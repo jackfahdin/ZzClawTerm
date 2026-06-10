@@ -109,41 +109,29 @@ if(ZZ_DEPLOY)
     get_target_property(_zz_qmake Qt6::qmake IMPORTED_LOCATION)
     get_filename_component(_zz_qt_bin "${_zz_qmake}" DIRECTORY)
 
+    set(_zz_deploy_tool "")
+    set(_zz_deploy_platform "OTHER")
+    set(_zz_deploy_src "$<TARGET_FILE:ZzClawTerm>")
+
     if(WIN32)
+        set(_zz_deploy_platform "WIN")
         find_program(ZZ_WINDEPLOYQT windeployqt HINTS "${_zz_qt_bin}")
-        if(ZZ_WINDEPLOYQT)
-            add_custom_command(TARGET ZzClawTerm POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "$<TARGET_FILE:ZzClawTerm>" "${ZZ_DIST_DIR}/"
-                COMMAND "${ZZ_WINDEPLOYQT}" --release --no-translations
-                        --compiler-runtime
-                        "${ZZ_DIST_DIR}/$<TARGET_FILE_NAME:ZzClawTerm>"
-                COMMENT "部署 ZzClawTerm 与 Qt 依赖到 ${ZZ_DIST_DIR}"
-                VERBATIM)
-        else()
-            message(WARNING "未找到 windeployqt, 跳过自动部署")
-        endif()
+        set(_zz_deploy_tool "${ZZ_WINDEPLOYQT}")
     elseif(APPLE)
+        set(_zz_deploy_platform "MAC")
         find_program(ZZ_MACDEPLOYQT macdeployqt HINTS "${_zz_qt_bin}")
-        if(ZZ_MACDEPLOYQT)
-            add_custom_command(TARGET ZzClawTerm POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                        "$<TARGET_BUNDLE_DIR:ZzClawTerm>" "${ZZ_DIST_DIR}/ZzClawTerm.app"
-                COMMAND "${ZZ_MACDEPLOYQT}" "${ZZ_DIST_DIR}/ZzClawTerm.app"
-                COMMENT "部署 ZzClawTerm.app 与 Qt 依赖到 ${ZZ_DIST_DIR}"
-                VERBATIM)
-        else()
-            message(WARNING "未找到 macdeployqt, 跳过自动部署")
-        endif()
-    else()
-        # Linux: 复制可执行文件 (完整 AppImage 由 scripts/ 处理)。
-        add_custom_command(TARGET ZzClawTerm POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:ZzClawTerm>" "${ZZ_DIST_DIR}/"
-            COMMENT "复制 ZzClawTerm 到 ${ZZ_DIST_DIR}"
-            VERBATIM)
+        set(_zz_deploy_tool "${ZZ_MACDEPLOYQT}")
+        set(_zz_deploy_src "$<TARGET_BUNDLE_DIR:ZzClawTerm>")
     endif()
+
+    # 通过脚本部署: 部署失败 (如 exe 正在运行) 只警告, 不中断构建。
+    add_custom_command(TARGET ZzClawTerm POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DZZ_EXE=${_zz_deploy_src}
+                -DZZ_DIST=${ZZ_DIST_DIR}
+                -DZZ_PLATFORM=${_zz_deploy_platform}
+                -DZZ_TOOL=${_zz_deploy_tool}
+                -P "${CMAKE_SOURCE_DIR}/cmake/Deploy.cmake"
+        COMMENT "部署 ZzClawTerm 与依赖到 ${ZZ_DIST_DIR}"
+        VERBATIM)
 endif()
