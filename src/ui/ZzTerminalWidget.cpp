@@ -29,7 +29,9 @@ ZzTerminalWidget::ZzTerminalWidget(QWidget* parent)
     : QWidget(parent), d_ptr(std::make_unique<ZzTerminalWidgetPrivate>())
 {
     setFocusPolicy(Qt::StrongFocus);
+    // paintEvent 会铺满整个区域, 关闭系统背景擦除以消除缩放时的黑白闪烁。
     setAttribute(Qt::WA_OpaquePaintEvent);
+    setAttribute(Qt::WA_NoSystemBackground);
     d_ptr->scheme = ZzBusiness::zzDraculaScheme();
     d_ptr->font = QFont(QStringLiteral("monospace"), 12);
     d_ptr->font.setStyleHint(QFont::Monospace);
@@ -141,7 +143,13 @@ void ZzTerminalWidget::keyPressEvent(QKeyEvent* event)
 void ZzTerminalWidget::resizeEvent(QResizeEvent* /*event*/)
 {
     const QSize cells = viewportCells();
-    emit viewportResized(cells.width(), cells.height());
+    // 仅当字符网格 (列/行数) 真正变化时才重设终端, 避免像素级缩放反复重排。
+    if (cells.width() != d_ptr->lastCols || cells.height() != d_ptr->lastRows) {
+        d_ptr->lastCols = cells.width();
+        d_ptr->lastRows = cells.height();
+        emit viewportResized(cells.width(), cells.height());
+    }
+    update();
 }
 
 }  // namespace ZzUi

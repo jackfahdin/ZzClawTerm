@@ -44,6 +44,9 @@ public:
     qreal cellWidth = 8.0;
     qreal cellHeight = 16.0;
     qreal baseline = 12.0;
+
+    int lastCols = -1;  ///< 上次上报的列数, 用于抑制重复 resize
+    int lastRows = -1;  ///< 上次上报的行数
 };
 
 }  // namespace ZzUi

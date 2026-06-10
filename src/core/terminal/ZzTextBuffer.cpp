@@ -14,7 +14,10 @@ namespace Terminal {
 
 ZzTextBuffer::ZzTextBuffer() : d_ptr(std::make_unique<ZzTextBufferPrivate>())
 {
-    resize(80, 24);
+    // 按 Private 默认尺寸 (80x24) 分配初始网格。
+    d_ptr->grid.assign(
+        static_cast<std::size_t>(d_ptr->cols) * static_cast<std::size_t>(d_ptr->rows), ZzCell{});
+    d_ptr->scrollBottom = d_ptr->rows - 1;
 }
 
 ZzTextBuffer::~ZzTextBuffer() = default;
@@ -23,9 +26,27 @@ void ZzTextBuffer::resize(int cols, int rows)
 {
     cols = std::max(1, cols);
     rows = std::max(1, rows);
+
+    // 尺寸未变则不动, 避免无谓清空导致缩放时闪烁。
+    if (cols == d_ptr->cols && rows == d_ptr->rows && !d_ptr->grid.empty()) {
+        return;
+    }
+
+    // 重排时保留已有内容 (左上对齐), 而非清空整屏。
+    std::vector<ZzCell> newGrid(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows),
+                                ZzCell{});
+    const int copyRows = std::min(d_ptr->rows, rows);
+    const int copyCols = std::min(d_ptr->cols, cols);
+    for (int r = 0; r < copyRows && !d_ptr->grid.empty(); ++r) {
+        for (int c = 0; c < copyCols; ++c) {
+            newGrid[static_cast<std::size_t>(r) * static_cast<std::size_t>(cols) +
+                    static_cast<std::size_t>(c)] = d_ptr->at(r, c);
+        }
+    }
+
+    d_ptr->grid = std::move(newGrid);
     d_ptr->cols = cols;
     d_ptr->rows = rows;
-    d_ptr->grid.assign(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows), ZzCell{});
     d_ptr->scrollTop = 0;
     d_ptr->scrollBottom = rows - 1;
     d_ptr->clampCursor();
