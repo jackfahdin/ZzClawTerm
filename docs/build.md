@@ -40,9 +40,14 @@ ctest --test-dir build
 
 ## 运行
 
+构建会自动把可执行文件与全部依赖部署到自包含目录 `build/dist/`, 直接运行该目录下的程序即可 (无需额外配置 PATH):
+
 ```bash
-./build/ZzClawTerm        # Windows: build\Release\ZzClawTerm.exe
+./build/dist/ZzClawTerm        # Windows: build\dist\ZzClawTerm.exe
 ```
+
+Windows 上 `dist` 已包含 Qt DLL、MinGW 运行时与全部插件 (platforms/sqldrivers/tls 等),
+可整目录拷贝到其它机器运行。如需关闭自动部署 (例如快速迭代): 配置时加 `-DZZ_DEPLOY=OFF`。
 
 启动后默认打开一个本地 Shell 标签页。常用快捷键:
 

@@ -95,3 +95,55 @@ endif()
 if(UNIX AND NOT APPLE)
     target_link_libraries(ZzClawTerm PRIVATE util)
 endif()
+
+# ─────────────────────────────────────────────────────────────
+# 构建后部署: 将可执行文件与全部 Qt 运行时依赖打包到自包含的
+# dist 目录, 直接可运行, 避免每次清理后丢失依赖。
+# 可用 -DZZ_DEPLOY=OFF 关闭 (例如快速迭代时)。
+# ─────────────────────────────────────────────────────────────
+option(ZZ_DEPLOY "构建后自动部署到 dist 目录 (含 Qt 依赖)" ON)
+set(ZZ_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "部署输出目录")
+
+if(ZZ_DEPLOY)
+    # 定位 Qt 工具目录 (qmake 同级)。
+    get_target_property(_zz_qmake Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_zz_qt_bin "${_zz_qmake}" DIRECTORY)
+
+    if(WIN32)
+        find_program(ZZ_WINDEPLOYQT windeployqt HINTS "${_zz_qt_bin}")
+        if(ZZ_WINDEPLOYQT)
+            add_custom_command(TARGET ZzClawTerm POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:ZzClawTerm>" "${ZZ_DIST_DIR}/"
+                COMMAND "${ZZ_WINDEPLOYQT}" --release --no-translations
+                        --compiler-runtime
+                        "${ZZ_DIST_DIR}/$<TARGET_FILE_NAME:ZzClawTerm>"
+                COMMENT "部署 ZzClawTerm 与 Qt 依赖到 ${ZZ_DIST_DIR}"
+                VERBATIM)
+        else()
+            message(WARNING "未找到 windeployqt, 跳过自动部署")
+        endif()
+    elseif(APPLE)
+        find_program(ZZ_MACDEPLOYQT macdeployqt HINTS "${_zz_qt_bin}")
+        if(ZZ_MACDEPLOYQT)
+            add_custom_command(TARGET ZzClawTerm POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<TARGET_BUNDLE_DIR:ZzClawTerm>" "${ZZ_DIST_DIR}/ZzClawTerm.app"
+                COMMAND "${ZZ_MACDEPLOYQT}" "${ZZ_DIST_DIR}/ZzClawTerm.app"
+                COMMENT "部署 ZzClawTerm.app 与 Qt 依赖到 ${ZZ_DIST_DIR}"
+                VERBATIM)
+        else()
+            message(WARNING "未找到 macdeployqt, 跳过自动部署")
+        endif()
+    else()
+        # Linux: 复制可执行文件 (完整 AppImage 由 scripts/ 处理)。
+        add_custom_command(TARGET ZzClawTerm POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${ZZ_DIST_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:ZzClawTerm>" "${ZZ_DIST_DIR}/"
+            COMMENT "复制 ZzClawTerm 到 ${ZZ_DIST_DIR}"
+            VERBATIM)
+    endif()
+endif()
