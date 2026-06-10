@@ -26,12 +26,15 @@ using ZzCore::Terminal::ZzCell;
 using ZzCore::Terminal::ZzTextBuffer;
 
 ZzTerminalWidget::ZzTerminalWidget(QWidget* parent)
-    : QWidget(parent), d_ptr(std::make_unique<ZzTerminalWidgetPrivate>())
+    : ZzTerminalWidgetBase(parent), d_ptr(std::make_unique<ZzTerminalWidgetPrivate>())
 {
     setFocusPolicy(Qt::StrongFocus);
-    // paintEvent 会铺满整个区域, 关闭系统背景擦除以消除缩放时的黑白闪烁。
+#if !defined(ZZ_GPU_RENDER)
+    // CPU 路径: paintEvent 铺满整个区域, 关闭系统背景擦除以消除缩放闪烁。
+    // (GPU 路径下 QOpenGLWidget 每帧全量重绘, 无需这些属性。)
     setAttribute(Qt::WA_OpaquePaintEvent);
     setAttribute(Qt::WA_NoSystemBackground);
+#endif
     d_ptr->scheme = ZzBusiness::zzDraculaScheme();
     d_ptr->font = QFont(QStringLiteral("monospace"), 12);
     d_ptr->font.setStyleHint(QFont::Monospace);
@@ -70,9 +73,8 @@ QSize ZzTerminalWidget::viewportCells() const
     return {cols, rows};
 }
 
-void ZzTerminalWidget::paintEvent(QPaintEvent* /*event*/)
+void ZzTerminalWidget::renderContent(QPainter& painter)
 {
-    QPainter painter(this);
     painter.fillRect(rect(), d_ptr->scheme.background);
 
     if (!d_ptr->core) {
@@ -129,6 +131,20 @@ void ZzTerminalWidget::paintEvent(QPaintEvent* /*event*/)
     }
 }
 
+#if defined(ZZ_GPU_RENDER)
+void ZzTerminalWidget::paintGL()
+{
+    QPainter painter(this);
+    renderContent(painter);
+}
+#else
+void ZzTerminalWidget::paintEvent(QPaintEvent* /*event*/)
+{
+    QPainter painter(this);
+    renderContent(painter);
+}
+#endif
+
 void ZzTerminalWidget::keyPressEvent(QKeyEvent* event)
 {
     const QByteArray bytes = ZzTerminalWidgetPrivate::translateKey(event);
@@ -140,8 +156,9 @@ void ZzTerminalWidget::keyPressEvent(QKeyEvent* event)
     QWidget::keyPressEvent(event);
 }
 
-void ZzTerminalWidget::resizeEvent(QResizeEvent* /*event*/)
+void ZzTerminalWidget::resizeEvent(QResizeEvent* event)
 {
+    ZzTerminalWidgetBase::resizeEvent(event);  // GPU 路径需要基类更新 GL 视口
     const QSize cells = viewportCells();
     // 仅当字符网格 (列/行数) 真正变化时才重设终端, 避免像素级缩放反复重排。
     if (cells.width() != d_ptr->lastCols || cells.height() != d_ptr->lastRows) {

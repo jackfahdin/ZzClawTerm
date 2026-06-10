@@ -11,9 +11,15 @@
 
 #include <QWidget>
 
+#if defined(ZZ_GPU_RENDER)
+#include <QOpenGLWidget>
+#endif
+
 #include <memory>
 
 #include "business/ZzColorScheme.h"
+
+class QPainter;
 
 namespace ZzCore {
 namespace Terminal {
@@ -25,10 +31,21 @@ namespace ZzUi {
 
 class ZzTerminalWidgetPrivate;
 
+#if defined(ZZ_GPU_RENDER)
+/** @brief GPU 加速渲染基类 (OpenGL); 无 GPU 时 Qt 自动回退软件 OpenGL。 */
+using ZzTerminalWidgetBase = QOpenGLWidget;
+#else
+/** @brief CPU 软件渲染基类 (raster QPainter)。 */
+using ZzTerminalWidgetBase = QWidget;
+#endif
+
 /**
  * @brief 终端渲染控件。
+ *
+ * 默认基于 QOpenGLWidget 用 OpenGL 加速绘制 (QPainter over GL);
+ * 配置 -DZZ_GPU_RENDER=OFF 时回退为纯 CPU 的 QWidget 渲染。
  */
-class ZzTerminalWidget : public QWidget
+class ZzTerminalWidget : public ZzTerminalWidgetBase
 {
     Q_OBJECT
 
@@ -56,11 +73,18 @@ signals:
     void viewportResized(int cols, int rows);
 
 protected:
+#if defined(ZZ_GPU_RENDER)
+    void paintGL() override;
+#else
     void paintEvent(QPaintEvent* event) override;
+#endif
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    /** @brief 共享绘制逻辑 (GPU/CPU 路径均调用)。 */
+    void renderContent(QPainter& painter);
+
     std::unique_ptr<ZzTerminalWidgetPrivate> d_ptr;
 };
 

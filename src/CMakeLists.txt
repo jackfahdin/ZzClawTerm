@@ -79,6 +79,12 @@ target_link_libraries(ZzClawTerm PRIVATE
     zz_warnings
 )
 
+# GPU 渲染: 链接 OpenGLWidgets 并定义开关宏。
+if(ZZ_GPU_RENDER)
+    target_link_libraries(ZzClawTerm PRIVATE Qt6::OpenGLWidgets)
+    target_compile_definitions(ZzClawTerm PRIVATE ZZ_GPU_RENDER=1)
+endif()
+
 # 可选依赖
 if(ZZ_ENABLE_LZ4)
     target_link_libraries(ZzClawTerm PRIVATE lz4::lz4)
