@@ -22,6 +22,8 @@ set(ZZ_SOURCES
     core/log/ZzRingBufferPrivate.cpp
     core/log/ZzLineIndex.cpp
     core/log/ZzLineIndexPrivate.cpp
+    core/log/ZzMmapBuffer.cpp
+    core/log/ZzMmapBufferPrivate.cpp
     core/log/ZzColdStorage.cpp
     core/log/ZzColdStoragePrivate.cpp
     core/log/ZzLogEngine.cpp
