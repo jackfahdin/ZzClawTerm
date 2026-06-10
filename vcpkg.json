@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "zzclawterm",
+  "version": "0.1.0",
+  "description": "高性能跨平台终端工具",
+  "dependencies": [],
+  "features": {
+    "compression": {
+      "description": "温层 LZ4 / 冷层 ZSTD 压缩",
+      "dependencies": ["lz4", "zstd"]
+    },
+    "freetype": {
+      "description": "FreeType 字形光栅化 (GPU 渲染路径)",
+      "dependencies": ["freetype", "harfbuzz"]
+    },
+    "tests": {
+      "description": "单元与基准测试",
+      "dependencies": ["catch2", "benchmark"]
+    }
+  }
+}
