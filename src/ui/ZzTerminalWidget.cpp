@@ -5,10 +5,13 @@
 
 #include "ui/ZzTerminalWidget.h"
 
+#include <QFile>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QResizeEvent>
+#include <QShowEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -148,12 +151,31 @@ void ZzTerminalWidget::paintEvent(QPaintEvent* /*event*/)
 void ZzTerminalWidget::keyPressEvent(QKeyEvent* event)
 {
     const QByteArray bytes = ZzTerminalWidgetPrivate::translateKey(event);
+    {
+        QFile f(QStringLiteral("C:/Users/guomaojie/AppData/Local/Temp/zzkeylog.txt"));
+        if (f.open(QIODevice::Append | QIODevice::Text)) {
+            f.write("KEY bytes=" + bytes.toHex() + "\n");
+        }
+    }
     if (!bytes.isEmpty()) {
         emit keyInput(bytes);
         event->accept();
         return;
     }
     QWidget::keyPressEvent(event);
+}
+
+void ZzTerminalWidget::showEvent(QShowEvent* event)
+{
+    ZzTerminalWidgetBase::showEvent(event);
+    // 控件首次显示时主动获取键盘焦点, 避免焦点停留在菜单栏/标签栏导致按键无效。
+    setFocus();
+}
+
+void ZzTerminalWidget::mousePressEvent(QMouseEvent* event)
+{
+    setFocus();
+    ZzTerminalWidgetBase::mousePressEvent(event);
 }
 
 void ZzTerminalWidget::resizeEvent(QResizeEvent* event)

@@ -20,6 +20,8 @@
 #include "business/ZzColorScheme.h"
 
 class QPainter;
+class QShowEvent;
+class QMouseEvent;
 
 namespace ZzCore {
 namespace Terminal {
@@ -80,6 +82,8 @@ protected:
 #endif
     void keyPressEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;        // 显示时夺取键盘焦点
+    void mousePressEvent(QMouseEvent* event) override;  // 点击时夺取键盘焦点
 
 private:
     /** @brief 共享绘制逻辑 (GPU/CPU 路径均调用)。 */

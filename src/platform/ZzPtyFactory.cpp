@@ -27,11 +27,11 @@ std::unique_ptr<ZzPtyInterface> ZzPtyFactory::create(QObject* parent)
 QString ZzPtyFactory::defaultShell()
 {
 #if defined(ZZ_PLATFORM_WINDOWS)
-    // 优先 PowerShell, 回退到 cmd。
     const QString systemRoot =
         QProcessEnvironment::systemEnvironment().value(QStringLiteral("SystemRoot"),
                                                        QStringLiteral("C:\\Windows"));
-    return systemRoot + QStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    // [诊断] 临时改用 cmd.exe 以区分 PowerShell/PSReadLine 与 ConPTY 输入问题。
+    return systemRoot + QStringLiteral("\\System32\\cmd.exe");
 #elif defined(ZZ_PLATFORM_MACOS)
     return QStringLiteral("/bin/zsh");
 #else

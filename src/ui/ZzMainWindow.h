@@ -10,6 +10,8 @@
 
 #include <memory>
 
+class QShowEvent;
+
 namespace ZzUi {
 
 class ZzMainWindowPrivate;
@@ -24,6 +26,9 @@ class ZzMainWindow : public QMainWindow
 public:
     explicit ZzMainWindow(QWidget* parent = nullptr);
     ~ZzMainWindow() override;
+
+protected:
+    void showEvent(QShowEvent* event) override;
 
 private slots:
     /** @brief 新建终端标签页。 */

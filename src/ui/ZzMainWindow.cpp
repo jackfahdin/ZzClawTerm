@@ -9,9 +9,12 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 
@@ -58,6 +61,8 @@ ZzMainWindow::ZzMainWindow(QWidget* parent)
     d_ptr->tabs = new QTabWidget(central);
     d_ptr->tabs->setTabsClosable(true);
     d_ptr->tabs->setDocumentMode(true);
+    // 标签栏不抢键盘焦点, 保证焦点留在终端控件。
+    d_ptr->tabs->tabBar()->setFocusPolicy(Qt::NoFocus);
     d_ptr->searchBar = new ZzSearchBar(central);
 
     layout->addWidget(d_ptr->tabs, 1);
@@ -94,6 +99,11 @@ ZzMainWindow::ZzMainWindow(QWidget* parent)
 
     // ── 信号 ──
     connect(d_ptr->tabs, &QTabWidget::tabCloseRequested, this, &ZzMainWindow::onCloseTab);
+    connect(d_ptr->tabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (auto* term = terminalIn(d_ptr->tabs->currentWidget())) {
+            term->setFocus();
+        }
+    });
     connect(d_ptr->searchBar, &ZzSearchBar::searchRequested, this, &ZzMainWindow::onSearch);
     connect(d_ptr->themes, &ZzBusiness::ZzThemeManager::schemeChanged, this,
             [this](const ZzBusiness::ZzColorScheme& scheme) {
@@ -112,6 +122,17 @@ ZzMainWindow::ZzMainWindow(QWidget* parent)
 ZzMainWindow::~ZzMainWindow()
 {
     d_ptr->config->sync();
+}
+
+void ZzMainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    // 窗口激活后 (事件循环空闲时) 将键盘焦点交给当前终端, 确保打开即可输入。
+    QTimer::singleShot(0, this, [this]() {
+        if (auto* term = terminalIn(d_ptr->tabs->currentWidget())) {
+            term->setFocus();
+        }
+    });
 }
 
 void ZzMainWindow::onNewTab()
