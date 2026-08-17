@@ -1,6 +1,7 @@
 #include "ZzPerfRecorder.h"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QDebug>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
@@ -91,8 +92,17 @@ bool ZzPerfRecorder::recordAndCheck(const QString &feature,
     QDir().mkpath(QFileInfo(path).absolutePath());
 
     // 同日同功能文件为单个 JSON 对象：覆盖写回（与 ZzLogEngine 记录格式一致）
+    // 落盘失败必须让测试失败（规格 §9.1 兜底），否则性能记录静默丢失
     QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        file.write(QJsonDocument(entry).toJson(QJsonDocument::Indented));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning("ZzPerfRecorder: 无法写入性能记录 %ls：%ls",
+                 qUtf16Printable(path), qUtf16Printable(file.errorString()));
+        return false;
+    }
+    if (file.write(QJsonDocument(entry).toJson(QJsonDocument::Indented)) < 0) {
+        qWarning("ZzPerfRecorder: 性能记录写入失败 %ls：%ls",
+                 qUtf16Printable(path), qUtf16Printable(file.errorString()));
+        return false;
+    }
     return passed;
 }
