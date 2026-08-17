@@ -38,3 +38,5 @@ target_compile_definitions(ZzCredentialPerfTest PRIVATE
     ZZ_GIT_COMMIT_HASH="${ZZ_GIT_COMMIT_HASH}"
     ZZ_RECORDS_DIR="${CMAKE_SOURCE_DIR}/tests/perf/records")
 add_test(NAME ZzCredentialPerfTest COMMAND ZzCredentialPerfTest)
+# 与 ZzLogEnginePerfTest 一致：性能门控归入 perf 标签，便于 ctest -L perf 统一筛选
+set_tests_properties(ZzCredentialPerfTest PROPERTIES LABELS "perf")
