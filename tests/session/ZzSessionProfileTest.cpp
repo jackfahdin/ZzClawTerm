@@ -48,7 +48,7 @@ private slots:
         QCOMPARE(profile.authMethod, ZzAuthMethod::Agent);
         QVERIFY(profile.privateKeyPath.isEmpty());
         QVERIFY(profile.credentialId.isNull());
-        QCOMPARE(profile.terminalType, QStringLiteral("xterm-256color"));
+        QVERIFY(profile.terminalType.isEmpty()); // 空串 = 跟随全局设置
         QCOMPARE(profile.encoding, QStringLiteral("UTF-8"));
         QVERIFY(profile.colorSchemeName.isEmpty());
         QCOMPARE(profile.keepAliveIntervalSeconds, 0);
