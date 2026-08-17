@@ -8,3 +8,4 @@ endfunction()
 
 zz_add_log_test(ZzLineIndexTest)
 zz_add_log_test(ZzRingBufferTest)
+zz_add_log_test(ZzMmapBufferTest)
