@@ -79,7 +79,7 @@ v0.1 不实现 QPluginLoader 动态加载，但所有可扩展点（传输协议
 
 仓库组织：
 
-- 新建 `ZzSshCore` 独立仓库：CMake `add_subdirectory` 引入（与 ZzTermWidget 的引入方式一致），只依赖 Qt Core/Network，不依赖 Widgets，可在无 GUI 环境（CI、Docker）中做集成测试
+- 新建 `ZzSshCore` 独立仓库（远端 `gitcode.com/JackfahdinQt/ZzSshCore`）：CMake `add_subdirectory` 引入（与 ZzTermWidget 的引入方式一致），只依赖 Qt Core/Network，不依赖 Widgets，可在无 GUI 环境（CI、Docker）中做集成测试
 - 本仓库 `ZzClawTerm`：应用仓库，通过 `add_subdirectory`（git submodule）引入 ZzSshCore、ZzTermWidget、ZzPureTools 与 libssh2
 - 依赖方向严格单向：应用 → ZzSshCore → libssh2；应用 → ZzTermWidget。SSH 层与终端层互相无感知，靠应用层做字节流转发——换协议层（libssh）或换终端组件都不影响另一边
 
@@ -279,8 +279,8 @@ void connectToHost(const QString &host, quint16 port, const QString &user);
 | 库 | 版本 | 用途 | 协议 | 引入方式 |
 | -- | ---- | ---- | ---- | -------- |
 | Qt | 6.8+ | UI 框架、Core/Network/Widgets | LGPL v3 / 商业 | 系统 / 官方安装 |
-| libssh2 | CMake 移植版（gitcode.com/JackfahdinQt/Zzlibusb） | SSH 协议 | BSD | add_subdirectory |
-| OpenSSL | 3.x | libssh2 后端 + 凭据 AES 加密 | Apache 2.0 | 系统 / 随 Qt |
+| libssh2 | CMake 移植版（gitcode.com/JackfahdinImport/libssh2） | SSH 协议 | BSD | add_subdirectory |
+| OpenSSL | 3.x（gitcode.com/ZzThirdParty/openssl，当前缺 macOS 构建，macOS 打包前补齐） | libssh2 后端 + 凭据 AES 加密 | Apache 2.0 | add_subdirectory |
 | ZzTermWidget | 现有仓库 | 终端解析与绘制 | 遵循 qtermwidget 上游（LGPL） | add_subdirectory |
 | ZzPureTools | 现有仓库 | 应用壳层框架 | MIT | add_subdirectory |
 | LZ4 | 1.9+ | 温层分块压缩 | BSD 2-Clause | add_subdirectory（vendored） |
