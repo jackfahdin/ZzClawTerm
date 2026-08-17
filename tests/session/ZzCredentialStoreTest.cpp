@@ -163,6 +163,118 @@ private slots:
             QCOMPARE(store.errorString(), QStringLiteral("凭据文件格式非法"));
         }
     }
+
+    /** @brief 加解密往返：写入凭据后锁定、重建实例、解锁，读回的明文必须一致（含中文与特殊字符）。 */
+    void credentialRoundTrip()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+
+        QUuid idAlpha;
+        QUuid idBeta;
+        QUuid idGamma;
+        {
+            ZzCredentialStore store(path);
+            QVERIFY(store.initialize(QStringLiteral("主密码-xyz")));
+            idAlpha = store.addCredential(QStringLiteral("root@web-01"), QStringLiteral("s3cret!@#"));
+            idBeta = store.addCredential(QStringLiteral("deploy@db-01"), QStringLiteral("密码含中文与换行\n第二行"));
+            idGamma = store.addCredential(QStringLiteral("空密码"), QString());
+            QVERIFY(!idAlpha.isNull());
+            QVERIFY(!idBeta.isNull());
+            QVERIFY(!idGamma.isNull());
+            // 同一实例内立即可读
+            QCOMPARE(store.credential(idAlpha).value(), QStringLiteral("s3cret!@#"));
+        } // 析构锁定，明文与密钥清零
+
+        ZzCredentialStore store(path);
+        QVERIFY(!store.credential(idAlpha).has_value()); // 未解锁不可读
+        QVERIFY(store.unlock(QStringLiteral("主密码-xyz")));
+        QCOMPARE(store.credential(idAlpha).value(), QStringLiteral("s3cret!@#"));
+        QCOMPARE(store.credential(idBeta).value(), QStringLiteral("密码含中文与换行\n第二行"));
+        QCOMPARE(store.credential(idGamma).value(), QString());
+        QVERIFY(!store.credential(QUuid::createUuid()).has_value());
+    }
+
+    /** @brief 更新凭据后重新解锁读到新明文。 */
+    void updateCredentialRoundTrip()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+
+        QUuid id;
+        {
+            ZzCredentialStore store(path);
+            QVERIFY(store.initialize(QStringLiteral("主密码-xyz")));
+            id = store.addCredential(QStringLiteral("root@web-01"), QStringLiteral("old"));
+            QVERIFY(!id.isNull());
+            QVERIFY(store.updateCredential(id, QStringLiteral("new-密码")));
+            QVERIFY(!store.updateCredential(QUuid::createUuid(), QStringLiteral("x")));
+        }
+
+        ZzCredentialStore store(path);
+        QVERIFY(store.unlock(QStringLiteral("主密码-xyz")));
+        QCOMPARE(store.credential(id).value(), QStringLiteral("new-密码"));
+    }
+
+    /** @brief 删除凭据后重新解锁不再可读；删除不存在的 id 返回 false。 */
+    void removeCredentialRoundTrip()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+
+        QUuid idKeep;
+        QUuid idDrop;
+        {
+            ZzCredentialStore store(path);
+            QVERIFY(store.initialize(QStringLiteral("主密码-xyz")));
+            idKeep = store.addCredential(QStringLiteral("保留"), QStringLiteral("keep"));
+            idDrop = store.addCredential(QStringLiteral("删除"), QStringLiteral("drop"));
+            QVERIFY(store.removeCredential(idDrop));
+            QVERIFY(!store.removeCredential(idDrop)); // 重复删除返回 false
+            QVERIFY(!store.removeCredential(QUuid::createUuid()));
+        }
+
+        ZzCredentialStore store(path);
+        QVERIFY(store.unlock(QStringLiteral("主密码-xyz")));
+        QCOMPARE(store.credential(idKeep).value(), QStringLiteral("keep"));
+        QVERIFY(!store.credential(idDrop).has_value());
+    }
+
+    /** @brief 锁定（或未解锁）状态下一切凭据操作被拒绝。 */
+    void lockedStoreRejectsOperations()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+
+        QUuid id;
+        {
+            ZzCredentialStore store(path);
+            QVERIFY(store.initialize(QStringLiteral("主密码-xyz")));
+            id = store.addCredential(QStringLiteral("root@web-01"), QStringLiteral("s3cret"));
+            QVERIFY(!id.isNull());
+        }
+
+        // 未解锁
+        ZzCredentialStore locked(path);
+        QVERIFY(locked.addCredential(QStringLiteral("x"), QStringLiteral("y")).isNull());
+        QVERIFY(!locked.errorString().isEmpty());
+        QVERIFY(!locked.updateCredential(id, QStringLiteral("y")));
+        QVERIFY(!locked.credential(id).has_value());
+        QVERIFY(!locked.removeCredential(id));
+
+        // 解锁后再 lock()，同样全部拒绝
+        QVERIFY(locked.unlock(QStringLiteral("主密码-xyz")));
+        QVERIFY(locked.credential(id).has_value());
+        locked.lock();
+        QVERIFY(locked.addCredential(QStringLiteral("x"), QStringLiteral("y")).isNull());
+        QVERIFY(!locked.updateCredential(id, QStringLiteral("y")));
+        QVERIFY(!locked.credential(id).has_value());
+        QVERIFY(!locked.removeCredential(id));
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzCredentialStoreTest)
