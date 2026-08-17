@@ -4,6 +4,8 @@ set(ZZCLAWTERM_APP_SOURCES
     transport/ZzTransportInterface.h
     transport/ZzTransportRegistry.h
     transport/ZzTransportRegistry.cpp
+    transport/ZzLocalPtyTransport.h
+    transport/ZzLocalPtyTransport.cpp
     panel/ZzPanelInterface.h
     panel/ZzPanelRegistry.h
     panel/ZzPanelRegistry.cpp
