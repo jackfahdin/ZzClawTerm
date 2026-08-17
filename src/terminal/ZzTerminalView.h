@@ -35,6 +35,9 @@ public:
     /** @brief 内部 QTermWidget（测试与滚动历史桥使用）。 */
     [[nodiscard]] QTermWidget *termWidget() const;
 
+    /** @brief 当前滚动历史桥（可空，enableScrollback 后非空；测试与状态查询用）。 */
+    [[nodiscard]] ZzScrollbackBridge *scrollbackBridge() const;
+
     /** @brief 以给定参数打开传输并记忆，供重连复用。 */
     void openEndpoint(const ZzTransportEndpoint &endpoint);
 

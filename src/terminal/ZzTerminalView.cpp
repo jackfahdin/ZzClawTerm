@@ -1,6 +1,7 @@
 #include "ZzTerminalView.h"
 
 #include <QtCore/QDir>
+#include <QtCore/QFile>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QStringConverter>
 #include <QtWidgets/QVBoxLayout>
@@ -76,6 +77,11 @@ QTermWidget *ZzTerminalView::termWidget() const
     return m_term;
 }
 
+ZzScrollbackBridge *ZzTerminalView::scrollbackBridge() const
+{
+    return m_scrollbackBridge;
+}
+
 void ZzTerminalView::openEndpoint(const ZzTransportEndpoint &endpoint)
 {
     m_lastEndpoint = endpoint;
@@ -124,11 +130,14 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
         QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
         + QStringLiteral("/scrollback");
     QDir().mkpath(dirPath);
+    const QString warmPath = dirPath + QLatin1Char('/') + sessionId
+                             + QStringLiteral(".warm");
+    // 新会话显示层历史基线恒从 0 起（QTermWidget 侧绝对行号口径），温层必须同步
+    // 从空开始；否则跨重启恢复的引擎行号会让读回命中上一会话的行（错行）
+    QFile::remove(warmPath);
     ZzLogEngine::Config config;
-    config.warmFilePath = dirPath + QLatin1Char('/') + sessionId
-                          + QStringLiteral(".warm");
+    config.warmFilePath = warmPath;
     auto *engine = new ZzLogEngine(config, this);
-    engine->open(); // 温层打开失败时引擎内部降级并发射 degradedToMemoryOnly
     m_scrollbackBridge = new ZzScrollbackBridge(m_term, engine, this);
     // 降级 → 状态栏提示（经 errorOccurred 同一路径到 ZzTabManager::statusMessage）
     connect(m_scrollbackBridge, &ZzScrollbackBridge::degraded, this,
@@ -136,4 +145,7 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
                 emit errorOccurred(QStringLiteral("滚动历史已降级为内存模式：%1")
                                        .arg(reason));
             });
+    // open 必须最后调用：温层打开失败时它会同步发射 degradedToMemoryOnly，
+    // 先于桥与提示链路接线调用会丢失该降级提示（规格 §八）
+    engine->open();
 }

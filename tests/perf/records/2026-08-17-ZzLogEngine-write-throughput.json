@@ -1,22 +1,22 @@
 {
     "details": {
-        "elapsedMs": 75,
+        "elapsedMs": 67,
         "lineCount": 200000
     },
     "environment": {
         "buildType": "Release",
         "compiler": "GCC 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "bac6a830f1fc7396c13cf26d4498c1e03e5a44eb",
+        "gitCommit": "19004d92476cda7adf683b67c3a948c9967a7003",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
         "qtVersion": "6.11.1"
     },
-    "measured": 2666666.666666667,
+    "measured": 2985074.6268656715,
     "passed": true,
     "testName": "ZzLogEngine-write-throughput",
     "threshold": 50000,
-    "timestamp": "2026-08-17T19:19:45Z",
+    "timestamp": "2026-08-17T19:31:43Z",
     "unit": "lines/s"
 }
