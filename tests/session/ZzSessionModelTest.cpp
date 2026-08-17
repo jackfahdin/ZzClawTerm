@@ -171,7 +171,116 @@ private slots:
         QVERIFY(model.save());
         QVERIFY(QFileInfo::exists(path));
     }
+
+    /** @brief allGroupPaths 返回去重并排序的全部分组路径（含嵌套路径全量，不含空分组）。 */
+    void allGroupPaths();
+
+    /** @brief sessionsInGroup 只返回直接位于该分组的会话，不含子分组。 */
+    void sessionsInGroup();
+
+    /** @brief 重命名分组时同路径及子路径前缀一并改写。 */
+    void renameGroup();
+
+    /** @brief 非法重命名（空路径、同名、重命名为自身子分组）被拒绝。 */
+    void renameGroupInvalidRejected();
+
+    /** @brief 删除分组时级联删除该分组及其子分组下的全部会话。 */
+    void removeGroup();
 };
+
+void ZzSessionModelTest::allGroupPaths()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ZzSessionModel model(dir.filePath(QStringLiteral("sessions.json")));
+
+    model.addSession(makeProfile(QStringLiteral("Web-01"), QStringLiteral("生产环境/Web 服务器")));
+    model.addSession(makeProfile(QStringLiteral("Web-02"), QStringLiteral("生产环境/Web 服务器")));
+    model.addSession(makeProfile(QStringLiteral("DB-01"), QStringLiteral("生产环境/数据库")));
+    model.addSession(makeProfile(QStringLiteral("Test-01"), QStringLiteral("测试环境")));
+    model.addSession(makeProfile(QStringLiteral("本地"), QString()));
+
+    const QStringList groups = model.allGroupPaths();
+    QCOMPARE(groups.size(), 3);
+    QVERIFY(groups.contains(QStringLiteral("生产环境/Web 服务器")));
+    QVERIFY(groups.contains(QStringLiteral("生产环境/数据库")));
+    QVERIFY(groups.contains(QStringLiteral("测试环境")));
+}
+
+void ZzSessionModelTest::sessionsInGroup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ZzSessionModel model(dir.filePath(QStringLiteral("sessions.json")));
+
+    model.addSession(makeProfile(QStringLiteral("Web-01"), QStringLiteral("生产环境")));
+    model.addSession(makeProfile(QStringLiteral("Web-02"), QStringLiteral("生产环境/Web 服务器")));
+    model.addSession(makeProfile(QStringLiteral("Web-03"), QStringLiteral("生产环境/Web 服务器")));
+    model.addSession(makeProfile(QStringLiteral("本地"), QString()));
+
+    QCOMPARE(model.sessionsInGroup(QStringLiteral("生产环境")).size(), 1);
+    QCOMPARE(model.sessionsInGroup(QStringLiteral("生产环境/Web 服务器")).size(), 2);
+    QVERIFY(model.sessionsInGroup(QStringLiteral("不存在")).isEmpty());
+    QVERIFY(model.sessionsInGroup(QString()).isEmpty());
+}
+
+void ZzSessionModelTest::renameGroup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ZzSessionModel model(dir.filePath(QStringLiteral("sessions.json")));
+
+    const QUuid idTop = model.addSession(makeProfile(QStringLiteral("Prod"), QStringLiteral("生产")));
+    const QUuid idSub = model.addSession(makeProfile(QStringLiteral("ProdWeb"), QStringLiteral("生产/Web")));
+    const QUuid idOther = model.addSession(makeProfile(QStringLiteral("ProdMirror"), QStringLiteral("生产环境-镜像")));
+    const QUuid idNone = model.addSession(makeProfile(QStringLiteral("Local"), QString()));
+
+    // spy 在 addSession 之后创建，只统计 renameGroup 触发的信号
+    QSignalSpy spy(&model, &ZzSessionModel::sessionsChanged);
+    QVERIFY(model.renameGroup(QStringLiteral("生产"), QStringLiteral("生产环境")));
+    QCOMPARE(spy.count(), 1);
+
+    QCOMPARE(model.session(idTop)->groupPath, QStringLiteral("生产环境"));
+    QCOMPARE(model.session(idSub)->groupPath, QStringLiteral("生产环境/Web"));
+    // "生产环境-镜像" 不是 "生产" 的子路径（前缀边界必须是 '/'），不得被误改
+    QCOMPARE(model.session(idOther)->groupPath, QStringLiteral("生产环境-镜像"));
+    QVERIFY(model.session(idNone)->groupPath.isEmpty());
+}
+
+void ZzSessionModelTest::renameGroupInvalidRejected()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ZzSessionModel model(dir.filePath(QStringLiteral("sessions.json")));
+    model.addSession(makeProfile(QStringLiteral("Web-01"), QStringLiteral("生产/Web")));
+
+    QVERIFY(!model.renameGroup(QString(), QStringLiteral("新分组")));
+    QVERIFY(!model.renameGroup(QStringLiteral("生产"), QString()));
+    QVERIFY(!model.renameGroup(QStringLiteral("生产"), QStringLiteral("生产")));
+    QVERIFY(!model.renameGroup(QStringLiteral("生产"), QStringLiteral("生产/Web/子分组")));
+
+    // 无匹配分组时视为幂等成功
+    QVERIFY(model.renameGroup(QStringLiteral("不存在"), QStringLiteral("任意")));
+}
+
+void ZzSessionModelTest::removeGroup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ZzSessionModel model(dir.filePath(QStringLiteral("sessions.json")));
+
+    model.addSession(makeProfile(QStringLiteral("Prod"), QStringLiteral("生产")));
+    model.addSession(makeProfile(QStringLiteral("ProdWeb"), QStringLiteral("生产/Web")));
+    const QUuid idOther = model.addSession(makeProfile(QStringLiteral("Test"), QStringLiteral("测试")));
+
+    QVERIFY(model.removeGroup(QStringLiteral("生产")));
+    QCOMPARE(model.allSessions().size(), 1);
+    QVERIFY(model.allSessions().first().id == idOther);
+
+    // 空路径拒绝；无匹配返回 false
+    QVERIFY(!model.removeGroup(QString()));
+    QVERIFY(!model.removeGroup(QStringLiteral("不存在")));
+}
 
 QTEST_GUILESS_MAIN(ZzSessionModelTest)
 

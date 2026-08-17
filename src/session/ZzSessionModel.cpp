@@ -138,6 +138,76 @@ bool ZzSessionModel::removeSession(const QUuid &id)
     return false;
 }
 
+QStringList ZzSessionModel::allGroupPaths() const
+{
+    QStringList paths;
+    for (const ZzSessionProfile &profile : m_sessions) {
+        if (!profile.groupPath.isEmpty() && !paths.contains(profile.groupPath))
+            paths.append(profile.groupPath);
+    }
+    paths.sort();
+    return paths;
+}
+
+QList<ZzSessionProfile> ZzSessionModel::sessionsInGroup(const QString &groupPath) const
+{
+    QList<ZzSessionProfile> result;
+    if (groupPath.isEmpty())
+        return result; // 空路径不是合法分组，返回空列表
+    for (const ZzSessionProfile &profile : m_sessions) {
+        if (profile.groupPath == groupPath)
+            result.append(profile);
+    }
+    return result;
+}
+
+bool ZzSessionModel::renameGroup(const QString &oldPath, const QString &newPath)
+{
+    if (oldPath.isEmpty() || newPath.isEmpty() || oldPath == newPath) {
+        m_errorString = QStringLiteral("分组重命名参数非法（空路径或与原路径相同）");
+        return false;
+    }
+    if (newPath.startsWith(oldPath + QLatin1Char('/'))) {
+        m_errorString = QStringLiteral("不能将分组重命名为自身的子分组");
+        return false;
+    }
+
+    bool changed = false;
+    const QString oldPrefix = oldPath + QLatin1Char('/');
+    for (ZzSessionProfile &profile : m_sessions) {
+        if (profile.groupPath == oldPath) {
+            profile.groupPath = newPath;
+            changed = true;
+        } else if (profile.groupPath.startsWith(oldPrefix)) {
+            profile.groupPath = newPath + profile.groupPath.mid(oldPath.size());
+            changed = true;
+        }
+    }
+    if (changed)
+        emit sessionsChanged();
+    return true; // 无匹配分组视为幂等成功
+}
+
+bool ZzSessionModel::removeGroup(const QString &groupPath)
+{
+    if (groupPath.isEmpty()) {
+        m_errorString = QStringLiteral("不能删除空分组路径");
+        return false;
+    }
+
+    const QString prefix = groupPath + QLatin1Char('/');
+    const qsizetype before = m_sessions.size();
+    m_sessions.removeIf([&](const ZzSessionProfile &profile) {
+        return profile.groupPath == groupPath || profile.groupPath.startsWith(prefix);
+    });
+    if (m_sessions.size() == before) {
+        m_errorString = QStringLiteral("分组不存在或为空：%1").arg(groupPath);
+        return false;
+    }
+    emit sessionsChanged();
+    return true;
+}
+
 QString ZzSessionModel::errorString() const
 {
     return m_errorString;

@@ -81,6 +81,36 @@ public:
      */
     bool removeSession(const QUuid &id);
 
+    /**
+     * @brief 返回全部非空分组路径（去重、字典序排序）。
+     * @return 分组路径列表，元素为完整路径字符串（如 "生产环境/Web 服务器"）。
+     * @note 只返回实际被会话使用的路径，不从嵌套路径推导父分组；
+     *       UI 构建分组树时自行按 '/' 拆分归并。
+     */
+    QStringList allGroupPaths() const;
+
+    /**
+     * @brief 返回直接位于指定分组的会话（不含子分组中的会话）。
+     * @param groupPath 分组路径；空串不是合法分组，返回空列表。
+     * @return 会话列表（按添加顺序）。
+     */
+    QList<ZzSessionProfile> sessionsInGroup(const QString &groupPath) const;
+
+    /**
+     * @brief 重命名分组：groupPath 等于 oldPath 或以 "oldPath/" 为前缀的会话，前缀改写为 newPath。
+     * @param oldPath 原分组路径，不能为空。
+     * @param newPath 新分组路径，不能为空、不能与 oldPath 相同、不能是 oldPath 的子路径。
+     * @return 参数非法返回 false；无匹配会话视为幂等成功返回 true。
+     */
+    bool renameGroup(const QString &oldPath, const QString &newPath);
+
+    /**
+     * @brief 删除分组：级联删除 groupPath 等于该路径或以 "groupPath/" 为前缀的全部会话。
+     * @param groupPath 分组路径，不能为空。
+     * @return 删除了至少一个会话返回 true；路径为空或无匹配返回 false。
+     */
+    bool removeGroup(const QString &groupPath);
+
     /** @brief 最近一次失败的错误信息（简体中文）。 */
     QString errorString() const;
 
