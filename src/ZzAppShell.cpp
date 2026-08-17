@@ -127,8 +127,10 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
         });
     // 主机密钥确认（规格 §八安全底线）
     tabs->setHostKeyConfirmer(
-        [tabs](const QString &host, const QString &fingerprint, bool changed) {
-            return ZzHostKeyDialog::confirm(host, fingerprint, changed, tabs);
+        [tabs](const QString &host, const QString &fingerprint,
+               const QString &oldFingerprint, bool changed) {
+            return ZzHostKeyDialog::confirm(host, fingerprint, oldFingerprint,
+                                            changed, tabs);
         });
 
     // 状态栏：状态 / 编码 / 行列 / 瞬时消息

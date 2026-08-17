@@ -24,10 +24,11 @@ public:
     /** @brief SSH 密码索取回调：按 profile 返回明文密码（空=取消认证）。 */
     using ZzPasswordProvider =
         std::function<QString(const ZzSessionProfile &profile)>;
-    /** @brief 主机密钥确认回调：host/fingerprint/changed → 是否接受。 */
+    /** @brief 主机密钥确认回调：host/fingerprint/oldFingerprint/changed → 是否接受。
+     *         changed=false（首次连接）时 oldFingerprint 为空串。 */
     using ZzHostKeyConfirmer =
         std::function<bool(const QString &host, const QString &fingerprint,
-                           bool changed)>;
+                           const QString &oldFingerprint, bool changed)>;
 
     explicit ZzTabManager(QWidget *parent = nullptr);
 

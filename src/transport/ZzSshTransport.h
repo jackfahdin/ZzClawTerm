@@ -25,10 +25,11 @@ class ZzSshTransportAdapter : public ZzTransportInterface
 public:
     /** @brief 密码索取回调：返回明文密码，空串表示用户取消。 */
     using ZzPasswordProvider = std::function<QString()>;
-    /** @brief 主机密钥确认回调：host/fingerprint/changed → 是否接受并记住。 */
+    /** @brief 主机密钥确认回调：host/fingerprint/oldFingerprint/changed → 是否接受并记住。
+     *         changed=false（首次连接）时 oldFingerprint 为空串。 */
     using ZzHostKeyConfirmer =
         std::function<bool(const QString &host, const QString &fingerprint,
-                           bool changed)>;
+                           const QString &oldFingerprint, bool changed)>;
 
     explicit ZzSshTransportAdapter(QObject *parent = nullptr);
     ~ZzSshTransportAdapter() override;

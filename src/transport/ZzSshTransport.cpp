@@ -84,16 +84,19 @@ void ZzSshTransportAdapter::wireConnection()
             [this](const QString &host, quint16 /*port*/,
                    const QString & /*keyType*/, const QString &fingerprint) {
                 const bool accept = m_hostKeyConfirmer
-                    ? m_hostKeyConfirmer(host, fingerprint, false) : false;
+                    ? m_hostKeyConfirmer(host, fingerprint, QString(), false)
+                    : false;
                 accept ? m_conn->trustHostKey() : m_conn->rejectHostKey();
             });
     connect(m_conn, &ZzSshConnection::hostKeyChanged, this,
             [this](const QString &host, quint16 /*port*/,
                    const QString & /*keyType*/,
-                   const QString & /*oldFingerprint*/,
+                   const QString &oldFingerprint,
                    const QString &newFingerprint) {
                 const bool accept = m_hostKeyConfirmer
-                    ? m_hostKeyConfirmer(host, newFingerprint, true) : false;
+                    ? m_hostKeyConfirmer(host, newFingerprint, oldFingerprint,
+                                         true)
+                    : false;
                 accept ? m_conn->acceptHostKeyChange() : m_conn->rejectHostKey();
             });
 }

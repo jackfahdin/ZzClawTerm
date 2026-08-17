@@ -55,8 +55,11 @@ void ZzTabManager::openSession(const ZzSessionProfile &profile)
         ssh->setHostKeyConfirmer(
             [confirmer = m_hostKeyConfirmer](const QString &host,
                                              const QString &fingerprint,
+                                             const QString &oldFingerprint,
                                              bool changed) {
-                return confirmer ? confirmer(host, fingerprint, changed) : false;
+                return confirmer
+                    ? confirmer(host, fingerprint, oldFingerprint, changed)
+                    : false;
             });
     }
     view->setTransport(transport);
@@ -111,8 +114,11 @@ void ZzTabManager::reconnectTab(int index)
         ssh->setHostKeyConfirmer(
             [confirmer = m_hostKeyConfirmer](const QString &host,
                                              const QString &fingerprint,
+                                             const QString &oldFingerprint,
                                              bool changed) {
-                return confirmer ? confirmer(host, fingerprint, changed) : false;
+                return confirmer
+                    ? confirmer(host, fingerprint, oldFingerprint, changed)
+                    : false;
             });
     }
     view->setTransport(transport);

@@ -15,11 +15,13 @@ public:
     /**
      * @brief 弹窗确认主机密钥。
      * @param host 主机标识（host:port）。
-     * @param fingerprint 密钥指纹（SHA256 文本）。
-     * @param changed true 表示与 known_hosts 中记录不一致（高危警告样式）。
+     * @param fingerprint 新密钥指纹（SHA256 文本）。
+     * @param oldFingerprint 本地 known_hosts 中记录的旧指纹；changed=false 时传空串。
+     * @param changed true 表示与 known_hosts 中记录不一致（高危警告样式，展示旧新指纹对比）。
      * @param parent 父窗口。
      * @return true 接受并写入 known_hosts.json；false 拒绝（连接中止）。
      */
     static bool confirm(const QString &host, const QString &fingerprint,
-                        bool changed, QWidget *parent = nullptr);
+                        const QString &oldFingerprint, bool changed,
+                        QWidget *parent = nullptr);
 };
