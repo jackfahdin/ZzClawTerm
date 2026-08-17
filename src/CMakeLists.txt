@@ -17,6 +17,8 @@ set(ZZCLAWTERM_APP_SOURCES
     panel/ZzSessionEditDialog.cpp
     settings/ZzAppSettings.h
     settings/ZzAppSettings.cpp
+    settings/ZzSettingsPage.h
+    settings/ZzSettingsPage.cpp
     terminal/ZzTerminalView.h
     terminal/ZzTerminalView.cpp
     tab/ZzTabManager.h
