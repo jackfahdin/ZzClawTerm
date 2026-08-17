@@ -58,3 +58,6 @@ compile_commands.json
 # ZzClawTerm：本机 CMake 预设与安装输出不入库
 CMakeUserPresets.json
 install/
+
+# 打包产物
+dist/
