@@ -7,6 +7,10 @@ add_library(ZzLogEngine STATIC
     ZzRingBuffer.cpp
     ZzMmapBuffer.h
     ZzMmapBuffer.cpp
+    ZzLogArchiveWorker.h
+    ZzLogArchiveWorker.cpp
+    ZzLogEngine.h
+    ZzLogEngine.cpp
 )
 target_include_directories(ZzLogEngine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ZzLogEngine PUBLIC Qt6::Core PRIVATE lz4_static)
