@@ -302,6 +302,14 @@ void connectToHost(const QString &host, quint16 port, const QString &user);
 - 三平台出可执行包，人工验收清单通过
 - 所有功能的性能测试通过且结果已记录到 `tests/perf/records/`（见 9.1，不达标不验收）
 
+各模块性能阈值（执行中追认的出处）：
+
+| 模块 | 指标 | 阈值 | 口径 |
+| ---- | ---- | ---- | ---- |
+| ZzSshCore | 连接耗时（TCP+握手+密码认证） | ≤2000ms | 本地 Docker 容器回环，Release |
+| ZzSshCore | shell 回显吞吐 | ≥2MB/s | 关回显、2KB 行、1MB 总量，Release |
+| ZzSshCore 后续增补 | （由后续计划的性能门控任务追认为准） | — | — |
+
 ### v0.2 / v0.3 概要
 
 - v0.2：SFTP 侧边栏（复用同一 `ZzSshConnection` 开 SFTP channel）、端口转发、终端分屏、ZzLogEngine 冷层、系统密钥环凭据后端

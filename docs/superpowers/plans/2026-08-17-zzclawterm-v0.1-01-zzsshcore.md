@@ -143,9 +143,10 @@ add_library(zzsshcore STATIC
 )
 target_include_directories(zzsshcore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(zzsshcore
-    PUBLIC Qt6::Core Qt6::Network
-    PRIVATE ${ZZSSHCORE_LIBSSH2_TARGET}
+    PUBLIC Qt6::Core Qt6::Network ${ZZSSHCORE_LIBSSH2_TARGET}
 )
+# 偏差说明（执行后同步）：libssh2 为 PUBLIC——公开头 ZzSshSession.h/ZzSshChannel.h
+# 直接暴露 LIBSSH2_* 类型，PRIVATE 会导致消费方编译失败。
 if(WIN32)
     target_link_libraries(zzsshcore PRIVATE ws2_32)
 endif()
@@ -3912,12 +3913,16 @@ void tst_ZzSshHostKeyIT::recreateChangedContainer()
 
 bool tst_ZzSshHostKeyIT::waitChangedPortReady(int timeoutMs)
 {
+    // 偏差说明（执行后同步）：必须等到读出 SSH banner，而非仅 TCP 连通——
+    // docker-proxy 在 sshd 就绪前就会接受连接，裸 waitForConnected 会假就绪。
     QElapsedTimer timer;
     timer.start();
     while (timer.elapsed() < timeoutMs) {
         QTcpSocket socket;
         socket.connectToHost(m_cfg.host, m_cfg.changedPort);
-        if (socket.waitForConnected(1000)) {
+        if (socket.waitForConnected(1000)
+                && socket.waitForReadyRead(3000)
+                && socket.peek(4) == "SSH-") {
             socket.disconnectFromHost();
             return true;
         }
