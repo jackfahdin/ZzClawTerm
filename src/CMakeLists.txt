@@ -29,6 +29,10 @@ set(ZZCLAWTERM_APP_SOURCES
     dialog/ZzHostKeyDialog.cpp
     dialog/ZzMasterPasswordDialog.h
     dialog/ZzMasterPasswordDialog.cpp
+    ZzClawTermModule.h
+    ZzClawTermModule.cpp
+    ZzAppShell.h
+    ZzAppShell.cpp
 )
 
 # 计划 03（会话模型/凭据）与计划 02（日志引擎）交付的子目录
@@ -68,7 +72,8 @@ set_target_properties(ZzClawTerm PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
 )
-target_link_libraries(ZzClawTerm PRIVATE ZzClawTermApp)
+# main.cpp 直接使用 ZzWindowKit bootstrap 头文件；ZzPureTools 仅私有链接它，需显式链接
+target_link_libraries(ZzClawTerm PRIVATE ZzClawTermApp Zz::WindowKit)
 
 install(TARGETS ZzClawTerm
     RUNTIME DESTINATION bin
