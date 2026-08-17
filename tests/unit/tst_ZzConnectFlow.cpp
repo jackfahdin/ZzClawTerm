@@ -42,6 +42,7 @@ private slots:
         profile.protocol = QStringLiteral("mock");
         profile.host = QStringLiteral("10.0.0.1");
         profile.userName = QStringLiteral("deploy");
+        profile.keepAliveIntervalSeconds = 30;
 
         // 等价于会话面板双击：面板发 connectRequested(profile) → openSession
         tabs.openSession(profile);
@@ -54,6 +55,8 @@ private slots:
         // 映射正确：host/user 进入 endpoint
         QCOMPARE(mock->lastEndpoint.host, QStringLiteral("10.0.0.1"));
         QCOMPARE(mock->lastEndpoint.user, QStringLiteral("deploy"));
+        // keepalive 接线：profile 字段必须透传到 endpoint
+        QCOMPARE(mock->lastEndpoint.keepaliveIntervalSeconds, 30);
 
         // 双向字节流：键盘输入抵达传输，远端输出不崩溃
         emit view->termWidget()->sendData("pwd\n", 4);

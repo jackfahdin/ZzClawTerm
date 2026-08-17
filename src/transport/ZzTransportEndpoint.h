@@ -16,6 +16,7 @@ struct ZzTransportEndpoint final
     int cols = 80;      ///< 初始列数。
     int rows = 24;      ///< 初始行数。
     QString keyPath;    ///< 公钥认证的私钥路径（可空）。
+    int keepaliveIntervalSeconds = 0; ///< keepalive 间隔（秒），0 表示禁用；localShell 时忽略。
     bool localShell = false; ///< true 表示本地 shell 会话（规格 §七）。
     QString shellProgram;    ///< 本地 shell 可执行路径（可空，空=系统默认）。
 };

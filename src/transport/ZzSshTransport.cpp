@@ -45,6 +45,8 @@ void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
 
     m_conn = new ZzSshConnection(this);
     wireConnection();
+    // keepalive 必须在 connectToHost 之前配置（ZzSshConnection 契约）
+    m_conn->setKeepaliveInterval(endpoint.keepaliveIntervalSeconds);
     if (!endpoint.keyPath.isEmpty()) {
         ZzSshAuthConfig auth;
         auth.privateKeyPath = endpoint.keyPath;

@@ -182,6 +182,7 @@ ZzTransportEndpoint ZzTabManager::endpointFor(const ZzSessionProfile &profile) c
     endpoint.terminalType = profile.terminalType.isEmpty()
         ? settings.terminalType() : profile.terminalType;
     endpoint.keyPath = profile.privateKeyPath;
+    endpoint.keepaliveIntervalSeconds = profile.keepAliveIntervalSeconds;
     endpoint.localShell = (profile.protocol == QStringLiteral("local"));
     if (endpoint.localShell) {
         // 契约约定：local 会话的 shell 程序路径存于 host 字段（可空=系统默认）
