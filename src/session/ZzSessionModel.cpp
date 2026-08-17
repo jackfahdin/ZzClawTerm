@@ -45,6 +45,13 @@ bool ZzSessionModel::load()
         m_errorString = QStringLiteral("会话文件格式非法（不是 JSON 对象）");
         return false;
     }
+    // 未知版本（含缺失字段）必须报错，不能静默按当前版本解析
+    const int version = doc.object().value(kVersionKey).toInt(-1);
+    if (version != kFormatVersion) {
+        m_errorString = QStringLiteral("不支持的会话文件版本：%1（当前支持 %2）")
+                            .arg(version).arg(kFormatVersion);
+        return false;
+    }
     const QJsonArray array = doc.object().value(kSessionsKey).toArray();
     QList<ZzSessionProfile> loaded;
     loaded.reserve(array.size());

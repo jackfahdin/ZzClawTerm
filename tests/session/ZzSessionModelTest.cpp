@@ -159,6 +159,35 @@ private slots:
         QVERIFY(!model.errorString().isEmpty());
     }
 
+    /** @brief 未知/缺失 version 字段的会话文件必须报错，不得静默解析。 */
+    void loadUnknownVersionFails()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString futurePath =
+            dir.filePath(QStringLiteral("sessions-future.json"));
+        const QString missingPath =
+            dir.filePath(QStringLiteral("sessions-missing.json"));
+
+        // 未来版本号
+        QFile futureFile(futurePath);
+        QVERIFY(futureFile.open(QIODevice::WriteOnly));
+        futureFile.write(R"({"version": 99, "sessions": []})");
+        futureFile.close();
+        ZzSessionModel futureModel(futurePath);
+        QVERIFY(!futureModel.load());
+        QVERIFY(futureModel.errorString().contains(QStringLiteral("版本")));
+
+        // 缺失 version 字段
+        QFile missingFile(missingPath);
+        QVERIFY(missingFile.open(QIODevice::WriteOnly));
+        missingFile.write(R"({"sessions": []})");
+        missingFile.close();
+        ZzSessionModel missingModel(missingPath);
+        QVERIFY(!missingModel.load());
+        QVERIFY(!missingModel.errorString().isEmpty());
+    }
+
     /** @brief save 在目录不存在时自动创建目录。 */
     void saveCreatesParentDirectory()
     {
