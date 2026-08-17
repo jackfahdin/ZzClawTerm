@@ -43,6 +43,20 @@ set(ZZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ZZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${ZZ_PURETOOLS_SUBDIR})
 
+# OpenSSL：优先接入 vendored 预编译 bundle（third_party/openssl 提供
+# OpenSSLBundleConfig.cmake，创建 OpenSSL::Crypto/OpenSSL::SSL 导入目标并
+# 设置 OPENSSL_INCLUDE_DIR/OPENSSL_*_LIBRARY 变量；其后 libssh2 与
+# src/session 的 find_package(OpenSSL) 模块会沿用已设变量与既有导入目标，
+# FindOpenSSL 的 NOT TARGET 守卫保证不重复建目标）。
+# bundle 缺失（子模块未初始化）时回退系统 OpenSSL。
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSLBundleConfig.cmake")
+    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
+    find_package(OpenSSLBundle QUIET)
+    if(OpenSSLBundle_FOUND)
+        message(STATUS "OpenSSL：使用 vendored bundle ${OPENSSL_VERSION}（${OPENSSL_BUNDLE_LINKAGE}）")
+    endif()
+endif()
+
 # libssh2（CMake 移植版）与 ZzSshCore（计划 01）：ZzSshCore 链接 libssh2 目标
 zz_require_submodule(third_party/libssh2)
 # ZzPureToolsPro 将 BUILD_SHARED_LIBS 默认置 ON；libssh2 固定静态构建，与计划 01 验证配置一致
