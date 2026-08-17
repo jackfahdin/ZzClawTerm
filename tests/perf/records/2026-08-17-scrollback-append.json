@@ -5,16 +5,16 @@
         "buildType": "Release",
         "compiler": "GNU 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "bac6a83",
+        "gitCommit": "51dd8fc",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
         "qtVersion": "6.11.1"
     },
-    "measured": 27,
+    "measured": 30,
     "passed": true,
     "testName": "滚动历史追加 10 万行",
     "threshold": 5000,
-    "timestamp": "2026-08-17T19:31:43Z",
+    "timestamp": "2026-08-17T20:36:42Z",
     "unit": "ms"
 }
