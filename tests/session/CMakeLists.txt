@@ -26,3 +26,4 @@ endfunction()
 
 zz_session_add_test(ZzSessionProfileTest)
 zz_session_add_test(ZzSessionModelTest)
+zz_session_add_test(ZzCredentialStoreTest)

@@ -9,6 +9,8 @@ add_library(ZzSessionCore STATIC
     ZzSessionProfile.h
     ZzSessionModel.cpp
     ZzSessionModel.h
+    ZzCredentialStore.cpp
+    ZzCredentialStore.h
 )
 target_compile_features(ZzSessionCore PUBLIC cxx_std_20)
 target_link_libraries(ZzSessionCore PUBLIC Qt6::Core PRIVATE OpenSSL::Crypto)
