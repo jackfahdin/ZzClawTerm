@@ -2,10 +2,10 @@
     "details": {
     },
     "environment": {
-        "buildType": "Debug",
+        "buildType": "Release",
         "compiler": "GNU 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "d0f1fd0",
+        "gitCommit": "827c7e4",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
@@ -15,6 +15,6 @@
     "passed": true,
     "testName": "记录器自检",
     "threshold": 1000,
-    "timestamp": "2026-08-17T16:53:08Z",
+    "timestamp": "2026-08-17T17:42:16Z",
     "unit": "ms"
 }

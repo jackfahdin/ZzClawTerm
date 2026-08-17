@@ -15,6 +15,8 @@ set(ZZCLAWTERM_APP_SOURCES
     settings/ZzAppSettings.cpp
     terminal/ZzTerminalView.h
     terminal/ZzTerminalView.cpp
+    tab/ZzTabManager.h
+    tab/ZzTabManager.cpp
 )
 
 # 计划 03（会话模型/凭据）与计划 02（日志引擎）交付的子目录

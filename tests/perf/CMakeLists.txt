@@ -22,3 +22,4 @@ endfunction()
 
 zz_add_perf_test(tst_PerfRecorder tst_PerfRecorder.cpp)
 zz_add_perf_test(tst_PerfSettings tst_PerfSettings.cpp)
+zz_add_perf_test(tst_PerfTabLifecycle tst_PerfTabLifecycle.cpp)
