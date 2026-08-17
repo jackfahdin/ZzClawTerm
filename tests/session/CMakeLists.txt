@@ -25,3 +25,4 @@ function(zz_session_add_test target)
 endfunction()
 
 zz_session_add_test(ZzSessionProfileTest)
+zz_session_add_test(ZzSessionModelTest)
