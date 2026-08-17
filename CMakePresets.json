@@ -1,0 +1,75 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "linux-gcc-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "ZZCLAWTERM_BUILD_TESTS": true
+      }
+    },
+    { "name": "linux-gcc-debug", "inherits": "linux-gcc-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "linux-gcc-release", "inherits": "linux-gcc-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    {
+      "name": "windows-msvc2022-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
+        "ZZCLAWTERM_BUILD_TESTS": true
+      }
+    },
+    { "name": "windows-msvc2022-debug", "inherits": "windows-msvc2022-base" },
+    { "name": "windows-msvc2022-release", "inherits": "windows-msvc2022-base" },
+    {
+      "name": "macos-clang-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.3",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "ZZCLAWTERM_BUILD_TESTS": true
+      }
+    },
+    { "name": "macos-clang-debug", "inherits": "macos-clang-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "macos-clang-release", "inherits": "macos-clang-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } }
+  ],
+  "buildPresets": [
+    { "name": "linux-gcc-debug", "configurePreset": "linux-gcc-debug" },
+    { "name": "linux-gcc-release", "configurePreset": "linux-gcc-release" },
+    { "name": "windows-msvc2022-debug", "configurePreset": "windows-msvc2022-debug", "configuration": "Debug" },
+    { "name": "windows-msvc2022-release", "configurePreset": "windows-msvc2022-release", "configuration": "Release" },
+    { "name": "macos-clang-debug", "configurePreset": "macos-clang-debug" },
+    { "name": "macos-clang-release", "configurePreset": "macos-clang-release" }
+  ],
+  "testPresets": [
+    { "name": "linux-gcc-debug", "configurePreset": "linux-gcc-debug",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "linux-gcc-release", "configurePreset": "linux-gcc-release",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "windows-msvc2022-debug", "configurePreset": "windows-msvc2022-debug", "configuration": "Debug",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "windows-msvc2022-release", "configurePreset": "windows-msvc2022-release", "configuration": "Release",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "macos-clang-debug", "configurePreset": "macos-clang-debug",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "macos-clang-release", "configurePreset": "macos-clang-release",
+      "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } }
+  ]
+}

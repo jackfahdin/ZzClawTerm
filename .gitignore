@@ -54,3 +54,7 @@ compile_commands.json
 *creator.user*
 
 *_qmlcache.qrc
+
+# ZzClawTerm：本机 CMake 预设与安装输出不入库
+CMakeUserPresets.json
+install/

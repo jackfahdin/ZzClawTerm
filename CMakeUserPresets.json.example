@@ -1,0 +1,12 @@
+{
+  "version": 4,
+  "configurePresets": [
+    {
+      "name": "local-linux-release",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "/home/zz/Qt/6.11.1/gcc_64"
+      }
+    }
+  ]
+}

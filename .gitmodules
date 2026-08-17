@@ -1,0 +1,18 @@
+[submodule "third_party/ZzTermWidget"]
+	path = third_party/ZzTermWidget
+	url = https://github.com/jackfahdin/ZzTermWidget
+[submodule "third_party/ZzPureToolsPro"]
+	path = third_party/ZzPureToolsPro
+	url = https://github.com/jackfahdin/ZzPureTools
+[submodule "third_party/ZzSshCore"]
+	path = third_party/ZzSshCore
+	url = /home/zz/Jackfahdin/github/ZzSshCore
+[submodule "third_party/libssh2"]
+	path = third_party/libssh2
+	url = git@gitcode.com:JackfahdinImport/libssh2.git
+[submodule "third_party/openssl"]
+	path = third_party/openssl
+	url = git@gitcode.com:ZzThirdParty/openssl.git
+[submodule "third_party/lz4"]
+	path = third_party/lz4
+	url = https://github.com/lz4/lz4.git
