@@ -21,3 +21,4 @@ function(zz_add_perf_test name)
 endfunction()
 
 zz_add_perf_test(tst_PerfRecorder tst_PerfRecorder.cpp)
+zz_add_perf_test(tst_PerfSettings tst_PerfSettings.cpp)

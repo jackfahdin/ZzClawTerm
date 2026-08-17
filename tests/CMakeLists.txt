@@ -23,5 +23,6 @@ foreach(sub log session)
 endforeach()
 
 zz_add_qtest(tst_Skeleton unit/tst_Skeleton.cpp)
+zz_add_qtest(tst_ZzAppSettings unit/tst_ZzAppSettings.cpp)
 zz_add_qtest(tst_ZzTransportRegistry unit/tst_ZzTransportRegistry.cpp)
 zz_add_qtest(tst_ZzLocalPtyTransport unit/tst_ZzLocalPtyTransport.cpp)
