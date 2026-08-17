@@ -363,6 +363,13 @@ bool ZzCredentialStore::persist() const
         m_errorString = QStringLiteral("凭据文件落盘失败：%1").arg(file.errorString());
         return false;
     }
+    // 密文文件也必须最小权限 0600（仅属主可读写），防止同机其他用户读取。
+    // Windows 无 POSIX 权限语义，QFile::setPermissions 近似 no-op，属已知平台限制
+    if (!QFile::setPermissions(m_filePath,
+                               QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        m_errorString = QStringLiteral("无法收紧凭据文件权限：%1").arg(m_filePath);
+        return false;
+    }
     return true;
 }
 

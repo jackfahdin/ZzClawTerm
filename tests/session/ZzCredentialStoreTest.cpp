@@ -31,6 +31,28 @@ private slots:
         QVERIFY(QFileInfo(path).size() > 0);
     }
 
+#ifndef Q_OS_WIN // Windows 无 POSIX 权限语义，跳过
+    /** @brief 凭据文件落盘权限必须为 0600（仅属主可读写）。 */
+    void credentialFilePermissionsAreOwnerOnly()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+
+        ZzCredentialStore store(path);
+        QVERIFY(store.initialize(QStringLiteral("主密码-abc123")));
+
+        const QFileDevice::Permissions perms = QFileInfo(path).permissions();
+        QVERIFY(perms.testFlag(QFileDevice::ReadOwner));
+        QVERIFY(perms.testFlag(QFileDevice::WriteOwner));
+        // 组/其他用户不得有任何读、写、执行权限
+        QCOMPARE(perms & (QFileDevice::ReadGroup | QFileDevice::WriteGroup
+                          | QFileDevice::ExeGroup | QFileDevice::ReadOther
+                          | QFileDevice::WriteOther | QFileDevice::ExeOther),
+                 QFileDevice::Permissions{});
+    }
+#endif
+
     /** @brief 已存在凭据文件时拒绝重复初始化。 */
     void initializeTwiceRejected()
     {
