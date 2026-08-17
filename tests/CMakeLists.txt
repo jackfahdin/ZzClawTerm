@@ -10,6 +10,15 @@ endfunction()
 
 add_subdirectory(mocks)
 
+# 后端库测试按目录条件接入（计划 02/03 交付后自动生效），与 src/ 侧模式一致
+foreach(sub log session)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${sub}/CMakeLists.txt")
+        add_subdirectory(${sub})
+    else()
+        message(STATUS "缺少 tests/${sub}（由计划 02/03 交付），相关测试暂不注册")
+    endif()
+endforeach()
+
 zz_add_qtest(tst_Skeleton unit/tst_Skeleton.cpp)
 
 add_subdirectory(perf)
