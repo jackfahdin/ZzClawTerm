@@ -37,6 +37,14 @@ public:
     [[nodiscard]] static QString recordFilePath(const QString &feature);
 
     /**
+     * @brief 覆盖记录根目录（仅供自检类测试使用）。
+     *
+     * 自检记录无性能语义，不应落盘到入库目录 tests/perf/records/ 污染仓库；
+     * 测试用 QTemporaryDir 调用本函数重定向，传空串恢复默认目录。
+     */
+    static void setRecordsDirOverride(const QString &dir);
+
+    /**
      * @brief 性能门控是否生效：仅 Release 构建返回 true（规格 §9.1）。
      *
      * 非 Release 构建下性能测试应 QSKIP，数字无效、不落记录。

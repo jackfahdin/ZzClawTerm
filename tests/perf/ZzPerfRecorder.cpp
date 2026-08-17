@@ -46,12 +46,25 @@ QJsonObject zzEnvironment()
 
 } // namespace
 
+namespace {
+
+/** @brief 记录根目录覆盖（仅测试自检用，见 setRecordsDirOverride）。 */
+QString g_recordsDirOverride;
+
+} // namespace
+
+void ZzPerfRecorder::setRecordsDirOverride(const QString &dir)
+{
+    g_recordsDirOverride = dir;
+}
+
 QString ZzPerfRecorder::recordFilePath(const QString &feature)
 {
     const QString date =
         QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyy-MM-dd"));
-    return QStringLiteral("%1/%2-%3.json")
-        .arg(QStringLiteral(ZZ_PERF_RECORDS_DIR), date, feature);
+    const QString root = g_recordsDirOverride.isEmpty()
+        ? QStringLiteral(ZZ_PERF_RECORDS_DIR) : g_recordsDirOverride;
+    return QStringLiteral("%1/%2-%3.json").arg(root, date, feature);
 }
 
 bool ZzPerfRecorder::recordAndCheck(const QString &feature,

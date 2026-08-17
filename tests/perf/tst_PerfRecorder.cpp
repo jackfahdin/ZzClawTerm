@@ -15,6 +15,11 @@ class tst_PerfRecorder : public QObject
 private slots:
     void recordWritesJson()
     {
+        // 自检记录无性能语义，落盘到临时目录而非入库目录，避免污染仓库
+        QTemporaryDir recordsDir;
+        QVERIFY(recordsDir.isValid());
+        ZzPerfRecorder::setRecordsDirOverride(recordsDir.path());
+
         // 本用例自身即一次真实记录（功能名固定为基建自检）
         const bool ok = ZzPerfRecorder::recordAndCheck(
             QStringLiteral("perf-infra-selfcheck"),
@@ -23,6 +28,7 @@ private slots:
 
         const QString path = ZzPerfRecorder::recordFilePath(
             QStringLiteral("perf-infra-selfcheck"));
+        QVERIFY2(path.startsWith(recordsDir.path()), qPrintable(path));
         QFile file(path);
         QVERIFY2(file.exists(), qPrintable(path));
         QVERIFY(file.open(QIODevice::ReadOnly));
@@ -49,16 +55,22 @@ private slots:
         // memory_mb 为数值（MB），不是 "31942880 kB" 这类字符串
         QVERIFY(env.value(QStringLiteral("memory_mb")).isDouble());
         QVERIFY(!env.value(QStringLiteral("gitCommit")).toString().isEmpty());
+
+        ZzPerfRecorder::setRecordsDirOverride(QString()); // 恢复默认目录
     }
 
     void thresholdViolationReturnsFalse()
     {
+        // 同 recordWritesJson：自检记录落临时目录，不污染入库目录
+        QTemporaryDir recordsDir;
+        QVERIFY(recordsDir.isValid());
+        ZzPerfRecorder::setRecordsDirOverride(recordsDir.path());
+
         QVERIFY(!ZzPerfRecorder::recordAndCheck(
             QStringLiteral("perf-infra-selfcheck-violation"),
             QStringLiteral("阈值违例自检"), 10.0, 999.0));
-        // 违例记录仅用于验证返回值，删除以免覆盖/混入入库的自检记录
-        QFile::remove(ZzPerfRecorder::recordFilePath(
-            QStringLiteral("perf-infra-selfcheck-violation")));
+
+        ZzPerfRecorder::setRecordsDirOverride(QString()); // 恢复默认目录
     }
 };
 
