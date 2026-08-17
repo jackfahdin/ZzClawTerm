@@ -16,6 +16,7 @@
 namespace {
 
 constexpr quint32 kFormatVersion = 1;
+constexpr quint32 kMaxKdfIterations = 10000000; // 文件头迭代次数上限，防恶意文件 DoS
 constexpr int kKeyLength = 32;   // AES-256
 constexpr int kSaltLength = 16;
 constexpr int kIvLength = 12;    // GCM 推荐 IV 长度
@@ -222,6 +223,7 @@ bool ZzCredentialStore::initialize(const QString &masterPassword)
     }
     if (!deriveKey(masterPassword, m_salt, m_kdfIterations, m_key)) {
         m_errorString = QStringLiteral("密钥派生失败");
+        m_key.clear(); // deriveKey 失败可能已分配非空缓冲区，不能让 isUnlocked() 误报 true
         return false;
     }
 
@@ -259,6 +261,10 @@ bool ZzCredentialStore::unlock(const QString &masterPassword)
         return false;
     }
     const quint32 iterations = readU32(raw, 8);
+    if (iterations < 1 || iterations > kMaxKdfIterations) {
+        m_errorString = QStringLiteral("凭据文件格式非法");
+        return false;
+    }
     const QByteArray salt = raw.mid(12, kSaltLength);
     const QByteArray blob = raw.mid(kHeaderLength);
 

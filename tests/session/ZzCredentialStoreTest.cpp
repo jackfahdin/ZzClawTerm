@@ -132,6 +132,37 @@ private slots:
         QVERIFY(!store.unlock(QStringLiteral("主密码-abc123")));
         QVERIFY(!store.errorString().isEmpty());
     }
+
+    /** @brief 文件头 kdfIterations 超出 [1, 10000000] 判为文件损坏，拒绝解锁（防恶意文件 DoS）。 */
+    void unlockRejectsOutOfRangeKdfIterations()
+    {
+        for (const quint32 forged : {quint32(0), quint32(10000001), quint32(0xFFFFFFFF)}) {
+            QTemporaryDir dir;
+            QVERIFY(dir.isValid());
+            const QString path = dir.filePath(QStringLiteral("credentials.dat"));
+            {
+                ZzCredentialStore store(path);
+                QVERIFY(store.initialize(QStringLiteral("正确密码")));
+            }
+
+            // 篡改文件头 kdfIterations（偏移 8，大端 u32）
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::ReadWrite));
+            QVERIFY(file.seek(8));
+            QByteArray buf(4, Qt::Uninitialized);
+            buf[0] = static_cast<char>(forged >> 24);
+            buf[1] = static_cast<char>(forged >> 16);
+            buf[2] = static_cast<char>(forged >> 8);
+            buf[3] = static_cast<char>(forged);
+            QCOMPARE(file.write(buf), qint64(4));
+            file.close();
+
+            ZzCredentialStore store(path);
+            QVERIFY(!store.unlock(QStringLiteral("正确密码")));
+            QVERIFY(!store.isUnlocked());
+            QCOMPARE(store.errorString(), QStringLiteral("凭据文件格式非法"));
+        }
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzCredentialStoreTest)
