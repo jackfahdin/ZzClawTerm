@@ -5,16 +5,16 @@
         "buildType": "Release",
         "compiler": "GNU 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "d04ef04",
+        "gitCommit": "bac6a83",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
         "qtVersion": "6.11.1"
     },
-    "measured": 41,
+    "measured": 39,
     "passed": true,
     "testName": "开会话到连接就绪（mock）",
     "threshold": 500,
-    "timestamp": "2026-08-17T17:51:10Z",
+    "timestamp": "2026-08-17T19:19:45Z",
     "unit": "ms"
 }

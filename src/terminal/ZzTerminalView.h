@@ -7,6 +7,7 @@
 
 class QTermWidget;
 class ZzAppSettings;
+class ZzScrollbackBridge;
 
 /**
  * @brief 单标签终端视图：组合 QTermWidget 与一个传输实例（规格 §七）。
@@ -46,6 +47,9 @@ public:
     /** @brief 应用全局设置：字号、编码、配色、内存历史行数。 */
     void applySettings(const ZzAppSettings &settings);
 
+    /** @brief 启用滚动历史桥：为该会话创建 ZzLogEngine 并接线（ZzTabManager 开会话时调用）。 */
+    void enableScrollback(const QString &sessionId);
+
 signals:
     /** @brief 传输状态透传（ZzTabManager 据此刷新标签外观与状态栏）。 */
     void stateChanged(ZzTransportInterface::State state);
@@ -61,4 +65,5 @@ private:
     ZzTransportInterface *m_transport = nullptr;
     ZzTransportEndpoint m_lastEndpoint;  ///< 最近一次 open 参数（重连用）
     QString m_encoding;                  ///< 状态栏展示的编码名
+    ZzScrollbackBridge *m_scrollbackBridge = nullptr; ///< 滚动历史桥（可空，以本视图为父）
 };

@@ -21,6 +21,8 @@ set(ZZCLAWTERM_APP_SOURCES
     settings/ZzSettingsPage.cpp
     terminal/ZzTerminalView.h
     terminal/ZzTerminalView.cpp
+    terminal/ZzScrollbackBridge.h
+    terminal/ZzScrollbackBridge.cpp
     tab/ZzTabManager.h
     tab/ZzTabManager.cpp
     dialog/ZzHostKeyDialog.h

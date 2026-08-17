@@ -1,10 +1,14 @@
 #include "ZzTerminalView.h"
 
+#include <QtCore/QDir>
+#include <QtCore/QStandardPaths>
 #include <QtCore/QStringConverter>
 #include <QtWidgets/QVBoxLayout>
 
 #include "qtermwidget.h"
+#include "log/ZzLogEngine.h"
 #include "settings/ZzAppSettings.h"
+#include "terminal/ZzScrollbackBridge.h"
 
 ZzTerminalView::ZzTerminalView(QWidget *parent)
     : QWidget(parent)
@@ -108,4 +112,28 @@ void ZzTerminalView::applySettings(const ZzAppSettings &settings)
         m_term->setColorScheme(settings.colorScheme());
     }
     m_term->setHistorySize(settings.historyLines());
+}
+
+void ZzTerminalView::enableScrollback(const QString &sessionId)
+{
+    if (m_scrollbackBridge) {
+        return; // 每会话只建一次
+    }
+    // 温层文件落在应用配置目录下按会话 ID 区分（QUuid 字符串，文件名安全）
+    const QString dirPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+        + QStringLiteral("/scrollback");
+    QDir().mkpath(dirPath);
+    ZzLogEngine::Config config;
+    config.warmFilePath = dirPath + QLatin1Char('/') + sessionId
+                          + QStringLiteral(".warm");
+    auto *engine = new ZzLogEngine(config, this);
+    engine->open(); // 温层打开失败时引擎内部降级并发射 degradedToMemoryOnly
+    m_scrollbackBridge = new ZzScrollbackBridge(m_term, engine, this);
+    // 降级 → 状态栏提示（经 errorOccurred 同一路径到 ZzTabManager::statusMessage）
+    connect(m_scrollbackBridge, &ZzScrollbackBridge::degraded, this,
+            [this](const QString &reason) {
+                emit errorOccurred(QStringLiteral("滚动历史已降级为内存模式：%1")
+                                       .arg(reason));
+            });
 }

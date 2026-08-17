@@ -67,6 +67,7 @@ void ZzTabManager::openSession(const ZzSessionProfile &profile)
     setCurrentIndex(index);
     wireView(index, view);
 
+    view->enableScrollback(profile.id.toString(QUuid::WithoutBraces));
     view->openEndpoint(endpointFor(profile));
 }
 
@@ -119,6 +120,7 @@ void ZzTabManager::reconnectTab(int index)
     tabBar()->setTabToolTip(index, QString());
     // 注意：视图级信号接线（wireView）在 openSession 已建立，此处不得重复调用，
     // 否则 currentStateChanged 等信号会翻倍发射
+    view->enableScrollback(profile.id.toString(QUuid::WithoutBraces));
     view->openEndpoint(endpointFor(profile));
 }
 
