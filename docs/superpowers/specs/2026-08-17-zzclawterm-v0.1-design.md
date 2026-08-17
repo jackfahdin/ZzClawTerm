@@ -273,6 +273,7 @@ void connectToHost(const QString &host, quint16 port, const QString &user);
 ```
 
 - 核心库不依赖 Qt Widgets；UI 层不直接访问传输与存储实现
+- **commit message 规范**：中文 Conventional Commits；首行为中文简要说明（如 `feat: 新增会话分组树操作`），空一行后用中文详细说明本次修改的问题点（改了什么、为什么、影响面）
 
 ## 十一、依赖清单
 
