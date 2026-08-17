@@ -3,7 +3,10 @@
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QtTest>
+
+#include <atomic>
 
 /**
  * @brief ZzLogEngine 门面单元测试：归档往返、滚动读取等价性、预加载、降级。
@@ -145,6 +148,61 @@ private slots:
         ZzLogLine got;
         QVERIFY(engine.getLine(engine.firstLineNo(), &got));
         QCOMPARE(got.text, line(engine.firstLineNo()).text);
+    }
+
+    /// @brief 多线程并发读压力：两个线程并发 getLines 命中未缓存块，
+    ///        同时主线程持续触发 preload，校验 QCache 并发保护下的数据正确性。
+    void concurrentReadsWithPreloadStress()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzLogEngine::Config c = testConfig(dir.filePath(QStringLiteral("warm.log")));
+        c.hotCapacity = 64;
+        c.archiveBatchSize = 32;
+        ZzLogEngine engine(c);
+        QVERIFY(engine.open());
+
+        // 每行约 1KB，单块（64KB）约 60 行；温层 900+ 行跨十余块，超出 8 块缓存容量，
+        // 保证并发读取反复缓存未命中并写 QCache
+        const QString payload = QString(1024, QLatin1Char('x'));
+        const auto makeLine = [&payload](quint64 i) {
+            return ZzLogLine{payload + QString::number(qint64(i)), QByteArray()};
+        };
+        constexpr quint64 N = 1000;
+        for (quint64 i = 0; i < N; ++i)
+            engine.appendLine(makeLine(i));
+        engine.flush();
+        QVERIFY(engine.totalLines() == N);
+
+        std::atomic<bool> failed{false};
+        const auto reader = [&engine, &failed, &makeLine]() {
+            for (int round = 0; round < 50 && !failed.load(); ++round) {
+                for (quint64 start = 0; start + 100 <= N; start += 37) {
+                    const QVector<ZzLogLine> window = engine.getLines(start, 100);
+                    if (window.size() != 100 ||
+                        window.first().text != makeLine(start).text ||
+                        window.last().text != makeLine(start + 99).text) {
+                        failed.store(true);
+                        return;
+                    }
+                }
+            }
+        };
+        QThread *t1 = QThread::create(reader);
+        QThread *t2 = QThread::create(reader);
+        t1->start();
+        t2->start();
+        // 读线程运行期间持续触发归档线程的 preload（写解压缓存路径）
+        while (!t1->isFinished() || !t2->isFinished()) {
+            for (quint64 id = 0; id < N; id += 64)
+                engine.preload(id);
+            QThread::msleep(1);
+        }
+        t1->wait();
+        t2->wait();
+        delete t1;
+        delete t2;
+        QVERIFY(!failed.load());
     }
 };
 

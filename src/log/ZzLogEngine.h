@@ -81,7 +81,7 @@ public:
 
     quint64 totalLines() const;   ///< 当前可读总行数（热层 + 温层）
     quint64 firstLineNo() const;  ///< 当前最老可读行 ID
-    bool isMemoryOnly() const { return m_memoryOnly; }
+    bool isMemoryOnly() const { return m_memoryOnly.load(); }
 
     /// @brief 预加载 lineNo 附近温层块到解压缓存（异步，不阻塞调用方）。
     void preload(quint64 lineNo);
@@ -107,5 +107,5 @@ private:
     std::atomic<quint64> m_warmBase{0};  ///< 温层首行 ID（归档线程发布）
     std::atomic<quint64> m_warmCount{0}; ///< 温层行数（归档线程发布）
     quint64 m_hotBase = 0;          ///< 热层首行 ID（m_hotMutex 保护）
-    bool m_memoryOnly = false;
+    std::atomic<bool> m_memoryOnly{false}; ///< 降级标志（archiveFailed 回调跨线程写）
 };

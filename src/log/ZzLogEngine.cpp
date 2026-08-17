@@ -52,7 +52,10 @@ bool ZzLogEngine::open()
             this, &ZzLogEngine::archiveFinished);
     connect(m_worker, &ZzLogArchiveWorker::archiveFailed, this,
             [this](const QString &message) {
-                m_memoryOnly = true; // 后续批次直接丢弃，不再尝试写盘
+                // 门闩：exchange 返回旧值，已降级则直接返回，避免队列中后续
+                // 失败批次逐批重复发射 degradedToMemoryOnly
+                if (m_memoryOnly.exchange(true))
+                    return;
                 emit degradedToMemoryOnly(message);
             });
     m_workerThread.start();

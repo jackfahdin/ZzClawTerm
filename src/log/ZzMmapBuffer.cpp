@@ -358,8 +358,11 @@ bool ZzMmapBuffer::writeBlock(const QByteArray &chunk, quint64 lineStart, quint3
 
 QByteArray ZzMmapBuffer::decompressBlock(const BlockInfo &block) const
 {
-    if (const QByteArray *cached = m_blockCache.object(block.lineStart))
-        return *cached;
+    {
+        QMutexLocker locker(&m_cacheMutex);
+        if (const QByteArray *cached = m_blockCache.object(block.lineStart))
+            return *cached;
+    }
     QByteArray out;
     out.resize(qsizetype(block.uncompSize));
     const int n = LZ4_decompress_safe(
@@ -367,6 +370,7 @@ QByteArray ZzMmapBuffer::decompressBlock(const BlockInfo &block) const
         out.data(), int(block.compSize), int(block.uncompSize));
     if (n != int(block.uncompSize))
         return {}; // 数据损坏
+    QMutexLocker locker(&m_cacheMutex);
     m_blockCache.insert(block.lineStart, new QByteArray(out), 1);
     return out;
 }

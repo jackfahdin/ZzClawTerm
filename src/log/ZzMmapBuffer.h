@@ -5,6 +5,7 @@
 
 #include <QCache>
 #include <QFile>
+#include <QMutex>
 #include <QVector>
 
 /**
@@ -16,7 +17,9 @@
  * - 文件预分配并按 4MB 粒度增长；尾部半写块与字段不合理的幽灵块在重开扫描时被安全忽略（崩溃安全）；
  * - 超出 maxLines 时按整块粒度丢弃最老数据（v0.2 改为归档冷层）。
  *
- * @note 线程安全由上层（ZzLogEngine 的 QReadWriteLock）保证，本类自身不加锁。
+ * @note 线程安全由上层（ZzLogEngine 的 QReadWriteLock）保证，本类自身不加锁；
+ *       唯一的例外是解压缓存 m_blockCache：上层读锁允许多线程并发进入 const 读路径，
+ *       故缓存访问由专用的 m_cacheMutex 保护（QCache 本身非线程安全）。
  */
 class ZzMmapBuffer
 {
@@ -99,4 +102,5 @@ private:
     QVector<BlockInfo> m_blocks;              ///< 存活块表（按 lineStart 递增）
     ZzLineIndex m_lineIndex;                  ///< 块内行偏移索引
     mutable QCache<quint64, QByteArray> m_blockCache; ///< 解压缓存，键为块首行 ID
+    mutable QMutex m_cacheMutex; ///< m_blockCache 专用锁（并发读路径下的 QCache 保护）
 };

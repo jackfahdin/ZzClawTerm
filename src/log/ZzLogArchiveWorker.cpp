@@ -30,7 +30,8 @@ void ZzLogArchiveWorker::archiveLines(const QVector<ZzLogLine> &lines)
 
 void ZzLogArchiveWorker::preloadAround(quint64 lineId)
 {
-    QReadLocker locker(m_lock);
+    // 持写锁而非读锁：preload 会写解压缓存（QCache），须与调用线程的读路径互斥
+    QWriteLocker locker(m_lock);
     m_buffer->preload(lineId);
 }
 
