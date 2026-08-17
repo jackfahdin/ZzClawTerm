@@ -84,6 +84,8 @@ private:
                     QString *errorString);
     QByteArray decompressBlock(const BlockInfo &block) const;
     qsizetype findBlockIndex(quint64 lineId) const;
+    void dropOldestBlocks();
+    void compact();
 
     QFile m_file;
     uchar *m_map = nullptr;     ///< 全文件映射基址

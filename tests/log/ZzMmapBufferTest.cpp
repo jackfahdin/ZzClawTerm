@@ -134,6 +134,73 @@ private slots:
         QCOMPARE(buf.lineCount(), 4ULL);
         QCOMPARE(buf.readLines(3, 1).first().text, line(3).text);
     }
+    /// @brief 超出 maxLines 时按整块粒度丢弃最老数据，剩余数据完整连续。
+    void capacityDropsOldestBlocks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzMmapBuffer buf(dir.filePath(QStringLiteral("warm.log")), /*maxLines=*/2000);
+        QVERIFY(buf.open());
+        QVector<ZzLogLine> lines;
+        for (quint64 i = 0; i < 5000; ++i)
+            lines.append(line(i));
+        QVERIFY(buf.appendLines(lines));
+
+        QVERIFY(buf.lineCount() <= 2000ULL);
+        QVERIFY(buf.lineCount() > 0ULL);
+        QVERIFY(buf.firstLineId() > 0ULL);
+        // 剩余数据完整且与写入序列逐字节一致
+        QVector<ZzLogLine> rest = buf.readLines(buf.firstLineId(), buf.lineCount());
+        QCOMPARE(quint64(rest.size()), buf.lineCount());
+        for (int i = 0; i < rest.size(); ++i)
+            QCOMPARE(rest[i].text, line(buf.firstLineId() + quint64(i)).text);
+        // 已丢弃的行读不到（区间被裁剪后为空）
+        QVERIFY(buf.readLines(0, 1).isEmpty());
+    }
+
+    /// @brief 裁剪状态持久化：重开后最老行不复活，且可继续追加。
+    void dropSurvivesReopen()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("warm.log"));
+        quint64 firstAfterDrop = 0;
+        {
+            ZzMmapBuffer buf(path, /*maxLines=*/2000);
+            QVERIFY(buf.open());
+            QVector<ZzLogLine> lines;
+            for (quint64 i = 0; i < 5000; ++i)
+                lines.append(line(i));
+            QVERIFY(buf.appendLines(lines));
+            buf.flush();
+            firstAfterDrop = buf.firstLineId();
+            buf.close();
+        }
+        ZzMmapBuffer buf(path, 2000);
+        QVERIFY(buf.open());
+        QCOMPARE(buf.firstLineId(), firstAfterDrop);
+        QVERIFY(buf.appendLines({line(5000)}));
+        QCOMPARE(buf.readLines(5000, 1).first().text, line(5000).text);
+    }
+
+    /// @brief 预读后读取结果不变（预读只影响缓存，不影响语义）。
+    void preloadKeepsReadsCorrect()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzMmapBuffer buf(dir.filePath(QStringLiteral("warm.log")));
+        QVERIFY(buf.open());
+        QVector<ZzLogLine> lines;
+        for (quint64 i = 0; i < 3000; ++i)
+            lines.append(line(i));
+        QVERIFY(buf.appendLines(lines));
+        buf.preload(1500);
+        buf.preload(0); // 边界：首块
+        QVector<ZzLogLine> got = buf.readLines(1490, 30);
+        QCOMPARE(got.size(), 30);
+        for (int i = 0; i < 30; ++i)
+            QCOMPARE(got[i].text, line(1490 + quint64(i)).text);
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzMmapBufferTest)

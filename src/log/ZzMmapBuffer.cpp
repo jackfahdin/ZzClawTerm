@@ -166,6 +166,7 @@ bool ZzMmapBuffer::appendLines(const QVector<ZzLogLine> &lines, QString *errorSt
             return false;
         commitChunk();
     }
+    dropOldestBlocks();
     return true;
 }
 
@@ -388,4 +389,53 @@ qsizetype ZzMmapBuffer::findBlockIndex(quint64 lineId) const
         }
     }
     return best;
+}
+
+void ZzMmapBuffer::dropOldestBlocks()
+{
+    // 按整块粒度丢弃最老数据，至少保留一块（v0.2 改为归档冷层）
+    while (m_lineCount > m_maxLines && m_blocks.size() > 1) {
+        const BlockInfo &oldest = m_blocks.first();
+        m_lineCount -= oldest.lineCount;
+        m_droppedBytes += kBlockHeaderSize + oldest.compSize;
+        ++m_skipBlocks;
+        m_blocks.removeFirst();
+    }
+    if (m_skipBlocks > 0)
+        writeHeader(); // 持久化丢弃进度，重开后最老行不复活
+    // 浪费空间超过已用一半且文件超过一个扩容粒度时，物理压缩文件
+    if (m_droppedBytes > m_appendOffset / 2 && m_appendOffset > kGrowGranularity)
+        compact();
+}
+
+void ZzMmapBuffer::compact()
+{
+    // 把存活块原样（保持压缩态）搬运到新文件头部之后，块内数据与行 ID 不变
+    qint64 total = 0;
+    for (const BlockInfo &b : std::as_const(m_blocks))
+        total += kBlockHeaderSize + b.compSize;
+
+    QByteArray alive;
+    alive.reserve(qsizetype(total));
+    for (BlockInfo &b : m_blocks) {
+        const qint64 oldOffset = b.fileOffset;
+        alive.append(reinterpret_cast<const char *>(m_map) + oldOffset,
+                     qsizetype(kBlockHeaderSize + b.compSize));
+        b.fileOffset = kHeaderSize + alive.size() - (kBlockHeaderSize + b.compSize);
+    }
+
+    if (m_map) {
+        m_file.unmap(m_map);
+        m_map = nullptr;
+    }
+    if (!m_file.resize(kHeaderSize + alive.size() + kGrowGranularity) || !remap()) {
+        // 压缩失败（磁盘满等）：m_map 为空后读写路径均按空数据安全返回，
+        // 由上层（ZzLogEngine）走 I/O 失败降级路径。
+        return;
+    }
+    std::memcpy(m_map + kHeaderSize, alive.constData(), size_t(alive.size()));
+    m_appendOffset = kHeaderSize + alive.size();
+    m_skipBlocks = 0;
+    m_droppedBytes = 0;
+    writeHeader();
 }
