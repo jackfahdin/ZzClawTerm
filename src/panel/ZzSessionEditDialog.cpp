@@ -6,6 +6,7 @@
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QLineEdit>
+#include <QtWidgets/QMessageBox>
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QWidget>
@@ -137,8 +138,16 @@ void ZzSessionEditDialog::accept()
     // 密码：输入了新密码则写入凭据库换新引用；留空保留原引用
     if (m_profile.authMethod == ZzAuthMethod::Password) {
         if (!m_passwordEdit->text().isEmpty()) {
-            m_profile.credentialId = m_store->addCredential(
+            const QUuid credentialId = m_store->addCredential(
                 m_profile.name, m_passwordEdit->text());
+            if (credentialId.isNull()) {
+                // 凭据库锁定/写入失败：不能静默丢密码，拒绝 accept 让用户处理
+                QMessageBox::warning(this, QStringLiteral("密码未保存"),
+                    QStringLiteral("凭据库未解锁，密码未保存。\n"
+                                   "请解锁凭据库后重试，或改用其他认证方式。"));
+                return;
+            }
+            m_profile.credentialId = credentialId;
         } else {
             m_profile.credentialId = m_originalCredentialId;
         }
