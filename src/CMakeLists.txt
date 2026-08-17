@@ -1,5 +1,12 @@
 # ZzClawTermApp：除 main.cpp 外的全部应用源码，供可执行与测试共同链接。
 set(ZZCLAWTERM_APP_SOURCES
+    transport/ZzTransportEndpoint.h
+    transport/ZzTransportInterface.h
+    transport/ZzTransportRegistry.h
+    transport/ZzTransportRegistry.cpp
+    panel/ZzPanelInterface.h
+    panel/ZzPanelRegistry.h
+    panel/ZzPanelRegistry.cpp
 )
 
 # 计划 03（会话模型/凭据）与计划 02（日志引擎）交付的子目录
