@@ -10,6 +10,9 @@ endfunction()
 
 add_subdirectory(mocks)
 
+# 性能基建（ZzPerfInfra）先于各后端目录注册，供其性能门控测试链接
+add_subdirectory(perf)
+
 # 后端库测试按目录条件接入（计划 02/03 交付后自动生效），与 src/ 侧模式一致
 foreach(sub log session)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${sub}/CMakeLists.txt")
@@ -21,5 +24,3 @@ endforeach()
 
 zz_add_qtest(tst_Skeleton unit/tst_Skeleton.cpp)
 zz_add_qtest(tst_ZzTransportRegistry unit/tst_ZzTransportRegistry.cpp)
-
-add_subdirectory(perf)

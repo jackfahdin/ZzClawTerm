@@ -1,6 +1,6 @@
 {
     "details": {
-        "avgMs": 0.010220915,
+        "avgMs": 0.008050245,
         "samples": 200,
         "totalLines": 200000,
         "windowRows": 60
@@ -9,16 +9,16 @@
         "buildType": "Release",
         "compiler": "GCC 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "2270184032b25bf8c6b18457fe7454dfd6739cb7",
+        "gitCommit": "c2b531522b56c0e04240dcfb6fc7d7e7dfec69d8",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
         "qtVersion": "6.11.1"
     },
-    "measured": 0.037456,
+    "measured": 0.045318,
     "passed": true,
     "testName": "ZzLogEngine-scroll-read-latency",
     "threshold": 16,
-    "timestamp": "2026-08-17T16:12:19Z",
+    "timestamp": "2026-08-17T16:29:30Z",
     "unit": "ms"
 }
