@@ -11,6 +11,10 @@ set(ZZCLAWTERM_APP_SOURCES
     panel/ZzPanelInterface.h
     panel/ZzPanelRegistry.h
     panel/ZzPanelRegistry.cpp
+    panel/ZzSessionPanel.h
+    panel/ZzSessionPanel.cpp
+    panel/ZzSessionEditDialog.h
+    panel/ZzSessionEditDialog.cpp
     settings/ZzAppSettings.h
     settings/ZzAppSettings.cpp
     terminal/ZzTerminalView.h
