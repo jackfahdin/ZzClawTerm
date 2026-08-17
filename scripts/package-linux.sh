@@ -2,7 +2,7 @@
 # ZzClawTerm Linux 打包：Release 构建 → linuxdeploy + qt 插件 → AppImage
 # 依赖：linuxdeploy-x86_64.AppImage 与 linuxdeploy-plugin-qt-x86_64.AppImage
 #       已放入 PATH（自行从 GitHub 发布页下载并 chmod +x）
-# 用法：QT_ROOT=/home/zz/Qt/6.11.1/gcc_64 bash scripts/package-linux.sh
+# 用法：QT_ROOT=<Qt前缀，如 ~/Qt/6.11.1/gcc_64> bash scripts/package-linux.sh
 # 注意：Qt 官方 gcc_64 的 imageformats/libqtiff.so 依赖 libtiff.so.5；较新发行版
 #       （如 Ubuntu 24.04+ 仅提供 libtiff.so.6）需自行准备 libtiff5 并加入
 #       LD_LIBRARY_PATH，否则 linuxdeploy-plugin-qt 会以 "Could not find dependency" 失败
