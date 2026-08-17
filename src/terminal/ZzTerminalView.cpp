@@ -4,6 +4,9 @@
 #include <QtCore/QFile>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QStringConverter>
+#include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QLabel>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QVBoxLayout>
 
 #include "qtermwidget.h"
@@ -20,6 +23,28 @@ ZzTerminalView::ZzTerminalView(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+
+    // 标签内错误横幅：默认隐藏（规格 §八：错误走标签内提示，不弹窗轰炸）
+    m_errorBanner = new QWidget(this);
+    m_errorBanner->setObjectName(QStringLiteral("zzErrorBanner"));
+    m_errorBanner->setStyleSheet(
+        QStringLiteral("#zzErrorBanner { background: #4a2b2b; color: #ffd7d7; }"));
+    auto *bannerLayout = new QHBoxLayout(m_errorBanner);
+    bannerLayout->setContentsMargins(8, 4, 8, 4);
+    m_errorLabel = new QLabel(m_errorBanner);
+    m_errorLabel->setWordWrap(true);
+    m_retryButton = new QPushButton(QStringLiteral("重试"), m_errorBanner);
+    m_retryButton->setObjectName(QStringLiteral("zzRetryButton"));
+    bannerLayout->addWidget(m_errorLabel, 1);
+    bannerLayout->addWidget(m_retryButton);
+    m_errorBanner->hide();
+    connect(m_retryButton, &QPushButton::clicked, this, [this]() {
+        hideErrorBanner();
+        if (m_transport) {
+            m_transport->open(m_lastEndpoint); // 用记忆的参数重试
+        }
+    });
+    layout->addWidget(m_errorBanner);
     layout->addWidget(m_term, 1);
 
     // 终端 → 传输（键盘输入方向）
@@ -57,10 +82,14 @@ void ZzTerminalView::setTransport(ZzTransportInterface *transport)
             });
     connect(m_transport, &ZzTransportInterface::stateChanged, this,
             [this](ZzTransportInterface::State state) {
+                if (state == ZzTransportInterface::State::Connected) {
+                    hideErrorBanner();
+                }
                 emit stateChanged(state);
             });
     connect(m_transport, &ZzTransportInterface::errorOccurred, this,
             [this](int, const QString &message) {
+                showErrorBanner(message);
                 emit errorOccurred(message);
             });
     connect(m_transport, &ZzTransportInterface::disconnected, this,
@@ -70,6 +99,21 @@ void ZzTerminalView::setTransport(ZzTransportInterface *transport)
 ZzTransportInterface *ZzTerminalView::transport() const
 {
     return m_transport;
+}
+
+QWidget *ZzTerminalView::errorBanner() const { return m_errorBanner; }
+QLabel *ZzTerminalView::errorLabel() const { return m_errorLabel; }
+QPushButton *ZzTerminalView::retryButton() const { return m_retryButton; }
+
+void ZzTerminalView::showErrorBanner(const QString &message)
+{
+    m_errorLabel->setText(message);
+    m_errorBanner->show();
+}
+
+void ZzTerminalView::hideErrorBanner()
+{
+    m_errorBanner->hide();
 }
 
 QTermWidget *ZzTerminalView::termWidget() const

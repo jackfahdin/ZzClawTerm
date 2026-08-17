@@ -5,6 +5,8 @@
 #include "transport/ZzTransportEndpoint.h"
 #include "transport/ZzTransportInterface.h"
 
+class QLabel;
+class QPushButton;
 class QTermWidget;
 class ZzAppSettings;
 class ZzScrollbackBridge;
@@ -13,8 +15,8 @@ class ZzScrollbackBridge;
  * @brief 单标签终端视图：组合 QTermWidget 与一个传输实例（规格 §七）。
  *
  * 职责只有胶水：远端输出 → recvData，键盘输入 → transport->write，
- * 尺寸变化 → transport->resize；外加设置应用与错误/断开信号透传
- * （错误横幅 UI 属任务 13，由 errorOccurred/disconnected 信号接入）。
+ * 尺寸变化 → transport->resize；外加设置应用、错误/断开信号透传，
+ * 以及标签内错误横幅（出错显示、重试重连、连通自动隐藏，规格 §八）。
  * 不拥有传输的所有权以外的语义——传输以本视图为 QObject 父对象随视图销毁。
  */
 class ZzTerminalView : public QWidget
@@ -53,20 +55,34 @@ public:
     /** @brief 启用滚动历史桥：为该会话创建 ZzLogEngine 并接线（ZzTabManager 开会话时调用）。 */
     void enableScrollback(const QString &sessionId);
 
+    // ---- 错误横幅观察口（测试用，任务 13） ----
+    /** @brief 标签内错误提示条。 */
+    [[nodiscard]] QWidget *errorBanner() const;
+    /** @brief 错误文本标签。 */
+    [[nodiscard]] QLabel *errorLabel() const;
+    /** @brief 重试按钮。 */
+    [[nodiscard]] QPushButton *retryButton() const;
+
 signals:
     /** @brief 传输状态透传（ZzTabManager 据此刷新标签外观与状态栏）。 */
     void stateChanged(ZzTransportInterface::State state);
     /** @brief 终端尺寸变化（列、行），状态栏用。 */
     void sizeChanged(int cols, int rows);
-    /** @brief 传输错误透传（横幅展示由任务 13 接入本信号链路）。 */
+    /** @brief 传输错误透传（标签内横幅同步展示，ZzTabManager 经此转状态栏提示）。 */
     void errorOccurred(const QString &message);
     /** @brief 被动断开透传。 */
     void disconnected(const QString &reason);
 
 private:
+    void showErrorBanner(const QString &message);
+    void hideErrorBanner();
+
     QTermWidget *m_term = nullptr;
     ZzTransportInterface *m_transport = nullptr;
     ZzTransportEndpoint m_lastEndpoint;  ///< 最近一次 open 参数（重连用）
     QString m_encoding;                  ///< 状态栏展示的编码名
     ZzScrollbackBridge *m_scrollbackBridge = nullptr; ///< 滚动历史桥（可空，以本视图为父）
+    QWidget *m_errorBanner = nullptr;  ///< 标签内错误提示条（默认隐藏）
+    QLabel *m_errorLabel = nullptr;
+    QPushButton *m_retryButton = nullptr;
 };
