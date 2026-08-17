@@ -60,6 +60,7 @@ add_subdirectory(third_party/ZzSshCore)
 # LZ4（温层压缩，供计划 02 的 ZzLogEngine 链接 lz4_static；官方 CMake 位于 build/cmake）
 zz_require_submodule(third_party/lz4/build/cmake)
 set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
 set(LZ4_BUILD_SHARED_LZ4_LIBRARY OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/lz4/build/cmake)
 
