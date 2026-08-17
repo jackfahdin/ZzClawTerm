@@ -5,7 +5,7 @@
         "buildType": "Release",
         "compiler": "GNU 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "827c7e4",
+        "gitCommit": "d04ef04",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
@@ -15,6 +15,6 @@
     "passed": true,
     "testName": "记录器自检",
     "threshold": 1000,
-    "timestamp": "2026-08-17T17:42:16Z",
+    "timestamp": "2026-08-17T17:51:10Z",
     "unit": "ms"
 }

@@ -17,6 +17,10 @@ set(ZZCLAWTERM_APP_SOURCES
     terminal/ZzTerminalView.cpp
     tab/ZzTabManager.h
     tab/ZzTabManager.cpp
+    dialog/ZzHostKeyDialog.h
+    dialog/ZzHostKeyDialog.cpp
+    dialog/ZzMasterPasswordDialog.h
+    dialog/ZzMasterPasswordDialog.cpp
 )
 
 # 计划 03（会话模型/凭据）与计划 02（日志引擎）交付的子目录

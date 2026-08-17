@@ -5,16 +5,16 @@
         "buildType": "Release",
         "compiler": "GNU 15.2.0",
         "cpu": "x86_64",
-        "gitCommit": "827c7e4",
+        "gitCommit": "d04ef04",
         "kernel": "7.0.0-29-generic",
         "memory_mb": 31194,
         "os": "Ubuntu 26.04 LTS",
         "qtVersion": "6.11.1"
     },
-    "measured": 177,
+    "measured": 164,
     "passed": true,
     "testName": "打开并关闭 50 个标签",
     "threshold": 3000,
-    "timestamp": "2026-08-17T17:42:16Z",
+    "timestamp": "2026-08-17T17:51:10Z",
     "unit": "ms"
 }
