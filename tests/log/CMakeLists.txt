@@ -7,3 +7,4 @@ function(zz_add_log_test name)
 endfunction()
 
 zz_add_log_test(ZzLineIndexTest)
+zz_add_log_test(ZzRingBufferTest)
