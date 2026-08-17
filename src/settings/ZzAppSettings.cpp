@@ -25,6 +25,9 @@ QString ZzAppSettings::terminalType() const
 
 void ZzAppSettings::setTerminalType(const QString &terminalType)
 {
+    if (this->terminalType() == terminalType) {
+        return; // 同值短路：值未变化不发射，避免放大无效重应用
+    }
     m_settings->setValue(QStringLiteral("terminal/type"), terminalType);
     emit settingsChanged();
 }
@@ -37,6 +40,9 @@ QString ZzAppSettings::encoding() const
 
 void ZzAppSettings::setEncoding(const QString &encoding)
 {
+    if (this->encoding() == encoding) {
+        return;
+    }
     m_settings->setValue(QStringLiteral("terminal/encoding"), encoding);
     emit settingsChanged();
 }
@@ -48,6 +54,9 @@ int ZzAppSettings::fontSize() const
 
 void ZzAppSettings::setFontSize(int fontSize)
 {
+    if (this->fontSize() == fontSize) {
+        return;
+    }
     m_settings->setValue(QStringLiteral("terminal/fontSize"), fontSize);
     emit settingsChanged();
 }
@@ -60,6 +69,9 @@ QString ZzAppSettings::colorScheme() const
 
 void ZzAppSettings::setColorScheme(const QString &colorScheme)
 {
+    if (this->colorScheme() == colorScheme) {
+        return;
+    }
     m_settings->setValue(QStringLiteral("terminal/colorScheme"), colorScheme);
     emit settingsChanged();
 }
@@ -71,6 +83,9 @@ int ZzAppSettings::historyLines() const
 
 void ZzAppSettings::setHistoryLines(int lines)
 {
+    if (historyLines() == lines) {
+        return;
+    }
     m_settings->setValue(QStringLiteral("terminal/historyLines"), lines);
     emit settingsChanged();
 }

@@ -32,7 +32,7 @@ private slots:
             settings.setFontSize(16);
             settings.setColorScheme(QStringLiteral("QuardCRT"));
             settings.setHistoryLines(20000);
-            QCOMPARE(spy.count(), 5); // 每项变更都通知
+            QCOMPARE(spy.count(), 5); // 每项变更都通知（变化才发射）
         }
         ZzAppSettings reloaded(path);
         QCOMPARE(reloaded.terminalType(), QStringLiteral("vt100"));
@@ -40,6 +40,28 @@ private slots:
         QCOMPARE(reloaded.fontSize(), 16);
         QCOMPARE(reloaded.colorScheme(), QStringLiteral("QuardCRT"));
         QCOMPARE(reloaded.historyLines(), 20000);
+        QFile::remove(path);
+    }
+
+    void sameValueDoesNotEmit()
+    {
+        // setter 同值短路：值未变化不发射 settingsChanged（避免无效重应用）
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-samevalue-test.ini"));
+        QFile::remove(path);
+        ZzAppSettings settings(path);
+        settings.setFontSize(16); // 先落入非默认值
+
+        QSignalSpy spy(&settings, &ZzAppSettings::settingsChanged);
+        settings.setTerminalType(settings.terminalType());
+        settings.setEncoding(settings.encoding());
+        settings.setFontSize(16);
+        settings.setColorScheme(settings.colorScheme());
+        settings.setHistoryLines(settings.historyLines());
+        QCOMPARE(spy.count(), 0);
+
+        settings.setFontSize(20); // 真实变化仍正常发射
+        QCOMPARE(spy.count(), 1);
         QFile::remove(path);
     }
 };
