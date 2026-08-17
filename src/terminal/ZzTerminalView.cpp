@@ -1,5 +1,7 @@
 #include "ZzTerminalView.h"
 
+#include <atomic>
+
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QStandardPaths>
@@ -169,12 +171,17 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
     if (m_scrollbackBridge) {
         return; // 每会话只建一次
     }
-    // 温层文件落在应用配置目录下按会话 ID 区分（QUuid 字符串，文件名安全）
+    // 温层文件落在应用配置目录下按会话 ID 区分（QUuid 字符串，文件名安全）。
+    // 同一 profile 可同时开多个标签（sessionId 相同），必须追加每标签唯一后缀，
+    // 否则后开标签的 QFile::remove 会截断先开标签正在使用的温层文件
+    static std::atomic<int> s_warmSequence = 0;
     const QString dirPath =
         QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
         + QStringLiteral("/scrollback");
     QDir().mkpath(dirPath);
     const QString warmPath = dirPath + QLatin1Char('/') + sessionId
+                             + QLatin1Char('-')
+                             + QString::number(s_warmSequence.fetch_add(1))
                              + QStringLiteral(".warm");
     // 新会话显示层历史基线恒从 0 起（QTermWidget 侧绝对行号口径），温层必须同步
     // 从空开始；否则跨重启恢复的引擎行号会让读回命中上一会话的行（错行）

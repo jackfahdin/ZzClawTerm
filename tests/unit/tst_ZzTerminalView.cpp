@@ -99,20 +99,56 @@ private slots:
     void scrollbackDegradationPromptsOnOpen()
     {
         QStandardPaths::setTestModeEnabled(true); // 隔离用户真实配置目录
-        const QString sessionId = QStringLiteral("test-degrade-open");
-        const QString warmPath =
+        // 温层文件名带每标签唯一后缀，无法预知精确路径；改为把 scrollback
+        // 目录置为只读，任何温层文件创建都会失败 → open() 同步降级
+        const QString dirPath =
             QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
-            + QStringLiteral("/scrollback/") + sessionId + QStringLiteral(".warm");
-        // 预置同名目录占位 → 温层按文件打开必然失败 → open() 同步降级
-        QVERIFY(QDir().mkpath(warmPath));
+            + QStringLiteral("/scrollback");
+        QVERIFY(QDir().mkpath(dirPath));
+        QVERIFY(QFile::setPermissions(
+            dirPath, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
 
         ZzTerminalView view;
         QSignalSpy spy(&view, &ZzTerminalView::errorOccurred);
-        view.enableScrollback(sessionId);
+        view.enableScrollback(QStringLiteral("test-degrade-open"));
         QCOMPARE(spy.count(), 1);
         QVERIFY(spy.first().at(0).toString().contains(QStringLiteral("降级")));
 
-        QVERIFY(QDir(warmPath).removeRecursively()); // 清理占位目录
+        // 恢复写权限，避免影响同进程后续用例
+        QVERIFY(QFile::setPermissions(
+            dirPath,
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                | QFileDevice::ExeOwner));
+    }
+
+    /**
+     * @brief 回归：同 sessionId 双开标签时温层文件必须每标签唯一。
+     *        曾共用 <sessionId>.warm，后开标签的 QFile::remove 会截断
+     *        先开标签正在使用的温层。
+     */
+    void scrollbackWarmFilesAreUniquePerTab()
+    {
+        QStandardPaths::setTestModeEnabled(true);
+        const QString sessionId = QStringLiteral("test-double-open");
+        const QString dirPath =
+            QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/scrollback");
+        // 清掉历史残留，保证计数断言确定
+        for (const QString &file :
+             QDir(dirPath).entryList({sessionId + QStringLiteral("-*.warm")},
+                                     QDir::Files)) {
+            QFile::remove(dirPath + QLatin1Char('/') + file);
+        }
+
+        ZzTerminalView view1;
+        view1.enableScrollback(sessionId);
+        ZzTerminalView view2; // 同 sessionId 同时存活（同 profile 双开）
+        view2.enableScrollback(sessionId);
+
+        const QStringList warmFiles =
+            QDir(dirPath).entryList({sessionId + QStringLiteral("-*.warm")},
+                                    QDir::Files);
+        QCOMPARE(warmFiles.size(), 2);
     }
 
     /**
