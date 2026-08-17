@@ -6,7 +6,7 @@
 	url = https://github.com/jackfahdin/ZzPureTools
 [submodule "third_party/ZzSshCore"]
 	path = third_party/ZzSshCore
-	url = /home/zz/Jackfahdin/github/ZzSshCore
+	url = https://gitcode.com/JackfahdinQt/ZzSshCore.git
 [submodule "third_party/libssh2"]
 	path = third_party/libssh2
 	url = git@gitcode.com:JackfahdinImport/libssh2.git
