@@ -3,6 +3,7 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QSpinBox>
 
 #include "qtermwidget.h"
@@ -56,8 +57,15 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     layout->addRow(note);
 
     // 即改即存
-    connect(m_terminalTypeCombo, &QComboBox::currentTextChanged,
-            m_settings, &ZzAppSettings::setTerminalType);
+    // 终端类型 combo 可编辑：currentTextChanged 逐键触发会写盘 "x"/"xt"/...
+    // 并引发全标签重应用；仅在下拉选择或编辑完成（回车/失焦）时提交
+    const auto commitTerminalType = [this]() {
+        m_settings->setTerminalType(m_terminalTypeCombo->currentText());
+    };
+    connect(m_terminalTypeCombo, &QComboBox::activated,
+            this, commitTerminalType);
+    connect(m_terminalTypeCombo->lineEdit(), &QLineEdit::editingFinished,
+            this, commitTerminalType);
     connect(m_encodingCombo, &QComboBox::currentTextChanged,
             m_settings, &ZzAppSettings::setEncoding);
     connect(m_fontSizeSpin, &QSpinBox::valueChanged,

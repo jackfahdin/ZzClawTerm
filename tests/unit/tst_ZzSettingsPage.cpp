@@ -1,6 +1,7 @@
 #include <QtTest/QtTest>
 
 #include <QtWidgets/QComboBox>
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QSpinBox>
 
 #include "qtermwidget.h"
@@ -43,12 +44,22 @@ private slots:
 
         page.fontSizeSpin()->setValue(14);
         page.encodingCombo()->setCurrentText(QStringLiteral("Big5"));
-        page.terminalTypeCombo()->setCurrentText(QStringLiteral("vt100"));
 
         QCOMPARE(settings.fontSize(), 14);
         QCOMPARE(settings.encoding(), QStringLiteral("Big5"));
-        QCOMPARE(settings.terminalType(), QStringLiteral("vt100"));
-        QVERIFY(spy.count() >= 3);
+        QCOMPARE(spy.count(), 2);
+
+        // 可编辑终端类型 combo：逐键输入不写盘（避免 "x"/"xt"/... 中间态落盘）
+        QTest::keyClicks(page.terminalTypeCombo()->lineEdit(),
+                         QStringLiteral("xterm"));
+        QCOMPARE(settings.terminalType(), QStringLiteral("xterm-256color"));
+        QCOMPARE(spy.count(), 2);
+
+        // 编辑完成（回车）才提交写盘
+        QTest::keyClick(page.terminalTypeCombo()->lineEdit(), Qt::Key_Return);
+        QCOMPARE(settings.terminalType(),
+                 page.terminalTypeCombo()->currentText());
+        QVERIFY(spy.count() > 2);
     }
 
     void colorSchemesComeFromTerminal()
