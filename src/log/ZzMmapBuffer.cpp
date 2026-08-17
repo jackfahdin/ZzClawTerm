@@ -134,6 +134,20 @@ bool ZzMmapBuffer::appendLines(const QVector<ZzLogLine> &lines, QString *errorSt
     chunk.reserve(qsizetype(kChunkSize) + 256);
     quint64 chunkFirstId = m_nextLineId;
     quint32 chunkLines = 0;
+    QVector<ZzLineIndex::Entry> pendingIndex; ///< 当前块待提交的行索引条目
+
+    // 行索引与计数器延迟到 writeBlock 成功后统一提交：
+    // writeBlock 失败时本批次状态保持未变，不产生幻影行。
+    const auto commitChunk = [&]() {
+        for (const ZzLineIndex::Entry &e : std::as_const(pendingIndex))
+            m_lineIndex.recordLine(e.lineId, e.blockFirstLineId, e.offset);
+        pendingIndex.clear();
+        m_nextLineId += chunkLines;
+        m_lineCount += chunkLines;
+        chunk.clear();
+        chunkFirstId = m_nextLineId;
+        chunkLines = 0;
+    };
 
     for (const ZzLogLine &line : lines) {
         const QByteArray encoded = encodeLine(line);
@@ -141,18 +155,17 @@ bool ZzMmapBuffer::appendLines(const QVector<ZzLogLine> &lines, QString *errorSt
         if (chunkLines > 0 && chunk.size() + encoded.size() > qint64(kChunkSize)) {
             if (!writeBlock(chunk, chunkFirstId, chunkLines, errorString))
                 return false;
-            chunk.clear();
-            chunkFirstId = m_nextLineId;
-            chunkLines = 0;
+            commitChunk();
         }
-        m_lineIndex.recordLine(m_nextLineId, chunkFirstId, quint64(chunk.size()));
+        pendingIndex.append({chunkFirstId + chunkLines, chunkFirstId, quint64(chunk.size())});
         chunk.append(encoded);
         ++chunkLines;
-        ++m_nextLineId;
-        ++m_lineCount;
     }
-    if (chunkLines > 0 && !writeBlock(chunk, chunkFirstId, chunkLines, errorString))
-        return false;
+    if (chunkLines > 0) {
+        if (!writeBlock(chunk, chunkFirstId, chunkLines, errorString))
+            return false;
+        commitChunk();
+    }
     return true;
 }
 
@@ -248,6 +261,7 @@ bool ZzMmapBuffer::scanFile()
 
     const char *base = reinterpret_cast<const char *>(m_map);
     qint64 offset = kHeaderSize;
+    quint64 minLineStart = 0; ///< 已知最小行 ID：块表必须单调不回退
     QVector<BlockInfo> physical;
     while (offset + kBlockHeaderSize <= m_mappedSize) {
         if (getU32(base + offset) != kBlockMagic)
@@ -259,9 +273,14 @@ bool ZzMmapBuffer::scanFile()
         b.uncompSize = getU32(base + offset + 16);
         b.compSize = getU32(base + offset + 20);
         const qint64 next = offset + kBlockHeaderSize + b.compSize;
-        if (next > m_mappedSize)
-            break; // 半写块
+        // 崩溃安全：断电按 4KB 页落盘，块头可能只有 magic 所在页已落盘而
+        // 其余字段仍为零（幽灵块）。字段合理性不满足的块视为尾端垃圾，
+        // 停止扫描，避免行 ID 被回退重分配。
+        if (b.lineCount == 0 || b.uncompSize == 0 || b.lineStart < minLineStart ||
+            next > m_mappedSize)
+            break;
         physical.append(b);
+        minLineStart = b.lineStart + b.lineCount;
         offset = next;
     }
     m_appendOffset = offset;

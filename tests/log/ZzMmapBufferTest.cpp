@@ -1,7 +1,10 @@
 #include "ZzMmapBuffer.h"
 
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <QtTest>
+
+#include <cstring>
 
 /**
  * @brief ZzMmapBuffer 温层存储单元测试。
@@ -91,6 +94,45 @@ private slots:
         QVERIFY(buf.appendLines({line(0), line(1)}));
         QCOMPARE(buf.readLines(0, 100).size(), 2);
         QVERIFY(buf.readLines(5, 1).isEmpty());
+    }
+
+    /// @brief 崩溃安全：尾随幽灵块（仅 magic 落盘、其余字段为零）重开时被忽略，行 ID 不回退。
+    void reopenIgnoresGhostBlock()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("warm.log"));
+        {
+            ZzMmapBuffer buf(path);
+            QVERIFY(buf.open());
+            QVERIFY(buf.appendLines({line(0), line(1), line(2)}));
+            buf.flush();
+            buf.close();
+        }
+        // 模拟断电按 4KB 页落盘：在最后一个合法块之后写入仅含块魔数的幽灵块头
+        // （magic 所在页已落盘，lineCount/uncompSize 等其余字段未落盘而为零）。
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::ReadWrite));
+            QVERIFY(f.seek(4096)); // 文件头一页之后是首个块
+            const QByteArray hdr = f.read(24);
+            QCOMPARE(hdr.size(), 24);
+            quint32 compSize = 0;
+            std::memcpy(&compSize, hdr.constData() + 20, 4);
+            compSize = qFromLittleEndian(compSize);
+            QVERIFY(f.seek(4096 + 24 + compSize)); // 幽灵块紧跟最后一个合法块
+            const quint32 magic = qToLittleEndian<quint32>(0x5A5A424B);
+            QCOMPARE(f.write(reinterpret_cast<const char *>(&magic), 4), qint64(4));
+            f.flush();
+            f.close();
+        }
+        ZzMmapBuffer buf(path);
+        QVERIFY(buf.open());
+        QCOMPARE(buf.lineCount(), 3ULL);         // 幽灵块被忽略
+        QCOMPARE(buf.readLines(0, 3).size(), 3); // 既有数据完好
+        QVERIFY(buf.appendLines({line(3)}));     // 行 ID 从 3 继续分配，不回退到 0
+        QCOMPARE(buf.lineCount(), 4ULL);
+        QCOMPARE(buf.readLines(3, 1).first().text, line(3).text);
     }
 };
 

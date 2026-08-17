@@ -13,7 +13,7 @@
  * - 每 64KB 未压缩数据压缩为一块，按需解压（单块微秒级），附带 8 块解压缓存；
  * - 通过 ZzLineIndex（每 1024 行一条）定位块内偏移，块内小范围扫描；
  * - 行 ID 绝对单调递增且永不复用，裁剪/压缩文件后保持可读；
- * - 文件预分配并按 4MB 粒度增长；尾部半写块在重开扫描时被安全忽略（崩溃安全）；
+ * - 文件预分配并按 4MB 粒度增长；尾部半写块与字段不合理的幽灵块在重开扫描时被安全忽略（崩溃安全）；
  * - 超出 maxLines 时按整块粒度丢弃最老数据（v0.2 改为归档冷层）。
  *
  * @note 线程安全由上层（ZzLogEngine 的 QReadWriteLock）保证，本类自身不加锁。
@@ -48,7 +48,8 @@ public:
      * @brief 追加一批行（序列化 → 64KB 分块 → LZ4 压缩 → 写映射区）。
      * @param lines 待追加行。
      * @param errorString 失败时输出原因，可为空。
-     * @return 压缩或扩容失败返回 false（已写入的部分保持一致可读）。
+     * @return 压缩或扩容失败返回 false；失败批次不产生幻影行，
+     *         行计数与下一个行 ID 保持未变，已落盘的前序块保持一致可读。
      */
     bool appendLines(const QVector<ZzLogLine> &lines, QString *errorString = nullptr);
 
