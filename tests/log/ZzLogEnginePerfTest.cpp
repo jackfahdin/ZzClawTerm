@@ -11,6 +11,12 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#if defined(Q_OS_MACOS)
+#  include <sys/sysctl.h>
+#elif defined(Q_OS_WIN)
+#  include <windows.h>
+#endif
+
 /**
  * @brief ZzLogEngine 性能门控测试（规格 §9.1）。
  *
@@ -26,13 +32,47 @@ class ZzLogEnginePerfTest : public QObject
         return {QStringLiteral("性能测试行 %1 0123456789abcdef").arg(i), QByteArray(8, 'x')};
     }
 
-    /// @brief 采集环境信息：CPU/OS/Qt 版本/编译器/构建类型/git commit hash。
+    /// @brief 返回物理内存总量（MB），无法获取时返回 -1。
+    static qint64 totalMemoryMB()
+    {
+#if defined(Q_OS_LINUX)
+        QFile f(QStringLiteral("/proc/meminfo"));
+        if (f.open(QIODevice::ReadOnly)) {
+            const QByteArray content = f.readAll();
+            const qsizetype pos = content.indexOf("MemTotal:");
+            if (pos >= 0) {
+                const QByteArray line = content.mid(pos, content.indexOf('\n', pos) - pos);
+                // 转为 QString 后用 SkipEmptyParts 跳过空白段（"MemTotal:" 与数值之间有多个空格）
+                return QString::fromLatin1(line).split(' ', Qt::SkipEmptyParts).value(1).toLongLong()
+                       / 1024;
+            }
+        }
+        return -1;
+#elif defined(Q_OS_MACOS)
+        int mib[2] = {CTL_HW, HW_MEMSIZE};
+        int64_t mem = 0;
+        size_t len = sizeof(mem);
+        if (sysctl(mib, 2, &mem, &len, nullptr, 0) == 0)
+            return mem / 1048576;
+        return -1;
+#elif defined(Q_OS_WIN)
+        MEMORYSTATUSEX status{sizeof(status)};
+        if (GlobalMemoryStatusEx(&status))
+            return static_cast<qint64>(status.ullTotalPhys / 1048576);
+        return -1;
+#else
+        return -1; // 其他平台无内存采集实现，记录为 -1
+#endif
+    }
+
+    /// @brief 采集环境信息：CPU/OS/内存/Qt 版本/编译器/构建类型/git commit hash。
     static QJsonObject environmentInfo()
     {
         QJsonObject env;
         env[QStringLiteral("cpu")] = QSysInfo::currentCpuArchitecture();
         env[QStringLiteral("os")] = QSysInfo::prettyProductName();
         env[QStringLiteral("kernel")] = QSysInfo::kernelVersion();
+        env[QStringLiteral("memory_mb")] = double(totalMemoryMB());
         env[QStringLiteral("qtVersion")] = QStringLiteral(QT_VERSION_STR);
         env[QStringLiteral("buildType")] = QStringLiteral("Release");
 #if defined(Q_CC_MSVC)
