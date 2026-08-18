@@ -1,12 +1,12 @@
 [submodule "third_party/ZzTermWidget"]
 	path = third_party/ZzTermWidget
-	url = https://github.com/jackfahdin/ZzTermWidget
+	url = git@github.com:jackfahdin/ZzTermWidget.git
 [submodule "third_party/ZzPureToolsPro"]
 	path = third_party/ZzPureToolsPro
-	url = https://github.com/jackfahdin/ZzPureTools
+	url = git@github.com:jackfahdin/ZzPureTools.git
 [submodule "third_party/ZzSshCore"]
 	path = third_party/ZzSshCore
-	url = https://gitcode.com/JackfahdinQt/ZzSshCore.git
+	url = git@gitcode.com:JackfahdinQt/ZzSshCore.git
 [submodule "third_party/libssh2"]
 	path = third_party/libssh2
 	url = git@gitcode.com:JackfahdinImport/libssh2.git
