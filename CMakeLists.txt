@@ -78,6 +78,23 @@ set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
 set(LZ4_BUILD_SHARED_LZ4_LIBRARY OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/lz4/build/cmake)
 
+# ZSTD（冷层压缩，供 ZzLogEngine 链接 libzstd_static；官方 CMake 位于 build/cmake）
+zz_require_submodule(third_party/zstd/build/cmake)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "不构建 zstd 命令行工具" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "不构建 zstd 动态库" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "不构建 zstd 测试" FORCE)
+add_subdirectory(third_party/zstd/build/cmake)
+
+# SQLite amalgamation（vendored，Public Domain）：冷层持久存储 + FTS5
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/CMakeLists.txt")
+    message(FATAL_ERROR
+        "SQLite amalgamation 缺失：third_party/sqlite\n请先执行冷层实现计划任务 1 的下载步骤")
+endif()
+# 根工程只声明 CXX；sqlite3.c 为 C 源，需在根作用域启用 C
+#（zstd/lz4 自带 project() 声明 C，无需此处理）
+enable_language(C)
+add_subdirectory(third_party/sqlite)
+
 add_subdirectory(src)
 
 if(ZZCLAWTERM_BUILD_TESTS)
