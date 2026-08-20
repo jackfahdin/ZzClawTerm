@@ -26,3 +26,12 @@ add_executable(ZzColdStorageTest ZzColdStorageTest.cpp)
 target_link_libraries(ZzColdStorageTest PRIVATE ZzLogEngine sqlite3_static Qt6::Core Qt6::Test)
 set_target_properties(ZzColdStorageTest PROPERTIES AUTOMOC ON)
 add_test(NAME ZzColdStorageTest COMMAND ZzColdStorageTest)
+
+# 冷层性能门控测试（规格 §八）：结果写入 tests/perf/records/，Release 构建数字才有效。
+add_executable(ZzColdStoragePerfTest ZzColdStoragePerfTest.cpp)
+target_link_libraries(ZzColdStoragePerfTest PRIVATE ZzLogEngine Qt6::Core Qt6::Test)
+set_target_properties(ZzColdStoragePerfTest PROPERTIES AUTOMOC ON)
+target_compile_definitions(ZzColdStoragePerfTest PRIVATE
+    PERF_RECORDS_DIR="${CMAKE_SOURCE_DIR}/tests/perf/records")
+add_test(NAME ZzColdStoragePerfTest COMMAND ZzColdStoragePerfTest)
+set_tests_properties(ZzColdStoragePerfTest PROPERTIES LABELS "perf")
