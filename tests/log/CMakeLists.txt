@@ -10,6 +10,7 @@ zz_add_log_test(ZzLineIndexTest)
 zz_add_log_test(ZzRingBufferTest)
 zz_add_log_test(ZzMmapBufferTest)
 zz_add_log_test(ZzLogEngineTest)
+zz_add_log_test(ZzLogArchiveWorkerTest)
 
 # 性能门控测试（规格 §9.1）：结果写入 tests/perf/records/，Release 构建数字才有效。
 add_executable(ZzLogEnginePerfTest ZzLogEnginePerfTest.cpp)
