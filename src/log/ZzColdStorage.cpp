@@ -208,9 +208,12 @@ bool ZzColdStorage::loadState(QString *errorString)
                                    .arg(last.firstLine + last.lineCount);
             return false;
         }
-    } else if (m_baseLine > m_frontier) {
+    } else if (m_baseLine != m_frontier) {
+        // 块表为空时 meta 必须 base == frontier：base < frontier 即"声称有行但无块"，同样拒绝
         if (errorString)
-            *errorString = QStringLiteral("meta base 超过 frontier（库损坏？）");
+            *errorString = QStringLiteral("meta 与空块表不一致（库损坏？）：base=%1 frontier=%2")
+                               .arg(m_baseLine)
+                               .arg(m_frontier);
         return false;
     }
     return true;
@@ -231,6 +234,7 @@ void ZzColdStorage::close()
     m_blocks.clear();
     m_frontier = 0;
     m_baseLine = 0;
+    m_blockCache.clear(); // 解压缓存与旧连接/旧状态绑定，随关闭一并失效
 }
 
 bool ZzColdStorage::isOpen() const
@@ -350,8 +354,10 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
             *errorString = QStringLiteral("冷层块写入失败：%1").arg(detail);
         return false;
     }
-    if (!execSql("COMMIT", errorString))
+    if (!execSql("COMMIT", errorString)) {
+        execSql("ROLLBACK", nullptr); // COMMIT 失败：尝试回滚，避免连接挂在事务里
         return false;
+    }
 
     m_blocks.append({firstLine, quint32(lines.size())});
     m_frontier = firstLine + quint64(lines.size());
@@ -441,8 +447,8 @@ QByteArray ZzColdStorage::rawBlock(quint64 firstLine) const
     raw.resize(qsizetype(rawSize));
     const size_t n = ZSTD_decompress(raw.data(), size_t(raw.size()),
                                      packed.constData(), size_t(packed.size()));
-    if (ZSTD_isError(n))
-        return {};
+    if (ZSTD_isError(n) || n != size_t(rawSize))
+        return {}; // 解压失败或实际尺寸与帧头声明不符：按块损坏处理
     m_blockCache.insert(firstLine, new QByteArray(raw), 1);
     return raw;
 }
@@ -491,6 +497,158 @@ QVector<quint64> ZzColdStorage::search(const QString &pattern, int maxResults) c
 
 void ZzColdStorage::enforceLimits()
 {
-    // 占位实现：清理逻辑由任务 5 补全（含 FTS5 同步删除与增量 VACUUM）。
-    // appendBlock 提交后调用本函数检查水位，当前为空操作以保证链接可用。
+    QMutexLocker locker(&m_mutex);
+    if (!m_db || m_blocks.isEmpty())
+        return;
+
+    QString error;
+    // 1) 超龄水位：块时间戳 = 归档时刻，随行号非递减，超龄块必为最老前缀
+    const qint64 cutoffNs =
+        (QDateTime::currentMSecsSinceEpoch() / 1000 - qint64(m_config.maxAgeDays) * 86400)
+        * 1000000000LL;
+    qsizetype drop = 0;
+    {
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM blocks WHERE end_ts_ns < ?",
+                               -1, &stmt, nullptr)
+            == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, cutoffNs);
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                drop = qsizetype(qMax<qint64>(0, sqlite3_column_int64(stmt, 0)));
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (drop > 0 && !deleteOldestBlocks(drop, &error))
+        return; // 删除失败：保持现状，下次写入时再试
+
+    // 2) 容量水位：有效体积 = (page_count - freelist_count) × page_size 超 maxBytes 则按
+    //    最老块批删（未开 auto_vacuum 时删除页进 freelist 而不归还文件，须剔除 freelist
+    //    才能反映真实占用；按块均体积估算批量，单批上限 64 块，保证不过度删除清空库）
+    const auto dbBytes = [this]() -> qint64 {
+        qint64 pages = 0;
+        qint64 freePages = 0;
+        qint64 pageSize = 0;
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, "PRAGMA page_count", -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                pages = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+            stmt = nullptr;
+        }
+        if (sqlite3_prepare_v2(m_db, "PRAGMA freelist_count", -1, &stmt, nullptr)
+            == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                freePages = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+            stmt = nullptr;
+        }
+        if (sqlite3_prepare_v2(m_db, "PRAGMA page_size", -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                pageSize = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+        }
+        return qMax<qint64>(0, pages - freePages) * pageSize;
+    };
+    while (!m_blocks.isEmpty()) {
+        const qint64 size = dbBytes();
+        if (size <= m_config.maxBytes)
+            break;
+        const qint64 perBlock = qMax<qint64>(1, size / m_blocks.size());
+        qsizetype n = qsizetype(qMin<qint64>(64, (size - m_config.maxBytes) / perBlock + 1));
+        n = qMin(n, m_blocks.size());
+        if (!deleteOldestBlocks(n, &error))
+            break; // 删除失败：保持现状，下次写入时再试
+    }
+}
+
+bool ZzColdStorage::deleteOldestBlocks(qsizetype count, QString *errorString)
+{
+    // 调用方须已持有 m_mutex
+    count = qMin(count, m_blocks.size());
+    if (count <= 0)
+        return true;
+    if (!execSql("BEGIN IMMEDIATE", errorString))
+        return false;
+    bool ok = true;
+
+    // 1) FTS5 contentless 删除需提供被删行原文：先解压待删块取回文本
+    sqlite3_stmt *del = nullptr;
+    ok = sqlite3_prepare_v2(
+             m_db, "INSERT INTO lines_fts(lines_fts, rowid, text) VALUES('delete', ?, ?)",
+             -1, &del, nullptr)
+         == SQLITE_OK;
+    for (qsizetype b = 0; b < count && ok; ++b) {
+        const BlockEntry block = m_blocks[b]; // 拷贝：rawBlock 可能写缓存，不持有引用
+        const QByteArray raw = rawBlock(block.firstLine);
+        if (raw.size() < 4) {
+            ok = false;
+            break;
+        }
+        const quint32 n = getU32(raw.constData());
+        if (n != block.lineCount || raw.size() < qint64(4 + 4 * n)) {
+            ok = false;
+            break;
+        }
+        for (quint32 i = 0; i < n && ok; ++i) {
+            const qint64 off = getU32(raw.constData() + 4 + 4 * i);
+            ZzLogLine line;
+            if (parseLine(raw, off, &line) < 0) {
+                ok = false;
+                break;
+            }
+            const QByteArray text = line.text.toUtf8();
+            sqlite3_reset(del);
+            sqlite3_bind_int64(del, 1, sqlite3_int64(block.firstLine + i));
+            sqlite3_bind_text(del, 2, text.constData(), int(text.size()), SQLITE_TRANSIENT);
+            ok = sqlite3_step(del) == SQLITE_DONE;
+        }
+    }
+    if (del)
+        sqlite3_finalize(del);
+
+    // 2) 块表删除
+    if (ok) {
+        sqlite3_stmt *stmt = nullptr;
+        ok = sqlite3_prepare_v2(m_db, "DELETE FROM blocks WHERE first_line = ?",
+                                -1, &stmt, nullptr)
+             == SQLITE_OK;
+        for (qsizetype b = 0; b < count && ok; ++b) {
+            sqlite3_reset(stmt);
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(m_blocks[b].firstLine));
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
+        }
+        if (stmt)
+            sqlite3_finalize(stmt);
+    }
+
+    // 3) base 前移（与删除同事务）；全部删光时 base = frontier
+    const quint64 newBase =
+        count < m_blocks.size() ? m_blocks[count].firstLine : m_frontier;
+    if (ok) {
+        sqlite3_stmt *stmt = nullptr;
+        ok = sqlite3_prepare_v2(m_db, "UPDATE meta SET value = ? WHERE key = 'base'",
+                                -1, &stmt, nullptr)
+             == SQLITE_OK;
+        if (ok) {
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(newBase));
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    if (!ok) {
+        execSql("ROLLBACK", nullptr);
+        if (errorString)
+            *errorString = QStringLiteral("冷层清理失败：%1")
+                               .arg(QString::fromUtf8(sqlite3_errmsg(m_db)));
+        return false;
+    }
+    if (!execSql("COMMIT", errorString))
+        return false;
+    execSql("PRAGMA incremental_vacuum", nullptr); // 回收空闲页（规格 §七）
+
+    m_blocks.remove(0, count);
+    m_baseLine = newBase;
+    m_blockCache.clear(); // 删除是稀有事件，整体失效最简单
+    return true;
 }

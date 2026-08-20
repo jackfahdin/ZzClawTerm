@@ -101,6 +101,7 @@ private:
     void closeLocked();                   ///< 调用方须已持有 m_mutex
     QByteArray rawBlock(quint64 firstLine) const; ///< 解压块（LRU 命中或 SELECT+ZSTD）；须持锁
     qsizetype findBlockIndex(quint64 lineId) const; ///< 二分找最后 firstLine <= lineId 的块
+    bool deleteOldestBlocks(qsizetype count, QString *errorString); ///< 删最老 count 块；须持锁
 
     Config m_config;
     sqlite3 *m_db = nullptr;

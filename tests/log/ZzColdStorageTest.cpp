@@ -1,6 +1,7 @@
 #include "ZzColdStorage.h"
 
 #include <QFile>
+#include <QRandomGenerator>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -316,6 +317,243 @@ private slots:
         QVERIFY(cold.open());
         QCOMPARE(cold.search(QStringLiteral("NEEDLE42")),
                  (QVector<quint64>{42ULL})); // 重开后索引仍可查
+    }
+
+    /// @brief 超龄清理：把前两块时间戳改为 100 天前，enforceLimits 后 baseLine 前移、
+    ///        老行不可读、FTS 不再命中、剩余行保持可读。
+    void maxAgeDaysDropsOldBlocks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        ZzColdStorage cold(testConfig(path));
+        QVERIFY(cold.open());
+        quint64 frontier = 0;
+        for (int b = 0; b < 5; ++b) {
+            QVector<ZzLogLine> block = makeLines(frontier, 1024);
+            if (b == 0)
+                block[5].text = QStringLiteral("old OLDTOKEN5 line");
+            QVERIFY(cold.appendBlock(block, frontier));
+            frontier += 1024;
+        }
+        QCOMPARE(cold.search(QStringLiteral("OLDTOKEN5")), (QVector<quint64>{5ULL}));
+
+        // 测试直接改库：前两块（行 0..2047）时间戳回拨 100 天
+        sqlite3 *db = nullptr;
+        // 先关闭 ZzColdStorage 持有的连接，避免 WAL 下双连接写冲突
+        cold.close();
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        char *errmsg = nullptr;
+        QCOMPARE(sqlite3_exec(db,
+                              "UPDATE blocks SET start_ts_ns = 1000000000, end_ts_ns = 1000000000"
+                              " WHERE first_line < 2048",
+                              nullptr, nullptr, &errmsg),
+                 SQLITE_OK);
+        sqlite3_free(errmsg);
+        sqlite3_close(db);
+        QVERIFY(cold.open());
+
+        cold.enforceLimits();
+        QCOMPARE(cold.baseLine(), 2048ULL);   // 前两块被清理
+        QCOMPARE(cold.frontier(), 5120ULL);   // frontier 不回退
+        QVERIFY(cold.readLines(0, 10).isEmpty());            // 已清理区间
+        QCOMPARE(cold.readLines(2048, 3).size(), 3);         // 幸存区间从 baseLine 起可读
+        QCOMPARE(cold.readLines(2048, 3).first().text, line(2048).text);
+        QVERIFY(cold.search(QStringLiteral("OLDTOKEN5")).isEmpty()); // FTS 同步删除
+    }
+
+    /// @brief 超容量清理：maxBytes 压小，写入超限后 enforceLimits 按最老块批删，
+    ///        baseLine 前移且剩余行完整可读。
+    void maxBytesDropsOldestBlocks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzColdStorage::Config c =
+            testConfig(dir.filePath(QStringLiteral("cold.db")));
+        c.maxBytes = 2 * 1024 * 1024; // 2MB
+        c.maxAgeDays = 36500;         // 关闭超龄干扰
+        ZzColdStorage cold(c);
+        QVERIFY(cold.open());
+
+        // 每行约 200 字节伪随机文本（按行号确定性生成，ZSTD 基本压不动），
+        // 单块约 200KB（含 FTS 索引），30 块库体积约 6MB > 2MB
+        const auto randLine = [](quint64 i) {
+            QRandomGenerator rng(quint32(i * 2654435761ULL)); // 按行号播种：可重复验证
+            QString text;
+            text.reserve(200);
+            for (int k = 0; k < 25; ++k)
+                text.append(QString::number(rng.generate(), 16));
+            return ZzLogLine{text + QString::number(qint64(i)), QByteArray()};
+        };
+        quint64 frontier = 0;
+        for (int b = 0; b < 30; ++b) {
+            QVector<ZzLogLine> block;
+            block.reserve(1024);
+            for (quint64 i = 0; i < 1024; ++i)
+                block.append(randLine(frontier + i));
+            QVERIFY(cold.appendBlock(block, frontier));
+            frontier += 1024;
+        }
+        cold.enforceLimits();
+        const quint64 base = cold.baseLine();
+        QVERIFY(base > 0ULL);                    // 最老块已被清理
+        QCOMPARE(base % 1024ULL, 0ULL);          // 整块粒度删除
+        QCOMPARE(cold.frontier(), 30720ULL);
+        QVERIFY(base + 1024 <= 30720ULL);        // 至少幸存一块（自适应批量不得删空）
+        // 幸存区间完整可读且内容正确
+        const QVector<ZzLogLine> head = cold.readLines(base, 24);
+        QCOMPARE(head.size(), 24);
+        for (qsizetype j = 0; j < 24; ++j)
+            QCOMPARE(head[j].text, randLine(base + quint64(j)).text);
+    }
+
+    /// @brief 写入后自动触发清理（appendBlock 内部调用 enforceLimits），无需手动调用。
+    void enforceLimitsRunsAutomaticallyOnAppend()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzColdStorage::Config c =
+            testConfig(dir.filePath(QStringLiteral("cold.db")));
+        c.maxBytes = 512 * 1024;
+        c.maxAgeDays = 36500;
+        ZzColdStorage cold(c);
+        QVERIFY(cold.open());
+        QRandomGenerator rng(7);
+        quint64 frontier = 0;
+        for (int b = 0; b < 20; ++b) {
+            QVector<ZzLogLine> block;
+            block.reserve(1024);
+            for (quint64 i = 0; i < 1024; ++i) {
+                QString text;
+                for (int k = 0; k < 25; ++k)
+                    text.append(QString::number(rng.generate(), 16));
+                block.append({text, QByteArray()});
+            }
+            QVERIFY(cold.appendBlock(block, frontier)); // 仅 append，不调 enforceLimits
+            frontier += 1024;
+        }
+        QVERIFY(cold.baseLine() > 0ULL); // 自动清理已生效
+    }
+
+    /// @brief baseLine 跨重开持久：清理后重开，老行不复活。
+    void baseLinePersistsAcrossReopen()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        {
+            ZzColdStorage cold(testConfig(path));
+            QVERIFY(cold.open());
+            QVERIFY(cold.appendBlock(makeLines(0, 1024), 0));
+            QVERIFY(cold.appendBlock(makeLines(1024, 1024), 1024));
+            cold.close();
+            // 回拨第一块时间戳触发超龄清理
+            sqlite3 *db = nullptr;
+            QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+            QCOMPARE(sqlite3_exec(db,
+                                  "UPDATE blocks SET start_ts_ns = 1, end_ts_ns = 1"
+                                  " WHERE first_line = 0",
+                                  nullptr, nullptr, nullptr),
+                     SQLITE_OK);
+            sqlite3_close(db);
+            QVERIFY(cold.open());
+            cold.enforceLimits();
+            QCOMPARE(cold.baseLine(), 1024ULL);
+        }
+        ZzColdStorage cold(testConfig(path));
+        QVERIFY(cold.open());
+        QCOMPARE(cold.baseLine(), 1024ULL);
+        QCOMPARE(cold.frontier(), 2048ULL);
+        QVERIFY(cold.readLines(0, 1).isEmpty());
+        QCOMPARE(cold.readLines(1024, 1).first().text, line(1024).text);
+    }
+
+    /// @brief 审查加固：块 payload 损坏（ZSTD 解压失败/尺寸不符）时按块损坏返回空。
+    void corruptedPayloadReadsAsEmpty()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        ZzColdStorage cold(testConfig(path));
+        QVERIFY(cold.open());
+        QVERIFY(cold.appendBlock(makeLines(0, 1024), 0));
+        cold.close();
+
+        // 截断 payload：ZSTD 帧头完好但数据不完整，解压必失败
+        sqlite3 *db = nullptr;
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(db,
+                              "UPDATE blocks SET payload = substr(payload, 1, length(payload) / 2)"
+                              " WHERE first_line = 0",
+                              nullptr, nullptr, nullptr),
+                 SQLITE_OK);
+        sqlite3_close(db);
+
+        QVERIFY(cold.open());
+        QVERIFY(cold.readLines(0, 10).isEmpty()); // 损坏块按空返回，不崩溃不误读
+    }
+
+    /// @brief 审查加固：写事务中途失败回滚后连接保持可用（后续写入成功、失败前状态不变）。
+    void appendFailureRollsBackAndConnectionStaysUsable()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        ZzColdStorage cold(testConfig(path));
+        QVERIFY(cold.open());
+        cold.close();
+
+        // 外部连接注入触发器：UPDATE meta 时强制失败（meta 是普通表，可挂触发器）
+        sqlite3 *db = nullptr;
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(db,
+                              "CREATE TRIGGER fail_meta BEFORE UPDATE ON meta"
+                              " BEGIN SELECT RAISE(FAIL, 'injected'); END",
+                              nullptr, nullptr, nullptr),
+                 SQLITE_OK);
+        sqlite3_close(db);
+
+        QVERIFY(cold.open());
+        QString error;
+        QVERIFY(!cold.appendBlock(makeLines(0, 100), 0, &error)); // 事务第 3 步失败 → ROLLBACK
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(cold.frontier(), 0ULL);                 // 状态不变
+        QVERIFY(cold.readLines(0, 10).isEmpty());        // 块写入已随事务回滚
+        QVERIFY(cold.search(QStringLiteral("cold-line-0")).isEmpty()); // FTS 同步回滚
+        cold.close();
+
+        // 拆除触发器后同一库可继续写入（连接未挂在事务里）
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(db, "DROP TRIGGER fail_meta", nullptr, nullptr, nullptr),
+                 SQLITE_OK);
+        sqlite3_close(db);
+        QVERIFY(cold.open());
+        QVERIFY(cold.appendBlock(makeLines(0, 100), 0));
+        QCOMPARE(cold.frontier(), 100ULL);
+        QCOMPARE(cold.readLines(0, 100).size(), 100);
+    }
+
+    /// @brief 审查加固：meta 声称有行（base < frontier）但块表为空 → 视为库损坏拒绝打开。
+    void emptyBlockTableWithNonzeroMetaRejected()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        {
+            ZzColdStorage cold(testConfig(path));
+            QVERIFY(cold.open());
+            QVERIFY(cold.appendBlock(makeLines(0, 1024), 0));
+        }
+        // 删光块表但保留 meta：base=0 < frontier=1024 的"声称有行但无块"情形
+        sqlite3 *db = nullptr;
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(db, "DELETE FROM blocks", nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(db);
+
+        ZzColdStorage cold(testConfig(path));
+        QString error;
+        QVERIFY(!cold.open(&error));
+        QVERIFY(!error.isEmpty());
     }
 };
 
