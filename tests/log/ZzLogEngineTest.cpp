@@ -1,5 +1,8 @@
 #include "ZzLogEngine.h"
 
+#include "ZzColdStorage.h"
+#include "ZzMmapBuffer.h"
+
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -30,6 +33,21 @@ class ZzLogEngineTest : public QObject
     {
         return {QStringLiteral("engine-line-%1").arg(i),
                 QByteArray("E") + QByteArray::number(qint64(i))};
+    }
+    static ZzLogEngine::Config testColdConfig(const QString &warmPath, const QString &dbPath)
+    {
+        ZzLogEngine::Config c = testConfig(warmPath); // 热 100 / 批 16 / 温 10 万
+        c.coldDbPath = dbPath;
+        c.sessionId = QStringLiteral("test-profile");
+        return c;
+    }
+    static QVector<ZzLogLine> makeLines(quint64 start, quint64 count)
+    {
+        QVector<ZzLogLine> out;
+        out.reserve(qsizetype(count));
+        for (quint64 i = 0; i < count; ++i)
+            out.append(line(start + i));
+        return out;
     }
 
 private slots:
@@ -203,6 +221,177 @@ private slots:
         delete t1;
         delete t2;
         QVERIFY(!failed.load());
+    }
+
+    /// @brief 冷层禁用（coldDbPath 为空）：isColdEnabled 为 false，行为与 v0.1 完全一致。
+    void coldDisabledKeepsV01Behavior()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzLogEngine engine(testConfig(dir.filePath(QStringLiteral("warm.log"))));
+        QVERIFY(engine.open());
+        QVERIFY(!engine.isColdEnabled());
+        QVERIFY(!engine.isMemoryOnly());
+        for (quint64 i = 0; i < 200; ++i)
+            engine.appendLine(line(i));
+        engine.flush();
+        QCOMPARE(engine.totalLines(), 200ULL);
+        QVERIFY(engine.searchLines(QStringLiteral("engine-line")).isEmpty()); // 无冷层 → 空
+    }
+
+    /// @brief 三层归并：2500 行（2400 冷层 + 100 热层）滑动窗口与写入序列逐行一致，
+    ///        跨冷/温/热边界无错位。
+    void coldRoundtripThreeLayerMerge()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzLogEngine engine(testColdConfig(dir.filePath(QStringLiteral("warm.log")),
+                                          dir.filePath(QStringLiteral("cold.db"))));
+        QVERIFY(engine.open());
+        QVERIFY(engine.isColdEnabled());
+        constexpr quint64 N = 2500; // 驱逐 150 批 × 16 = 2400 行入温层→flush 后全入冷层；100 行留热层
+        for (quint64 i = 0; i < N; ++i)
+            engine.appendLine(line(i));
+        engine.flush();
+        QCOMPARE(engine.totalLines(), N);
+        QCOMPARE(engine.firstLineNo(), 0ULL);
+
+        for (quint64 start = 0; start + 60 <= N; start += 17) {
+            const QVector<ZzLogLine> window = engine.getLines(start, 60);
+            QCOMPARE(window.size(), 60);
+            for (int j = 0; j < 60; ++j)
+                QCOMPARE(window[j].text, line(start + quint64(j)).text);
+        }
+        // 冷层数据已由冷层承载（库内验证在 cleanExitDeletesWarmFile 用例做）
+    }
+
+    /// @brief 干净退出：flush 后析构删除温层文件，全部已归档行持久于冷层库。
+    void cleanExitDeletesWarmFileAndPersistsCold()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString warmPath = dir.filePath(QStringLiteral("warm.log"));
+        const QString dbPath = dir.filePath(QStringLiteral("cold.db"));
+        {
+            ZzLogEngine engine(testColdConfig(warmPath, dbPath));
+            QVERIFY(engine.open());
+            for (quint64 i = 0; i < 2500; ++i)
+                engine.appendLine(line(i));
+            engine.flush();
+        } // 析构：冷层健康 → 删除温层文件
+        QVERIFY(!QFile::exists(warmPath));
+        QVERIFY(QFile::exists(dbPath));
+
+        // 直接打开冷层库验证（首个会话 offset 为 0，库内行号 == 引擎行号）
+        ZzColdStorage::Config cc;
+        cc.dbPath = dbPath;
+        cc.sessionId = QStringLiteral("test-profile");
+        ZzColdStorage cold(cc);
+        QVERIFY(cold.open());
+        QCOMPARE(cold.frontier(), 2400ULL); // flush 把温层 2400 行全部推进冷层
+        const QVector<ZzLogLine> head = cold.readLines(0, 3);
+        QCOMPARE(head.size(), 3);
+        QCOMPARE(head[0].text, line(0).text);
+        QCOMPARE(head[2].text, line(2).text);
+    }
+
+    /// @brief 崩溃恢复：残留温层（游标 500，共 1500 行）+ 冷层已归档 500 行；
+    ///        引擎 open 同步续传 [500,1500) 进冷层后删除残留、全新开始；
+    ///        续传的行属上一会话，对本会话不可见但持久可查。
+    void crashRecoveryResumesResidualWarm()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString warmPath = dir.filePath(QStringLiteral("warm.log"));
+        const QString dbPath = dir.filePath(QStringLiteral("cold.db"));
+        // 构造"崩溃现场"：温层 1500 行、游标 500；冷层已有 [0,500)
+        {
+            ZzMmapBuffer warm(warmPath, 100000);
+            QVERIFY(warm.open());
+            // 单次追加 ~43KB < 64KB：1500 行落在同一块内，floor 500 不丢块（跨整块才丢弃）
+            QVERIFY(warm.appendLines(makeLines(0, 1500)));
+            warm.setRetentionFloor(500); // 持久化续传游标
+            QCOMPARE(warm.firstLineId(), 0ULL);
+            warm.flush();
+            warm.close();
+            ZzColdStorage::Config cc;
+            cc.dbPath = dbPath;
+            cc.sessionId = QStringLiteral("test-profile");
+            ZzColdStorage cold(cc);
+            QVERIFY(cold.open());
+            QVERIFY(cold.appendBlock(makeLines(0, 500), 0));
+        }
+        // 引擎 open：同步续传 [500,1500) → 删除残留 → 全新温层
+        ZzLogEngine engine(testColdConfig(warmPath, dbPath));
+        QSignalSpy warmOnlySpy(&engine, &ZzLogEngine::degradedToWarmOnly);
+        QVERIFY(engine.open());
+        QCOMPARE(warmOnlySpy.count(), 0);
+        QVERIFY(engine.isColdEnabled());
+        QCOMPARE(engine.totalLines(), 0ULL); // 新会话从空开始（残留行已入冷层，不属于本会话）
+        QCOMPARE(engine.firstLineNo(), 0ULL);
+
+        // 冷层库内验证：1500 行全部在库且内容正确
+        ZzColdStorage::Config cc;
+        cc.dbPath = dbPath;
+        cc.sessionId = QStringLiteral("test-profile");
+        ZzColdStorage cold(cc);
+        QVERIFY(cold.open());
+        QCOMPARE(cold.frontier(), 1500ULL);
+        QCOMPARE(cold.readLines(499, 3).first().text, line(499).text);  // 续传边界
+        QCOMPARE(cold.readLines(1499, 1).first().text, line(1499).text);
+
+        // 新会话写入的行接续全局空间；searchLines 返回引擎空间行号
+        for (quint64 i = 0; i < 200; ++i) {
+            ZzLogLine l = line(i);
+            if (i == 10)
+                l.text = QStringLiteral("post-recovery FATALMARK line");
+            engine.appendLine(l);
+        }
+        engine.flush(); // 驱逐 7 批 × 16 = 112 行入冷层（全局 [1500,1612)）
+        QCOMPARE(engine.searchLines(QStringLiteral("FATALMARK")),
+                 (QVector<quint64>{10ULL})); // 引擎空间：本会话第 10 行
+    }
+
+    /// @brief 冷层库打开失败：发射 degradedToWarmOnly 降级为 v0.1 温层模式；
+    ///        残留温层无续传去向被删除全新开始；降级后析构不得删除温层文件。
+    void coldOpenFailureDegradesToWarmOnly()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString warmPath = dir.filePath(QStringLiteral("warm.log"));
+        // 预置残留温层（100 行）
+        {
+            ZzMmapBuffer warm(warmPath, 100000);
+            QVERIFY(warm.open());
+            QVERIFY(warm.appendLines(makeLines(0, 100)));
+            warm.flush();
+            warm.close();
+        }
+        // 用一个已存在的文件当“父目录”，其下 cold.db 必然打不开（跨平台）
+        const QString blocker = dir.filePath(QStringLiteral("blocker"));
+        QFile f(blocker);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+
+        ZzLogEngine::Config c = testConfig(warmPath);
+        c.coldDbPath = blocker + QStringLiteral("/cold.db");
+        c.sessionId = QStringLiteral("test-profile");
+        {
+            ZzLogEngine engine(c);
+            QSignalSpy warmOnlySpy(&engine, &ZzLogEngine::degradedToWarmOnly);
+            QSignalSpy memoryOnlySpy(&engine, &ZzLogEngine::degradedToMemoryOnly);
+            QVERIFY(engine.open());
+            QCOMPARE(warmOnlySpy.count(), 1);
+            QCOMPARE(memoryOnlySpy.count(), 0);
+            QVERIFY(!engine.isColdEnabled());
+            QVERIFY(!engine.isMemoryOnly());
+            QCOMPARE(engine.totalLines(), 0ULL); // 残留温层已删除，全新开始
+            for (quint64 i = 0; i < 200; ++i)
+                engine.appendLine(line(i));
+            engine.flush();
+            QCOMPARE(engine.totalLines(), 200ULL); // v0.1 温层路径正常
+        }
+        QVERIFY(QFile::exists(warmPath)); // 冷层降级后不得删除温层文件（规格 §六）
     }
 };
 
