@@ -183,6 +183,93 @@ private slots:
         QCOMPARE(buf.readLines(5000, 1).first().text, line(5000).text);
     }
 
+    /// @brief 保留下限：只丢弃整体行号 ≤ floor 的最老块，跨界块保留；游标可读回。
+    void retentionFloorDropsOnlyCoveredBlocks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzMmapBuffer buf(dir.filePath(QStringLiteral("warm.log")), 1000000); // 大 maxLines 排除 v0.1 丢弃
+        QVERIFY(buf.open());
+        // 每行约 1KB，单块（64KB）约 60 行；写 300 行形成多块
+        const QString payload(1000, QLatin1Char('x'));
+        QVector<ZzLogLine> batch;
+        batch.reserve(300);
+        for (int i = 0; i < 300; ++i)
+            batch.append({payload + QString::number(i), QByteArray()});
+        QVERIFY(buf.appendLines(batch));
+        QCOMPARE(buf.firstLineId(), 0ULL);
+        QCOMPARE(buf.lineCount(), 300ULL);
+        QCOMPARE(buf.coldCursor(), 0ULL); // 未设置 floor 时游标为 0
+
+        buf.setRetentionFloor(120); // 行 0..119 已被冷层覆盖
+        const quint64 first = buf.firstLineId();
+        QVERIFY(first > 0ULL);    // 至少丢了一块
+        QVERIFY(first <= 120ULL); // 跨界块必须保留：首存活块覆盖 floor
+        QCOMPARE(buf.lineCount(), 300ULL - first);
+        QCOMPARE(buf.coldCursor(), 120ULL);
+        // 幸存行内容正确
+        QCOMPARE(buf.readLines(first, 1).first().text,
+                 payload + QString::number(qint64(first)));
+        QCOMPARE(buf.readLines(299, 1).first().text, payload + QStringLiteral("299"));
+    }
+
+    /// @brief floor 游标与丢弃进度跨重开持久（崩溃恢复依据）。
+    void retentionFloorPersistsAcrossReopen()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("warm.log"));
+        const QString payload(1000, QLatin1Char('x'));
+        quint64 firstBeforeClose = 0;
+        {
+            ZzMmapBuffer buf(path, 1000000);
+            QVERIFY(buf.open());
+            QVector<ZzLogLine> batch;
+            for (int i = 0; i < 300; ++i)
+                batch.append({payload + QString::number(i), QByteArray()});
+            QVERIFY(buf.appendLines(batch));
+            buf.setRetentionFloor(120);
+            firstBeforeClose = buf.firstLineId();
+            buf.flush();
+            buf.close();
+        }
+        ZzMmapBuffer buf(path, 1000000);
+        QVERIFY(buf.open());
+        QCOMPARE(buf.coldCursor(), 120ULL);           // 游标持久
+        QCOMPARE(buf.firstLineId(), firstBeforeClose); // 已丢块不复活（skipBlocks 持久）
+        QVERIFY(buf.readLines(firstBeforeClose, 1).first().text
+                == payload + QString::number(qint64(firstBeforeClose))); // 幸存首行内容正确
+        QVERIFY(buf.readLines(0, 1).isEmpty()); // v0.1 语义：区间完全落在已丢弃范围时返回空
+    }
+
+    /// @brief 清除 floor 后恢复 v0.1 纯 maxLines 丢弃（冷层降级路径）。
+    void clearRetentionFloorRestoresV01Dropping()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString payload(1000, QLatin1Char('x'));
+        ZzMmapBuffer buf(dir.filePath(QStringLiteral("warm.log")), 150); // maxLines 150
+        QVERIFY(buf.open());
+        QVector<ZzLogLine> batch;
+        for (int i = 0; i < 300; ++i)
+            batch.append({payload + QString::number(i), QByteArray()});
+        QVERIFY(buf.appendLines(batch)); // 未设 floor：v0.1 丢弃，lineCount ≤ 150
+        QVERIFY(buf.lineCount() <= 150ULL);
+        const quint64 firstAfterV01 = buf.firstLineId();
+
+        buf.setRetentionFloor(firstAfterV01 + 30); // floor 模式：再丢一些整块
+        const quint64 firstWithFloor = buf.firstLineId();
+        QVERIFY(firstWithFloor >= firstAfterV01);
+        buf.clearRetentionFloor(); // 降级：回到 v0.1
+
+        QVector<ZzLogLine> more;
+        for (int i = 300; i < 420; ++i)
+            more.append({payload + QString::number(i), QByteArray()});
+        QVERIFY(buf.appendLines(more)); // 触发 v0.1 maxLines 丢弃
+        QVERIFY(buf.lineCount() <= 150ULL);
+        QVERIFY(buf.firstLineId() > firstWithFloor); // 按 maxLines 继续前移
+    }
+
     /// @brief 预读后读取结果不变（预读只影响缓存，不影响语义）。
     void preloadKeepsReadsCorrect()
     {

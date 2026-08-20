@@ -68,6 +68,21 @@ public:
     /// @brief 刷新文件流缓冲；mmap 脏页由 OS 回写，close/unmap 时保证落盘。
     void flush();
 
+    /**
+     * @brief 设置保留下限（冷层模式）：dropOldestBlocks 只丢弃整体行号区间
+     *        （lineStart + lineCount <= firstDisposableLineId）的最老块，跨界块保留。
+     * @param firstDisposableLineId 第一个可被丢弃的行 ID == 冷层已覆盖行数上界（本文件局部行号空间）。
+     * @note 立即生效（调用 dropOldestBlocks），并把该游标持久化到文件头偏移 12 处
+     *       （coldCursor，异常退出后冷层续传依据）；未设置 floor 时保持 v0.1 纯 maxLines 丢弃。
+     */
+    void setRetentionFloor(quint64 firstDisposableLineId);
+
+    /// @brief 清除保留下限，恢复 v0.1 纯 maxLines 丢弃（冷层降级时由归档线程调用）。
+    void clearRetentionFloor();
+
+    /// @brief 冷层续传游标（文件头持久化；未启用冷层的文件读出 0）。
+    quint64 coldCursor() const { return m_coldCursor; }
+
     static constexpr quint64 kChunkSize = 64 * 1024; ///< 单块未压缩数据上限（字节）
 
 private:
@@ -99,6 +114,9 @@ private:
     quint64 m_nextLineId = 0;   ///< 下一个待分配行 ID
     quint32 m_skipBlocks = 0;   ///< 文件头部已逻辑丢弃的块数（持久化于文件头）
     qint64 m_droppedBytes = 0;  ///< 已逻辑丢弃的字节数（触发物理压缩用）
+    quint64 m_retentionFloor = 0;      ///< 保留下限（m_hasRetentionFloor 为 true 时有效）
+    bool m_hasRetentionFloor = false;  ///< 是否处于冷层保留下限模式
+    quint64 m_coldCursor = 0;          ///< 文件头持久化的冷层续传游标（== 最近一次 floor）
     QVector<BlockInfo> m_blocks;              ///< 存活块表（按 lineStart 递增）
     ZzLineIndex m_lineIndex;                  ///< 块内行偏移索引
     mutable QCache<quint64, QByteArray> m_blockCache; ///< 解压缓存，键为块首行 ID

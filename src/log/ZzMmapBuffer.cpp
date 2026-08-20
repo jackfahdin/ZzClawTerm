@@ -100,6 +100,7 @@ bool ZzMmapBuffer::open()
             return false;
         }
         m_skipBlocks = getU32(base + 8);
+        m_coldCursor = getU64(base + 12); // v0.1 文件读出 0 == 无续传进度
         scanFile();
     }
     m_blockCache.setMaxCost(kCacheBlocks);
@@ -304,6 +305,7 @@ void ZzMmapBuffer::writeHeader()
     putU32(base, kFileMagic);
     putU32(base + 4, kFileVersion);
     putU32(base + 8, m_skipBlocks);
+    putU64(base + 12, m_coldCursor); // v0.2：冷层续传游标（v0.1 文件此处为零填充，读出 0）
 }
 
 bool ZzMmapBuffer::ensureCapacity(qint64 extraBytes)
@@ -397,13 +399,27 @@ qsizetype ZzMmapBuffer::findBlockIndex(quint64 lineId) const
 
 void ZzMmapBuffer::dropOldestBlocks()
 {
-    // 按整块粒度丢弃最老数据，至少保留一块（v0.2 改为归档冷层）
-    while (m_lineCount > m_maxLines && m_blocks.size() > 1) {
-        const BlockInfo &oldest = m_blocks.first();
-        m_lineCount -= oldest.lineCount;
-        m_droppedBytes += kBlockHeaderSize + oldest.compSize;
-        ++m_skipBlocks;
-        m_blocks.removeFirst();
+    if (m_hasRetentionFloor) {
+        // 冷层模式：只丢弃冷层已完整覆盖的最老块（跨界块保留），容量水位由
+        // 冷层持续推进保证；至少保留一块（与 v0.1 一致的空防护）
+        while (m_blocks.size() > 1
+               && m_blocks.first().lineStart + m_blocks.first().lineCount
+                      <= m_retentionFloor) {
+            const BlockInfo oldest = m_blocks.first();
+            m_lineCount -= oldest.lineCount;
+            m_droppedBytes += kBlockHeaderSize + oldest.compSize;
+            ++m_skipBlocks;
+            m_blocks.removeFirst();
+        }
+    } else {
+        // v0.1 行为：超 maxLines 按整块粒度丢弃最老数据，至少保留一块
+        while (m_lineCount > m_maxLines && m_blocks.size() > 1) {
+            const BlockInfo oldest = m_blocks.first();
+            m_lineCount -= oldest.lineCount;
+            m_droppedBytes += kBlockHeaderSize + oldest.compSize;
+            ++m_skipBlocks;
+            m_blocks.removeFirst();
+        }
     }
     if (m_skipBlocks > 0)
         writeHeader(); // 持久化丢弃进度，重开后最老行不复活
@@ -442,4 +458,22 @@ void ZzMmapBuffer::compact()
     m_skipBlocks = 0;
     m_droppedBytes = 0;
     writeHeader();
+}
+
+void ZzMmapBuffer::setRetentionFloor(quint64 firstDisposableLineId)
+{
+    m_hasRetentionFloor = true;
+    m_retentionFloor = firstDisposableLineId;
+    if (m_coldCursor != firstDisposableLineId) {
+        m_coldCursor = firstDisposableLineId;
+        writeHeader(); // 持久化续传游标（崩溃恢复依据；一页 mmap 写，代价可忽略）
+    }
+    dropOldestBlocks(); // 立即按新 floor 截头
+}
+
+void ZzMmapBuffer::clearRetentionFloor()
+{
+    m_hasRetentionFloor = false;
+    m_retentionFloor = 0;
+    dropOldestBlocks(); // 回到 v0.1：若已超 maxLines 立即按容量丢弃
 }
