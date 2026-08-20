@@ -575,16 +575,25 @@ private slots:
         QVERIFY(b.open());
 
         QString error;
+        quint64 actual = 0; // appendBlock 事务内权威落点回传
         // 交错写入：行内容按全局行号生成（cold-line-<N>），便于连续性校验
-        QVERIFY(a.appendBlock(makeLines(0, 10), a.frontier()));
+        QVERIFY2(a.appendBlock(makeLines(0, 10), a.frontier(), &error, &actual),
+                 qPrintable(error));
+        QCOMPARE(actual, 0ULL);
         // b 的缓存 frontier=0 已过期（库内实为 10）：事务内重读接管，写入落 10..14
-        QVERIFY2(b.appendBlock(makeLines(10, 5), b.frontier(), &error), qPrintable(error));
+        QVERIFY2(b.appendBlock(makeLines(10, 5), b.frontier(), &error, &actual),
+                 qPrintable(error));
+        QCOMPARE(actual, 10ULL); // 落点漂移如实回传
         QCOMPARE(b.frontier(), 15ULL);
         // a 的缓存 frontier=10 已过期（库内实为 15）：写入落 15..21
-        QVERIFY2(a.appendBlock(makeLines(15, 7), a.frontier(), &error), qPrintable(error));
+        QVERIFY2(a.appendBlock(makeLines(15, 7), a.frontier(), &error, &actual),
+                 qPrintable(error));
+        QCOMPARE(actual, 15ULL);
         QCOMPARE(a.frontier(), 22ULL);
         // b 的缓存 frontier=15 已过期（库内实为 22）：写入落 22..24
-        QVERIFY2(b.appendBlock(makeLines(22, 3), b.frontier(), &error), qPrintable(error));
+        QVERIFY2(b.appendBlock(makeLines(22, 3), b.frontier(), &error, &actual),
+                 qPrintable(error));
+        QCOMPARE(actual, 22ULL);
         QCOMPARE(b.frontier(), 25ULL);
 
         // 第三方实例重开验证：frontier == 两边行数之和，全量连续读回无丢失无重复
@@ -614,6 +623,73 @@ private slots:
         const QVector<ZzLogLine> span = a.readLines(8, 10); // 8..17 含 b 的 10..14
         QCOMPARE(span.size(), 2); // 仅 8、9 可得
         QCOMPARE(span.last().text, line(9).text);
+
+        // search 按 session_id 过滤：各自只见己方行的命中（短语查询：FTS5 查询词
+        // 不能带连字符，"cold-line" 会解析失败；文本 tokenize 为 cold/line/<N>）
+        QCOMPARE(a.search(QStringLiteral("\"cold line\""), 100).size(), 17); // 0..9 + 15..21
+        QCOMPARE(b.search(QStringLiteral("\"cold line\""), 100).size(), 8);  // 10..14 + 22..24
+    }
+
+    /// @brief 审查修复轮 2（Important #2）：两实例交错写后由其中一个实例触发全局清理，
+    ///        newBase 必须等于库内真实最老幸存块首行（而非本实例部分索引计算值），
+    ///        重开库 open 成功（loadState 一致性校验不被误触发）且幸存数据完好。
+    void enforceLimitsWithInterleavedLayoutKeepsConsistentBase()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        ZzColdStorage::Config ca = testConfig(path);
+        ca.sessionId = QStringLiteral("session-a");
+        ZzColdStorage::Config cb = testConfig(path);
+        cb.sessionId = QStringLiteral("session-b");
+        ZzColdStorage a(ca);
+        ZzColdStorage b(cb);
+        QVERIFY(a.open());
+        QVERIFY(b.open());
+
+        // 交错布局：A[0,100) B[100,200) A[200,300)；块 0 内嵌独立 token 标记行
+        QVector<ZzLogLine> first = makeLines(0, 100);
+        first[5].text = QStringLiteral("doomed GONETOKEN5 line");
+        QVERIFY(a.appendBlock(first, a.frontier()));
+        QVERIFY(b.appendBlock(makeLines(100, 100), b.frontier()));
+        QVERIFY(a.appendBlock(makeLines(200, 100), a.frontier()));
+        QCOMPARE(a.frontier(), 300ULL);
+        QCOMPARE(a.search(QStringLiteral("GONETOKEN5")), (QVector<quint64>{5ULL}));
+
+        // 外部连接把全局最老块（A 的 [0,100)）时间戳回拨 100 天，触发超龄清理
+        sqlite3 *db = nullptr;
+        QCOMPARE(sqlite3_open(path.toUtf8().constData(), &db), SQLITE_OK);
+        QCOMPARE(sqlite3_exec(db,
+                              "UPDATE blocks SET start_ts_ns = 1000000000,"
+                              " end_ts_ns = 1000000000 WHERE first_line = 0",
+                              nullptr, nullptr, nullptr),
+                 SQLITE_OK);
+        sqlite3_close(db);
+
+        // 由 b 触发清理：b 的内存索引只有 [100,200)，若按部分索引删块会错删/错算 base
+        b.enforceLimits();
+        QCOMPARE(b.baseLine(), 100ULL);   // 库内全局最老块 [0,100) 被删，base = 幸存首块 100
+        QCOMPARE(b.frontier(), 200ULL);   // 缓存值：b 只追加过一块（库内权威 300 由重开校验）
+        QCOMPARE(b.readLines(100, 3).size(), 3); // 自己的块仍可读
+        a.close();
+        b.close();
+
+        // 重开：loadState 一致性校验通过，幸存区间 [100,300) 完好
+        ZzColdStorage::Config cv = testConfig(path);
+        cv.sessionId = QStringLiteral("session-a"); // 与块 0/2 同会话：search 过滤不遮蔽校验
+        ZzColdStorage verifier(cv);
+        QString error;
+        QVERIFY2(verifier.open(&error), qPrintable(error));
+        QCOMPARE(verifier.baseLine(), 100ULL);
+        QCOMPARE(verifier.frontier(), 300ULL);
+        QVERIFY(verifier.readLines(0, 10).isEmpty()); // 已清理区间
+        const QVector<ZzLogLine> rest = verifier.readLines(100, 200);
+        QCOMPARE(rest.size(), 200);
+        for (qsizetype i = 0; i < rest.size(); ++i)
+            QCOMPARE(rest[i].text, line(100 + quint64(i)).text);
+        // FTS 同步删除：被删块文本不再命中（同会话幸存块 [200,300) 的文本仍可命中）
+        QVERIFY(verifier.search(QStringLiteral("GONETOKEN5")).isEmpty());
+        QCOMPARE(verifier.search(QStringLiteral("\"cold line\""), 300).size(), 100); // 仅块 2 的 100 行
     }
 };
 

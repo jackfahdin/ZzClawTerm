@@ -257,7 +257,7 @@ quint64 ZzColdStorage::frontier() const
 }
 
 bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLine,
-                                QString *errorString)
+                                QString *errorString, quint64 *actualFirstLine)
 {
     QMutexLocker locker(&m_mutex);
     if (!m_db) {
@@ -378,6 +378,8 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
     m_blocks.append({authoritativeFirst, quint32(lines.size())});
     m_frontier = authoritativeFirst + quint64(lines.size());
     m_blockCache.insert(authoritativeFirst, new QByteArray(raw), 1); // 刚序列化的块直接入缓存
+    if (actualFirstLine)
+        *actualFirstLine = authoritativeFirst; // 回传实际落点（调用方维护映射用）
 
     locker.unlock();
     enforceLimits(); // 规格 §七：每次写入后检查清理水位（内部自取锁，不能在写事务内调用）
@@ -498,15 +500,23 @@ QVector<quint64> ZzColdStorage::search(const QString &pattern, int maxResults) c
     if (!m_db || pattern.isEmpty() || maxResults <= 0)
         return out;
     sqlite3_stmt *stmt = nullptr;
-    // 非法 MATCH 表达式时 prepare 失败，按无命中返回（调用方负责合法 FTS5 语法）
+    // 非法 MATCH 表达式时 prepare 失败，按无命中返回（调用方负责合法 FTS5 语法）。
+    // JOIN blocks 按本实例 sessionId 过滤：全局单库跨会话共享，命中行可能属于
+    // 其他会话（审查修复轮 2：引擎侧再经映射表反查，双重过滤）。
+    // 注意 MATCH 左值必须是 FTS5 表原名（别名会报 no such column）
     if (sqlite3_prepare_v2(m_db,
-                           "SELECT rowid FROM lines_fts WHERE lines_fts MATCH ? LIMIT ?",
+                           "SELECT lines_fts.rowid FROM lines_fts "
+                           "JOIN blocks AS b ON lines_fts.rowid >= b.first_line"
+                           " AND lines_fts.rowid < b.first_line + b.line_count "
+                           "WHERE lines_fts MATCH ? AND b.session_id = ? LIMIT ?",
                            -1, &stmt, nullptr)
         != SQLITE_OK)
         return out;
     const QByteArray utf8 = pattern.toUtf8();
     sqlite3_bind_text(stmt, 1, utf8.constData(), int(utf8.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, maxResults);
+    const QByteArray sid = m_config.sessionId.toUtf8();
+    sqlite3_bind_text(stmt, 2, sid.constData(), int(sid.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, maxResults);
     while (sqlite3_step(stmt) == SQLITE_ROW)
         out.append(quint64(sqlite3_column_int64(stmt, 0)));
     sqlite3_finalize(stmt);
@@ -516,11 +526,24 @@ QVector<quint64> ZzColdStorage::search(const QString &pattern, int maxResults) c
 void ZzColdStorage::enforceLimits()
 {
     QMutexLocker locker(&m_mutex);
-    if (!m_db || m_blocks.isEmpty())
+    if (!m_db)
         return;
 
+    // 库内全局块数（多会话共享单库：本实例内存索引只是部分视图，水位判定必须全局）
+    const auto globalBlockCount = [this]() -> qsizetype {
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM blocks", -1, &stmt, nullptr)
+            != SQLITE_OK)
+            return 0;
+        qsizetype n = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            n = qsizetype(qMax<qint64>(0, sqlite3_column_int64(stmt, 0)));
+        sqlite3_finalize(stmt);
+        return n;
+    };
+
     QString error;
-    // 1) 超龄水位：块时间戳 = 归档时刻，随行号非递减，超龄块必为最老前缀
+    // 1) 超龄水位：块时间戳 = 归档时刻，随行号非递减，超龄块必为最老前缀（全局统计）
     const qint64 cutoffNs =
         (QDateTime::currentMSecsSinceEpoch() / 1000 - qint64(m_config.maxAgeDays) * 86400)
         * 1000000000LL;
@@ -567,13 +590,16 @@ void ZzColdStorage::enforceLimits()
         }
         return qMax<qint64>(0, pages - freePages) * pageSize;
     };
-    while (!m_blocks.isEmpty()) {
+    for (;;) {
+        const qsizetype total = globalBlockCount();
+        if (total <= 0)
+            break;
         const qint64 size = dbBytes();
         if (size <= m_config.maxBytes)
             break;
-        const qint64 perBlock = qMax<qint64>(1, size / m_blocks.size());
+        const qint64 perBlock = qMax<qint64>(1, size / total);
         qsizetype n = qsizetype(qMin<qint64>(64, (size - m_config.maxBytes) / perBlock + 1));
-        n = qMin(n, m_blocks.size());
+        n = qMin(n, total);
         if (!deleteOldestBlocks(n, &error))
             break; // 删除失败：保持现状，下次写入时再试
     }
@@ -582,21 +608,48 @@ void ZzColdStorage::enforceLimits()
 bool ZzColdStorage::deleteOldestBlocks(qsizetype count, QString *errorString)
 {
     // 调用方须已持有 m_mutex
-    count = qMin(count, m_blocks.size());
     if (count <= 0)
         return true;
     if (!execSql("BEGIN IMMEDIATE", errorString))
         return false;
     bool ok = true;
 
+    // 0) 事务内重读库内全局最老 count 块（审查修复轮 2：多会话共享单库，本实例
+    //    内存索引只是部分视图，最老块可能属于其他会话；newBase 必须等于库内真实
+    //    最老幸存块首行，否则下次 open 的 loadState 一致性校验会误判库损坏）
+    QVector<BlockEntry> doomed;
+    {
+        sqlite3_stmt *stmt = nullptr;
+        ok = sqlite3_prepare_v2(
+                 m_db,
+                 "SELECT first_line, line_count FROM blocks ORDER BY first_line LIMIT ?",
+                 -1, &stmt, nullptr)
+             == SQLITE_OK;
+        if (ok) {
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(count));
+            while (sqlite3_step(stmt) == SQLITE_ROW)
+                doomed.append({quint64(sqlite3_column_int64(stmt, 0)),
+                               quint32(sqlite3_column_int(stmt, 1))});
+            sqlite3_finalize(stmt);
+        }
+    }
+    count = doomed.size(); // 实际可删数（库内块可能少于请求数）
+    if (ok && count == 0) {
+        execSql("ROLLBACK", nullptr); // 无块可删：无事可做，释放事务
+        return true;
+    }
+
     // 1) FTS5 contentless 删除需提供被删行原文：先解压待删块取回文本
+    //    （rawBlock 按 firstLine 从库内取块，对其他会话写入的块同样适用）
     sqlite3_stmt *del = nullptr;
-    ok = sqlite3_prepare_v2(
-             m_db, "INSERT INTO lines_fts(lines_fts, rowid, text) VALUES('delete', ?, ?)",
-             -1, &del, nullptr)
-         == SQLITE_OK;
+    if (ok) {
+        ok = sqlite3_prepare_v2(
+                 m_db, "INSERT INTO lines_fts(lines_fts, rowid, text) VALUES('delete', ?, ?)",
+                 -1, &del, nullptr)
+             == SQLITE_OK;
+    }
     for (qsizetype b = 0; b < count && ok; ++b) {
-        const BlockEntry block = m_blocks[b]; // 拷贝：rawBlock 可能写缓存，不持有引用
+        const BlockEntry block = doomed[b]; // 拷贝：rawBlock 可能写缓存，不持有引用
         const QByteArray raw = rawBlock(block.firstLine);
         if (raw.size() < 4) {
             ok = false;
@@ -632,16 +685,44 @@ bool ZzColdStorage::deleteOldestBlocks(qsizetype count, QString *errorString)
              == SQLITE_OK;
         for (qsizetype b = 0; b < count && ok; ++b) {
             sqlite3_reset(stmt);
-            sqlite3_bind_int64(stmt, 1, sqlite3_int64(m_blocks[b].firstLine));
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(doomed[b].firstLine));
             ok = sqlite3_step(stmt) == SQLITE_DONE;
         }
         if (stmt)
             sqlite3_finalize(stmt);
     }
 
-    // 3) base 前移（与删除同事务）；全部删光时 base = frontier
-    const quint64 newBase =
-        count < m_blocks.size() ? m_blocks[count].firstLine : m_frontier;
+    // 3) base 前移（与删除同事务）：事务内重读库内真实最老幸存块首行；
+    //    全部删光时 base = 库内权威 frontier（同事务重读，不用本实例缓存值）
+    quint64 newBase = 0;
+    if (ok) {
+        sqlite3_stmt *stmt = nullptr;
+        ok = sqlite3_prepare_v2(m_db,
+                                "SELECT first_line FROM blocks ORDER BY first_line LIMIT 1",
+                                -1, &stmt, nullptr)
+             == SQLITE_OK;
+        if (ok) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                newBase = quint64(sqlite3_column_int64(stmt, 0));
+                sqlite3_finalize(stmt);
+                stmt = nullptr;
+            } else {
+                sqlite3_finalize(stmt);
+                stmt = nullptr;
+                ok = sqlite3_prepare_v2(m_db,
+                                        "SELECT value FROM meta WHERE key = 'frontier'",
+                                        -1, &stmt, nullptr)
+                     == SQLITE_OK;
+                if (ok) {
+                    ok = sqlite3_step(stmt) == SQLITE_ROW;
+                    if (ok)
+                        newBase = quint64(sqlite3_column_int64(stmt, 0));
+                    sqlite3_finalize(stmt);
+                    stmt = nullptr;
+                }
+            }
+        }
+    }
     if (ok) {
         sqlite3_stmt *stmt = nullptr;
         ok = sqlite3_prepare_v2(m_db, "UPDATE meta SET value = ? WHERE key = 'base'",
@@ -665,7 +746,12 @@ bool ZzColdStorage::deleteOldestBlocks(qsizetype count, QString *errorString)
         return false;
     execSql("PRAGMA incremental_vacuum", nullptr); // 回收空闲页（规格 §七）
 
-    m_blocks.remove(0, count);
+    // 内存索引同步：丢弃本实例索引中首行低于 newBase 的条目（已被删除；
+    //  doomed 里属于其他会话的块本就不在本索引中，无需处理）
+    qsizetype ownDrop = 0;
+    while (ownDrop < m_blocks.size() && m_blocks[ownDrop].firstLine < newBase)
+        ++ownDrop;
+    m_blocks.remove(0, ownDrop);
     m_baseLine = newBase;
     m_blockCache.clear(); // 删除是稀有事件，整体失效最简单
     return true;

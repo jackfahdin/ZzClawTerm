@@ -393,6 +393,92 @@ private slots:
         }
         QVERIFY(QFile::exists(warmPath)); // 冷层降级后不得删除温层文件（规格 §六）
     }
+
+    /// @brief 审查修复轮 2（块映射表）：两个引擎实例共享同一 cold.db（不同温层文件、
+    ///        不同 sessionId），交错写入到双方都发生冷层归档后各自 flush，验证：
+    ///        各自 getLines 完整读回自己写入的行（不串行、不缺失、不空白）；
+    ///        各自 searchLines 只命中自己的行；firstLineNo/totalLines 自洽。
+    void multiSessionEnginesSharedColdDb()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString dbPath = dir.filePath(QStringLiteral("cold.db"));
+        ZzLogEngine::Config ca =
+            testColdConfig(dir.filePath(QStringLiteral("warm-a.log")), dbPath);
+        ca.sessionId = QStringLiteral("session-a");
+        ZzLogEngine::Config cb =
+            testColdConfig(dir.filePath(QStringLiteral("warm-b.log")), dbPath);
+        cb.sessionId = QStringLiteral("session-b");
+        ZzLogEngine engineA(ca);
+        ZzLogEngine engineB(cb);
+        QVERIFY(engineA.open());
+        QVERIFY(engineB.open());
+        QVERIFY(engineA.isColdEnabled());
+        QVERIFY(engineB.isColdEnabled());
+
+        // 行文本带会话专属 token + 会话内序号：保证全局可区分、FTS 可按 token 过滤
+        const auto lineA = [](quint64 i) {
+            return ZzLogLine{QStringLiteral("row %1 tokenAlpha").arg(i), QByteArray("A")};
+        };
+        const auto lineB = [](quint64 i) {
+            return ZzLogLine{QStringLiteral("row %1 tokenBravo").arg(i), QByteArray("B")};
+        };
+
+        // 交错写入：每轮各自 flush 强制落冷层，制造块级交错（热 100 / 批 16，
+        // A 每轮 200 行共 6 轮 = 1200，B 每轮 150 行共 6 轮 = 900）
+        constexpr quint64 NA = 1200;
+        constexpr quint64 NB = 900;
+        for (quint64 round = 0; round < 6; ++round) {
+            for (quint64 i = round * 200; i < (round + 1) * 200; ++i)
+                engineA.appendLine(lineA(i));
+            engineA.flush();
+            for (quint64 i = round * 150; i < (round + 1) * 150; ++i)
+                engineB.appendLine(lineB(i));
+            engineB.flush();
+        }
+
+        // firstLineNo/totalLines 自洽
+        QCOMPARE(engineA.totalLines(), NA);
+        QCOMPARE(engineA.firstLineNo(), 0ULL);
+        QCOMPARE(engineB.totalLines(), NB);
+        QCOMPARE(engineB.firstLineNo(), 0ULL);
+
+        // 冷层段全量逐行校验（驱逐按 16 行整批：A 冷层 69×16=1104 行/热层 96 行，
+        // B 冷层 50×16=800 行/热层 100 行）：不串行（读不到对方行）、不缺失、不空白
+        const QVector<ZzLogLine> coldA = engineA.getLines(0, 1104);
+        QCOMPARE(coldA.size(), 1104);
+        for (qsizetype i = 0; i < coldA.size(); ++i) {
+            QCOMPARE(coldA[i].text, lineA(quint64(i)).text);
+            QCOMPARE(coldA[i].attributes, lineA(quint64(i)).attributes);
+        }
+        const QVector<ZzLogLine> coldB = engineB.getLines(0, 800);
+        QCOMPARE(coldB.size(), 800);
+        for (qsizetype i = 0; i < coldB.size(); ++i)
+            QCOMPARE(coldB[i].text, lineB(quint64(i)).text);
+
+        // 跨冷/热边界的滑动窗口
+        for (quint64 start = NA - 130; start + 60 <= NA; start += 13) {
+            const QVector<ZzLogLine> w = engineA.getLines(start, 60);
+            QCOMPARE(w.size(), 60);
+            for (int j = 0; j < 60; ++j)
+                QCOMPARE(w[j].text, lineA(start + quint64(j)).text);
+        }
+
+        // searchLines：各自只命中自己的行（SQL 按 session_id 过滤 + 映射反查翻译）
+        QCOMPARE(engineA.searchLines(QStringLiteral("tokenAlpha"), 2000).size(), 1104);
+        QCOMPARE(engineB.searchLines(QStringLiteral("tokenBravo"), 2000).size(), 800);
+        QVERIFY(engineA.searchLines(QStringLiteral("tokenBravo"), 10).isEmpty());
+        QVERIFY(engineB.searchLines(QStringLiteral("tokenAlpha"), 10).isEmpty());
+        // 共享 token "row"：双方各自命中己方冷层行且行号-内容自洽
+        const QVector<quint64> sharedA = engineA.searchLines(QStringLiteral("row"), 2000);
+        QCOMPARE(sharedA.size(), 1104);
+        for (const quint64 h : sharedA)
+            QCOMPARE(engineA.getLines(h, 1).first().text, lineA(h).text);
+        const QVector<quint64> sharedB = engineB.searchLines(QStringLiteral("row"), 2000);
+        QCOMPARE(sharedB.size(), 800);
+        for (const quint64 h : sharedB)
+            QCOMPARE(engineB.getLines(h, 1).first().text, lineB(h).text);
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzLogEngineTest)

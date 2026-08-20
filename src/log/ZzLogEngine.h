@@ -1,18 +1,19 @@
 #pragma once
 
 #include "ZzLogLine.h"
+#include "ZzLogArchiveWorker.h"
 #include "ZzRingBuffer.h"
 
 #include <QMutex>
 #include <QObject>
 #include <QReadWriteLock>
 #include <QThread>
+#include <QVector>
 
 #include <atomic>
 #include <memory>
 
 class ZzColdStorage;
-class ZzLogArchiveWorker;
 class ZzMmapBuffer;
 
 /**
@@ -20,13 +21,16 @@ class ZzMmapBuffer;
  *
  * 行号约定：绝对单调递增 ID，可读窗口为 [firstLineNo(), firstLineNo()+totalLines())；
  * 温层超限丢弃、纯内存模式驱逐或冷层清理时 firstLineNo() 前移。
- * 冷层启用时库内行号全局单调（跨会话共享 cold.db），引擎行号 = 库内行号 - m_coldOffset，
- * 每会话从 0 起；本会话只能看到 g >= m_coldOffset 的冷层行（历史会话行持久保留但不可见）。
+ * 冷层启用时库内行号全局单调（跨会话共享 cold.db），引擎行号每会话从 0 起；
+ * 引擎行区间 → 库内全局区间的对应关系由冷层映射表（m_coldMap，每归档一块追加一条，
+ * 落点为 appendBlock 事务内回传的权威值）维护，读回/搜索按表翻译——多会话并发写
+ * 单库时落点可能漂移，不得假设固定平移量（审查修复轮 2）。
+ * 本会话只能看到映射表内的冷层行（历史会话行持久保留但不可见）。
  *
  * 线程模型：appendLine 可在任意线程调用（通常为终端 I/O 线程）；归档与预加载
  * 在内部独立 QThread 中执行，绝不阻塞调用方；getLine/getLines 可在任意线程调用
- * （热层互斥锁 + 温层读写锁 + 冷层内部互斥锁保护）。归档是异步的，flush() 返回后
- * 所有已排队批次保证完成归档（含温→冷推进，不足一块的尾批也落入冷层）。
+ * （热层互斥锁 + 温层读写锁 + 冷层内部互斥锁 + 映射表互斥锁保护）。归档是异步的，
+ * flush() 返回后所有已排队批次保证完成归档（含温→冷推进，不足一块的尾批也落入冷层）。
  *
  * 降级：温层 I/O 失败 → degradedToMemoryOnly（纯内存）；冷层打开/写入失败 →
  * degradedToWarmOnly（无冷层，温层回到 v0.1 容量丢弃，温层文件保留）。
@@ -97,7 +101,9 @@ public:
      * @param pattern FTS5 MATCH 表达式。
      * @param maxResults 最大返回行数。
      * @return 命中行的引擎空间行号（升序）；仅覆盖已归档进冷层的行
-     *         （温层/热层行不入索引，属 v0.2 范围边界）。
+     *         （温层/热层行不入索引，属 v0.2 范围边界）。SQL 层按 session_id 过滤，
+     *         再经映射表反查翻译；同 sessionId 但不在本会话映射内的命中
+     *         （如崩溃续传的历史会话行）丢弃。
      */
     QVector<quint64> searchLines(const QString &pattern, int maxResults = 1000) const;
 
@@ -117,6 +123,16 @@ private:
     ///        续传失败时降级温层模式（发射 degradedToWarmOnly）并删除残留全新开始。
     void recoverResidualWarm();
 
+    /// @brief 惰性裁剪映射表：丢弃/截断全局区间已低于 cold->baseLine() 的条目
+    ///        （冷层清理联动；其他会话实例也可能触发全局清理，读路径每次调用前裁剪）。
+    ///        注意 firstLineNo 一致性：裁剪后最老幸存条目的 engineStart 即新窗口起点。
+    void trimColdMap() const;
+
+    /// @brief 冷层窗口起点（引擎空间；调用前须已 trimColdMap）。
+    ///        映射表非空时为首条目 engineStart；为空时全部冷层行已清理，返回 coldFrontier
+    ///        （== 温层首行，floor 不变式保证）。
+    quint64 coldFirstLineNo() const;
+
     Config m_config;
     ZzRingBuffer m_hot;             ///< 热层（m_hotMutex 保护）
     mutable QMutex m_hotMutex;
@@ -129,8 +145,9 @@ private:
     quint64 m_hotBase = 0;          ///< 热层首行 ID（m_hotMutex 保护）
     std::atomic<bool> m_memoryOnly{false}; ///< 降级标志（archiveFailed 回调跨线程写）
     std::unique_ptr<ZzColdStorage> m_cold; ///< 冷层（coldDbPath 为空或打开/恢复失败时为空）
-    quint64 m_coldOffset = 0;       ///< 本会话引擎行号 → 库内全局行号的平移量（open 时确定）
-    std::atomic<quint64> m_coldBase{0};     ///< 冷层最老可读行（库内全局空间；读路径减 m_coldOffset 夹取）
+    mutable QMutex m_coldMapMutex;      ///< 映射表互斥锁（worker 追加写、读路径读/惰性裁剪）
+    mutable QVector<ZzColdMapEntry> m_coldMap; ///< 冷层映射表：引擎区间 → 库内全局区间（engineStart 有序）
+    std::atomic<quint64> m_coldBase{0};     ///< 冷层最老可读行发布位（库内全局空间；读映射已改映射表，保留供测试/诊断）
     std::atomic<quint64> m_coldFrontier{0}; ///< 本会话已落冷层行数上界（引擎空间 == worker 游标）
     std::atomic<bool> m_coldDegraded{false}; ///< 冷层降级门闩（coldFailed 回调跨线程写）
 };

@@ -3,12 +3,16 @@
 #include "ZzColdStorage.h"
 #include "ZzMmapBuffer.h"
 
+#include <QMutex>
+
 ZzLogArchiveWorker::ZzLogArchiveWorker(ZzMmapBuffer *buffer, QReadWriteLock *lock,
                                        std::atomic<quint64> *warmBase,
                                        std::atomic<quint64> *warmCount,
                                        ZzColdStorage *cold,
                                        std::atomic<quint64> *coldBase,
-                                       std::atomic<quint64> *coldFrontier, QObject *parent)
+                                       std::atomic<quint64> *coldFrontier,
+                                       QVector<ZzColdMapEntry> *coldMap,
+                                       QMutex *coldMapMutex, QObject *parent)
     : QObject(parent)
     , m_buffer(buffer)
     , m_lock(lock)
@@ -17,6 +21,8 @@ ZzLogArchiveWorker::ZzLogArchiveWorker(ZzMmapBuffer *buffer, QReadWriteLock *loc
     , m_cold(cold)
     , m_coldBase(coldBase)
     , m_coldFrontier(coldFrontier)
+    , m_coldMap(coldMap)
+    , m_coldMapMutex(coldMapMutex)
 {
 }
 
@@ -56,8 +62,9 @@ void ZzLogArchiveWorker::coldAdvance(bool includePartial)
             break; // 温层读回不完整（块损坏）：留待下一批，避免写入错位
         QString error;
         bool ok = false;
+        quint64 actualFirst = 0; // appendBlock 事务内权威落点（多会话交错时可 != 缓存 frontier）
         for (int attempt = 0; attempt < 3 && !ok; ++attempt)
-            ok = m_cold->appendBlock(lines, m_cold->frontier(), &error); // 库内全局空间连续追加
+            ok = m_cold->appendBlock(lines, m_cold->frontier(), &error, &actualFirst); // 库内全局空间连续追加
         if (!ok) {
             m_coldFailed = true;
             {
@@ -66,6 +73,12 @@ void ZzLogArchiveWorker::coldAdvance(bool includePartial)
             }
             emit coldFailed(QStringLiteral("冷层写入失败（已重试 3 次）：%1").arg(error));
             return;
+        }
+        // 记录映射：引擎区间 [m_coldCursor, +batch) ↔ 库内全局 [actualFirst, +batch)
+        // （先于 m_coldFrontier 发布，保证读路径看到的 frontier 必有对应映射条目）
+        if (m_coldMap) {
+            QMutexLocker locker(m_coldMapMutex);
+            m_coldMap->append({m_coldCursor, actualFirst, batch});
         }
         m_coldCursor += batch; // 游标只增不减：setRetentionFloor 入参天然单调，防 floor 回退造成续传空洞
         m_coldFrontier->store(m_coldCursor); // 引擎空间：本会话覆盖上界（读路径按此行号路由）

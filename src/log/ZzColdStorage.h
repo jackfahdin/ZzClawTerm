@@ -68,12 +68,14 @@ public:
      *        可能已推进 frontier 使本实例缓存过期，交错写入不失败、不产生重复/丢失；
      *        单会话路径库内值与缓存恒等，行为不变。
      * @param errorString 失败时输出原因，可为空。
+     * @param actualFirstLine 非空时回传实际落点（权威首行号）；调用方（引擎/worker）
+     *        据此维护「引擎行区间 → 库内全局行区间」映射，不得再假设落点 == 传入值。
      * @return 成功返回 true 且 frontier() 前移 lines.size()；失败返回 false 且状态不变。
      * @note 提交后内部自动执行一次 enforceLimits()（规格 §七：每次写入后检查水位）。
      * @note open() 已置 PRAGMA busy_timeout=5000：并发写者等待而非立即 SQLITE_BUSY。
      */
     bool appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLine,
-                     QString *errorString = nullptr);
+                     QString *errorString = nullptr, quint64 *actualFirstLine = nullptr);
 
     /**
      * @brief 读取 [startLine, startLine + count) 区间内的行（任意线程）。
@@ -88,7 +90,8 @@ public:
      * @brief FTS5 全文搜索。
      * @param pattern FTS5 MATCH 表达式（非法表达式返回空，不报错）。
      * @param maxResults 最大返回行数。
-     * @return 命中行的绝对行号（升序）；仅覆盖已归档进冷层的行。
+     * @return 命中行的绝对行号（升序）；仅覆盖已归档进冷层的行，且经 JOIN blocks
+     *         按本实例 sessionId 过滤（全局单库跨会话共享，不含其他会话的命中）。
      */
     QVector<quint64> search(const QString &pattern, int maxResults = 1000) const;
 
@@ -106,7 +109,7 @@ private:
     void closeLocked();                   ///< 调用方须已持有 m_mutex
     QByteArray rawBlock(quint64 firstLine) const; ///< 解压块（LRU 命中或 SELECT+ZSTD）；须持锁
     qsizetype findBlockIndex(quint64 lineId) const; ///< 二分找最后 firstLine <= lineId 的块
-    bool deleteOldestBlocks(qsizetype count, QString *errorString); ///< 删最老 count 块；须持锁
+    bool deleteOldestBlocks(qsizetype count, QString *errorString); ///< 删库内全局最老 count 块（事务内重读块表，不依赖本实例部分索引）；须持锁
 
     Config m_config;
     sqlite3 *m_db = nullptr;

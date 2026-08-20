@@ -61,9 +61,8 @@ bool ZzLogEngine::open()
         } else {
             recoverResidualWarm(); // 崩溃恢复（失败时内部降级并发射信号）
             if (isColdEnabled()) {
-                // 本会话行号基线接续全局单调空间（含刚续传进的残留行；
-                // 残留行属上一会话，对本会话不可见）
-                m_coldOffset = m_cold->frontier();
+                // 本会话行号从 0 起（引擎空间）；库内落点由映射表逐块记录，
+                // 不做固定平移假设（续传进的残留行属上一会话，不进本会话映射，不可见）
                 m_coldBase.store(m_cold->baseLine());
                 m_coldFrontier.store(0); // 引擎空间：本会话尚未有任何行落冷层
             }
@@ -88,7 +87,8 @@ bool ZzLogEngine::open()
         m_hotBase = m_warmBase.load() + m_warmCount.load();
     }
     m_worker = new ZzLogArchiveWorker(m_warm.get(), &m_warmLock, &m_warmBase, &m_warmCount,
-                                      m_cold.get(), &m_coldBase, &m_coldFrontier);
+                                      m_cold.get(), &m_coldBase, &m_coldFrontier,
+                                      &m_coldMap, &m_coldMapMutex);
     m_worker->moveToThread(&m_workerThread);
     connect(m_worker, &ZzLogArchiveWorker::archiveCompleted,
             this, &ZzLogEngine::archiveFinished);
@@ -190,25 +190,48 @@ QVector<ZzLogLine> ZzLogEngine::getLines(quint64 startLine, quint64 count) const
     quint64 id = startLine;
     quint64 remaining = count;
 
-    // 0) 冷层区间：引擎空间 [?, m_coldFrontier)，读时平移到库内全局空间
-    if (isColdEnabled()) {
-        const quint64 coldBaseG = m_coldBase.load();        // 库内全局空间
-        const quint64 coldLocalEnd = m_coldFrontier.load(); // 引擎空间（本会话覆盖上界）
-        if (id < coldLocalEnd && remaining > 0) {
-            quint64 gid = id + m_coldOffset;
-            if (gid < coldBaseG) { // 起点已被清理：前移到冷层最老可读行
-                const quint64 skip = qMin(coldBaseG - gid, coldLocalEnd - id);
-                id += skip;
-                gid += skip;
-                remaining -= qMin(remaining, skip);
+    // 0) 冷层区间：引擎空间 [?, m_coldFrontier)，按映射表翻译成库内全局区间段逐段读
+    if (isColdEnabled() && id < m_coldFrontier.load() && remaining > 0) {
+        trimColdMap(); // 惰性裁剪：其他会话实例可能已触发全局清理删除本会话的块
+        QVector<ZzColdMapEntry> segs; // 快照后释放锁，解压/读库不占用映射表互斥锁
+        {
+            QMutexLocker locker(&m_coldMapMutex);
+            const quint64 coldEnd = m_coldFrontier.load();
+            // 二分：最后一个 engineStart <= id 的条目；id 早于首个幸存条目（已清理）
+            // 时从首条目起（前移到冷层最老可读行）
+            qsizetype lo = 0;
+            qsizetype hi = m_coldMap.size() - 1;
+            qsizetype best = -1;
+            while (lo <= hi) {
+                const qsizetype mid = (lo + hi) / 2;
+                if (m_coldMap[mid].engineStart <= id) {
+                    best = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
             }
-            const quint64 want = qMin(remaining, coldLocalEnd - id);
-            if (want > 0) {
-                out = m_cold->readLines(gid, want);
-                const quint64 got = quint64(out.size());
-                id += got;
-                remaining -= got;
+            for (qsizetype i = qMax<qsizetype>(best, 0); i < m_coldMap.size(); ++i) {
+                if (m_coldMap[i].engineStart >= coldEnd)
+                    break;
+                segs.append(m_coldMap[i]);
             }
+        }
+        for (const ZzColdMapEntry &e : std::as_const(segs)) {
+            if (remaining == 0)
+                break;
+            if (id < e.engineStart)
+                id = e.engineStart; // 前段已被清理：跳到幸存区间起点（不占 remaining）
+            if (id >= e.engineStart + e.count)
+                continue;
+            const quint64 off = id - e.engineStart;
+            const quint64 want = qMin(remaining, e.count - off);
+            const QVector<ZzLogLine> got = m_cold->readLines(e.globalStart + off, want);
+            out += got;
+            id += quint64(got.size());
+            remaining -= quint64(got.size());
+            if (quint64(got.size()) < want)
+                id = e.engineStart + e.count; // 块损坏短读：跳到下一映射条目，避免原地踏步
         }
     }
     // 1) 温层区间
@@ -241,18 +264,23 @@ QVector<ZzLogLine> ZzLogEngine::getLines(quint64 startLine, quint64 count) const
 
 quint64 ZzLogEngine::totalLines() const
 {
-    QMutexLocker locker(&m_hotMutex);
-    const quint64 hotEnd = m_hotBase + quint64(m_hot.count());
+    quint64 hotBase;
+    quint64 hotEnd;
+    {
+        QMutexLocker locker(&m_hotMutex);
+        hotBase = m_hotBase;
+        hotEnd = m_hotBase + quint64(m_hot.count());
+    }
     // 行空间连续 [firstLineNo(), hotEnd)：冷层启用时窗口起点为冷层基线（引擎空间），
     // 否则为温层首行/热层首行（与 v0.1 的 m_warmCount + hot.count() 数值等价）
     quint64 first;
     if (isColdEnabled()) {
-        const qint64 base = qint64(m_coldBase.load()) - qint64(m_coldOffset);
-        first = base > 0 ? qMin(quint64(base), m_coldFrontier.load()) : 0;
+        trimColdMap();
+        first = coldFirstLineNo();
     } else if (m_warm) {
         first = m_warmBase.load();
     } else {
-        first = m_hotBase;
+        first = hotBase;
     }
     return hotEnd - first;
 }
@@ -260,9 +288,8 @@ quint64 ZzLogEngine::totalLines() const
 quint64 ZzLogEngine::firstLineNo() const
 {
     if (isColdEnabled()) {
-        // 引擎空间 = 库内空间 - m_coldOffset；库内 base 低于本会话基线时窗口从 0 起
-        const qint64 base = qint64(m_coldBase.load()) - qint64(m_coldOffset);
-        return base > 0 ? qMin(quint64(base), m_coldFrontier.load()) : 0;
+        trimColdMap();
+        return coldFirstLineNo();
     }
     if (m_warm)
         return m_warmBase.load();
@@ -270,20 +297,67 @@ quint64 ZzLogEngine::firstLineNo() const
     return m_hotBase;
 }
 
+void ZzLogEngine::trimColdMap() const
+{
+    if (!m_cold)
+        return;
+    const quint64 base = m_cold->baseLine(); // 先取库内基线（冷层内部锁），再持映射表锁
+    QMutexLocker locker(&m_coldMapMutex);
+    // 整块低于 base 的条目丢弃
+    while (!m_coldMap.isEmpty()
+           && m_coldMap.first().globalStart + m_coldMap.first().count <= base)
+        m_coldMap.removeFirst();
+    // 首条目部分重叠：截断（全局/引擎两空间同步前移，行数差一致）
+    if (!m_coldMap.isEmpty() && m_coldMap.first().globalStart < base) {
+        ZzColdMapEntry &e = m_coldMap.first();
+        const quint64 trim = base - e.globalStart;
+        e.globalStart = base;
+        e.engineStart += trim;
+        e.count -= trim;
+    }
+}
+
+quint64 ZzLogEngine::coldFirstLineNo() const
+{
+    QMutexLocker locker(&m_coldMapMutex);
+    if (!m_coldMap.isEmpty())
+        return m_coldMap.first().engineStart;
+    // 映射表为空：全部冷层行已清理（或尚无行落冷层，此时 coldFrontier == 0）；
+    // 可读窗口从温层首行起（floor 不变式保证 warmBase >= coldFrontier）
+    return m_coldFrontier.load();
+}
+
 QVector<quint64> ZzLogEngine::searchLines(const QString &pattern, int maxResults) const
 {
     if (!isColdEnabled())
         return {};
+    trimColdMap();
+    // FTS 命中为库内全局行号（SQL 层已按 session_id 过滤）；经映射表反查翻译成
+    // 引擎行号。同 sessionId 但不在本会话映射内的命中（如崩溃续传的历史会话行）丢弃
     const QVector<quint64> hits = m_cold->search(pattern, maxResults);
     QVector<quint64> out;
     out.reserve(hits.size());
-    const quint64 first = firstLineNo();
+    QMutexLocker locker(&m_coldMapMutex);
     for (const quint64 g : hits) {
-        if (g < m_coldOffset)
-            continue; // 历史会话行：持久保留但不属于当前会话窗口
-        const quint64 local = g - m_coldOffset;
-        if (local >= first && local < m_coldFrontier.load())
-            out.append(local);
+        // 二分：最后一个 globalStart <= g 的条目（映射按 engineStart 有序，globalStart 同序）
+        qsizetype lo = 0;
+        qsizetype hi = m_coldMap.size() - 1;
+        qsizetype best = -1;
+        while (lo <= hi) {
+            const qsizetype mid = (lo + hi) / 2;
+            if (m_coldMap[mid].globalStart <= g) {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if (best < 0)
+            continue;
+        const ZzColdMapEntry &e = m_coldMap[best];
+        if (g >= e.globalStart + e.count)
+            continue;
+        out.append(e.engineStart + (g - e.globalStart));
     }
     return out;
 }
@@ -292,10 +366,38 @@ void ZzLogEngine::preload(quint64 lineNo)
 {
     if (!m_worker)
         return;
-    // 按行号路由：落入本会话冷层区间的走冷层预解压，其余走温层（现有路径）
+    // 按行号路由：落入本会话冷层区间的经映射表翻译成库内全局行号走冷层预解压，
+    // 其余走温层（现有路径）；已清理区间无块可预载，直接返回
     if (isColdEnabled() && lineNo < m_coldFrontier.load()) {
+        trimColdMap();
+        quint64 globalId = 0;
+        bool found = false;
+        {
+            QMutexLocker locker(&m_coldMapMutex);
+            qsizetype lo = 0;
+            qsizetype hi = m_coldMap.size() - 1;
+            qsizetype best = -1;
+            while (lo <= hi) {
+                const qsizetype mid = (lo + hi) / 2;
+                if (m_coldMap[mid].engineStart <= lineNo) {
+                    best = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            if (best >= 0) {
+                const ZzColdMapEntry &e = m_coldMap[best];
+                if (lineNo < e.engineStart + e.count) {
+                    globalId = e.globalStart + (lineNo - e.engineStart);
+                    found = true;
+                }
+            }
+        }
+        if (!found)
+            return;
         QMetaObject::invokeMethod(m_worker, "preloadCold", Qt::QueuedConnection,
-                                  Q_ARG(quint64, lineNo + m_coldOffset));
+                                  Q_ARG(quint64, globalId));
         return;
     }
     QMetaObject::invokeMethod(m_worker, "preloadAround", Qt::QueuedConnection,
