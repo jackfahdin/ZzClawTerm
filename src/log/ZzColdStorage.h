@@ -2,6 +2,7 @@
 
 #include "ZzLogLine.h"
 
+#include <QCache>
 #include <QMutex>
 #include <QString>
 #include <QVector>
@@ -98,6 +99,8 @@ private:
     bool execSql(const char *sql, QString *errorString) const;
     bool loadState(QString *errorString); ///< open 时读 meta + 块表并做一致性校验
     void closeLocked();                   ///< 调用方须已持有 m_mutex
+    QByteArray rawBlock(quint64 firstLine) const; ///< 解压块（LRU 命中或 SELECT+ZSTD）；须持锁
+    qsizetype findBlockIndex(quint64 lineId) const; ///< 二分找最后 firstLine <= lineId 的块
 
     Config m_config;
     sqlite3 *m_db = nullptr;
@@ -105,4 +108,5 @@ private:
     QVector<BlockEntry> m_blocks; ///< 存活块表（按 firstLine 递增）
     quint64 m_frontier = 0;
     quint64 m_baseLine = 0;
+    mutable QCache<quint64, QByteArray> m_blockCache; ///< 解压块 LRU（键：块首行号）
 };
