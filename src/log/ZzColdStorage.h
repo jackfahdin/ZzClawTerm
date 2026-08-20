@@ -62,10 +62,15 @@ public:
     /**
      * @brief 追加一块（归档线程调用）。
      * @param lines 块内行，1..kMaxBlockLines 行。
-     * @param firstLine 块首行绝对行号，必须 == frontier()（全局连续，崩溃无重复块）。
+     * @param firstLine 块首行绝对行号，应 == frontier()（调用方缓存值）。写事务内
+     *        （BEGIN IMMEDIATE 持库级写锁）会重读 meta.frontier 作为权威首行号：
+     *        与传入值不一致时以库内值为准——全局单库被多会话实例共享，其他实例
+     *        可能已推进 frontier 使本实例缓存过期，交错写入不失败、不产生重复/丢失；
+     *        单会话路径库内值与缓存恒等，行为不变。
      * @param errorString 失败时输出原因，可为空。
      * @return 成功返回 true 且 frontier() 前移 lines.size()；失败返回 false 且状态不变。
      * @note 提交后内部自动执行一次 enforceLimits()（规格 §七：每次写入后检查水位）。
+     * @note open() 已置 PRAGMA busy_timeout=5000：并发写者等待而非立即 SQLITE_BUSY。
      */
     bool appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLine,
                      QString *errorString = nullptr);

@@ -555,6 +555,66 @@ private slots:
         QVERIFY(!cold.open(&error));
         QVERIFY(!error.isEmpty());
     }
+
+    /// @brief 审查修复（多会话并发写单库）：两个 ZzColdStorage 实例打开同一 cold.db，
+    ///        交错 appendBlock——双方写入都成功（事务内重读 meta.frontier 权威值接管
+    ///        过期缓存），库内数据连续无丢失无重复，frontier == 两边行数之和，
+    ///        各自 readLines 能读回自己写的行内容。
+    void concurrentInstancesInterleavedAppend()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        ZzColdStorage::Config ca = testConfig(path);
+        ca.sessionId = QStringLiteral("session-a");
+        ZzColdStorage::Config cb = testConfig(path);
+        cb.sessionId = QStringLiteral("session-b");
+        ZzColdStorage a(ca);
+        ZzColdStorage b(cb);
+        QVERIFY(a.open());
+        QVERIFY(b.open());
+
+        QString error;
+        // 交错写入：行内容按全局行号生成（cold-line-<N>），便于连续性校验
+        QVERIFY(a.appendBlock(makeLines(0, 10), a.frontier()));
+        // b 的缓存 frontier=0 已过期（库内实为 10）：事务内重读接管，写入落 10..14
+        QVERIFY2(b.appendBlock(makeLines(10, 5), b.frontier(), &error), qPrintable(error));
+        QCOMPARE(b.frontier(), 15ULL);
+        // a 的缓存 frontier=10 已过期（库内实为 15）：写入落 15..21
+        QVERIFY2(a.appendBlock(makeLines(15, 7), a.frontier(), &error), qPrintable(error));
+        QCOMPARE(a.frontier(), 22ULL);
+        // b 的缓存 frontier=15 已过期（库内实为 22）：写入落 22..24
+        QVERIFY2(b.appendBlock(makeLines(22, 3), b.frontier(), &error), qPrintable(error));
+        QCOMPARE(b.frontier(), 25ULL);
+
+        // 第三方实例重开验证：frontier == 两边行数之和，全量连续读回无丢失无重复
+        ZzColdStorage verifier(testConfig(path));
+        QVERIFY(verifier.open());
+        QCOMPARE(verifier.frontier(), 25ULL);
+        QCOMPARE(verifier.baseLine(), 0ULL);
+        const QVector<ZzLogLine> all = verifier.readLines(0, 25);
+        QCOMPARE(all.size(), 25);
+        for (qsizetype i = 0; i < all.size(); ++i) {
+            QCOMPARE(all[i].text, line(quint64(i)).text);
+            QCOMPARE(all[i].attributes, line(quint64(i)).attributes);
+        }
+
+        // 各自实例读回自己写的行（内存块索引仅含本实例写入的块）
+        const QVector<ZzLogLine> aHead = a.readLines(0, 10);
+        QCOMPARE(aHead.size(), 10);
+        QCOMPARE(aHead.first().text, line(0).text);
+        QCOMPARE(aHead.last().text, line(9).text);
+        const QVector<ZzLogLine> aTail = a.readLines(15, 7);
+        QCOMPARE(aTail.size(), 7);
+        QCOMPARE(aTail.first().text, line(15).text);
+        QCOMPARE(b.readLines(10, 5).first().text, line(10).text);
+        QCOMPARE(b.readLines(22, 3).first().text, line(22).text);
+
+        // 跨空洞读窗（a 的索引不含 b 的块）：按可得数据返回，不死循环
+        const QVector<ZzLogLine> span = a.readLines(8, 10); // 8..17 含 b 的 10..14
+        QCOMPARE(span.size(), 2); // 仅 8、9 可得
+        QCOMPARE(span.last().text, line(9).text);
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzColdStorageTest)

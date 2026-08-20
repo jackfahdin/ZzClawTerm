@@ -128,6 +128,7 @@ bool ZzColdStorage::open(QString *errorString)
     static const char *const kSetup[] = {
         "PRAGMA journal_mode=WAL",     // WAL：崩溃不丢已提交数据（规格 §四）
         "PRAGMA synchronous=NORMAL",   // WAL 下 NORMAL 足够（崩溃不丢已提交事务）
+        "PRAGMA busy_timeout=5000",    // 全局单库多会话并发写：等待而非立即 SQLITE_BUSY
         "CREATE TABLE IF NOT EXISTS blocks ("
         " block_id    INTEGER PRIMARY KEY,"
         " first_line  INTEGER NOT NULL,"
@@ -298,16 +299,31 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
 
     if (!execSql("BEGIN IMMEDIATE", errorString))
         return false;
+    // 全局单库被多会话实例共享：其他实例可能已推进 frontier（本实例缓存过期）。
+    // BEGIN IMMEDIATE 已持库级写锁，事务内重读 meta.frontier 为权威值；与传入
+    // firstLine 不一致时以库内值为准（交错写不失败、不产生重复/丢失；单会话
+    // 路径库内值与本实例缓存恒等，行为与既有实现逐字节一致）
+    quint64 authoritativeFirst = firstLine;
     bool ok = false;
     sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, "SELECT value FROM meta WHERE key = 'frontier'",
+                           -1, &stmt, nullptr)
+        == SQLITE_OK) {
+        ok = sqlite3_step(stmt) == SQLITE_ROW;
+        if (ok)
+            authoritativeFirst = quint64(sqlite3_column_int64(stmt, 0));
+        sqlite3_finalize(stmt);
+        stmt = nullptr;
+    }
     // 1) blocks 行
-    if (sqlite3_prepare_v2(m_db,
+    if (ok
+        && sqlite3_prepare_v2(m_db,
             "INSERT INTO blocks(first_line, line_count, session_id, start_ts_ns, end_ts_ns, payload)"
             " VALUES(?, ?, ?, ?, ?, ?)",
             -1, &stmt, nullptr)
         == SQLITE_OK) {
         const QByteArray sid = m_config.sessionId.toUtf8();
-        sqlite3_bind_int64(stmt, 1, sqlite3_int64(firstLine));
+        sqlite3_bind_int64(stmt, 1, sqlite3_int64(authoritativeFirst));
         sqlite3_bind_int(stmt, 2, int(lines.size()));
         sqlite3_bind_text(stmt, 3, sid.constData(), int(sid.size()), SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 4, nowNs);
@@ -325,7 +341,7 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
         for (qsizetype i = 0; i < lines.size() && ok; ++i) {
             const QByteArray text = lines[i].text.toUtf8();
             sqlite3_reset(stmt);
-            sqlite3_bind_int64(stmt, 1, sqlite3_int64(firstLine + quint64(i)));
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(authoritativeFirst + quint64(i)));
             sqlite3_bind_text(stmt, 2, text.constData(), int(text.size()), SQLITE_TRANSIENT);
             ok = sqlite3_step(stmt) == SQLITE_DONE;
         }
@@ -340,7 +356,7 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
                                 -1, &stmt, nullptr)
              == SQLITE_OK;
         if (ok) {
-            sqlite3_bind_int64(stmt, 1, sqlite3_int64(firstLine + quint64(lines.size())));
+            sqlite3_bind_int64(stmt, 1, sqlite3_int64(authoritativeFirst + quint64(lines.size())));
             ok = sqlite3_step(stmt) == SQLITE_DONE;
             sqlite3_finalize(stmt);
             stmt = nullptr;
@@ -359,9 +375,9 @@ bool ZzColdStorage::appendBlock(const QVector<ZzLogLine> &lines, quint64 firstLi
         return false;
     }
 
-    m_blocks.append({firstLine, quint32(lines.size())});
-    m_frontier = firstLine + quint64(lines.size());
-    m_blockCache.insert(firstLine, new QByteArray(raw), 1); // 刚序列化的块直接入缓存
+    m_blocks.append({authoritativeFirst, quint32(lines.size())});
+    m_frontier = authoritativeFirst + quint64(lines.size());
+    m_blockCache.insert(authoritativeFirst, new QByteArray(raw), 1); // 刚序列化的块直接入缓存
 
     locker.unlock();
     enforceLimits(); // 规格 §七：每次写入后检查清理水位（内部自取锁，不能在写事务内调用）
@@ -385,6 +401,8 @@ QVector<ZzLogLine> ZzColdStorage::readLines(quint64 startLine, quint64 count) co
         if (bi < 0)
             break;
         const BlockEntry &block = m_blocks[bi];
+        if (block.firstLine + block.lineCount <= id)
+            break; // 多会话共享单库：其他实例写入的块不在本实例内存索引中，按可得数据返回
         const QByteArray raw = rawBlock(block.firstLine);
         if (raw.size() < 4)
             break; // 块损坏：按可得数据返回
