@@ -82,7 +82,7 @@ void ZzLogArchiveWorker::coldAdvance(bool includePartial)
         }
         m_coldCursor += batch; // 游标只增不减：setRetentionFloor 入参天然单调，防 floor 回退造成续传空洞
         m_coldFrontier->store(m_coldCursor); // 引擎空间：本会话覆盖上界（读路径按此行号路由）
-        m_coldBase->store(m_cold->baseLine()); // 库内全局空间原始值（读路径减 m_coldOffset 夹取）
+        m_coldBase->store(m_cold->baseLine()); // 库内全局空间原始值（发布位供测试/诊断；读路径走映射表翻译，不依赖本值）
         {
             QWriteLocker locker(m_lock);
             m_buffer->setRetentionFloor(m_coldCursor); // 温层截头 + 游标持久化

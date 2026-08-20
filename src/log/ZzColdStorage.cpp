@@ -74,7 +74,7 @@ QByteArray serializeBlock(const QVector<ZzLogLine> &lines)
 
 /**
  * @file ZzColdStorage.cpp
- * @brief 冷层存储实现。行编码函数（encodeLine/skipLine/parseLine）与
+ * @brief 冷层存储实现。行编码函数（encodeLine/parseLine）与
  *        ZzMmapBuffer.cpp 同款（textLen u32|attrLen u32|UTF-8|属性负载），
  *        保持冷/温两层块内格式一致；任务 3 追加块读写时引入该匿名命名空间。
  */
@@ -742,8 +742,10 @@ bool ZzColdStorage::deleteOldestBlocks(qsizetype count, QString *errorString)
                                .arg(QString::fromUtf8(sqlite3_errmsg(m_db)));
         return false;
     }
-    if (!execSql("COMMIT", errorString))
+    if (!execSql("COMMIT", errorString)) {
+        execSql("ROLLBACK", nullptr); // COMMIT 失败：尝试回滚，避免连接挂在事务里（对齐 appendBlock）
         return false;
+    }
     execSql("PRAGMA incremental_vacuum", nullptr); // 回收空闲页（规格 §七）
 
     // 内存索引同步：丢弃本实例索引中首行低于 newBase 的条目（已被删除；

@@ -30,6 +30,8 @@
 
 **8. 线程与锁。** `ZzColdStorage` 内部 `QMutex` 保护 sqlite3 连接与全部内部状态（sqlite3 以 `SQLITE_OPEN_FULLMUTEX` 打开，双保险）；写事务短（一块一事务），读路径一次最多解压 1 块。温层读写锁模型不变。归档线程内 coldAdvance 读温层持读锁、改 floor 持写锁。
 
+**9.（执行后补记）第 3 条的 `m_coldOffset` 固定平移方案已被块映射表方案取代。** 执行中发现固定平移无法处理多会话交错写单库（其他实例推进库内 frontier 导致本实例平移假设失同步），任务 9 修复轮 2 经用户裁决改为块映射表方案：`appendBlock` 事务内重读库内权威 `meta.frontier` 并回传实际落点（`actualFirstLine`），引擎侧维护 `ZzColdMapEntry{engineFirst, coldFirst, count}` 映射表做引擎行号 ↔ 库内行号双向翻译（`m_coldOffset` 已删除），`searchLines` 增加 `session_id` 过滤（SQL 侧 JOIN blocks 过滤 + 引擎侧映射表反查双重过滤）。受影响的前文位置：本前置说明第 3 条、下文"行号约定"段、任务 8 与任务 10 正文中的相关代码段——均以实际入库代码为准，不再改写（任务正文保留为历史执行记录）。
+
 所有命令默认在仓库根目录 `/home/zz/Jackfahdin/github/ZzClawTerm` 下执行。构建用显式形式（`cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug && cmake --build build/debug -j8`）；性能测试用 Release 构建：若执行环境 preset 可则用 `cmake --preset linux-gcc-release && cmake --build --preset linux-gcc-release`，否则显式 `cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release && cmake --build build/release -j8`（两种形式在任务 10 均给出）。
 
 ## 文件结构
