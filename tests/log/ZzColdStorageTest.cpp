@@ -251,6 +251,72 @@ private slots:
         QCOMPARE(got.size(), 8);
         QCOMPARE(got.first().text, line(2040).text);
     }
+
+    /// @brief FTS5 搜索：关键字命中返回精确绝对行号（升序）。
+    void searchFindsLinesByKeyword()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzColdStorage cold(testConfig(dir.filePath(QStringLiteral("cold.db"))));
+        QVERIFY(cold.open());
+        // 3 块；关键字 ERROR 出现在第 7 / 2048 / 3071 行（块内/跨块边界均覆盖）
+        quint64 frontier = 0;
+        for (int b = 0; b < 3; ++b) {
+            QVector<ZzLogLine> block = makeLines(frontier, 1024);
+            if (b == 0)
+                block[7].text = QStringLiteral("line 7 ERROR happened");
+            if (b == 2) {
+                block[0].text = QStringLiteral("line 2048 ERROR happened");
+                block[1023].text = QStringLiteral("line 3071 ERROR happened");
+            }
+            QVERIFY(cold.appendBlock(block, frontier));
+            frontier += 1024;
+        }
+        const QVector<quint64> hits = cold.search(QStringLiteral("ERROR"));
+        QCOMPARE(hits, (QVector<quint64>{7ULL, 2048ULL, 3071ULL}));
+        // 命中行原文可读回
+        QCOMPARE(cold.readLines(hits[1], 1).first().text,
+                 QStringLiteral("line 2048 ERROR happened"));
+    }
+
+    /// @brief maxResults 限制生效；非法 MATCH 表达式返回空不报错。
+    void searchRespectsMaxResultsAndBadPattern()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ZzColdStorage cold(testConfig(dir.filePath(QStringLiteral("cold.db"))));
+        QVERIFY(cold.open());
+        QVector<ZzLogLine> block = makeLines(0, 1024);
+        for (qsizetype i = 0; i < 100; ++i)
+            block[i].text = QStringLiteral("row %1 TOKENXYZ tail").arg(i);
+        QVERIFY(cold.appendBlock(block, 0));
+
+        QCOMPARE(cold.search(QStringLiteral("TOKENXYZ"), 10).size(), 10);
+        QCOMPARE(cold.search(QStringLiteral("TOKENXYZ"), 1000).size(), 100);
+        QVERIFY(cold.search(QStringLiteral("\"unclosed")).isEmpty()); // 非法表达式 → 空
+        QVERIFY(cold.search(QString(), 10).isEmpty());                // 空 pattern → 空
+        QVERIFY(cold.search(QStringLiteral("TOKENXYZ"), 0).isEmpty()); // maxResults<=0 → 空
+    }
+
+    /// @brief 无命中返回空；FTS 索引跨重开持久。
+    void searchNoMatchAndReopenPersistence()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("cold.db"));
+        {
+            ZzColdStorage cold(testConfig(path));
+            QVERIFY(cold.open());
+            QVector<ZzLogLine> block = makeLines(0, 512);
+            block[42].text = QStringLiteral("persistent NEEDLE42 here");
+            QVERIFY(cold.appendBlock(block, 0));
+            QVERIFY(cold.search(QStringLiteral("NOSUCHTOKEN")).isEmpty());
+        }
+        ZzColdStorage cold(testConfig(path));
+        QVERIFY(cold.open());
+        QCOMPARE(cold.search(QStringLiteral("NEEDLE42")),
+                 (QVector<quint64>{42ULL})); // 重开后索引仍可查
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzColdStorageTest)

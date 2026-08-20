@@ -467,6 +467,28 @@ qsizetype ZzColdStorage::findBlockIndex(quint64 lineId) const
     return best;
 }
 
+QVector<quint64> ZzColdStorage::search(const QString &pattern, int maxResults) const
+{
+    QVector<quint64> out;
+    QMutexLocker locker(&m_mutex);
+    if (!m_db || pattern.isEmpty() || maxResults <= 0)
+        return out;
+    sqlite3_stmt *stmt = nullptr;
+    // 非法 MATCH 表达式时 prepare 失败，按无命中返回（调用方负责合法 FTS5 语法）
+    if (sqlite3_prepare_v2(m_db,
+                           "SELECT rowid FROM lines_fts WHERE lines_fts MATCH ? LIMIT ?",
+                           -1, &stmt, nullptr)
+        != SQLITE_OK)
+        return out;
+    const QByteArray utf8 = pattern.toUtf8();
+    sqlite3_bind_text(stmt, 1, utf8.constData(), int(utf8.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, maxResults);
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+        out.append(quint64(sqlite3_column_int64(stmt, 0)));
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 void ZzColdStorage::enforceLimits()
 {
     // 占位实现：清理逻辑由任务 5 补全（含 FTS5 同步删除与增量 VACUUM）。
