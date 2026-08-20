@@ -20,7 +20,7 @@
 | 压缩方案 | 引入 ZSTD（third_party/zstd 子模块，BSD 协议，锁定版本 tag） |
 | 库组织 | 全局单库 `cold.db`，行携带 sessionId + 纳秒时间戳 |
 | 实现方案 | 方案 A：`ZzColdStorage` 独立类，复用现有归档线程两阶段推进 |
-| SQLite 访问 | 倾向直接 sqlite3 C API（事务与 FTS5 控制精细）；计划阶段最终定 |
+| SQLite 访问 | 直接 sqlite3 C API（事务与 FTS5 控制精细），不走 Qt SQL |
 | UI | 本次零 UI 工作；搜索只交付引擎 API + QTest |
 
 ## 三、架构与数据流
@@ -95,7 +95,7 @@ getLines(start, count) 请求 [start, start+count)：
 1. 温层批次写完 → 触发 coldAdvance 任务
 2. 从温层读 [coldFrontier, warmBase+warmCount) 中已完整成块的部分（1024 行一批）
 3. ZSTD 压缩 + SQLite 事务写入（块表 + FTS5 同事务）→ 提交后 coldFrontier 前移
-4. 温层截头：coldFrontier 已覆盖的温层前缀标记废弃，文件内空间复用
+4. 温层截头：coldFrontier 已覆盖的温层前缀复用既有"最老块丢弃"机制回收空间
 5. 干净退出：flush 保证全部已排队行落入冷层后删除温层文件
    异常退出：温层文件残留，下次启动比对 coldFrontier 续传未归档部分后删除
 ```
@@ -127,7 +127,7 @@ QTest 单元测试覆盖：块读写往返、FTS5 搜索、崩溃恢复续传、
 ## 九、依赖与构建
 
 - `third_party/zstd`：Git 子模块，锁定 release tag，CMake 静态编译接入
-- SQLite：优先使用系统库或 Qt 自带；需确认 FTS5 编译开关可用，否则 third_party 引入 amalgamation
+- SQLite：直接使用 sqlite3 C API；构建时探测系统库 FTS5 编译开关，不可用则 third_party 引入官方 amalgamation（Public Domain）
 - 所有新代码遵守项目既有约束：C++20、Zz 前缀、文件名与类名一致、Doxygen 简体中文注释、commit 首行中文简述 + 空行 + 中文详细说明（Conventional Commits 前缀）
 
 ## 十、范围边界（明确不做）
