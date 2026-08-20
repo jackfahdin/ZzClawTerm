@@ -95,6 +95,9 @@ private slots:
     /**
      * @brief 回归：enableScrollback 时温层 open 失败（同步降级）必须提示用户（规格 §八）。
      *        曾因 open() 先于桥/提示链路接线而丢失该信号。
+     *        冷层接线后目录只读会让冷层与温层 open 双双失败：先报冷层降级
+     *        （degradedToWarmOnly），再报温层降级（degradedToMemoryOnly，
+     *        最终状态为纯内存模式，末条提示为准）。
      */
     void scrollbackDegradationPromptsOnOpen()
     {
@@ -111,8 +114,9 @@ private slots:
         ZzTerminalView view;
         QSignalSpy spy(&view, &ZzTerminalView::errorOccurred);
         view.enableScrollback(QStringLiteral("test-degrade-open"));
-        QCOMPARE(spy.count(), 1);
-        QVERIFY(spy.first().at(0).toString().contains(QStringLiteral("降级")));
+        QCOMPARE(spy.count(), 2); // 冷层降级 + 温层降级各一条
+        QVERIFY(spy.at(0).at(0).toString().contains(QStringLiteral("温层模式")));
+        QVERIFY(spy.at(1).at(0).toString().contains(QStringLiteral("内存模式")));
 
         // 恢复写权限，避免影响同进程后续用例
         QVERIFY(QFile::setPermissions(

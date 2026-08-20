@@ -3,7 +3,6 @@
 #include <atomic>
 
 #include <QtCore/QDir>
-#include <QtCore/QFile>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QStringConverter>
 #include <QtWidgets/QHBoxLayout>
@@ -173,7 +172,7 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
     }
     // 温层文件落在应用配置目录下按会话 ID 区分（QUuid 字符串，文件名安全）。
     // 同一 profile 可同时开多个标签（sessionId 相同），必须追加每标签唯一后缀，
-    // 否则后开标签的 QFile::remove 会截断先开标签正在使用的温层文件
+    // 否则后开标签与先开标签共用同一温层文件路径，互相干扰
     static std::atomic<int> s_warmSequence = 0;
     const QString dirPath =
         QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
@@ -183,17 +182,25 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
                              + QLatin1Char('-')
                              + QString::number(s_warmSequence.fetch_add(1))
                              + QStringLiteral(".warm");
-    // 新会话显示层历史基线恒从 0 起（QTermWidget 侧绝对行号口径），温层必须同步
-    // 从空开始；否则跨重启恢复的引擎行号会让读回命中上一会话的行（错行）
-    QFile::remove(warmPath);
+    // 温层残留文件不再由本层预删：冷层模式下引擎 open() 会按文件头游标完成
+    // 崩溃恢复续传后删除残留并创建全新空温层；冷层不可用时引擎降级为温层模式
+    // 并自行删除残留全新开始（与 v0.1 行为一致，新会话显示层行号仍从 0 起）
     ZzLogEngine::Config config;
     config.warmFilePath = warmPath;
+    config.coldDbPath = dirPath + QStringLiteral("/cold.db"); // 全局单库：所有会话共享
+    config.sessionId = sessionId;                             // 会话 profile id（冷层行归属）
     auto *engine = new ZzLogEngine(config, this);
     m_scrollbackBridge = new ZzScrollbackBridge(m_term, engine, this);
     // 降级 → 状态栏提示（经 errorOccurred 同一路径到 ZzTabManager::statusMessage）
     connect(m_scrollbackBridge, &ZzScrollbackBridge::degraded, this,
             [this](const QString &reason) {
                 emit errorOccurred(QStringLiteral("滚动历史已降级为内存模式：%1")
+                                       .arg(reason));
+            });
+    // 冷层降级 → 状态栏提示（与温层降级同一路径，不打断终端）
+    connect(engine, &ZzLogEngine::degradedToWarmOnly, this,
+            [this](const QString &reason) {
+                emit errorOccurred(QStringLiteral("滚动历史已降级为温层模式：%1")
                                        .arg(reason));
             });
     // open 必须最后调用：温层打开失败时它会同步发射 degradedToMemoryOnly，
