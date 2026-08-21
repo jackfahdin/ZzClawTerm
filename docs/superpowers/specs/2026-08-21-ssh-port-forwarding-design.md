@@ -57,9 +57,9 @@ ZzSessionEditDialog      [改] 加"端口转发"规则表（QTableWidget + 增�
 
 **动态（-D）**：本地 SOCKS5 服务（入口同 -L），RFC1928 无认证子集：握手 → 解析目标 → direct-tcpip → 与 -L 相同的数据泵。`ZzSocks5Handshake` 解析器独立纯函数式小类。
 
-**统一组件 `ZzSocketChannelPump`**：一个 QTcpSocket 与一个 channel 之间的双向搬运工（readyRead→写 channel 节流；channel 数据→写 socket 带背压）。三种转发复用同一泵，只有入口与 channel 打开方式不同。
+**统一组件 `ZzSocketChannelPump`**：一个 QTcpSocket 与一个 channel 之间的双向搬运工（readyRead→写 channel：worker 写队列拥塞时以拥塞标志位暂停消费 socket，数据留在 socket 缓冲由 TCP 窗口自然节流；channel 数据→写 socket 带背压）。三种转发复用同一泵，只有入口与 channel 打开方式不同。
 
-**背压与上限**：单连接 socket 写缓冲水位 1MB（超限暂停对端读取）；单隧道最大并发连接 256；监听绑定失败只影响该规则。
+**背压与上限**：单连接 socket 写缓冲水位 1MB（超限经 `setReadPaused` 暂停 channel 侧读取，降到 512KB 恢复水位以下恢复）；反方向 worker 写队列拥塞时以拥塞标志位停读 socket（`QIODevice::setReadEnabled` 为 protected 不可用，"不消费即节流"与其等价）；单隧道最大并发连接 256；监听绑定失败只影响该规则。
 
 ## 五、配置格式
 
