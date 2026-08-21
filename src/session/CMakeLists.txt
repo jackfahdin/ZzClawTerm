@@ -11,6 +11,8 @@ add_library(ZzSessionCore STATIC
     ZzSessionModel.h
     ZzCredentialStore.cpp
     ZzCredentialStore.h
+    ZzForwardRule.cpp
+    ZzForwardRule.h
 )
 target_compile_features(ZzSessionCore PUBLIC cxx_std_20)
 target_link_libraries(ZzSessionCore PUBLIC Qt6::Core PRIVATE OpenSSL::Crypto)
