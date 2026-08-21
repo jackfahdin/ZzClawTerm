@@ -89,3 +89,18 @@ void ZzAppSettings::setHistoryLines(int lines)
     m_settings->setValue(QStringLiteral("terminal/historyLines"), lines);
     emit settingsChanged();
 }
+
+QString ZzAppSettings::credentialBackend() const
+{
+    return m_settings->value(QStringLiteral("credential/backend"),
+                             QStringLiteral("auto")).toString();
+}
+
+void ZzAppSettings::setCredentialBackend(const QString &backend)
+{
+    if (credentialBackend() == backend) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("credential/backend"), backend);
+    emit settingsChanged();
+}

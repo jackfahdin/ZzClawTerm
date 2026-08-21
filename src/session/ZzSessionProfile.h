@@ -36,6 +36,8 @@ struct ZzSessionProfile {
     ZzAuthMethod authMethod = ZzAuthMethod::Agent; ///< 认证方式
     QString privateKeyPath;         ///< 私钥文件路径（authMethod == PrivateKey 时有效）
     QUuid credentialId;             ///< 密码引用（authMethod == Password 时有效；null 表示无）
+    QUuid keyPassphraseCredentialId; ///< 私钥口令引用（authMethod == PrivateKey 且私钥有口令时有效；
+                                    ///< 口令密文存于凭据后端，不落 profile；null 表示无口令）
     QString terminalType;           ///< 终端类型（TERM），空串表示跟随全局设置（ZzAppSettings::terminalType）
     QString encoding = QStringLiteral("UTF-8");              ///< 字符编码
     QString colorSchemeName;        ///< 配色方案名，空串表示使用全局默认

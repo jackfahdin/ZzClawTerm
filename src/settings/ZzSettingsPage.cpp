@@ -50,6 +50,22 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     m_historyLinesSpin->setValue(m_settings->historyLines());
     layout->addRow(QStringLiteral("内存历史行数："), m_historyLinesSpin);
 
+    // 凭据后端：auto（密钥环可用则用，否则 AES 文件）/ aes-file / system-keyring
+    m_credentialBackendCombo = new QComboBox(this);
+    m_credentialBackendCombo->addItem(QStringLiteral("自动（优先系统密钥环）"),
+                                      QStringLiteral("auto"));
+    m_credentialBackendCombo->addItem(QStringLiteral("AES 加密文件"),
+                                      QStringLiteral("aes-file"));
+    m_credentialBackendCombo->addItem(QStringLiteral("系统密钥环"),
+                                      QStringLiteral("system-keyring"));
+    const int backendIndex =
+        m_credentialBackendCombo->findData(m_settings->credentialBackend());
+    m_credentialBackendCombo->setCurrentIndex(backendIndex >= 0 ? backendIndex : 0);
+    m_credentialBackendCombo->setToolTip(
+        QStringLiteral("凭据库在应用启动时构造，本项改动重启后生效。\n"
+                       "切换到系统密钥环不会自动迁移旧 AES 文件中的凭据（旧文件保留不删）。"));
+    layout->addRow(QStringLiteral("凭据后端："), m_credentialBackendCombo);
+
     auto *note = new QLabel(
         QStringLiteral("改动立即生效：新标签使用新值，已打开标签实时应用字号/配色/编码。"),
         this);
@@ -74,6 +90,10 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
             m_settings, &ZzAppSettings::setColorScheme);
     connect(m_historyLinesSpin, &QSpinBox::valueChanged,
             m_settings, &ZzAppSettings::setHistoryLines);
+    connect(m_credentialBackendCombo, &QComboBox::activated, this, [this](int index) {
+        m_settings->setCredentialBackend(
+            m_credentialBackendCombo->itemData(index).toString());
+    });
 }
 
 QComboBox *ZzSettingsPage::terminalTypeCombo() const { return m_terminalTypeCombo; }
@@ -81,3 +101,4 @@ QComboBox *ZzSettingsPage::encodingCombo() const { return m_encodingCombo; }
 QSpinBox *ZzSettingsPage::fontSizeSpin() const { return m_fontSizeSpin; }
 QComboBox *ZzSettingsPage::colorSchemeCombo() const { return m_colorSchemeCombo; }
 QSpinBox *ZzSettingsPage::historyLinesSpin() const { return m_historyLinesSpin; }
+QComboBox *ZzSettingsPage::credentialBackendCombo() const { return m_credentialBackendCombo; }

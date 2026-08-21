@@ -2,6 +2,8 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QJsonDocument>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTableWidget>
@@ -144,6 +146,86 @@ private slots:
         table->selectRow(0);
         removeBtn->click();
         QCOMPARE(table->rowCount(), 0);
+    }
+
+    /** @brief 公钥认证 + 私钥口令：accept 后口令写入凭据库，profile 仅留引用。 */
+    void privateKeyPassphraseSavedToStore()
+    {
+        auto store = makeStore();
+        QVERIFY(store->initialize(QStringLiteral("pw")));
+
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("密钥机");
+        profile.host = QStringLiteral("10.0.0.2");
+        profile.authMethod = ZzAuthMethod::PrivateKey;
+        profile.privateKeyPath = QStringLiteral("/home/u/.ssh/id_ed25519");
+        ZzSessionEditDialog dlg(store.get(), profile);
+        auto *passEdit = dlg.findChild<QLineEdit *>(QStringLiteral("keyPassphraseEdit"));
+        QVERIFY(passEdit);
+        passEdit->setText(QStringLiteral("pass-口令"));
+
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        const QUuid passphraseId = dlg.profile().keyPassphraseCredentialId;
+        QVERIFY(!passphraseId.isNull());
+        // 口令密文入凭据库，可按引用取回
+        QCOMPARE(store->credential(passphraseId).value(), QStringLiteral("pass-口令"));
+        // profile 序列化不含口令明文（仅有 id 引用）
+        QVERIFY(!QString::fromUtf8(QJsonDocument(dlg.profile().toJson()).toJson())
+                     .contains(QStringLiteral("pass-口令")));
+    }
+
+    /** @brief 已有口令引用且未输入新口令：accept 保留原引用。 */
+    void emptyPassphraseKeepsOriginalReference()
+    {
+        auto store = makeStore();
+        QVERIFY(store->initialize(QStringLiteral("pw")));
+
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("密钥机");
+        profile.host = QStringLiteral("10.0.0.2");
+        profile.authMethod = ZzAuthMethod::PrivateKey;
+        profile.privateKeyPath = QStringLiteral("/home/u/.ssh/id_ed25519");
+        profile.keyPassphraseCredentialId =
+            store->addCredential(QStringLiteral("密钥机 私钥口令"), QStringLiteral("old-pass"));
+        QVERIFY(!profile.keyPassphraseCredentialId.isNull());
+
+        ZzSessionEditDialog dlg(store.get(), profile);
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        QCOMPARE(dlg.profile().keyPassphraseCredentialId, profile.keyPassphraseCredentialId);
+    }
+
+    /** @brief 密码认证下私钥口令引用被清空，旧口令凭据一并删除（不留孤儿条目）。 */
+    void passwordAuthClearsKeyPassphraseReference()
+    {
+        auto store = makeStore();
+        QVERIFY(store->initialize(QStringLiteral("pw")));
+
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("密钥机");
+        profile.host = QStringLiteral("10.0.0.2");
+        profile.authMethod = ZzAuthMethod::PrivateKey;
+        profile.privateKeyPath = QStringLiteral("/home/u/.ssh/id_ed25519");
+        profile.keyPassphraseCredentialId =
+            store->addCredential(QStringLiteral("密钥机 私钥口令"), QStringLiteral("old-pass"));
+
+        ZzSessionEditDialog dlg(store.get(), profile);
+        auto *authCombo = dlg.findChild<QComboBox *>(QStringLiteral("authCombo"));
+        QVERIFY(authCombo);
+        authCombo->setCurrentIndex(
+            authCombo->findData(static_cast<int>(ZzAuthMethod::Password)));
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        QVERIFY(dlg.profile().keyPassphraseCredentialId.isNull());
+        // 旧口令凭据已从凭据库删除
+        QVERIFY(!store->credential(profile.keyPassphraseCredentialId).has_value());
     }
 };
 

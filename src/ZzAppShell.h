@@ -16,6 +16,7 @@ class QWidget;
 class ZzCredentialStore;
 class ZzSessionModel;
 class ZzSessionPanel;
+class ZzSftpPanel;
 class ZzTabManager;
 
 /**
@@ -56,6 +57,7 @@ public:
 
     // ---- 测试观察口 ----
     [[nodiscard]] ZzSessionPanel *sessionPanel() const;
+    [[nodiscard]] ZzSftpPanel *sftpPanel() const;
     [[nodiscard]] ZzTabManager *tabManager() const;
     [[nodiscard]] ZzSessionModel *sessionModel() const;
     [[nodiscard]] ZzCredentialStore *credentialStore() const;
@@ -76,6 +78,7 @@ private:
     ZzSessionModel *m_sessionModel = nullptr;      ///< this 为父
     ZzCredentialStore *m_credentialStore = nullptr; ///< this 为父
     QPointer<ZzSessionPanel> m_sessionPanel;       ///< 窗口拥有
+    QPointer<ZzSftpPanel> m_sftpPanel;             ///< 窗口拥有
     QPointer<ZzTabManager> m_tabManager;           ///< pageParent 拥有
     QPointer<QLabel> m_stateLabel;
     QPointer<QLabel> m_encodingLabel;

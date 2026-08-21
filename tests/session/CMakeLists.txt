@@ -12,6 +12,7 @@ endfunction()
 zz_session_add_test(ZzSessionProfileTest)
 zz_session_add_test(ZzSessionModelTest)
 zz_session_add_test(ZzCredentialStoreTest)
+zz_session_add_test(ZzKeyringCredentialBackendTest)
 zz_session_add_test(ZzForwardRuleTest)
 
 # 规格 9.1：性能记录统一经 ZzPerfRecorder（ZzPerfInfra）；Release 数字才有效

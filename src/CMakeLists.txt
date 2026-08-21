@@ -18,6 +18,11 @@ set(ZZCLAWTERM_APP_SOURCES
     panel/ZzPanelRegistry.cpp
     panel/ZzSessionPanel.h
     panel/ZzSessionPanel.cpp
+    panel/ZzSftpOps.h
+    panel/ZzSftpSessionOps.h
+    panel/ZzSftpSessionOps.cpp
+    panel/ZzSftpPanel.h
+    panel/ZzSftpPanel.cpp
     panel/ZzSessionEditDialog.h
     panel/ZzSessionEditDialog.cpp
     settings/ZzAppSettings.h
@@ -30,6 +35,8 @@ set(ZZCLAWTERM_APP_SOURCES
     terminal/ZzScrollbackBridge.cpp
     tab/ZzTabManager.h
     tab/ZzTabManager.cpp
+    tab/ZzSplitContainer.h
+    tab/ZzSplitContainer.cpp
     dialog/ZzHostKeyDialog.h
     dialog/ZzHostKeyDialog.cpp
     dialog/ZzMasterPasswordDialog.h

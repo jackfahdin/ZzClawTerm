@@ -20,7 +20,13 @@
   失败瞬时提示），规则在会话编辑对话框的端口转发规则表中维护
 - 本地 shell 会话（本地 PTY 传输，验证终端层与协议层解耦）
 - 会话管理：保存、树形分组、编辑、删除、双击连接（ZzSessionModel + ZzSessionPanel）
-- 凭据存储：AES-256-GCM 加密 + 主密码（PBKDF2-HMAC-SHA256 60 万次迭代派生密钥，GCM tag 提供完整性认证）
+- 凭据存储：AES-256-GCM 加密 + 主密码（PBKDF2-HMAC-SHA256 60 万次迭代派生密钥，GCM tag 提供完整性认证）；
+  可选系统密钥环后端（Linux libsecret 已实测，Windows Credential Manager / macOS Keychain 按平台 API 实现），
+  支持 AES 文件到密钥环的迁移
+- 终端分屏：标签内水平 / 垂直分屏（ZzSplitContainer），Ctrl+Shift+E/O 分屏、Ctrl+Shift+W 关窗格、
+  Ctrl+Shift+方向键移焦点；多窗格断线重连覆盖全部断线窗格
+- SFTP 侧边栏面板（ZzSftpPanel）：远程目录浏览、上传 / 下载（多选）、新建目录 / 删除 / 重命名，
+  传输队列带进度与取消；库侧流水线传输实测上下行均超过系统 OpenSSH sftp
 - 主机密钥验证（known_hosts 风格确认对话框）
 - 三层滚动历史日志引擎（ZzLogEngine）：
   - 热层：内存环形缓冲
@@ -35,7 +41,7 @@
 
 | 里程碑 | 内容 |
 | ------ | ---- |
-| v0.2 | SFTP 侧边栏面板、终端分屏、系统密钥环凭据后端 |
+| v0.2（已完成） | SFTP 侧边栏面板、终端分屏、系统密钥环凭据后端 |
 | v0.3 | X11 forwarding 三端统一体验（Windows 魔改 vcxsrv，Linux/macOS 用系统 X server） |
 | v0.4+ | 插件动态加载框架、串口、Telnet、宏 / 批量执行 |
 
@@ -53,7 +59,7 @@
 本仓库只做装配：复用 ZzTermWidget（终端）、ZzPureToolsPro（框架）、ZzSshCore（SSH）三大件，自身承载会话模型、凭据存储、日志引擎与 Dock UI 胶水层。可扩展点走注册接口：
 
 - `ZzTransportInterface`：传输协议抽象（SSH / 本地 PTY 已实现，未来协议走同一注册路径）
-- `ZzPanelInterface`：Dock 面板抽象（会话面板、未来的 SFTP 面板）
+- `ZzPanelInterface`：Dock 面板抽象（会话面板、SFTP 面板）
 
 ```text
 src/

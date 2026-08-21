@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 
 #include "ZzCredentialStore.h"
+#include "ZzKeyringCredentialBackend.h"
 #include "ZzPerfRecorder.h"
 
 namespace {
@@ -101,6 +102,53 @@ private slots:
             QStringLiteral("ms"),
             {{QStringLiteral("credentialCount"), kCredentialCount}});
         QVERIFY2(passed, qPrintable(QStringLiteral("加解密往返耗时 %1ms 超过阈值 %2ms")
+                                        .arg(elapsed)
+                                        .arg(kRoundTripThresholdMs)));
+    }
+
+    /**
+     * @brief 系统密钥环后端往返耗时记录（无硬门控：密钥环走 IPC，耗时取决于系统服务）。
+     *
+     * 密钥环不可用时跳过；记录名为 credential-keyring-roundtrip。
+     * 阈值设得宽松（100 条 3000ms），主要用于观测回归而非强制约束。
+     */
+    void keyringRoundTripPerformance()
+    {
+        if (!ZzPerfRecorder::gatingEnabled())
+            QSKIP("性能数字仅 Release 构建有效（规格 9.1），当前构建跳过阈值判定");
+        if (!ZzKeyringCredentialBackend::probeAvailability())
+            QSKIP("系统密钥环不可用（无 Secret Service 守护进程），跳过密钥环性能记录");
+
+        constexpr int kKeyringCredentialCount = 100;
+        const QString secret = QStringLiteral("perf-keyring-secret-0123456789-中文填充数据");
+
+        QList<QUuid> ids;
+        ids.reserve(kKeyringCredentialCount);
+        QElapsedTimer timer;
+        timer.start();
+        {
+            ZzKeyringCredentialBackend backend;
+            QVERIFY(backend.unlock(QString()));
+            for (int i = 0; i < kKeyringCredentialCount; ++i) {
+                const QUuid id = backend.addCredential(
+                    QStringLiteral("perf-cred-%1").arg(i), secret);
+                QVERIFY2(!id.isNull(), qPrintable(backend.errorString()));
+                ids.append(id);
+            }
+            for (const QUuid &id : ids)
+                QCOMPARE(backend.credential(id).value(), secret);
+            // 清理：不把性能数据留在用户密钥环
+            for (const QUuid &id : ids)
+                QVERIFY(backend.removeCredential(id));
+        }
+        const qint64 elapsed = timer.elapsed();
+        const bool passed = ZzPerfRecorder::recordAndCheck(
+            QStringLiteral("credential-keyring-roundtrip"),
+            QStringLiteral("系统密钥环 100 条凭据写入 + 读取 + 删除总耗时"),
+            double(kRoundTripThresholdMs), double(elapsed),
+            QStringLiteral("ms"),
+            {{QStringLiteral("credentialCount"), kKeyringCredentialCount}});
+        QVERIFY2(passed, qPrintable(QStringLiteral("密钥环往返耗时 %1ms 超过阈值 %2ms")
                                         .arg(elapsed)
                                         .arg(kRoundTripThresholdMs)));
     }

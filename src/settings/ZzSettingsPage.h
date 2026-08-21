@@ -24,6 +24,7 @@ public:
     [[nodiscard]] QSpinBox *fontSizeSpin() const;
     [[nodiscard]] QComboBox *colorSchemeCombo() const;
     [[nodiscard]] QSpinBox *historyLinesSpin() const;
+    [[nodiscard]] QComboBox *credentialBackendCombo() const;
 
 private:
     ZzAppSettings *m_settings;
@@ -32,4 +33,5 @@ private:
     QSpinBox *m_fontSizeSpin;
     QComboBox *m_colorSchemeCombo;
     QSpinBox *m_historyLinesSpin;
+    QComboBox *m_credentialBackendCombo;
 };

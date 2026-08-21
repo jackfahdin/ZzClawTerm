@@ -1,0 +1,23 @@
+{
+    "details": {
+        "chunkBytes": 1024,
+        "chunksPerPane": 100,
+        "panes": 4
+    },
+    "environment": {
+        "buildType": "Release",
+        "compiler": "GNU 15.2.0",
+        "cpu": "x86_64",
+        "gitCommit": "22e4c82",
+        "kernel": "7.0.0-29-generic",
+        "memory_mb": 31194,
+        "os": "Ubuntu 26.04 LTS",
+        "qtVersion": "6.11.1"
+    },
+    "measured": 69,
+    "passed": true,
+    "testName": "分屏 4 窗格渲染并关闭",
+    "threshold": 2000,
+    "timestamp": "2026-08-21T09:13:40Z",
+    "unit": "ms"
+}

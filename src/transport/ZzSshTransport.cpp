@@ -9,6 +9,9 @@
 #include "ZzSshTunnelHandle.h"
 #include "ZzTunnelManager.h"
 
+ZzSshTransportAdapter::ZzKeyPassphraseResolver
+    ZzSshTransportAdapter::s_keyPassphraseResolver;
+
 ZzSshTransportAdapter::ZzSshTransportAdapter(QObject *parent)
     : ZzTransportInterface(parent)
 {
@@ -27,6 +30,11 @@ void ZzSshTransportAdapter::setPasswordProvider(ZzPasswordProvider provider)
 void ZzSshTransportAdapter::setHostKeyConfirmer(ZzHostKeyConfirmer confirmer)
 {
     m_hostKeyConfirmer = std::move(confirmer);
+}
+
+void ZzSshTransportAdapter::setKeyPassphraseResolver(ZzKeyPassphraseResolver resolver)
+{
+    s_keyPassphraseResolver = std::move(resolver);
 }
 
 void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
@@ -54,6 +62,11 @@ void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
     if (!endpoint.keyPath.isEmpty()) {
         ZzSshAuthConfig auth;
         auth.privateKeyPath = endpoint.keyPath;
+        // 私钥口令：经进程级解析器从凭据后端取（口令存凭据库，不落明文 profile）；
+        // 空解析器或返回空串均视为私钥无口令（ZzSshAuthConfig 契约：无口令留空）
+        if (s_keyPassphraseResolver) {
+            auth.passphrase = s_keyPassphraseResolver(endpoint);
+        }
         m_conn->setAuthConfig(auth);
     }
     m_conn->connectToHost(endpoint.host, endpoint.port, endpoint.user);

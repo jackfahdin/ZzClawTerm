@@ -59,6 +59,11 @@ bool ZzMasterPasswordDialog::ensureUnlocked(ZzCredentialStore *store,
     if (store->isUnlocked()) {
         return true;
     }
+    // 系统密钥环等无主密码后端：由 OS 托管解锁，不弹主密码框
+    if (!store->requiresMasterPassword()) {
+        return store->hasMasterPassword() ? store->unlock(QString())
+                                          : store->initialize(QString());
+    }
     ZzMasterPasswordDialog dialog(store, parent);
     return dialog.exec() == QDialog::Accepted;
 }

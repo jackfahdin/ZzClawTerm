@@ -41,6 +41,14 @@ public:
     [[nodiscard]] int historyLines() const;
     void setHistoryLines(int lines);
 
+    /**
+     * @brief 凭据后端模式："auto"（默认，密钥环可用则用，否则 AES 文件）/
+     *        "aes-file"（AES-256-GCM 加密文件）/ "system-keyring"（系统密钥环）。
+     * @note 凭据库在应用启动时构造，本项改动重启后生效。
+     */
+    [[nodiscard]] QString credentialBackend() const;
+    void setCredentialBackend(const QString &backend);
+
 signals:
     /** @brief 任一字段变更后发射；UI 层收到后实时应用到已打开标签。 */
     void settingsChanged();

@@ -129,6 +129,129 @@ private slots:
         tabs.openSession(makeProfile(QStringLiteral("状态栏")));
         QTRY_VERIFY(stateSpy.count() >= 2); // Connecting + Connected
     }
+
+    void splitOpensNewPaneWithSameProfile()
+    {
+        ZzTabManager tabs;
+        tabs.openSession(makeProfile(QStringLiteral("分屏机")));
+        QCOMPARE(tabs.count(), 1);
+        QCOMPARE(tabs.paneCountAt(0), 1);
+        auto *first = tabs.viewAt(0);
+        QTRY_COMPARE(first->transportState(), ZzTransportInterface::State::Connected);
+
+        tabs.splitCurrentTab(Qt::Horizontal);
+        QCOMPARE(tabs.paneCountAt(0), 2);
+        // 新窗格成为焦点窗格，viewAt 随之切换
+        auto *second = tabs.viewAt(0);
+        QVERIFY(second != nullptr);
+        QVERIFY(second != first);
+        // 同一 profile 开新会话：独立的全新传输实例
+        QVERIFY(second->transport() != first->transport());
+        QTRY_COMPARE(second->transportState(), ZzTransportInterface::State::Connected);
+        QCOMPARE(tabs.tabText(0), QStringLiteral("分屏机"));
+    }
+
+    void closePaneKeepsTabUntilLastPane()
+    {
+        ZzTabManager tabs;
+        tabs.openSession(makeProfile(QStringLiteral("关窗格")));
+        auto *first = tabs.viewAt(0);
+        tabs.splitCurrentTab(Qt::Vertical);
+        QCOMPARE(tabs.paneCountAt(0), 2);
+
+        tabs.closeCurrentPane(); // 关掉焦点窗格（新分出的）
+        QCOMPARE(tabs.count(), 1);       // 标签保留
+        QCOMPARE(tabs.paneCountAt(0), 1);
+        QCOMPARE(tabs.viewAt(0), first); // 焦点回落到剩余窗格
+
+        tabs.closeCurrentPane(); // 最后窗格关闭 → 整标签关闭
+        QCOMPARE(tabs.count(), 0);
+    }
+
+    void splitShortcutsDriveSplitCloseAndFocus()
+    {
+        ZzTabManager tabs;
+        tabs.resize(800, 400);
+        tabs.openSession(makeProfile(QStringLiteral("快捷键")));
+        auto *first = tabs.viewAt(0);
+        tabs.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&tabs));
+        first->setFocus();
+        QTRY_VERIFY(QApplication::focusWidget() != nullptr);
+        QTest::qWait(50);
+
+        // Ctrl+Shift+E：左右分屏
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_E,
+                        Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_COMPARE(tabs.paneCountAt(0), 2);
+
+        // Ctrl+Shift+Left：焦点回到左窗格
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Left,
+                        Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_COMPARE(tabs.viewAt(0), first);
+
+        // Ctrl+Shift+W：关闭焦点窗格，标签保留
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_W,
+                        Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_COMPARE(tabs.paneCountAt(0), 1);
+        QCOMPARE(tabs.count(), 1);
+    }
+
+    void nonFocusedPaneDisconnectGreysTab()
+    {
+        ZzTabManager tabs;
+        tabs.openSession(makeProfile(QStringLiteral("非焦点断线")));
+        tabs.splitCurrentTab(Qt::Horizontal);
+        const auto panes = tabs.viewsAt(0);
+        QCOMPARE(panes.size(), 2);
+        // 焦点在新窗格 panes[1]；等两窗格都连通后断开非焦点窗格 panes[0]
+        for (ZzTerminalView *pane : panes) {
+            QTRY_COMPARE(pane->transportState(),
+                         ZzTransportInterface::State::Connected);
+        }
+        auto *mock = static_cast<ZzMockTransport *>(panes.at(0)->transport());
+        mock->simulateDisconnect(QStringLiteral("网络中断"));
+
+        QCOMPARE(tabs.count(), 1); // 不自动关标签
+        QCOMPARE(tabs.tabBar()->tabTextColor(0), QColor(Qt::gray));
+        QVERIFY(tabs.isTabDisconnected(0)); // 非焦点窗格断线也判定为断线标签
+    }
+
+    void reconnectTabCoversAllDisconnectedPanes()
+    {
+        ZzTabManager tabs;
+        tabs.openSession(makeProfile(QStringLiteral("多窗格重连")));
+        tabs.splitCurrentTab(Qt::Horizontal);
+        tabs.splitCurrentTab(Qt::Vertical);
+        QCOMPARE(tabs.paneCountAt(0), 3);
+        const auto panes = tabs.viewsAt(0);
+        for (ZzTerminalView *pane : panes) {
+            QTRY_COMPARE(pane->transportState(),
+                         ZzTransportInterface::State::Connected);
+        }
+
+        // 断开两个窗格（含非焦点窗格），第三个保持连通
+        auto *mockA = static_cast<ZzMockTransport *>(panes.at(0)->transport());
+        auto *mockB = static_cast<ZzMockTransport *>(panes.at(1)->transport());
+        auto *keepC = panes.at(2)->transport();
+        mockA->simulateDisconnect(QStringLiteral("掉线A"));
+        mockB->simulateDisconnect(QStringLiteral("掉线B"));
+        QCOMPARE(tabs.tabBar()->tabTextColor(0), QColor(Qt::gray));
+        QVERIFY(tabs.isTabDisconnected(0));
+
+        tabs.reconnectTab(0);
+        // 两个断线窗格都拿到全新传输实例并连通，连通窗格不动
+        QVERIFY(panes.at(0)->transport() != mockA);
+        QVERIFY(panes.at(1)->transport() != mockB);
+        QCOMPARE(panes.at(2)->transport(), keepC);
+        for (ZzTerminalView *pane : panes) {
+            QTRY_COMPARE(pane->transportState(),
+                         ZzTransportInterface::State::Connected);
+        }
+        // 全部窗格重连后恢复非灰色
+        QVERIFY(tabs.tabBar()->tabTextColor(0) != QColor(Qt::gray));
+        QVERIFY(!tabs.isTabDisconnected(0));
+    }
 };
 
 QTEST_MAIN(tst_ZzTabManager)

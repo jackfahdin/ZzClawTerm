@@ -49,6 +49,7 @@ private:
     ZzCredentialStore *m_store;
     ZzSessionProfile m_profile;        ///< 编辑中的工作副本
     QUuid m_originalCredentialId;      ///< 原密码引用（未改密码时保留）
+    QUuid m_originalKeyPassphraseCredentialId; ///< 原私钥口令引用（未改口令时保留）
 
     QLineEdit *m_nameEdit;
     QLineEdit *m_groupEdit;
@@ -60,6 +61,7 @@ private:
     QLineEdit *m_userEdit;
     QComboBox *m_authCombo;            ///< Agent / PrivateKey / Password
     QLineEdit *m_keyPathEdit;
+    QLineEdit *m_keyPassphraseEdit;    ///< 仅输入新私钥口令；留空=保留原引用
     QLineEdit *m_passwordEdit;         ///< 仅输入新密码；留空=保留原引用
     QTableWidget *m_forwardTable = nullptr; ///< 端口转发规则表
 };

@@ -33,6 +33,9 @@ public:
     using ZzHostKeyConfirmer =
         std::function<bool(const QString &host, const QString &fingerprint,
                            const QString &oldFingerprint, bool changed)>;
+    /** @brief 私钥口令解析回调：按连接参数返回私钥口令（空串表示无口令）。 */
+    using ZzKeyPassphraseResolver =
+        std::function<QString(const ZzTransportEndpoint &endpoint)>;
 
     explicit ZzSshTransportAdapter(QObject *parent = nullptr);
     ~ZzSshTransportAdapter() override;
@@ -44,6 +47,25 @@ public:
 
     void setPasswordProvider(ZzPasswordProvider provider);
     void setHostKeyConfirmer(ZzHostKeyConfirmer confirmer);
+
+    /**
+     * @brief 底层 SSH 连接只读访问器（SFTP 面板创建会话用）。
+     * @return 当前连接对象（非拥有，随 open/close 重建）；未 open 时为 nullptr。
+     */
+    [[nodiscard]] ZzSshConnection *sshConnection() const { return m_conn; }
+
+    /**
+     * @brief 进程级安装私钥口令解析器（由组合根 ZzAppShell 装配一次）。
+     *
+     * 传输实例由终端视图深处按需创建，口令引用（ZzSessionProfile::
+     * keyPassphraseCredentialId）不经过 ZzTransportEndpoint 逐层下传，
+     * 而是由解析器按 endpoint（host/port/user/keyPath）反查会话模型后
+     * 从凭据后端取明文。空解析器或返回空串均视为私钥无口令。
+     *
+     * @note 线程契约：解析器仅在 GUI 线程安装、调用与卸载（open() 在 GUI
+     *       线程执行）；ZzAppShell 析构时必须置空，避免悬挂捕获。
+     */
+    static void setKeyPassphraseResolver(ZzKeyPassphraseResolver resolver);
 
 private:
     void wireConnection();
@@ -58,6 +80,7 @@ private:
     ZzTransportEndpoint m_endpoint;
     ZzPasswordProvider m_passwordProvider;
     ZzHostKeyConfirmer m_hostKeyConfirmer;
+    static ZzKeyPassphraseResolver s_keyPassphraseResolver; ///< 进程级私钥口令解析器
     std::unique_ptr<ZzSshTunnelFactory> m_tunnelFactory; ///< 随 m_conn 重建
     ZzTunnelManager *m_tunnelManager = nullptr;          ///< 本对象为父；随 m_conn 重建
     ///< 主动 close 期间压制底层 disconnected/closed 上报（接口契约：主动关闭不报断线）

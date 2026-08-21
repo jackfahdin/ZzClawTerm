@@ -27,6 +27,7 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
     , m_store(store)
     , m_profile(std::move(profile))
     , m_originalCredentialId(m_profile.credentialId)
+    , m_originalKeyPassphraseCredentialId(m_profile.keyPassphraseCredentialId)
 {
     const bool isNew = m_profile.id.isNull();
     setWindowTitle(isNew ? QStringLiteral("新建会话") : QStringLiteral("编辑会话"));
@@ -81,6 +82,7 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
     layout->addRow(QStringLiteral("用户名："), m_userEdit);
 
     m_authCombo = new QComboBox(this);
+    m_authCombo->setObjectName(QStringLiteral("authCombo"));
     m_authCombo->addItem(QStringLiteral("SSH Agent"),
                          static_cast<int>(ZzAuthMethod::Agent));
     m_authCombo->addItem(QStringLiteral("公钥文件"),
@@ -95,6 +97,16 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
     m_keyPathEdit = new QLineEdit(m_profile.privateKeyPath, this);
     m_keyPathEdit->setPlaceholderText(QStringLiteral("私钥路径（公钥认证）"));
     layout->addRow(QStringLiteral("私钥路径："), m_keyPathEdit);
+
+    // 私钥口令：密文存凭据库，profile 只留 keyPassphraseCredentialId 引用
+    m_keyPassphraseEdit = new QLineEdit(this);
+    m_keyPassphraseEdit->setObjectName(QStringLiteral("keyPassphraseEdit"));
+    m_keyPassphraseEdit->setEchoMode(QLineEdit::Password);
+    m_keyPassphraseEdit->setPlaceholderText(
+        m_originalKeyPassphraseCredentialId.isNull()
+            ? QStringLiteral("私钥口令（无口令留空）")
+            : QStringLiteral("留空保留已保存的口令"));
+    layout->addRow(QStringLiteral("私钥口令："), m_keyPassphraseEdit);
 
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setEchoMode(QLineEdit::Password);
@@ -202,12 +214,51 @@ void ZzSessionEditDialog::accept()
                                    "请解锁凭据库后重试，或改用其他认证方式。"));
                 return;
             }
+            // 新凭据落库成功后再删旧凭据，避免孤儿条目；删除失败不阻断保存
+            if (!m_originalCredentialId.isNull()
+                && m_originalCredentialId != credentialId) {
+                m_store->removeCredential(m_originalCredentialId);
+            }
             m_profile.credentialId = credentialId;
         } else {
             m_profile.credentialId = m_originalCredentialId;
         }
     } else {
+        // 切离密码认证：清理旧密码凭据，避免孤儿条目（凭据库锁定时删除失败不阻断保存）
+        if (!m_originalCredentialId.isNull()) {
+            m_store->removeCredential(m_originalCredentialId);
+        }
         m_profile.credentialId = QUuid();
+    }
+
+    // 私钥口令：与密码同策略——输入新口令写凭据库换引用，留空保留原引用
+    if (m_profile.authMethod == ZzAuthMethod::PrivateKey) {
+        if (!m_keyPassphraseEdit->text().isEmpty()) {
+            const QUuid passphraseId = m_store->addCredential(
+                m_profile.name + QStringLiteral(" 私钥口令"),
+                m_keyPassphraseEdit->text());
+            if (passphraseId.isNull()) {
+                // 凭据库锁定/写入失败：不能静默丢口令，拒绝 accept 让用户处理
+                QMessageBox::warning(this, QStringLiteral("私钥口令未保存"),
+                    QStringLiteral("凭据库未解锁，私钥口令未保存。\n"
+                                   "请解锁凭据库后重试，或留空口令。"));
+                return;
+            }
+            // 新口令落库成功后再删旧凭据，避免孤儿条目；删除失败不阻断保存
+            if (!m_originalKeyPassphraseCredentialId.isNull()
+                && m_originalKeyPassphraseCredentialId != passphraseId) {
+                m_store->removeCredential(m_originalKeyPassphraseCredentialId);
+            }
+            m_profile.keyPassphraseCredentialId = passphraseId;
+        } else {
+            m_profile.keyPassphraseCredentialId = m_originalKeyPassphraseCredentialId;
+        }
+    } else {
+        // 切离公钥认证：清理旧口令凭据，避免孤儿条目（凭据库锁定时删除失败不阻断保存）
+        if (!m_originalKeyPassphraseCredentialId.isNull()) {
+            m_store->removeCredential(m_originalKeyPassphraseCredentialId);
+        }
+        m_profile.keyPassphraseCredentialId = QUuid();
     }
 
     QDialog::accept();

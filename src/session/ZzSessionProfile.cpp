@@ -14,6 +14,7 @@ const QString kUserNameKey = QStringLiteral("userName");
 const QString kAuthMethodKey = QStringLiteral("authMethod");
 const QString kPrivateKeyPathKey = QStringLiteral("privateKeyPath");
 const QString kCredentialIdKey = QStringLiteral("credentialId");
+const QString kKeyPassphraseCredentialIdKey = QStringLiteral("keyPassphraseCredentialId");
 const QString kTerminalTypeKey = QStringLiteral("terminalType");
 const QString kEncodingKey = QStringLiteral("encoding");
 const QString kColorSchemeNameKey = QStringLiteral("colorSchemeName");
@@ -60,6 +61,8 @@ QJsonObject ZzSessionProfile::toJson() const
     obj.insert(kAuthMethodKey, authMethodToString(authMethod));
     obj.insert(kPrivateKeyPathKey, privateKeyPath);
     obj.insert(kCredentialIdKey, credentialId.toString(QUuid::WithoutBraces));
+    obj.insert(kKeyPassphraseCredentialIdKey,
+               keyPassphraseCredentialId.toString(QUuid::WithoutBraces));
     obj.insert(kTerminalTypeKey, terminalType);
     obj.insert(kEncodingKey, encoding);
     obj.insert(kColorSchemeNameKey, colorSchemeName);
@@ -84,6 +87,8 @@ ZzSessionProfile ZzSessionProfile::fromJson(const QJsonObject &obj)
     profile.authMethod = authMethodFromString(obj.value(kAuthMethodKey).toString());
     profile.privateKeyPath = obj.value(kPrivateKeyPathKey).toString();
     profile.credentialId = QUuid::fromString(obj.value(kCredentialIdKey).toString());
+    profile.keyPassphraseCredentialId =
+        QUuid::fromString(obj.value(kKeyPassphraseCredentialIdKey).toString());
     profile.terminalType = obj.value(kTerminalTypeKey).toString(profile.terminalType);
     profile.encoding = obj.value(kEncodingKey).toString(profile.encoding);
     profile.colorSchemeName = obj.value(kColorSchemeNameKey).toString();
