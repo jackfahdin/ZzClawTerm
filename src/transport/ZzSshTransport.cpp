@@ -6,6 +6,9 @@
 #include <ZzSshConnection.h>
 #include <ZzSshShellChannel.h>
 
+#include "ZzSshTunnelHandle.h"
+#include "ZzTunnelManager.h"
+
 ZzSshTransportAdapter::ZzSshTransportAdapter(QObject *parent)
     : ZzTransportInterface(parent)
 {
@@ -34,6 +37,7 @@ void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
     // 重试/重连场景：废弃旧连接对象（规格 §4.2 注释：同一连接不可重复 connectToHost）
     if (m_conn) {
         m_suppressDisconnect = true;
+        destroyTunnelManager(); // 隧道先于连接销毁（句柄持有观察连接的隧道）
         m_conn->disconnectFromHost();
         m_conn->deleteLater();
         m_conn = nullptr;
@@ -131,6 +135,8 @@ void ZzSshTransportAdapter::onConnected()
     // openShell 为异步操作：保持 Connecting，待 shellOpened 后迁移 Connected
     m_channel->openShell(m_endpoint.terminalType,
                          m_endpoint.cols, m_endpoint.rows);
+
+    startTunnels(); // 连接已就绪：createTunnel/createForwardListener 均可用
 }
 
 void ZzSshTransportAdapter::write(const QByteArray &data)
@@ -154,10 +160,44 @@ void ZzSshTransportAdapter::close()
         m_channel->closeChannel();
         m_channel = nullptr;
     }
+    destroyTunnelManager();
     if (m_conn) {
         m_conn->disconnectFromHost();
         m_conn->deleteLater();
         m_conn = nullptr;
     }
     setState(State::Disconnected);
+}
+
+void ZzSshTransportAdapter::destroyTunnelManager()
+{
+    if (!m_tunnelManager) {
+        return;
+    }
+    m_tunnelManager->stopAll();
+    m_tunnelManager->deleteLater();
+    m_tunnelManager = nullptr;
+    m_tunnelFactory.reset();
+}
+
+void ZzSshTransportAdapter::startTunnels()
+{
+    if (m_endpoint.portForwards.isEmpty()) {
+        return;
+    }
+    m_tunnelFactory = std::make_unique<ZzSshTunnelFactory>(m_conn);
+    m_tunnelManager = new ZzTunnelManager(m_tunnelFactory.get(),
+                                          m_endpoint.portForwards, this);
+    // 规则级失败 → 状态栏瞬时提示（规格 §六：单规则失败隔离，不动错误横幅）
+    connect(m_tunnelManager, &ZzTunnelManager::ruleFailed, this,
+            [this](const ZzForwardRule &rule, const QString &message) {
+                emit statusNotice(QStringLiteral("转发规则 %1 启动失败：%2")
+                                      .arg(rule.describe(), message));
+            });
+    connect(m_tunnelManager, &ZzTunnelManager::tunnelConnectionError, this,
+            [this](const QString &message) { emit statusNotice(message); });
+    connect(m_tunnelManager, &ZzTunnelManager::tunnelsChanged, this, [this]() {
+        emit tunnelCountChanged(m_tunnelManager ? m_tunnelManager->activeTunnelCount() : 0);
+    });
+    m_tunnelManager->startAll();
 }

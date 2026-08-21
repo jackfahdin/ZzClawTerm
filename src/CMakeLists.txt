@@ -11,6 +11,8 @@ set(ZZCLAWTERM_APP_SOURCES
     transport/ZzTunnelHandle.h
     transport/ZzTunnelManager.h
     transport/ZzTunnelManager.cpp
+    transport/ZzSshTunnelHandle.h
+    transport/ZzSshTunnelHandle.cpp
     panel/ZzPanelInterface.h
     panel/ZzPanelRegistry.h
     panel/ZzPanelRegistry.cpp

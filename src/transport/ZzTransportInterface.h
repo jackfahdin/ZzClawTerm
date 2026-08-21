@@ -54,6 +54,10 @@ signals:
     void errorOccurred(int code, const QString &message);
     /** @brief 被动断开（远端关闭、网络中断、子进程退出）。 */
     void disconnected(const QString &reason);
+    /** @brief 活动隧道数变化（仅支持转发的传输发射；无规则时不发射）。 */
+    void tunnelCountChanged(int count);
+    /** @brief 瞬时提示消息（状态栏展示，不弹窗不横幅；如转发规则失败/单连接错误）。 */
+    void statusNotice(const QString &message);
 
 protected:
     /** @brief 实现类迁移状态并发射 stateChanged。 */

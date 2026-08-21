@@ -1,11 +1,14 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 
 #include "ZzTransportInterface.h"
 
 class ZzSshConnection;
 class ZzSshShellChannel;
+class ZzTunnelManager;
+class ZzSshTunnelFactory;
 
 /**
  * @brief SSH 传输适配器：把 ZzSshConnection/ZzSshShellChannel 包装成
@@ -45,12 +48,18 @@ public:
 private:
     void wireConnection();
     void onConnected();
+    /** @brief 销毁隧道管理器（先 stopAll 释放监听，再 deleteLater）。 */
+    void destroyTunnelManager();
+    /** @brief connected 后按 endpoint.portForwards 创建并启动隧道管理器。 */
+    void startTunnels();
 
     ZzSshConnection *m_conn = nullptr;      ///< 本对象为父，随适配器销毁
     ZzSshShellChannel *m_channel = nullptr; ///< 观察指针，连接断开即失效
     ZzTransportEndpoint m_endpoint;
     ZzPasswordProvider m_passwordProvider;
     ZzHostKeyConfirmer m_hostKeyConfirmer;
+    std::unique_ptr<ZzSshTunnelFactory> m_tunnelFactory; ///< 随 m_conn 重建
+    ZzTunnelManager *m_tunnelManager = nullptr;          ///< 本对象为父；随 m_conn 重建
     ///< 主动 close 期间压制底层 disconnected/closed 上报（接口契约：主动关闭不报断线）
     bool m_suppressDisconnect = false;
 };
