@@ -8,6 +8,9 @@ set(ZZCLAWTERM_APP_SOURCES
     transport/ZzLocalPtyTransport.cpp
     transport/ZzSshTransport.h
     transport/ZzSshTransport.cpp
+    transport/ZzTunnelHandle.h
+    transport/ZzTunnelManager.h
+    transport/ZzTunnelManager.cpp
     panel/ZzPanelInterface.h
     panel/ZzPanelRegistry.h
     panel/ZzPanelRegistry.cpp
