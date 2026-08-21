@@ -55,7 +55,14 @@ public:
     /** @brief 启动全部规则（幂等）。 */
     void startAll();
 
-    /** @brief 停止并销毁全部隧道（幂等；之后可再次 startAll 重建）。 */
+    /**
+     * @brief 停止并销毁全部隧道（幂等；之后可再次 startAll 重建）。
+     * @warning 内部会直接 delete 句柄，因此不得在任何句柄信号
+     *          （listening/failed/connectionError/invalidated）或 manager 自身信号
+     *          （tunnelsChanged/ruleFailed/tunnelConnectionError）的同步调用链内调用，
+     *          否则会销毁正在发射信号的对象。正常调用点为适配器的
+     *          open()/close()/析构路径（重连前确定性释放监听端口）。
+     */
     void stopAll();
 
     /** @brief 当前活动（listening）隧道数。 */
