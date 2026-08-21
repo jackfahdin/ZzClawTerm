@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QVariant>
 
+#include "ZzForwardRule.h"
 #include "ZzSessionProfile.h"
 
 /**
@@ -76,6 +77,29 @@ private slots:
         const QVariant variant = QVariant::fromValue(profile);
         QVERIFY(variant.canConvert<ZzSessionProfile>());
         QVERIFY(variant.value<ZzSessionProfile>() == profile);
+    }
+
+    /** @brief portForwards 字段序列化往返（规格 §五配置格式）。 */
+    void portForwardsRoundTrip()
+    {
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("带隧道");
+        profile.portForwards = {
+            {ZzForwardRule::Type::Local, QStringLiteral("127.0.0.1"), 13306,
+             QStringLiteral("db.internal"), 3306},
+            {ZzForwardRule::Type::Dynamic, QStringLiteral("127.0.0.1"), 1080,
+             QString(), 0},
+        };
+        const ZzSessionProfile restored = ZzSessionProfile::fromJson(profile.toJson());
+        QVERIFY(restored == profile); // operator== 全字段含 portForwards
+    }
+
+    /** @brief 旧版 sessions.json 无 portForwards 字段：默认空列表（version 仍为 1 兼容）。 */
+    void portForwardsDefaultsToEmpty()
+    {
+        const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
+        QVERIFY(profile.portForwards.isEmpty());
     }
 };
 

@@ -4,6 +4,7 @@
 #include "dialog/ZzMasterPasswordDialog.h"
 #include "qtermwidget.h"
 #include "session/ZzCredentialStore.h"
+#include "session/ZzForwardRule.h"
 #include "session/ZzSessionProfile.h"
 #include "tab/ZzTabManager.h"
 #include "terminal/ZzTerminalView.h"
@@ -43,6 +44,10 @@ private slots:
         profile.host = QStringLiteral("10.0.0.1");
         profile.userName = QStringLiteral("deploy");
         profile.keepAliveIntervalSeconds = 30;
+        profile.portForwards = {
+            {ZzForwardRule::Type::Local, QStringLiteral("127.0.0.1"), 13306,
+             QStringLiteral("db.internal"), 3306},
+        };
 
         // 等价于会话面板双击：面板发 connectRequested(profile) → openSession
         tabs.openSession(profile);
@@ -57,6 +62,8 @@ private slots:
         QCOMPARE(mock->lastEndpoint.user, QStringLiteral("deploy"));
         // keepalive 接线：profile 字段必须透传到 endpoint
         QCOMPARE(mock->lastEndpoint.keepaliveIntervalSeconds, 30);
+        // 端口转发规则必须透传到 endpoint（任务 3 规格 §三）
+        QCOMPARE(mock->lastEndpoint.portForwards, profile.portForwards);
 
         // 双向字节流：键盘输入抵达传输，远端输出不崩溃
         emit view->termWidget()->sendData("pwd\n", 4);

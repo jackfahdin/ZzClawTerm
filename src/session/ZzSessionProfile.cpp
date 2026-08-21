@@ -1,5 +1,7 @@
 #include "ZzSessionProfile.h"
 
+#include <QJsonArray>
+
 namespace {
 
 const QString kIdKey = QStringLiteral("id");
@@ -16,6 +18,7 @@ const QString kTerminalTypeKey = QStringLiteral("terminalType");
 const QString kEncodingKey = QStringLiteral("encoding");
 const QString kColorSchemeNameKey = QStringLiteral("colorSchemeName");
 const QString kKeepAliveKey = QStringLiteral("keepAliveIntervalSeconds");
+const QString kPortForwardsKey = QStringLiteral("portForwards");
 
 /**
  * @brief 认证方式转 JSON 字符串。
@@ -61,6 +64,10 @@ QJsonObject ZzSessionProfile::toJson() const
     obj.insert(kEncodingKey, encoding);
     obj.insert(kColorSchemeNameKey, colorSchemeName);
     obj.insert(kKeepAliveKey, keepAliveIntervalSeconds);
+    QJsonArray forwards;
+    for (const ZzForwardRule &rule : portForwards)
+        forwards.append(rule.toJson());
+    obj.insert(kPortForwardsKey, forwards);
     return obj;
 }
 
@@ -81,5 +88,8 @@ ZzSessionProfile ZzSessionProfile::fromJson(const QJsonObject &obj)
     profile.encoding = obj.value(kEncodingKey).toString(profile.encoding);
     profile.colorSchemeName = obj.value(kColorSchemeNameKey).toString();
     profile.keepAliveIntervalSeconds = obj.value(kKeepAliveKey).toInt(profile.keepAliveIntervalSeconds);
+    const QJsonArray forwards = obj.value(kPortForwardsKey).toArray();
+    for (const auto &v : forwards)
+        profile.portForwards.append(ZzForwardRule::fromJson(v.toObject()));
     return profile;
 }

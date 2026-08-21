@@ -4,6 +4,9 @@
 #include <QMetaType>
 #include <QString>
 #include <QUuid>
+#include <QVector>
+
+#include "ZzForwardRule.h"
 
 /**
  * @brief 会话认证方式。
@@ -37,6 +40,7 @@ struct ZzSessionProfile {
     QString encoding = QStringLiteral("UTF-8");              ///< 字符编码
     QString colorSchemeName;        ///< 配色方案名，空串表示使用全局默认
     int keepAliveIntervalSeconds = 0; ///< keepalive 间隔（秒），0 表示禁用
+    QVector<ZzForwardRule> portForwards;  ///< 端口转发规则（规格 §五；空=不启用转发）
 
     /**
      * @brief 序列化为 JSON 对象。

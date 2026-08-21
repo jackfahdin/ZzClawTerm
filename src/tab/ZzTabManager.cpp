@@ -188,6 +188,10 @@ ZzTransportEndpoint ZzTabManager::endpointFor(const ZzSessionProfile &profile) c
         // 契约约定：local 会话的 shell 程序路径存于 host 字段（可空=系统默认）
         endpoint.shellProgram = profile.host;
     }
+    // 端口转发仅 SSH 会话有效；local 会话保持空列表（契约：localShell 时为空）
+    if (!endpoint.localShell) {
+        endpoint.portForwards = profile.portForwards;
+    }
     // 初始行列以视图当前尺寸为准，open 后由 termSizeChange 信号持续同步
     auto *view = qobject_cast<ZzTerminalView *>(currentWidget());
     endpoint.cols = view ? view->termWidget()->screenColumnsCount() : 80;
