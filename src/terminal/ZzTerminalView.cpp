@@ -95,6 +95,10 @@ void ZzTerminalView::setTransport(ZzTransportInterface *transport)
             });
     connect(m_transport, &ZzTransportInterface::disconnected, this,
             [this](const QString &reason) { emit disconnected(reason); });
+    connect(m_transport, &ZzTransportInterface::tunnelCountChanged, this,
+            &ZzTerminalView::tunnelCountChanged);
+    connect(m_transport, &ZzTransportInterface::statusNotice, this,
+            &ZzTerminalView::statusNotice);
 }
 
 ZzTransportInterface *ZzTerminalView::transport() const

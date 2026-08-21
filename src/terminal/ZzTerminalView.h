@@ -72,6 +72,10 @@ signals:
     void errorOccurred(const QString &message);
     /** @brief 被动断开透传。 */
     void disconnected(const QString &reason);
+    /** @brief 活动隧道数透传（ZzTabManager 据此刷新状态栏第四要素）。 */
+    void tunnelCountChanged(int count);
+    /** @brief 瞬时提示透传（转发规则失败等；不触发错误横幅）。 */
+    void statusNotice(const QString &message);
 
 private:
     void showErrorBanner(const QString &message);

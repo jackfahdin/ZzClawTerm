@@ -32,6 +32,7 @@ ZzTabManager::ZzTabManager(QWidget *parent)
         emit currentEncodingChanged(view->encoding());
         emit currentSizeChanged(view->termWidget()->screenColumnsCount(),
                                 view->termWidget()->screenLinesCount());
+        emit currentTunnelCountChanged(m_tabTunnelCounts.value(view, 0));
     });
 }
 
@@ -84,6 +85,7 @@ void ZzTabManager::closeTab(int index)
         view->transport()->close();
     }
     m_tabProfiles.remove(view);
+    m_tabTunnelCounts.remove(view);
     removeTab(index);
     view->deleteLater();
 }
@@ -231,6 +233,15 @@ void ZzTabManager::wireView(int index, ZzTerminalView *view)
                 }
             });
     connect(view, &ZzTerminalView::errorOccurred, this,
+            [this](const QString &message) { emit statusMessage(message); });
+    connect(view, &ZzTerminalView::tunnelCountChanged, this,
+            [this, view](int count) {
+                m_tabTunnelCounts.insert(view, count);
+                if (indexOf(view) == currentIndex()) {
+                    emit currentTunnelCountChanged(count);
+                }
+            });
+    connect(view, &ZzTerminalView::statusNotice, this,
             [this](const QString &message) { emit statusMessage(message); });
 }
 

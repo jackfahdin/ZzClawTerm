@@ -62,6 +62,8 @@ signals:
     void currentSizeChanged(int cols, int rows);
     /** @brief 需要状态栏展示的瞬时消息（错误处理走状态栏，规格 §八）。 */
     void statusMessage(const QString &message);
+    /** @brief 当前标签活动隧道数变化（状态栏第四要素）。 */
+    void currentTunnelCountChanged(int count);
 
 private slots:
     void showTabContextMenu(const QPoint &pos);
@@ -73,6 +75,7 @@ private:
     void markTabDisconnected(int index, const QString &reason);
 
     QHash<ZzTerminalView *, ZzSessionProfile> m_tabProfiles;
+    QHash<ZzTerminalView *, int> m_tabTunnelCounts; ///< 每标签活动隧道数
     ZzPasswordProvider m_passwordProvider;
     ZzHostKeyConfirmer m_hostKeyConfirmer;
 };

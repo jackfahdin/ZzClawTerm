@@ -62,6 +62,7 @@ public:
     [[nodiscard]] QLabel *statusStateLabel() const;
     [[nodiscard]] QLabel *statusEncodingLabel() const;
     [[nodiscard]] QLabel *statusSizeLabel() const;
+    [[nodiscard]] QLabel *statusTunnelLabel() const;
 
 public slots:
     /** @brief 状态栏瞬时提示（5 秒自动消退，规格 §八错误不弹窗）。 */
@@ -79,5 +80,6 @@ private:
     QPointer<QLabel> m_stateLabel;
     QPointer<QLabel> m_encodingLabel;
     QPointer<QLabel> m_sizeLabel;
+    QPointer<QLabel> m_tunnelLabel;
     QPointer<QStatusBar> m_statusBar;
 };

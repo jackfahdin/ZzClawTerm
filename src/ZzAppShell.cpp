@@ -73,6 +73,8 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     m_statusBar->addPermanentWidget(m_stateLabel);
     m_statusBar->addPermanentWidget(m_encodingLabel);
     m_statusBar->addPermanentWidget(m_sizeLabel);
+    m_tunnelLabel = new QLabel(QStringLiteral("隧道: 0"), m_statusBar);
+    m_statusBar->addPermanentWidget(m_tunnelLabel);
 
     // 双击会话 → 开标签（终端页可能尚未创建，经 QPointer 惰性转发）
     connect(panel, &ZzSessionPanel::connectRequested, this,
@@ -153,6 +155,12 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
                               QStringLiteral("%1×%2").arg(cols).arg(rows));
                       }
                   });
+    tabs->connect(tabs, &ZzTabManager::currentTunnelCountChanged, this,
+                  [this](int count) {
+                      if (m_tunnelLabel) {
+                          m_tunnelLabel->setText(QStringLiteral("隧道: %1").arg(count));
+                      }
+                  });
     tabs->connect(tabs, &ZzTabManager::statusMessage, this,
                   &ZzAppShell::showStatusMessage);
 
@@ -182,3 +190,4 @@ ZzCredentialStore *ZzAppShell::credentialStore() const { return m_credentialStor
 QLabel *ZzAppShell::statusStateLabel() const { return m_stateLabel; }
 QLabel *ZzAppShell::statusEncodingLabel() const { return m_encodingLabel; }
 QLabel *ZzAppShell::statusSizeLabel() const { return m_sizeLabel; }
+QLabel *ZzAppShell::statusTunnelLabel() const { return m_tunnelLabel; }

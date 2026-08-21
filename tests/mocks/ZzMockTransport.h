@@ -25,6 +25,10 @@ public:
     void simulateError(int code, const QString &message);
     /** @brief 注入一段远端输出。 */
     void simulateData(const QByteArray &data);
+    /** @brief 注入一次活动隧道数变化。 */
+    void simulateTunnelCount(int count) { emit tunnelCountChanged(count); }
+    /** @brief 注入一条瞬时提示消息。 */
+    void simulateStatusNotice(const QString &message) { emit statusNotice(message); }
 
     bool echoEnabled = true;       ///< write 回显开关
     QByteArray writtenData;        ///< 累计写入内容
