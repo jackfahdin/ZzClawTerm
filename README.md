@@ -45,7 +45,7 @@
 - **UI**：Qt 6（≥ 6.8，Core/Gui/Widgets/Network/Test/Xml/Multimedia）
 - **终端组件**：ZzTermWidget（终端解析 + 绘制，含本地 pty）
 - **应用框架**：ZzPureToolsPro（无边框窗口、模块路由、导航、Fluent 主题）
-- **SSH**：ZzSshCore（自研，libssh2 的 Qt 异步封装，worker 线程泵模型）+ libssh2（CMake 移植版）+ OpenSSL（vendored 预编译 bundle，缺失时回退系统 OpenSSL）
+- **SSH**：ZzSshCore（自研，libssh2 的 Qt 异步封装，worker 线程泵模型；libssh2 由其嵌套子模块提供，CMake 移植版）+ OpenSSL（vendored 预编译 bundle，缺失时回退系统 OpenSSL）
 - **日志引擎**：LZ4（温层压缩）、ZSTD（冷层压缩）、SQLite amalgamation（冷层存储 + FTS5，vendored，Public Domain）
 
 ## 架构与目录结构
@@ -137,8 +137,7 @@ test preset 与 configure preset 同名；失败时自动输出详细日志（`o
 | ---- | ---- |
 | `ZzTermWidget` | 终端组件（解析 + 绘制 + 本地 pty） |
 | `ZzPureToolsPro` | 应用框架（无边框窗口、路由、导航、Fluent 主题） |
-| `ZzSshCore` | libssh2 的 Qt 异步封装（自研） |
-| `libssh2` | SSH 协议库（CMake 移植版，静态构建，OpenSSL 加密后端） |
+| `ZzSshCore` | libssh2 的 Qt 异步封装（自研；libssh2 CMake 移植版为其嵌套子模块，静态构建，OpenSSL 加密后端） |
 | `openssl` | vendored 预编译 bundle（缺失时回退系统 OpenSSL） |
 | `lz4` / `zstd` | 日志引擎温层 / 冷层压缩（静态构建） |
 | `sqlite` | SQLite amalgamation（vendored，非子模块，Public Domain） |

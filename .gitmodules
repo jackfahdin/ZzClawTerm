@@ -7,9 +7,6 @@
 [submodule "third_party/ZzSshCore"]
 	path = third_party/ZzSshCore
 	url = git@gitcode.com:JackfahdinQt/ZzSshCore.git
-[submodule "third_party/libssh2"]
-	path = third_party/libssh2
-	url = git@gitcode.com:JackfahdinImport/libssh2.git
 [submodule "third_party/openssl"]
 	path = third_party/openssl
 	url = git@gitcode.com:ZzThirdParty/openssl.git

@@ -57,15 +57,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSLBundleConfig.c
     endif()
 endif()
 
-# libssh2（CMake 移植版）与 ZzSshCore（计划 01）：ZzSshCore 链接 libssh2 目标
-zz_require_submodule(third_party/libssh2)
+# ZzSshCore（计划 01）：libssh2 由 ZzSshCore 自带的嵌套子模块
+#（third_party/ZzSshCore/third_party/libssh2）编译提供——其 CMake 检测到上层
+# 没有 libssh2 目标时会自动 add_subdirectory 嵌套副本（唯一事实源，
+# 消除主仓库/嵌套两份指针的漂移风险）。需要 git submodule update --init --recursive。
 # ZzPureToolsPro 将 BUILD_SHARED_LIBS 默认置 ON；libssh2 固定静态构建，与计划 01 验证配置一致
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-# libssh2 使用 OpenSSL 作为加密后端（规格 §十一），不构建其示例与测试
-set(CRYPTO_BACKEND "OpenSSL" CACHE STRING "" FORCE)
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/libssh2)
 zz_require_submodule(third_party/ZzSshCore)
 # ZzSshCore 自带测试已在计划 01 全量验证，应用构建不重复编译
 set(ZZSSHCORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
