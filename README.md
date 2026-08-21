@@ -15,6 +15,9 @@
 
 - 多标签终端（ZzTabManager），断线标签保留与手动重连
 - SSH 会话：密码 / 公钥 / agent 认证（基于 ZzSshCore，libssh2 的 Qt 异步封装）
+- SSH 端口转发：本地 -L / 远程 -R / 动态 -D（SOCKS5），规则绑定会话 profile、
+  连接成功自动启动、断线销毁重连重建、单规则失败隔离（状态栏「隧道 N」指示 +
+  失败瞬时提示），规则在会话编辑对话框的端口转发规则表中维护
 - 本地 shell 会话（本地 PTY 传输，验证终端层与协议层解耦）
 - 会话管理：保存、树形分组、编辑、删除、双击连接（ZzSessionModel + ZzSessionPanel）
 - 凭据存储：AES-256-GCM 加密 + 主密码（PBKDF2-HMAC-SHA256 60 万次迭代派生密钥，GCM tag 提供完整性认证）
@@ -24,13 +27,9 @@
   - 温层：mmap 文件 + LZ4 压缩，I/O 失败自动降级为纯内存模式
   - 冷层：SQLite + ZSTD 持久化 + FTS5 全文搜索，跨会话保留历史
 - 全局设置页（终端类型、编码、字号、配色）
-- 状态栏三要素（连接状态 / 编码 / 终端尺寸）+ 瞬时错误提示（错误不弹窗）
+- 状态栏四要素（连接状态 / 编码 / 终端尺寸 / 活动隧道数）+ 瞬时错误提示（错误不弹窗）
 - WindTerm 风格 Dock 布局壳层（无边框窗口、Fluent 导航）
 - 三平台打包脚本（Linux AppImage 已产出 v0.1 包）
-
-### 开发中
-
-- SSH 端口转发：本地 -L / 远程 -R / 动态 -D（SOCKS5）三种全做，规则绑定会话 profile、随连接自动重建。设计规格与实现计划已定稿，见 `docs/superpowers/specs/2026-08-21-ssh-port-forwarding-design.md`
 
 ### 路线图
 
