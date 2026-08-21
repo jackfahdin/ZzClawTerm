@@ -8,6 +8,7 @@ class QComboBox;
 class QLineEdit;
 class QSpinBox;
 class QStackedWidget;
+class QTableWidget;
 class ZzCredentialStore;
 
 /**
@@ -38,6 +39,13 @@ protected:
     void accept() override;
 
 private:
+    /** @brief 用 m_profile.portForwards 填充规则表。 */
+    void populateForwardTable();
+    /** @brief 向表格追加一行（默认值或给定规则）。 */
+    void appendForwardRow(const ZzForwardRule &rule);
+    /** @brief 从表格读出规则列表（未校验）。 */
+    QVector<ZzForwardRule> rulesFromTable() const;
+
     ZzCredentialStore *m_store;
     ZzSessionProfile m_profile;        ///< 编辑中的工作副本
     QUuid m_originalCredentialId;      ///< 原密码引用（未改密码时保留）
@@ -53,4 +61,5 @@ private:
     QComboBox *m_authCombo;            ///< Agent / PrivateKey / Password
     QLineEdit *m_keyPathEdit;
     QLineEdit *m_passwordEdit;         ///< 仅输入新密码；留空=保留原引用
+    QTableWidget *m_forwardTable = nullptr; ///< 端口转发规则表
 };

@@ -5,10 +5,16 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFormLayout>
+#include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QHeaderView>
+#include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QSpinBox>
 #include <QtWidgets/QStackedWidget>
+#include <QtWidgets/QTableWidget>
+#include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 
 #include "session/ZzCredentialStore.h"
@@ -98,6 +104,39 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
             : QStringLiteral("留空保留已保存的密码"));
     layout->addRow(QStringLiteral("密码："), m_passwordEdit);
 
+    // 端口转发规则表（规格 §三/§五）：五列 + 增删按钮
+    auto *forwardSection = new QWidget(this);
+    auto *forwardLayout = new QVBoxLayout(forwardSection);
+    forwardLayout->setContentsMargins(0, 0, 0, 0);
+    m_forwardTable = new QTableWidget(0, 5, forwardSection);
+    m_forwardTable->setObjectName(QStringLiteral("forwardTable"));
+    m_forwardTable->setHorizontalHeaderLabels({
+        QStringLiteral("类型"), QStringLiteral("监听地址"), QStringLiteral("监听端口"),
+        QStringLiteral("目标地址"), QStringLiteral("目标端口")});
+    m_forwardTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_forwardTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    forwardLayout->addWidget(m_forwardTable);
+    auto *forwardButtons = new QHBoxLayout;
+    auto *addButton = new QPushButton(QStringLiteral("添加"), forwardSection);
+    addButton->setObjectName(QStringLiteral("addForwardButton"));
+    auto *removeButton = new QPushButton(QStringLiteral("删除"), forwardSection);
+    removeButton->setObjectName(QStringLiteral("removeForwardButton"));
+    forwardButtons->addWidget(addButton);
+    forwardButtons->addWidget(removeButton);
+    forwardButtons->addStretch();
+    forwardLayout->addLayout(forwardButtons);
+    layout->addRow(QStringLiteral("端口转发："), forwardSection);
+    populateForwardTable();
+    connect(addButton, &QPushButton::clicked, this, [this]() {
+        appendForwardRow(ZzForwardRule{});
+    });
+    connect(removeButton, &QPushButton::clicked, this, [this]() {
+        const int row = m_forwardTable->currentRow();
+        if (row >= 0) {
+            m_forwardTable->removeRow(row);
+        }
+    });
+
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZzSessionEditDialog::accept);
@@ -135,6 +174,22 @@ void ZzSessionEditDialog::accept()
         static_cast<ZzAuthMethod>(m_authCombo->currentData().toInt());
     m_profile.privateKeyPath = m_keyPathEdit->text().trimmed();
 
+    // 端口转发规则：逐条校验 + 列表去重，非法禁止保存（规格 §五）
+    const QVector<ZzForwardRule> rules = rulesFromTable();
+    for (const ZzForwardRule &rule : rules) {
+        const QString error = rule.validate();
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("转发规则无效"), error);
+            return;
+        }
+    }
+    const QString dupError = ZzForwardRule::validateList(rules);
+    if (!dupError.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("转发规则无效"), dupError);
+        return;
+    }
+    m_profile.portForwards = rules;
+
     // 密码：输入了新密码则写入凭据库换新引用；留空保留原引用
     if (m_profile.authMethod == ZzAuthMethod::Password) {
         if (!m_passwordEdit->text().isEmpty()) {
@@ -156,4 +211,56 @@ void ZzSessionEditDialog::accept()
     }
 
     QDialog::accept();
+}
+
+void ZzSessionEditDialog::populateForwardTable()
+{
+    for (const ZzForwardRule &rule : m_profile.portForwards) {
+        appendForwardRow(rule);
+    }
+}
+
+void ZzSessionEditDialog::appendForwardRow(const ZzForwardRule &rule)
+{
+    const int row = m_forwardTable->rowCount();
+    m_forwardTable->insertRow(row);
+
+    auto *typeCombo = new QComboBox(m_forwardTable);
+    typeCombo->addItem(QStringLiteral("本地 -L"), static_cast<int>(ZzForwardRule::Type::Local));
+    typeCombo->addItem(QStringLiteral("远程 -R"), static_cast<int>(ZzForwardRule::Type::Remote));
+    typeCombo->addItem(QStringLiteral("动态 -D"), static_cast<int>(ZzForwardRule::Type::Dynamic));
+    const int typeIndex = typeCombo->findData(static_cast<int>(rule.type));
+    typeCombo->setCurrentIndex(typeIndex >= 0 ? typeIndex : 0);
+    m_forwardTable->setCellWidget(row, 0, typeCombo);
+
+    m_forwardTable->setItem(row, 1, new QTableWidgetItem(rule.listenHost));
+    m_forwardTable->setItem(row, 2, new QTableWidgetItem(
+        rule.listenPort ? QString::number(rule.listenPort) : QString()));
+    m_forwardTable->setItem(row, 3, new QTableWidgetItem(rule.targetHost));
+    m_forwardTable->setItem(row, 4, new QTableWidgetItem(
+        rule.targetPort ? QString::number(rule.targetPort) : QString()));
+}
+
+QVector<ZzForwardRule> ZzSessionEditDialog::rulesFromTable() const
+{
+    QVector<ZzForwardRule> rules;
+    for (int row = 0; row < m_forwardTable->rowCount(); ++row) {
+        auto *typeCombo = qobject_cast<QComboBox *>(m_forwardTable->cellWidget(row, 0));
+        ZzForwardRule rule;
+        rule.type = static_cast<ZzForwardRule::Type>(typeCombo->currentData().toInt());
+        const auto *listenHostItem = m_forwardTable->item(row, 1);
+        const auto *listenPortItem = m_forwardTable->item(row, 2);
+        const auto *targetHostItem = m_forwardTable->item(row, 3);
+        const auto *targetPortItem = m_forwardTable->item(row, 4);
+        rule.listenHost = listenHostItem ? listenHostItem->text().trimmed() : QString();
+        // 非法数字/空串 → 0，交由 validate() 拒绝（quint16 超界由 toUInt 失败兜底）
+        bool ok = false;
+        const uint listenPort = listenPortItem ? listenPortItem->text().toUInt(&ok) : 0;
+        rule.listenPort = (ok && listenPort <= 65535) ? static_cast<quint16>(listenPort) : 0;
+        rule.targetHost = targetHostItem ? targetHostItem->text().trimmed() : QString();
+        const uint targetPort = targetPortItem ? targetPortItem->text().toUInt(&ok) : 0;
+        rule.targetPort = (ok && targetPort <= 65535) ? static_cast<quint16>(targetPort) : 0;
+        rules.append(rule);
+    }
+    return rules;
 }
