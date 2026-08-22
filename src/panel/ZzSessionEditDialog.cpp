@@ -3,6 +3,7 @@
 #include <utility>
 
 #include <QtWidgets/QComboBox>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -149,6 +150,14 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
         }
     });
 
+    // X11 转发开关（实验性）：Windows 走内建 X server，Linux/macOS 依赖本机 X server
+    m_x11CheckBox = new QCheckBox(QStringLiteral("X11 转发（实验性）"), this);
+    m_x11CheckBox->setObjectName(QStringLiteral("x11CheckBox"));
+    m_x11CheckBox->setToolTip(QStringLiteral(
+        "Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz"));
+    m_x11CheckBox->setChecked(m_profile.x11Forwarding);
+    layout->addRow(QStringLiteral("图形转发："), m_x11CheckBox);
+
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZzSessionEditDialog::accept);
@@ -185,6 +194,7 @@ void ZzSessionEditDialog::accept()
     m_profile.authMethod =
         static_cast<ZzAuthMethod>(m_authCombo->currentData().toInt());
     m_profile.privateKeyPath = m_keyPathEdit->text().trimmed();
+    m_profile.x11Forwarding = m_x11CheckBox->isChecked();
 
     // 端口转发规则：逐条校验 + 列表去重，非法禁止保存（规格 §五）
     const QVector<ZzForwardRule> rules = rulesFromTable();

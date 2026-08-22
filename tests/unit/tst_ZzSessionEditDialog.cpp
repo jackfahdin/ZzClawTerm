@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -198,6 +199,44 @@ private slots:
         clickOk(dlg);
         QCOMPARE(finishSpy.count(), 1);
         QCOMPARE(dlg.profile().keyPassphraseCredentialId, profile.keyPassphraseCredentialId);
+    }
+
+    /** @brief 对话框暴露 x11CheckBox，加载/保存与 profile.x11Forwarding 一致。 */
+    void dialogExposesX11Checkbox()
+    {
+        auto store = makeStore();
+
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("图形机");
+        profile.host = QStringLiteral("10.0.0.3");
+        profile.x11Forwarding = true;
+
+        ZzSessionEditDialog dlg(store.get(), profile);
+        auto *check = dlg.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
+        QVERIFY(check);
+        QVERIFY(check->isChecked()); // 构造时按 profile 加载
+        QVERIFY(!check->toolTip().isEmpty());
+
+        // 取消勾选后保存，profile 随之为 false
+        check->setChecked(false);
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        QCOMPARE(dlg.profile().x11Forwarding, false);
+
+        // 反向：false profile 加载未勾选，勾选后保存为 true
+        ZzSessionProfile plain;
+        plain.id = QUuid::createUuid();
+        plain.name = QStringLiteral("终端机");
+        plain.host = QStringLiteral("10.0.0.4");
+        ZzSessionEditDialog dlg2(store.get(), plain);
+        auto *check2 = dlg2.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
+        QVERIFY(check2);
+        QVERIFY(!check2->isChecked());
+        check2->setChecked(true);
+        clickOk(dlg2);
+        QCOMPARE(dlg2.profile().x11Forwarding, true);
     }
 
     /** @brief 密码认证下私钥口令引用被清空，旧口令凭据一并删除（不留孤儿条目）。 */

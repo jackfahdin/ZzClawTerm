@@ -5,6 +5,7 @@
 #include "session/ZzSessionProfile.h"
 
 class QComboBox;
+class QCheckBox;
 class QLineEdit;
 class QSpinBox;
 class QStackedWidget;
@@ -64,4 +65,5 @@ private:
     QLineEdit *m_keyPassphraseEdit;    ///< 仅输入新私钥口令；留空=保留原引用
     QLineEdit *m_passwordEdit;         ///< 仅输入新密码；留空=保留原引用
     QTableWidget *m_forwardTable = nullptr; ///< 端口转发规则表
+    QCheckBox *m_x11CheckBox = nullptr;  ///< X11 转发开关（实验性）
 };

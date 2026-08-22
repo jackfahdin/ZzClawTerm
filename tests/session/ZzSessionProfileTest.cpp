@@ -101,6 +101,26 @@ private slots:
         const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
         QVERIFY(profile.portForwards.isEmpty());
     }
+
+    /** @brief x11Forwarding 字段序列化/反序列化往返保持。 */
+    void x11ForwardingRoundTrip()
+    {
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("图形机");
+        profile.x11Forwarding = true;
+        const ZzSessionProfile restored = ZzSessionProfile::fromJson(profile.toJson());
+        QCOMPARE(restored.x11Forwarding, true);
+        QVERIFY(restored == profile);
+    }
+
+    /** @brief 旧版 JSON 无 x11Forwarding 字段：缺省 false（向后兼容）。 */
+    void x11DefaultsOff()
+    {
+        const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
+        QCOMPARE(profile.x11Forwarding, false);
+        QCOMPARE(ZzSessionProfile{}.x11Forwarding, false);
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzSessionProfileTest)
