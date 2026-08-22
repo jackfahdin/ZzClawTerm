@@ -42,6 +42,8 @@ set(ZZCLAWTERM_APP_SOURCES
     dialog/ZzMasterPasswordDialog.h
     dialog/ZzMasterPasswordDialog.cpp
     x11/ZzXServerDownloader.h
+    x11/ZzXAuthority.h
+    x11/ZzXAuthority.cpp
     ZzClawTermModule.h
     ZzClawTermModule.cpp
     ZzAppShell.h
