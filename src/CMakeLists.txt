@@ -45,6 +45,8 @@ set(ZZCLAWTERM_APP_SOURCES
     x11/ZzXServerDownloader.cpp
     x11/ZzXAuthority.h
     x11/ZzXAuthority.cpp
+    x11/ZzXServerManager.h
+    x11/ZzXServerManager.cpp
     ZzClawTermModule.h
     ZzClawTermModule.cpp
     ZzAppShell.h
