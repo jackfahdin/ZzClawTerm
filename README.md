@@ -18,6 +18,10 @@
 - SSH 端口转发：本地 -L / 远程 -R / 动态 -D（SOCKS5），规则绑定会话 profile、
   连接成功自动启动、断线销毁重连重建、单规则失败隔离（状态栏「隧道 N」指示 +
   失败瞬时提示），规则在会话编辑对话框的端口转发规则表中维护
+- X11 forwarding：SSH 会话可转发 X11 图形程序，三端统一体验——Windows 首次使用按需下载
+  内建 X server（官方 vcxsrv 21.1.16.1 noadmin 包，SHA256 校验后安装），Linux 直连系统
+  X server，macOS 使用 XQuartz；每会话独立 X server 实例与 cookie（MIT-MAGIC-COOKIE-1
+  自动生成与清理），开关在会话编辑对话框的 X11 转发选项中维护
 - 本地 shell 会话（本地 PTY 传输，验证终端层与协议层解耦）
 - 会话管理：保存、树形分组、编辑、删除、双击连接（ZzSessionModel + ZzSessionPanel）
 - 凭据存储：AES-256-GCM 加密 + 主密码（PBKDF2-HMAC-SHA256 60 万次迭代派生密钥，GCM tag 提供完整性认证）；
