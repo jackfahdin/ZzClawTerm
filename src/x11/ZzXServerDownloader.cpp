@@ -127,6 +127,18 @@ QString ZzXServerDownloader::installRoot() const
            + QStringLiteral("/xserver");
 }
 
+QString ZzXServerDownloader::stagingRoot() const
+{
+    // 静默安装先落到安装根旁的 staging 目录，成功后才换入，失败只清它
+    return installRoot() + QStringLiteral(".staging");
+}
+
+QString ZzXServerDownloader::backupRoot() const
+{
+    // swap 期间旧版安装的临时名，替换成功后删除
+    return installRoot() + QStringLiteral(".old");
+}
+
 void ZzXServerDownloader::startDownload()
 {
     if (!m_nam)
@@ -192,8 +204,11 @@ void ZzXServerDownloader::handleReplyFinished()
 
 void ZzXServerDownloader::startInstall()
 {
-    const QString root = installRoot();
-    QDir().mkpath(root);
+    // 安装目标是 staging 目录而非安装根本身：全程不触碰既有可用旧版，
+    // 成功核验后才换入（见 handleInstallFinished）
+    const QString staging = stagingRoot();
+    QDir(staging).removeRecursively(); // 清掉上次可能残留的 staging
+    QDir().mkpath(staging);
 
     m_installer = new QProcess(this);
     // 超时保护：安装包损坏卡死时不至于永久悬挂
@@ -219,11 +234,11 @@ void ZzXServerDownloader::startInstall()
                           QFile::permissions(m_tempFile->fileName()) |
                               QFileDevice::ExeOwner | QFileDevice::ExeUser);
     m_installer->start(m_tempFile->fileName(),
-                       {QStringLiteral("/S"), QStringLiteral("/D=%1").arg(root)});
+                       {QStringLiteral("/S"), QStringLiteral("/D=%1").arg(staging)});
 #else
     // NSIS 要求 /D= 为命令行最后一个参数且即使含空格也不加引号，
     // QStringList 参数会被 QProcess 自动加引号，故用原始命令行拼接
-    m_installer->setNativeArguments(QStringLiteral("/S /D=%1").arg(root));
+    m_installer->setNativeArguments(QStringLiteral("/S /D=%1").arg(staging));
     m_installer->start(m_tempFile->fileName());
 #endif
 }
@@ -236,25 +251,41 @@ void ZzXServerDownloader::handleInstallFinished(int exitCode, int exitStatus)
         fail(tr("静默安装失败（exit=%1）").arg(exitCode));
         return;
     }
-    // 安装成功：核验可执行文件落盘，再写版本标记
-    const QString exe = serverExecutablePath();
-    if (!QFile::exists(exe)) {
-        fail(tr("安装完成但未找到 %1").arg(exe));
+    // 安装成功：先在 staging 内核验可执行文件落盘、写版本标记
+    const QString staging = stagingRoot();
+    if (!QFile::exists(QDir(staging).filePath(kExeName))) {
+        fail(tr("安装完成但未找到 %1").arg(QDir(staging).filePath(kExeName)));
         return;
     }
-    QSaveFile versionFile(QDir(installRoot()).filePath(kVersionFileName));
+    QSaveFile versionFile(QDir(staging).filePath(kVersionFileName));
     if (!versionFile.open(QIODevice::WriteOnly)
         || versionFile.write(QByteArray(ZzXServerRelease::kVersion) + '\n') < 0
         || !versionFile.commit()) {
         fail(tr("版本标记写入失败：%1").arg(versionFile.errorString()));
         return;
     }
+    // staging 核验通过，换入安装根：旧版改名 .old → staging 上位 → 删 .old。
+    // rename 同卷为原子操作；staging 上位失败时回滚旧版，保证根目录始终可用
+    const QString root = installRoot();
+    const QString backup = backupRoot();
+    QDir(backup).removeRecursively();
+    if (QDir(root).exists() && !QDir().rename(root, backup)) {
+        fail(tr("旧版安装改名失败，无法换入新版本：%1").arg(root));
+        return;
+    }
+    if (!QDir().rename(staging, root)) {
+        if (QDir(backup).exists())
+            QDir().rename(backup, root); // 回滚旧版
+        fail(tr("新版本换入安装根失败：%1").arg(root));
+        return;
+    }
+    QDir(backup).removeRecursively();
     m_installer->deleteLater();
     m_installer = nullptr;
     m_running = false;
     removeTempFile();
     emit progressChanged(100);
-    emit ready(exe);
+    emit ready(serverExecutablePath());
 }
 
 void ZzXServerDownloader::fail(const QString &message)
@@ -275,6 +306,7 @@ void ZzXServerDownloader::fail(const QString &message)
         m_installer = nullptr;
     }
     removeTempFile(); // 清理临时安装包
-    QDir(installRoot()).removeRecursively(); // 清理安装半成品
+    // 只清本次流程的半成品（staging 目录）；既有可用旧版安装必须原样保留
+    QDir(stagingRoot()).removeRecursively();
     emit downloadFailed(message);
 }

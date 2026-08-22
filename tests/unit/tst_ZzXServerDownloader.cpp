@@ -88,12 +88,45 @@ private:
     QString m_root;        ///< 安装根目录覆盖
     QString m_argsFile;    ///< 桩安装包参数记录文件
 
+    /// 旧版安装标记版本（与官方 kVersion 不同，触发升级下载流程）。
+    static constexpr char kOldVersion[] = "20.0.14.0";
+
+    /** @brief 在安装根预置一套完好的旧版安装（VERSION=旧版 + vcxsrv.exe）。 */
+    void seedOldInstall()
+    {
+        QVERIFY(QDir().mkpath(m_root));
+        QFile vf(m_root + QStringLiteral("/VERSION"));
+        QVERIFY(vf.open(QIODevice::WriteOnly));
+        vf.write(QByteArray(kOldVersion) + '\n');
+        vf.close();
+        QFile ef(m_root + QStringLiteral("/vcxsrv.exe"));
+        QVERIFY(ef.open(QIODevice::WriteOnly));
+        ef.write("old-pe");
+        ef.close();
+    }
+
+    /** @brief 断言旧版安装原样保留，且无 staging/backup 残留。 */
+    void verifyOldInstallIntact()
+    {
+        QFile vf(m_root + QStringLiteral("/VERSION"));
+        QVERIFY(vf.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(vf.readAll()).trimmed(),
+                 QString::fromLatin1(kOldVersion));
+        QFile ef(m_root + QStringLiteral("/vcxsrv.exe"));
+        QVERIFY(ef.open(QIODevice::ReadOnly));
+        QCOMPARE(ef.readAll(), QByteArray("old-pe"));
+        QVERIFY(!QDir(m_root + QStringLiteral(".staging")).exists());
+        QVERIFY(!QDir(m_root + QStringLiteral(".old")).exists());
+    }
+
 private slots:
     void init()
     {
         QVERIFY(m_dir.isValid());
-        // QtTest 全用例共享同一测试对象实例，须逐用例清理安装根，防串扰
+        // QtTest 全用例共享同一测试对象实例，须逐用例清理安装根与 staging/backup，防串扰
         QDir(m_dir.filePath(QStringLiteral("xserver"))).removeRecursively();
+        QDir(m_dir.filePath(QStringLiteral("xserver.staging"))).removeRecursively();
+        QDir(m_dir.filePath(QStringLiteral("xserver.old"))).removeRecursively();
         QFile::remove(m_dir.filePath(QStringLiteral("installer-args.txt")));
         m_root = m_dir.filePath(QStringLiteral("xserver"));
         m_argsFile = m_dir.filePath(QStringLiteral("installer-args.txt"));
@@ -128,15 +161,17 @@ private slots:
         QCOMPARE(readySpy.takeFirst().at(0).toString(), exe);
         QVERIFY(QFile::exists(exe));
 
-        // 静默安装必须以 /S /D=<根目录> 参数发起
+        // 静默安装必须以 /S /D=<staging 目录> 参数发起（成功后才换入安装根）
         QFile af(m_argsFile);
         QVERIFY(af.open(QIODevice::ReadOnly));
         QCOMPARE(QString::fromUtf8(af.readAll()),
-                 QStringLiteral("/S\n/D=%1\n").arg(m_root));
+                 QStringLiteral("/S\n/D=%1.staging\n").arg(m_root));
 
-        // 版本标记幂等：VERSION 写入官方版本号
+        // 版本标记幂等：VERSION 写入官方版本号；staging/backup 均已清场
         QCOMPARE(dl.installedVersion(), QString::fromLatin1(ZzXServerRelease::kVersion));
         QCOMPARE(dl.serverExecutablePath(), exe);
+        QVERIFY(!QDir(m_root + QStringLiteral(".staging")).exists());
+        QVERIFY(!QDir(m_root + QStringLiteral(".old")).exists());
 
         // 进度信号最终到达 100%
         QVERIFY(progSpy.count() >= 1);
@@ -223,6 +258,62 @@ private slots:
         QCOMPARE(readySpy.count(), 1); // 同步直发，无需等待
         QCOMPARE(readySpy.first().at(0).toString(), m_root + QStringLiteral("/vcxsrv.exe"));
         QCOMPARE(server.requestCount, 0);
+    }
+
+    /** @brief 回归：旧版可用 + 下载失败 → 旧版目录与 VERSION 原样保留。 */
+    void oldVersionSurvivesFailedDownload()
+    {
+        seedOldInstall();
+
+        ZzStubHttpServer server;
+        server.status = 404;
+        server.body = "not found";
+        QVERIFY(server.start());
+
+        QNetworkAccessManager nam;
+        ZzXServerDownloader dl;
+        dl.setSimulateWindows(true);
+        dl.setNetworkAccessManager(&nam);
+        dl.setInstallRoot(m_root);
+        dl.setReleaseSource(server.url(), sha256Hex(server.body));
+
+        QSignalSpy failSpy(&dl, &ZzXServerDownloader::downloadFailed);
+        dl.ensureAvailable();
+        QVERIFY(failSpy.wait(15000));
+
+        verifyOldInstallIntact();
+    }
+
+    /** @brief 回归：旧版可用 + 静默安装失败 → 旧版原样保留，staging 清场。 */
+    void oldVersionSurvivesFailedInstall()
+    {
+        seedOldInstall();
+
+        // 桩安装包：落一个半成品文件后以 exit 1 失败
+        QByteArray script;
+        script += "#!/bin/sh\n";
+        script += "printf '%s\\n' \"$@\" > '" + m_argsFile.toUtf8() + "'\n";
+        script += "for a in \"$@\"; do case \"$a\" in /D=*) d=\"${a#/D=}\";; esac; done\n";
+        script += "mkdir -p \"$d\"\n";
+        script += "touch \"$d/partial-junk\"\n";
+        script += "exit 1\n";
+        ZzStubHttpServer server;
+        server.body = script;
+        QVERIFY(server.start());
+
+        QNetworkAccessManager nam;
+        ZzXServerDownloader dl;
+        dl.setSimulateWindows(true);
+        dl.setNetworkAccessManager(&nam);
+        dl.setInstallRoot(m_root);
+        dl.setReleaseSource(server.url(), sha256Hex(script));
+
+        QSignalSpy failSpy(&dl, &ZzXServerDownloader::downloadFailed);
+        dl.ensureAvailable();
+        QVERIFY(failSpy.wait(15000));
+        QVERIFY(failSpy.first().at(0).toString().contains(QStringLiteral("静默安装失败")));
+
+        verifyOldInstallIntact();
     }
 
     /** @brief 非 Windows 平台编译期分支：ensureAvailable 直接 ready(QString())。 */

@@ -75,8 +75,10 @@ class QCryptographicHash;
  *
  * 仅 Windows 真用：其他平台 ensureAvailable() 编译期直通，直接发 ready(QString())。
  * 流程：下载到临时文件（边下边算 SHA256）→ 校验通过才以
- * "installer /S /D=<安装根目录>" 静默安装（免 UAC noadmin 变体）→ 核验 vcxsrv.exe
- * 落盘并写版本标记 xserver/VERSION；任何失败清理半成品（临时包与安装目录）。
+ * "installer /S /D=<staging 目录>" 静默安装（免 UAC noadmin 变体）→ 核验
+ * vcxsrv.exe 落盘并写版本标记 xserver/VERSION → 成功后才把 staging 换入安装根
+ * （旧版先改名 .old 再替换，替换失败回滚）；任何失败只清理本次半成品
+ * （临时包与 staging 目录），不误伤既有可用的旧版安装。
  * 已装同版本且可执行文件存在时幂等直通，不发网络请求。
  */
 class ZzXServerDownloader : public QObject
@@ -125,6 +127,8 @@ signals:
 private:
     bool windowsFlowEnabled() const;
     QString installRoot() const;
+    QString stagingRoot() const;
+    QString backupRoot() const;
     void startDownload();
     void handleReplyFinished();
     void startInstall();
