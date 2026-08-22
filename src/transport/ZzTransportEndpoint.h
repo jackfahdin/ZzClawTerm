@@ -23,4 +23,5 @@ struct ZzTransportEndpoint final
     bool localShell = false; ///< true 表示本地 shell 会话（规格 §七）。
     QString shellProgram;    ///< 本地 shell 可执行路径（可空，空=系统默认）。
     QVector<ZzForwardRule> portForwards; ///< 端口转发规则（规格 §五）；localShell 时为空。
+    bool x11Forwarding = false; ///< 是否启用 X11 转发（规格 §5.3，实验性）；localShell 时忽略。
 };

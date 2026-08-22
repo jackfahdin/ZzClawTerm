@@ -2,12 +2,18 @@
 
 #include <utility>
 
+#include <QFileInfo>
+#include <QStandardPaths>
+
 #include <ZzSshAuthConfig.h>
 #include <ZzSshConnection.h>
 #include <ZzSshShellChannel.h>
+#include <ZzSshX11Bridge.h>
 
 #include "ZzSshTunnelHandle.h"
 #include "ZzTunnelManager.h"
+#include "x11/ZzXServerDownloader.h"
+#include "x11/ZzXServerManager.h"
 
 ZzSshTransportAdapter::ZzKeyPassphraseResolver
     ZzSshTransportAdapter::s_keyPassphraseResolver;
@@ -46,6 +52,7 @@ void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
     if (m_conn) {
         m_suppressDisconnect = true;
         destroyTunnelManager(); // 隧道先于连接销毁（句柄持有观察连接的隧道）
+        destroyX11();           // X11 桥观察旧连接，一并回收
         m_conn->disconnectFromHost();
         m_conn->deleteLater();
         m_conn = nullptr;
@@ -145,11 +152,25 @@ void ZzSshTransportAdapter::onConnected()
         }
     });
 
-    // openShell 为异步操作：保持 Connecting，待 shellOpened 后迁移 Connected
-    m_channel->openShell(m_endpoint.terminalType,
-                         m_endpoint.cols, m_endpoint.rows);
+    // x11-req 必须在 shell 启动前发出（OpenSSH 仅 LARVAL 态受理）：X11 装配
+    // 先行，requestX11Forwarding 先于 openShell 入队（库侧登记 pending 后在
+    // doOpenShell 内 PTY/shell 之前发出）；装配任何失败只瞬时提示并照常开 shell
+    if (m_endpoint.x11Forwarding) {
+        startX11Forwarding(); // 内部保证以 openShellChannel() 收尾（同步或异步）
+    } else {
+        openShellChannel();
+    }
 
     startTunnels(); // 连接已就绪：createTunnel/createForwardListener 均可用
+}
+
+void ZzSshTransportAdapter::openShellChannel()
+{
+    // openShell 为异步操作：保持 Connecting，待 shellOpened 后迁移 Connected
+    if (m_channel) {
+        m_channel->openShell(m_endpoint.terminalType,
+                             m_endpoint.cols, m_endpoint.rows);
+    }
 }
 
 void ZzSshTransportAdapter::write(const QByteArray &data)
@@ -174,6 +195,7 @@ void ZzSshTransportAdapter::close()
         m_channel = nullptr;
     }
     destroyTunnelManager();
+    destroyX11();
     if (m_conn) {
         m_conn->disconnectFromHost();
         m_conn->deleteLater();
@@ -213,4 +235,149 @@ void ZzSshTransportAdapter::startTunnels()
         emit tunnelCountChanged(m_tunnelManager ? m_tunnelManager->activeTunnelCount() : 0);
     });
     m_tunnelManager->startAll();
+}
+
+void ZzSshTransportAdapter::startX11Forwarding()
+{
+    // 契约：无论装配成败，本函数保证以 openShellChannel() 收尾（Unix 同步、
+    // Windows 经 downloader 异步续接），任何失败只瞬时提示、不阻断会话
+    if (!m_channel) {
+        return;
+    }
+#if defined(Q_OS_LINUX)
+    // 无本地 X server（纯 Wayland/无头）时提前提示并跳过
+    if (qgetenv("DISPLAY").isEmpty()) {
+        emit statusNotice(QStringLiteral(
+            "X11 转发已跳过：未检测到本地 X server（$DISPLAY 为空）"));
+        openShellChannel();
+        return;
+    }
+#elif defined(Q_OS_MAC)
+    // macOS 依赖 XQuartz 的 Unix 域套接字目录
+    if (!QFileInfo::exists(QStringLiteral("/tmp/.X11-unix"))) {
+        emit statusNotice(QStringLiteral(
+            "X11 转发已跳过：未检测到 XQuartz（/tmp/.X11-unix 不存在）"));
+        openShellChannel();
+        return;
+    }
+#endif
+    m_x11Cookie = m_x11Authority.generateCookie();
+#if defined(Q_OS_WIN)
+    // 按需下载/校验/安装 vcxsrv，就绪后经 onX11ServerReady 续接 openShell
+    if (!m_x11Downloader) {
+        m_x11Downloader = new ZzXServerDownloader(this);
+        connect(m_x11Downloader, &ZzXServerDownloader::ready, this,
+                &ZzSshTransportAdapter::onX11ServerReady);
+        connect(m_x11Downloader, &ZzXServerDownloader::downloadFailed, this,
+                [this](const QString &message) {
+                    emit statusNotice(QStringLiteral("X11 转发不可用：%1").arg(message));
+                    openShellChannel(); // X11 失败不阻断会话
+                });
+    }
+    m_x11Downloader->ensureAvailable();
+#else
+    // Unix：复用系统 X server，start() 只解析 $DISPLAY 记录端点，不拉起进程
+    if (!m_x11Manager) {
+        m_x11Manager = new ZzXServerManager(this);
+        connect(m_x11Manager, &ZzXServerManager::crashed, this,
+                [this](const QString &message) {
+                    emit statusNotice(QStringLiteral("X11 本地 server 异常：%1").arg(message));
+                });
+    }
+    m_x11Manager->start(QString(), QString(), 0);
+    const int display = m_x11Manager->display();
+    if (display < 0) {
+        emit statusNotice(QStringLiteral("X11 转发已跳过：无法解析 $DISPLAY"));
+        openShellChannel();
+        return;
+    }
+    // cookie 并入系统授权库，转发字节流经桥透传后由本地 X server 校验同一 cookie
+    QString error;
+    if (!m_x11Authority.addToSystemAuthority(display, m_x11Cookie, &error)) {
+        emit statusNotice(QStringLiteral("X11 授权写入失败：%1").arg(error));
+        openShellChannel();
+        return;
+    }
+    // x11-req 先于 openShell 入队（OpenSSH 仅 LARVAL 态受理）
+    requestX11Forwarding();
+    openShellChannel();
+#endif
+}
+
+void ZzSshTransportAdapter::onX11ServerReady(const QString &executablePath)
+{
+#if defined(Q_OS_WIN)
+    // 下载/安装期间会话可能已关闭：channel 不在则无需再补 openShell
+    if (!m_channel || !m_endpoint.x11Forwarding) {
+        return;
+    }
+    if (!m_x11Manager) {
+        m_x11Manager = new ZzXServerManager(this);
+        connect(m_x11Manager, &ZzXServerManager::crashed, this,
+                [this](const QString &message) {
+                    emit statusNotice(QStringLiteral("X11 本地 server 异常：%1").arg(message));
+                });
+    }
+    const int display = ZzXServerManager::allocateDisplay();
+    if (display < 0) {
+        emit statusNotice(QStringLiteral("X11 转发不可用：无空闲 display 号"));
+        openShellChannel();
+        return;
+    }
+    const QString xauthPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/xserver/xauth-%1").arg(display);
+    if (!m_x11Authority.writeXauthorityFile(xauthPath, display, m_x11Cookie)) {
+        emit statusNotice(QStringLiteral("X11 授权写入失败：%1").arg(xauthPath));
+        openShellChannel();
+        return;
+    }
+    // 桥按 channel 到达时才连本地端点，无需等待 server 完全就绪
+    m_x11Manager->start(executablePath, xauthPath, display);
+    requestX11Forwarding();
+    openShellChannel();
+#else
+    Q_UNUSED(executablePath);
+#endif
+}
+
+void ZzSshTransportAdapter::requestX11Forwarding()
+{
+    if (!m_channel || !m_x11Manager) {
+        return;
+    }
+    // 应用侧 ZzXLocalEndpoint → 库侧 ZzSshX11Bridge::LocalEndpoint 字段映射
+    const ZzXLocalEndpoint local = m_x11Manager->localEndpoint();
+    ZzSshX11Bridge::LocalEndpoint endpoint;
+    endpoint.host = local.host;
+    endpoint.port = local.port;
+    endpoint.localSocketPath = local.localSocketPath;
+    m_x11Bridge = new ZzSshX11Bridge(m_conn, endpoint, this);
+    connect(m_x11Bridge, &ZzSshX11Bridge::bridgeFailed, this,
+            [this](quint32 /*channelId*/, int /*code*/, const QString &message) {
+                emit statusNotice(QStringLiteral("X11 转发通道失败：%1").arg(message));
+            });
+    connect(m_channel, &ZzSshShellChannel::x11ForwardingReady, this, [this]() {
+        emit statusNotice(QStringLiteral("X11 转发已启用"));
+    });
+    connect(m_channel, &ZzSshShellChannel::x11ForwardingFailed, this,
+            [this](int /*code*/, const QString &message) {
+                emit statusNotice(QStringLiteral("X11 转发被服务端拒绝：%1").arg(message));
+            });
+    m_channel->requestX11Forwarding(m_x11Cookie);
+}
+
+void ZzSshTransportAdapter::destroyX11()
+{
+    if (m_x11Bridge) {
+        m_x11Bridge->deleteLater();
+        m_x11Bridge = nullptr;
+    }
+    if (m_x11Manager) {
+        // stop 为异步收尾；deleteLater 后 QObject 树兜底回收（Windows 子进程随析构终止）
+        m_x11Manager->stop();
+        m_x11Manager->deleteLater();
+        m_x11Manager = nullptr;
+    }
+    m_x11Cookie.clear();
 }
