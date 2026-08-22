@@ -45,7 +45,15 @@ public:
      */
     void start(const QString &executablePath, const QString &xauthorityPath, int display);
 
-    /** @brief 主动停止 server 进程并释放 display（Unix 无进程分支仅复位状态）。 */
+    /**
+     * @brief 主动停止 server 并释放 display（异步收尾，不阻塞调用线程）。
+     *
+     * 立即置为未运行并 terminate 进程；进程退出后由 finished 处理器复位 display
+     * 并发射 stopped——即 stopped 在 stop() 返回之后异步到达（Unix 无进程分支
+     * 无进程可等，stopped 同步发射）。3s 未退出升级 kill，kill 后 1s 仍无
+     * finished 则强制复位并发射 stopped，最坏收尾耗时 ~4s。收尾完成前
+     * start()/restart() 为空操作。
+     */
     void stop();
 
     /** @brief server 当前是否在运行。 */
@@ -56,7 +64,7 @@ public:
 
     /**
      * @brief 崩溃后按上次 start() 参数重新拉起 server。
-     * 从未 start 过或已在运行时为空操作。
+     * 从未 start 过、已在运行或 stop() 收尾未完时为空操作。
      */
     void restart();
 
@@ -72,7 +80,7 @@ public:
 signals:
     void started(int display);          ///< server 就绪（Windows 进程拉起成功；Unix 端点已记录）
     void crashed(const QString &message); ///< 非预期退出（消息含退出码），区别于主动 stop()
-    void stopped();                     ///< 主动停止或非零退出的干净退出后复位
+    void stopped();                     ///< 主动停止或退出码为 0 的正常退出后复位发射
 
 private:
     /** @brief 以给定参数拉起 server 进程（start 与 restart 共用）。 */

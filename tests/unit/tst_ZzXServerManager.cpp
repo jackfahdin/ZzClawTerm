@@ -75,20 +75,20 @@ private slots:
         QFile f(argsFile);
         QVERIFY(f.open(QIODevice::ReadOnly));
         const QStringList args = QString::fromUtf8(f.readAll()).split(u'\n', Qt::SkipEmptyParts);
-        QVERIFY(args.contains(QStringLiteral(":7")));
-        QVERIFY(args.contains(QStringLiteral("-multiwindow")));
-        QVERIFY(args.contains(QStringLiteral("-clipboard")));
-        QVERIFY(args.contains(QStringLiteral("-listen")));
-        QVERIFY(args.contains(QStringLiteral("tcp")));
-        QVERIFY(args.contains(QStringLiteral("-auth")));
-        QVERIFY(args.contains(xauth));
+        // 精确锁定参数顺序与完整性
+        QCOMPARE(args, QStringList({QStringLiteral(":7"), QStringLiteral("-multiwindow"),
+                                    QStringLiteral("-clipboard"), QStringLiteral("-listen"),
+                                    QStringLiteral("tcp"), QStringLiteral("-auth"), xauth}));
 
         // 桩走 TCP 语义端点
         const ZzXLocalEndpoint ep = mgr.localEndpoint();
         QCOMPARE(ep.host, QStringLiteral("127.0.0.1"));
         QCOMPARE(ep.port, quint16(6007));
 
+        // stop 为异步收尾，等 stopped 再离场，避免桩进程泄漏
+        QSignalSpy stoppedSpy(&mgr, &ZzXServerManager::stopped);
         mgr.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy.count() >= 1, 5000);
 #else
         QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
 #endif
@@ -124,7 +124,9 @@ private slots:
         QVERIFY(mgr.isRunning());
         QCOMPARE(mgr.display(), 3);
 
+        QSignalSpy stoppedSpy(&mgr, &ZzXServerManager::stopped);
         mgr.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy.count() >= 1, 5000);
 #else
         QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
 #endif
@@ -158,7 +160,37 @@ private slots:
         mgr.start(QString(), m_dir.filePath(QStringLiteral("xauth-test")), 5);
         QTRY_VERIFY_WITH_TIMEOUT(restartedSpy.count() >= 1, 5000);
         QVERIFY(mgr.isRunning());
+        QSignalSpy stoppedSpy2(&mgr, &ZzXServerManager::stopped);
         mgr.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy2.count() >= 1, 5000);
+#else
+        QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
+#endif
+    }
+
+    /** @brief stop() 不阻塞调用线程；桩忽略 SIGTERM 时 3s 后升级 kill 收尾。 */
+    void stopIsAsyncAndEscalatesToKill()
+    {
+#ifdef Q_OS_UNIX
+        // 忽略 SIGTERM 的桩：只有升级 SIGKILL 才能退出
+        const QString stub = makeStubServer("#!/bin/sh\ntrap '' TERM\nsleep 60 &\nwait\n");
+        QVERIFY(!stub.isEmpty());
+
+        ZzXServerManager mgr;
+        mgr.setServerProgramForTesting(stub);
+        QSignalSpy startedSpy(&mgr, &ZzXServerManager::started);
+        mgr.start(QString(), m_dir.filePath(QStringLiteral("xauth-test")), 9);
+        QTRY_VERIFY_WITH_TIMEOUT(startedSpy.count() >= 1, 5000);
+        QTest::qWait(300); // 等桩脚本装好 trap，避免 terminate 抢在 trap 前命中
+
+        QSignalSpy stoppedSpy(&mgr, &ZzXServerManager::stopped);
+        QElapsedTimer timer;
+        timer.start();
+        mgr.stop();
+        QVERIFY(timer.elapsed() < 1000); // 立即返回，不等进程退出
+        QVERIFY(!mgr.isRunning());
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy.count() >= 1, 6000); // 3s 后 kill 收尾
+        QCOMPARE(mgr.display(), -1);
 #else
         QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
 #endif

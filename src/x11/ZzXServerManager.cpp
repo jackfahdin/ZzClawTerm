@@ -3,6 +3,7 @@
 #include <QHostAddress>
 #include <QProcess>
 #include <QTcpServer>
+#include <QTimer>
 
 ZzXServerManager::ZzXServerManager(QObject *parent)
     : QObject(parent)
@@ -21,8 +22,8 @@ int ZzXServerManager::allocateDisplay()
 
 void ZzXServerManager::start(const QString &executablePath, const QString &xauthorityPath, int displayNum)
 {
-    if (m_running)
-        return;
+    if (m_running || m_process)
+        return; // 运行中或异步停止收尾未完，拒绝重复拉起
 
 #ifdef Q_OS_WIN
     launchProcess(m_programOverride.isEmpty() ? executablePath : m_programOverride,
@@ -106,19 +107,31 @@ void ZzXServerManager::stop()
         return;
     m_stopping = true;
     m_running = false;
-    if (m_process) {
-        // finished 处理器负责复位 display 并发 stopped
-        m_process->terminate();
-        if (!m_process->waitForFinished(3000)) {
-            m_process->kill();
-            m_process->waitForFinished(1000);
-        }
+    if (!m_process) {
+        // Unix 无进程分支：仅复位状态，stopped 同步发射
+        m_stopping = false;
+        m_display = -1;
+        emit stopped();
         return;
     }
-    // Unix 无进程分支：仅复位状态
-    m_stopping = false;
-    m_display = -1;
-    emit stopped();
+    // 异步收尾不阻塞 GUI 线程：terminate 后由 finished 处理器复位 display 并发
+    // stopped；3s 未退出升级 kill，kill 后 1s 仍无 finished 则强制复位防悬挂
+    m_process->terminate();
+    QTimer::singleShot(3000, this, [this] {
+        if (!m_process || !m_stopping)
+            return; // finished 已正常收尾
+        m_process->kill();
+        QTimer::singleShot(1000, this, [this] {
+            if (!m_process || !m_stopping)
+                return;
+            m_process->disconnect(this); // 阻断迟到的 finished 二次发射
+            m_process->deleteLater();
+            m_process = nullptr;
+            m_stopping = false;
+            m_display = -1;
+            emit stopped();
+        });
+    });
 }
 
 bool ZzXServerManager::isRunning() const
@@ -133,8 +146,8 @@ int ZzXServerManager::display() const
 
 void ZzXServerManager::restart()
 {
-    if (m_running || m_lastDisplay < 0)
-        return;
+    if (m_running || m_process || m_lastDisplay < 0)
+        return; // 运行中或异步停止收尾未完，拒绝重复拉起
     launchProcess(m_lastProgram, m_lastXauthorityPath, m_lastDisplay);
 }
 
