@@ -38,7 +38,7 @@ M1 与 M2 无相互依赖，可并行；M3 依赖 M1+M2；M4 依赖 M3 验收通
 ### 2.1 v0.3 包含
 
 - SSH X11 forwarding 端到端打通（三端）
-- Windows 端内建 X server（M1-M3 用官方二进制，独立窗口模式）
+- Windows 端内建 X server（M1-M3 官方二进制路径已按 2026-08-23 裁决门禁，待回环绑定魔改就绪后开放，见 §二里程碑变更注记）
 - display 号 / cookie / 生命周期的自动管理（用户零配置）
 - M4 起的 rootful 嵌入 Qt 标签页
 
