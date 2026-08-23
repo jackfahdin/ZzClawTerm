@@ -33,6 +33,8 @@ ZzClawTerm 的差异化目标之一是「X11 forwarding 三端统一体验」（
 
 M1 与 M2 无相互依赖，可并行；M3 依赖 M1+M2；M4 依赖 M3 验收通过。
 
+> **里程碑变更（2026-08-23 用户裁决）**：实证官方 vcxsrv 二进制 xtrans 硬编码 `INADDR_ANY`、无地址绑定 CLI（见 §5.1），用户不接受全网卡监听形态交付。M1-M3 的 Windows 端 X11 暂不上线；「xtrans 回环绑定魔改 + Windows 构建链」从原 M4 前置为 v0.3 下一里程碑，回环绑定就绪后 Windows 端 X11 方可启用并验收。
+
 ### 2.1 v0.3 包含
 
 - SSH X11 forwarding 端到端打通（三端）
@@ -95,7 +97,7 @@ profile.x11Forwarding = on
 
 ### 5.1 vcxsrv 对接面（调研结论，均为现成功能）
 
-- **监听**：Windows 版仅 TCP 传输（`os/xstrans.c` 强制 TCPCONN），标准端口 6000+display；启动参数必须显式 `-listen tcp` 并绑定 127.0.0.1，避免监听外部接口
+- **监听**：Windows 版仅 TCP 传输（`os/xstrans.c` 强制 TCPCONN），标准端口 6000+display。实证结论：官方预编译二进制的 xtrans 层硬编码 `INADDR_ANY`，无地址绑定 CLI 选项，`-listen tcp` 必然监听全网卡。**用户裁决（2026-08-23）：不接受全网卡监听形态交付**——M1-M3 的 Windows 端 X11 暂不上线（应用侧已加门禁，见主仓库 `ZzSshTransport.cpp`）；xtrans 回环绑定魔改 + Windows 构建链提前为 v0.3 下一里程碑（原 M4 内容前置），回环绑定就绪后 Windows 端 X11 方可启用
 - **认证**：`-auth <xauthority 文件>` 走标准 DIX 解析；不用 `-ac`（关闭访问控制）除非仅绑回环的调试场景
 - **内部 cookie**：vcxsrv 自身用 `winGenerateAuthorization()`（`hw/xwin/winauth.c`）供剪贴板线程 / multiwindow WM 内部连接，与我们的 cookie 管理不冲突
 - **事件循环**：server 线程自泵 Win32 消息（`winwakeup.c` PeekMessage），嵌入时保持「server 独立线程自泵、Qt 侧只持有 HWND 做 reparent」模型，不进 Qt 主事件循环
@@ -179,6 +181,6 @@ profile.x11Forwarding = on
 ## 十、验收标准
 
 - M2 完成定义：Docker 端到端用例通过（经 SSH 转发 xdpyinfo 返回正确 display 信息），X11 性能门控入库
-- M3 完成定义：Linux 本机勾选 X11 的 SSH 会话可跑远端 xeyes 并显示在系统 X server；macOS 同链路（XQuartz）代码就绪；Windows CI 产物人工验收：官方二进制拉起 + 远端 GUI 显示在独立窗口
+- M3 完成定义：Linux 本机勾选 X11 的 SSH 会话可跑远端 xeyes 并显示在系统 X server；macOS 同链路（XQuartz）代码就绪；Windows 端待回环绑定魔改完成后验收（2026-08-23 裁决：官方二进制监听全网卡，不按现状交付）
 - M4 完成定义：CI 构建出自有 ZzXsrv.exe，rootful 嵌入 Qt 标签页，截图冒烟通过 + 人工验收通过
 - 全量回归：主仓库既有 40 项测试与 ZzSshCore 既有 14+14 项测试保持全绿，性能记录无超 5% 回归

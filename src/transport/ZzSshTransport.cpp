@@ -263,6 +263,18 @@ void ZzSshTransportAdapter::startX11Forwarding()
 #endif
     m_x11Cookie = m_x11Authority.generateCookie();
 #if defined(Q_OS_WIN)
+    // 门禁（2026-08-23 用户裁决）：官方 vcxsrv 二进制 xtrans 硬编码 INADDR_ANY，
+    // 无地址绑定 CLI，现状下启动必然监听全网卡；故内建 X server 回环绑定魔改
+    // 就绪前不走 downloader→manager→bridge 链路，仅瞬时提示并照常开会话。
+    // 测试旁路：ZZCLAWTERM_X11_ALLOW_ANY_BIND=1 时走下方原链路（下一里程碑
+    // 魔改就绪后恢复为默认路径）。风险提示：官方二进制监听全网卡，该旁路仅限
+    // 隔离测试环境，不得用于交付形态。
+    if (qgetenv("ZZCLAWTERM_X11_ALLOW_ANY_BIND") != "1") {
+        emit statusNotice(QStringLiteral(
+            "Windows 端 X11 转发将在内建 server 回环绑定就绪后可用"));
+        openShellChannel(); // X11 未就绪不阻断会话
+        return;
+    }
     // 按需下载/校验/安装 vcxsrv，就绪后经 onX11ServerReady 续接 openShell
     if (!m_x11Downloader) {
         m_x11Downloader = new ZzXServerDownloader(this);
