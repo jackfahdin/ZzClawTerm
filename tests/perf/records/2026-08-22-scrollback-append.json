@@ -1,0 +1,20 @@
+{
+    "details": {
+    },
+    "environment": {
+        "buildType": "Release",
+        "compiler": "GNU 15.2.0",
+        "cpu": "x86_64",
+        "gitCommit": "a27719b",
+        "kernel": "7.0.0-29-generic",
+        "memory_mb": 31194,
+        "os": "Ubuntu 26.04 LTS",
+        "qtVersion": "6.11.1"
+    },
+    "measured": 27,
+    "passed": true,
+    "testName": "滚动历史追加 10 万行",
+    "threshold": 5000,
+    "timestamp": "2026-08-22T18:41:02Z",
+    "unit": "ms"
+}

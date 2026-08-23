@@ -1,0 +1,22 @@
+{
+    "details": {
+        "hits": 102,
+        "totalLines": 10240000
+    },
+    "environment": {
+        "buildType": "Release",
+        "compiler": "GCC 15.2.0",
+        "cpu": "x86_64",
+        "gitCommit": "3b720e038541610bcd72e85df464784b7a4c79ff",
+        "kernel": "7.0.0-29-generic",
+        "memory_mb": 31194,
+        "os": "Ubuntu 26.04 LTS",
+        "qtVersion": "6.11.1"
+    },
+    "measured": 111,
+    "passed": true,
+    "testName": "ZzColdStorage-fts-search-10m",
+    "threshold": 500,
+    "timestamp": "2026-08-22T18:41:31Z",
+    "unit": "ms"
+}

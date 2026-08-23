@@ -1,0 +1,25 @@
+{
+    "details": {
+        "cacheBlocks": 32,
+        "sampleStrideBlocks": 33,
+        "samples": 100,
+        "totalLines": 3379200,
+        "windowRows": 24
+    },
+    "environment": {
+        "buildType": "Release",
+        "compiler": "GCC 15.2.0",
+        "cpu": "x86_64",
+        "gitCommit": "f4b2fc15ab91ac9e19df24abeafd81ac8f92c0aa",
+        "kernel": "7.0.0-29-generic",
+        "memory_mb": 31194,
+        "os": "Ubuntu 26.04 LTS",
+        "qtVersion": "6.11.1"
+    },
+    "measured": 0.042608,
+    "passed": true,
+    "testName": "ZzColdStorage-random-read-24",
+    "threshold": 5,
+    "timestamp": "2026-08-23T03:23:10Z",
+    "unit": "ms"
+}
