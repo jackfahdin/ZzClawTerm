@@ -15,6 +15,26 @@
 #include "transport/ZzTransportRegistry.h"
 #include "x11/ZzX11Viewport.h"
 
+#ifdef Q_OS_WIN
+namespace {
+/** @brief 嵌入窗格的动态属性标记：重连时据此回填 -parent 句柄（分屏窗格不嵌入）。 */
+constexpr char kX11EmbeddedProperty[] = "zzX11Embedded";
+
+/**
+ * @brief 回填 X11 嵌入 endpoint 字段（openSession 建标签与 reconnectTab 重连共用）。
+ *
+ * 布局未就绪时 viewport size 可能为空：给 -screen 一个合理初值，
+ * 后续尺寸变化由 viewport resize 跟随（SetWindowPos 拉伸）。
+ */
+void applyX11EmbedEndpoint(ZzTransportEndpoint &endpoint, const ZzX11Viewport *viewport)
+{
+    endpoint.x11ParentWindow = viewport->embeddingHandle();
+    endpoint.x11InitialSize = viewport->size().isEmpty()
+        ? QSize(800, 600) : viewport->size();
+}
+} // namespace
+#endif
+
 ZzTabManager::ZzTabManager(QWidget *parent)
     : QTabWidget(parent)
 {
@@ -89,6 +109,8 @@ void ZzTabManager::openSession(const ZzSessionProfile &profile)
         splitter->setStretchFactor(0, 3);
         splitter->setStretchFactor(1, 1);
         page = splitter;
+        // 标记嵌入窗格：重连时仅对带标记的窗格回填 -parent 句柄
+        view->setProperty(kX11EmbeddedProperty, true);
     }
 #endif
     const int index = addTab(page, profile.name);
@@ -100,11 +122,7 @@ void ZzTabManager::openSession(const ZzSessionProfile &profile)
     ZzTransportEndpoint endpoint = endpointFor(profile);
 #ifdef Q_OS_WIN
     if (x11Viewport) {
-        endpoint.x11ParentWindow = x11Viewport->embeddingHandle();
-        // 布局未就绪时 size 可能为空：给 -screen 一个合理初值，
-        // 后续尺寸变化由 viewport resize 跟随（SetWindowPos 拉伸）
-        endpoint.x11InitialSize = x11Viewport->size().isEmpty()
-            ? QSize(800, 600) : x11Viewport->size();
+        applyX11EmbedEndpoint(endpoint, x11Viewport);
     }
 #endif
     view->openEndpoint(endpoint);
@@ -223,6 +241,13 @@ void ZzTabManager::reconnectTab(int index)
     if (!container) {
         return;
     }
+#ifdef Q_OS_WIN
+    // 嵌入标签页的 viewport 随页面存活（仅 closeTab 销毁），重连复用同一实例与句柄
+    ZzX11Viewport *x11Viewport = nullptr;
+    if (auto *splitter = qobject_cast<QSplitter *>(widget(index))) {
+        x11Viewport = qobject_cast<ZzX11Viewport *>(splitter->widget(1));
+    }
+#endif
     // 对标签内全部断线窗格逐一重连：旧实例废弃，重连必须换新实例
     // （ZzSshConnection 不可重复 connectToHost，规格 §十注释约定）
     for (ZzTerminalView *view : container->views()) {
@@ -246,7 +271,15 @@ void ZzTabManager::reconnectTab(int index)
         // 注意：视图级信号接线（wireView）在 openSession/splitTab 已建立，
         // 此处不得重复调用，否则 currentStateChanged 等信号会翻倍发射
         view->enableScrollback(profile.id.toString(QUuid::WithoutBraces));
-        view->openEndpoint(endpointFor(profile));
+        ZzTransportEndpoint endpoint = endpointFor(profile);
+#ifdef Q_OS_WIN
+        // 嵌入窗格重连必须回填 -parent 句柄，否则 X server 静默退化为
+        // 独立窗口，viewport 空白占据标签页下半区；分屏窗格无标记不嵌入
+        if (x11Viewport && view->property(kX11EmbeddedProperty).toBool()) {
+            applyX11EmbedEndpoint(endpoint, x11Viewport);
+        }
+#endif
+        view->openEndpoint(endpoint);
     }
     // 无遗留断线窗格：同步恢复正常颜色（不等 Connected 信号，
     // 与单窗格时代的立即恢复行为一致）

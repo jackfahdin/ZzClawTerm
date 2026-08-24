@@ -1,6 +1,12 @@
 #include <QtTest/QtTest>
 #include <QtWidgets/QTabBar>
 
+#ifdef Q_OS_WIN
+#include <QtWidgets/QSplitter>
+
+#include "x11/ZzX11Viewport.h"
+#endif
+
 #include "ZzMockTransport.h"
 #include "session/ZzSessionProfile.h"
 #include "tab/ZzTabManager.h"
@@ -108,6 +114,41 @@ private slots:
         // 恢复非灰色
         QVERIFY(tabs.tabBar()->tabTextColor(0) != QColor(Qt::gray));
         QVERIFY(!tabs.isTabDisconnected(0));
+    }
+
+    void reconnectEmbeddedTabKeepsX11EmbedEndpoint()
+    {
+        ZzTabManager tabs;
+        ZzSessionProfile profile = makeProfile(QStringLiteral("嵌入重连"));
+        profile.x11Forwarding = true;
+        profile.x11EmbedMode = true;
+        tabs.openSession(profile);
+        auto *view = tabs.viewAt(0);
+        QTRY_COMPARE(view->transportState(), ZzTransportInterface::State::Connected);
+        auto *firstMock = static_cast<ZzMockTransport *>(view->transport());
+        firstMock->simulateDisconnect(QStringLiteral("掉线"));
+
+        tabs.reconnectTab(0);
+        auto *secondMock = static_cast<ZzMockTransport *>(view->transport());
+        QVERIFY(secondMock != firstMock); // 重连换新传输实例
+        QTRY_COMPARE(view->transportState(), ZzTransportInterface::State::Connected);
+
+#ifdef Q_OS_WIN
+        // 审查修复断言：嵌入标签页重连的 endpoint 必须回填 viewport 的
+        // -parent 句柄与初始尺寸，否则 X server 静默退化为独立窗口
+        auto *splitter = qobject_cast<QSplitter *>(tabs.widget(0));
+        QVERIFY(splitter != nullptr);
+        auto *viewport = qobject_cast<ZzX11Viewport *>(splitter->widget(1));
+        QVERIFY(viewport != nullptr);
+        QVERIFY(secondMock->lastEndpoint.x11ParentWindow != 0);
+        QCOMPARE(secondMock->lastEndpoint.x11ParentWindow,
+                 viewport->embeddingHandle());
+        QVERIFY(!secondMock->lastEndpoint.x11InitialSize.isEmpty());
+#else
+        // 非 Windows 无嵌入（Q_OS_WIN 编译隔离）：endpoint 保持独立窗口语义
+        QCOMPARE(secondMock->lastEndpoint.x11ParentWindow, quintptr(0));
+        QVERIFY(secondMock->lastEndpoint.x11InitialSize.isEmpty());
+#endif
     }
 
     void unknownProtocolShowsStatusMessage()
