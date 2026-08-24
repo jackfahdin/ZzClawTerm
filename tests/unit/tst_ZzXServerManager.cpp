@@ -62,7 +62,7 @@ private slots:
         ZzXServerManager mgr;
         mgr.setServerProgramForTesting(stub);
         QSignalSpy startedSpy(&mgr, &ZzXServerManager::started);
-        mgr.start(QStringLiteral("/nonexistent/vcxsrv.exe"), xauth, 7);
+        mgr.start(QStringLiteral("/nonexistent/ZzXsrv.exe"), xauth, 7);
         // 用 QTRY 断言计数而非 spy.wait()：信号若在 stop()/start() 内同步发出，
         // Qt 6.11 的 QSignalSpy::wait() 对已记录的计数仍可能返回 false
         QTRY_VERIFY_WITH_TIMEOUT(startedSpy.count() >= 1, 5000);
@@ -89,6 +89,64 @@ private slots:
         QSignalSpy stoppedSpy(&mgr, &ZzXServerManager::stopped);
         mgr.stop();
         QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy.count() >= 1, 5000);
+#else
+        QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
+#endif
+    }
+
+    /** @brief 嵌入模式：桩 server 收到 :N -parent <hwnd> -screen 0 800x600 -clipboard -listen tcp -auth <path>。 */
+    void startsEmbeddedWithExpectedArgs()
+    {
+#ifdef Q_OS_UNIX
+        const QString argsFile = m_dir.filePath(QStringLiteral("args.txt"));
+        const QString xauth = m_dir.filePath(QStringLiteral("xauth-test"));
+        // m_dir 全用例共享：清掉前序用例残留的参数记录，避免读到旧内容
+        QFile::remove(argsFile);
+        const QString stub = makeSleepingStub(argsFile);
+        QVERIFY(!stub.isEmpty());
+
+        ZzXServerManager mgr;
+        mgr.setServerProgramForTesting(stub);
+        QSignalSpy startedSpy(&mgr, &ZzXServerManager::started);
+        mgr.startEmbedded(QStringLiteral("/nonexistent/ZzXsrv.exe"), xauth, 7,
+                          12345, QSize(800, 600));
+        // 用 QTRY 断言计数而非 spy.wait()：信号若在 stop()/start() 内同步发出，
+        // Qt 6.11 的 QSignalSpy::wait() 对已记录的计数仍可能返回 false
+        QTRY_VERIFY_WITH_TIMEOUT(startedSpy.count() >= 1, 5000);
+        QCOMPARE(startedSpy.first().at(0).toInt(), 7);
+        QVERIFY(mgr.isRunning());
+        QCOMPARE(mgr.display(), 7);
+
+        // 桩脚本落参数文件与 started 存在调度竞态，轮询等待
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(argsFile), 5000);
+        QFile f(argsFile);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QStringList args = QString::fromUtf8(f.readAll()).split(u'\n', Qt::SkipEmptyParts);
+        // 精确锁定嵌入参数顺序与完整性（-parent 父窗口 + -screen 0 初始终端尺寸）
+        QCOMPARE(args, QStringList({QStringLiteral(":7"), QStringLiteral("-parent"),
+                                    QStringLiteral("12345"), QStringLiteral("-screen"),
+                                    QStringLiteral("0"), QStringLiteral("800x600"),
+                                    QStringLiteral("-clipboard"), QStringLiteral("-listen"),
+                                    QStringLiteral("tcp"), QStringLiteral("-auth"), xauth}));
+        f.close();
+
+        // stop 后 restart 复用同一份嵌入参数（m_last* 记忆）
+        QSignalSpy stoppedSpy(&mgr, &ZzXServerManager::stopped);
+        mgr.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy.count() >= 1, 5000);
+        QVERIFY(QFile::remove(argsFile)); // 删旧记录，确认 restart 重新落参
+        QSignalSpy restartedSpy(&mgr, &ZzXServerManager::started);
+        mgr.restart();
+        QTRY_VERIFY_WITH_TIMEOUT(restartedSpy.count() >= 1, 5000);
+        QCOMPARE(restartedSpy.first().at(0).toInt(), 7);
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(argsFile), 5000);
+        QFile f2(argsFile);
+        QVERIFY(f2.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(f2.readAll()).split(u'\n', Qt::SkipEmptyParts), args);
+
+        QSignalSpy stoppedSpy2(&mgr, &ZzXServerManager::stopped);
+        mgr.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(stoppedSpy2.count() >= 1, 5000);
 #else
         QSKIP("桩脚本依赖 POSIX shell，仅 Unix 可测");
 #endif

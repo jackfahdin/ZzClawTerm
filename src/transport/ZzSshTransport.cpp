@@ -333,7 +333,14 @@ void ZzSshTransportAdapter::onX11ServerReady(const QString &executablePath)
         return;
     }
     // 桥按 channel 到达时才连本地端点，无需等待 server 完全就绪
-    m_x11Manager->start(executablePath, xauthPath, display);
+    if (m_endpoint.x11ParentWindow != 0) {
+        // 嵌入模式：ZzXsrv -parent 嵌入标签页内 ZzX11Viewport
+        m_x11Manager->startEmbedded(executablePath, xauthPath, display,
+                                    m_endpoint.x11ParentWindow,
+                                    m_endpoint.x11InitialSize);
+    } else {
+        m_x11Manager->start(executablePath, xauthPath, display);
+    }
     requestX11Forwarding();
     openShellChannel();
 #else

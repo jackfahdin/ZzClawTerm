@@ -121,6 +121,28 @@ private slots:
         QCOMPARE(profile.x11Forwarding, false);
         QCOMPARE(ZzSessionProfile{}.x11Forwarding, false);
     }
+
+    /** @brief x11EmbedMode 字段序列化/反序列化往返保持（true/false 两值）。 */
+    void x11EmbedModeRoundTrip()
+    {
+        for (const bool embed : {true, false}) {
+            ZzSessionProfile profile;
+            profile.id = QUuid::createUuid();
+            profile.name = QStringLiteral("嵌入机");
+            profile.x11EmbedMode = embed;
+            const ZzSessionProfile restored = ZzSessionProfile::fromJson(profile.toJson());
+            QCOMPARE(restored.x11EmbedMode, embed);
+            QVERIFY(restored == profile);
+        }
+    }
+
+    /** @brief 旧版 JSON 无 x11EmbedMode 字段：缺省 true（嵌入标签页，向后兼容）。 */
+    void x11EmbedModeDefaultsOn()
+    {
+        const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
+        QCOMPARE(profile.x11EmbedMode, true);
+        QCOMPARE(ZzSessionProfile{}.x11EmbedMode, true);
+    }
 };
 
 QTEST_GUILESS_MAIN(ZzSessionProfileTest)

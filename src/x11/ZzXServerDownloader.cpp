@@ -15,7 +15,7 @@
 namespace {
 
 /// 安装根目录下的 X server 可执行文件名（NSIS 直接装到 INSTDIR 根）。
-const QString kExeName = QStringLiteral("vcxsrv.exe");
+const QString kExeName = QStringLiteral("ZzXsrv.exe");
 
 /// 版本标记文件名（内容为官方版本号，供幂等判断）。
 const QString kVersionFileName = QStringLiteral("VERSION");

@@ -20,6 +20,7 @@ const QString kEncodingKey = QStringLiteral("encoding");
 const QString kColorSchemeNameKey = QStringLiteral("colorSchemeName");
 const QString kKeepAliveKey = QStringLiteral("keepAliveIntervalSeconds");
 const QString kX11ForwardingKey = QStringLiteral("x11Forwarding");
+const QString kX11EmbedModeKey = QStringLiteral("x11EmbedMode");
 const QString kPortForwardsKey = QStringLiteral("portForwards");
 
 /**
@@ -69,6 +70,7 @@ QJsonObject ZzSessionProfile::toJson() const
     obj.insert(kColorSchemeNameKey, colorSchemeName);
     obj.insert(kKeepAliveKey, keepAliveIntervalSeconds);
     obj.insert(kX11ForwardingKey, x11Forwarding);
+    obj.insert(kX11EmbedModeKey, x11EmbedMode);
     QJsonArray forwards;
     for (const ZzForwardRule &rule : portForwards)
         forwards.append(rule.toJson());
@@ -96,6 +98,7 @@ ZzSessionProfile ZzSessionProfile::fromJson(const QJsonObject &obj)
     profile.colorSchemeName = obj.value(kColorSchemeNameKey).toString();
     profile.keepAliveIntervalSeconds = obj.value(kKeepAliveKey).toInt(profile.keepAliveIntervalSeconds);
     profile.x11Forwarding = obj.value(kX11ForwardingKey).toBool(profile.x11Forwarding);
+    profile.x11EmbedMode = obj.value(kX11EmbedModeKey).toBool(profile.x11EmbedMode);
     const QJsonArray forwards = obj.value(kPortForwardsKey).toArray();
     for (const auto &v : forwards)
         profile.portForwards.append(ZzForwardRule::fromJson(v.toObject()));

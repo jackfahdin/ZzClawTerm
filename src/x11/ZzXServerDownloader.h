@@ -8,10 +8,12 @@
  * @brief X server 发布物事实常量（X11 forwarding 应用侧，按需下载器前置交付）。
  *
  * M4a 起下载源从官方 vcxsrv 切换为 ZzXsrv 自有构建
- *（github.com/jackfahdin/ZzXsrv，release zz-21.1.16.1-1）：基于官方
+ *（github.com/jackfahdin/ZzXsrv，release zz-21.1.16.1-2 / zz2）：基于官方
  * 21.1.16.1 + xtrans 回环绑定 patch，默认仅监听 127.0.0.1/::1（满足
  * 2026-08-23 安全裁决）；环境变量 ZZXSRV_LISTEN_ANY=1 恢复全网卡监听，
- * 仅限隔离调试。官方发布物调研证据保留于下，供溯源。
+ * 仅限隔离调试。zz2 在 zz1 基础上完成运行时裁剪与品牌化（可执行文件
+ * ZzXsrv.exe、窗口类名 ZzXsrv/x），并新增 -parent rootful 嵌入支持。
+ * 官方发布物调研证据保留于下，供溯源。
  *
  * 本头文件只固化常量，不含实现；后续 Windows 按需下载器（ZzXServerDownloader）
  * 直接引用本命名空间。以下信息均经真实网络调研核实，核实日期 2026-08-22。
@@ -55,19 +57,20 @@
  */
 namespace ZzXServerRelease {
 
-/// ZzXsrv 自有构建版本标识（基于 vcxsrv 21.1.16.1 + xtrans 回环绑定 patch）。
-/// 与官方版版本串不等，已装官方版的用户据此触发重装。
-inline constexpr char kVersion[] = "21.1.16.1-zz1";
+/// ZzXsrv 自有构建版本标识（基于 vcxsrv 21.1.16.1 + xtrans 回环绑定 patch；
+/// zz2 = 裁剪 + 品牌化 + -parent 嵌入）。与官方版版本串不等，已装官方版
+/// 或 zz1 的用户据此触发重装。
+inline constexpr char kVersion[] = "21.1.16.1-zz2";
 
 /// ZzXsrv release 的 64 位免管理员 NSIS 安装包下载 URL。
 inline constexpr char kUrl[] =
-    "https://github.com/jackfahdin/ZzXsrv/releases/download/zz-21.1.16.1-1/"
-    "vcxsrv-64.21.1.16.1.installer.noadmin.exe";
+    "https://github.com/jackfahdin/ZzXsrv/releases/download/zz-21.1.16.1-2/"
+    "zzxsrv-64.21.1.16.1.installer.noadmin.exe";
 
 /// kUrl 所指安装包的 SHA256（ZzXsrv CI 发布物随附 .sha256，2026-08-24 实测；
-/// 文件大小 42,546,902 字节）。
+/// 文件大小 39,209,845 字节）。
 inline constexpr char kSha256[] =
-    "4c6e568ba332e2934c55375624c61fe3c65f75f63dd76bce02dc3a119aaa0fa6";
+    "2c182ee294716c654fe8795d3bc634c8a5151cbef6ae8c85f0486090ba65b14b";
 
 } // namespace ZzXServerRelease
 
@@ -83,7 +86,7 @@ class QCryptographicHash;
  * 仅 Windows 真用：其他平台 ensureAvailable() 编译期直通，直接发 ready(QString())。
  * 流程：下载到临时文件（边下边算 SHA256）→ 校验通过才以
  * "installer /S /D=<staging 目录>" 静默安装（免 UAC noadmin 变体）→ 核验
- * vcxsrv.exe 落盘并写版本标记 xserver/VERSION → 成功后才把 staging 换入安装根
+ * ZzXsrv.exe 落盘并写版本标记 xserver/VERSION → 成功后才把 staging 换入安装根
  * （旧版先改名 .old 再替换，替换失败回滚）；任何失败只清理本次半成品
  * （临时包与 staging 目录），不误伤既有可用的旧版安装。
  * 已装同版本且可执行文件存在时幂等直通，不发网络请求。
@@ -101,7 +104,7 @@ public:
     /** @brief 确保可用：已装且校验通过直接发 ready；否则下载+校验+静默安装。 */
     void ensureAvailable();
 
-    /** @brief 安装后 vcxsrv.exe 的完整路径（Windows）；其他平台返回空。 */
+    /** @brief 安装后 ZzXsrv.exe 的完整路径（Windows）；其他平台返回空。 */
     QString serverExecutablePath() const;
 
     // —— 以下为测试注入接口，须在 ensureAvailable() 之前调用 ——
@@ -124,7 +127,7 @@ public:
     void setSimulateWindows(bool on);
 
 signals:
-    /** @brief 流程成功：executablePath 为 vcxsrv.exe 完整路径（非 Windows 直通为空串）。 */
+    /** @brief 流程成功：executablePath 为 ZzXsrv.exe 完整路径（非 Windows 直通为空串）。 */
     void ready(const QString &executablePath);
     /** @brief 任一步骤失败：message 含原因（HTTP 错误含状态码），半成品已清理。 */
     void downloadFailed(const QString &message);

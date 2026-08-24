@@ -5,6 +5,40 @@
 #include <QTcpServer>
 #include <QTimer>
 
+namespace {
+
+/**
+ * @brief 组装 X server 命令行参数（独立窗口 / 嵌入两模式共用入口）。
+ * @param parentWindow 非 0 走嵌入模式（-parent/-screen），0 走独立窗口（-multiwindow）。
+ */
+QStringList buildServerArgs(int displayNum, const QString &xauthorityPath,
+                            quintptr parentWindow, const QSize &initialSize)
+{
+    if (parentWindow != 0) {
+        // 嵌入模式：-parent 指定 Win32 父窗口，-screen 0 为初始逻辑屏像素尺寸
+        return {
+            QStringLiteral(":%1").arg(displayNum),
+            QStringLiteral("-parent"), QString::number(parentWindow),
+            QStringLiteral("-screen"), QStringLiteral("0"),
+            QStringLiteral("%1x%2").arg(initialSize.width()).arg(initialSize.height()),
+            QStringLiteral("-clipboard"),
+            QStringLiteral("-listen"), QStringLiteral("tcp"),
+            QStringLiteral("-auth"), xauthorityPath,
+        };
+    }
+    return {
+        QStringLiteral(":%1").arg(displayNum),
+        QStringLiteral("-multiwindow"),
+        QStringLiteral("-clipboard"),
+        QStringLiteral("-listen"),
+        QStringLiteral("tcp"),
+        QStringLiteral("-auth"),
+        xauthorityPath,
+    };
+}
+
+} // namespace
+
 ZzXServerManager::ZzXServerManager(QObject *parent)
     : QObject(parent)
 {
@@ -41,23 +75,42 @@ void ZzXServerManager::start(const QString &executablePath, const QString &xauth
 #endif
 }
 
-void ZzXServerManager::launchProcess(const QString &program, const QString &xauthorityPath, int displayNum)
+void ZzXServerManager::startEmbedded(const QString &executablePath,
+                                     const QString &xauthorityPath, int displayNum,
+                                     quintptr parentWindow, const QSize &initialSize)
+{
+    if (m_running || m_process)
+        return; // 运行中或异步停止收尾未完，拒绝重复拉起
+
+#ifdef Q_OS_WIN
+    launchProcess(m_programOverride.isEmpty() ? executablePath : m_programOverride,
+                  xauthorityPath, displayNum, parentWindow, initialSize);
+#else
+    if (m_programOverride.isEmpty()) {
+        // 嵌入模式仅 Windows 提供（ZzX11Viewport 非 Windows 句柄恒为 0，不会走到这里）；
+        // Unix 无进程分支退化为 start() 的端点记录语义
+        start(executablePath, xauthorityPath, displayNum);
+        return;
+    }
+    launchProcess(m_programOverride, xauthorityPath, displayNum,
+                  parentWindow, initialSize);
+#endif
+}
+
+void ZzXServerManager::launchProcess(const QString &program, const QString &xauthorityPath,
+                                     int displayNum, quintptr parentWindow,
+                                     const QSize &initialSize)
 {
     m_lastProgram = program;
     m_lastXauthorityPath = xauthorityPath;
     m_lastDisplay = displayNum;
+    m_lastParentWindow = parentWindow;
+    m_lastInitialSize = initialSize;
     m_display = displayNum;
     m_stopping = false;
 
-    const QStringList args = {
-        QStringLiteral(":%1").arg(displayNum),
-        QStringLiteral("-multiwindow"),
-        QStringLiteral("-clipboard"),
-        QStringLiteral("-listen"),
-        QStringLiteral("tcp"),
-        QStringLiteral("-auth"),
-        xauthorityPath,
-    };
+    const QStringList args =
+        buildServerArgs(displayNum, xauthorityPath, parentWindow, initialSize);
 
     auto *proc = new QProcess(this);
     m_process = proc;
@@ -148,7 +201,8 @@ void ZzXServerManager::restart()
 {
     if (m_running || m_process || m_lastDisplay < 0)
         return; // 运行中或异步停止收尾未完，拒绝重复拉起
-    launchProcess(m_lastProgram, m_lastXauthorityPath, m_lastDisplay);
+    launchProcess(m_lastProgram, m_lastXauthorityPath, m_lastDisplay,
+                  m_lastParentWindow, m_lastInitialSize);
 }
 
 ZzXLocalEndpoint ZzXServerManager::localEndpoint() const

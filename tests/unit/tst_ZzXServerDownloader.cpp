@@ -57,7 +57,7 @@ protected:
 };
 
 /**
- * @brief 生成桩 NSIS 安装包：记录参数到 argsPath，并在 /D= 目录落 vcxsrv.exe。
+ * @brief 生成桩 NSIS 安装包：记录参数到 argsPath，并在 /D= 目录落 ZzXsrv.exe。
  */
 QByteArray makeStubInstaller(const QString &argsPath)
 {
@@ -66,7 +66,7 @@ QByteArray makeStubInstaller(const QString &argsPath)
     script += "printf '%s\\n' \"$@\" > '" + argsPath.toUtf8() + "'\n";
     script += "for a in \"$@\"; do case \"$a\" in /D=*) d=\"${a#/D=}\";; esac; done\n";
     script += "mkdir -p \"$d\"\n";
-    script += "touch \"$d/vcxsrv.exe\"\n";
+    script += "touch \"$d/ZzXsrv.exe\"\n";
     return script;
 }
 
@@ -91,7 +91,7 @@ private:
     /// 旧版安装标记版本（与官方 kVersion 不同，触发升级下载流程）。
     static constexpr char kOldVersion[] = "20.0.14.0";
 
-    /** @brief 在安装根预置一套完好的旧版安装（VERSION=旧版 + vcxsrv.exe）。 */
+    /** @brief 在安装根预置一套完好的旧版安装（VERSION=旧版 + ZzXsrv.exe）。 */
     void seedOldInstall()
     {
         QVERIFY(QDir().mkpath(m_root));
@@ -99,7 +99,7 @@ private:
         QVERIFY(vf.open(QIODevice::WriteOnly));
         vf.write(QByteArray(kOldVersion) + '\n');
         vf.close();
-        QFile ef(m_root + QStringLiteral("/vcxsrv.exe"));
+        QFile ef(m_root + QStringLiteral("/ZzXsrv.exe"));
         QVERIFY(ef.open(QIODevice::WriteOnly));
         ef.write("old-pe");
         ef.close();
@@ -112,7 +112,7 @@ private:
         QVERIFY(vf.open(QIODevice::ReadOnly));
         QCOMPARE(QString::fromUtf8(vf.readAll()).trimmed(),
                  QString::fromLatin1(kOldVersion));
-        QFile ef(m_root + QStringLiteral("/vcxsrv.exe"));
+        QFile ef(m_root + QStringLiteral("/ZzXsrv.exe"));
         QVERIFY(ef.open(QIODevice::ReadOnly));
         QCOMPARE(ef.readAll(), QByteArray("old-pe"));
         QVERIFY(!QDir(m_root + QStringLiteral(".staging")).exists());
@@ -157,7 +157,7 @@ private slots:
                  failSpy.count() ? qPrintable(failSpy.first().at(0).toString()) : "ready 超时");
         QCOMPARE(server.requestCount, 1);
 
-        const QString exe = m_root + QStringLiteral("/vcxsrv.exe");
+        const QString exe = m_root + QStringLiteral("/ZzXsrv.exe");
         QCOMPARE(readySpy.takeFirst().at(0).toString(), exe);
         QVERIFY(QFile::exists(exe));
 
@@ -238,7 +238,7 @@ private slots:
         QVERIFY(vf.open(QIODevice::WriteOnly));
         vf.write(QByteArray(ZzXServerRelease::kVersion) + '\n');
         vf.close();
-        QFile ef(m_root + QStringLiteral("/vcxsrv.exe"));
+        QFile ef(m_root + QStringLiteral("/ZzXsrv.exe"));
         QVERIFY(ef.open(QIODevice::WriteOnly));
         ef.write("pe");
         ef.close();
@@ -256,7 +256,7 @@ private slots:
         dl.ensureAvailable();
 
         QCOMPARE(readySpy.count(), 1); // 同步直发，无需等待
-        QCOMPARE(readySpy.first().at(0).toString(), m_root + QStringLiteral("/vcxsrv.exe"));
+        QCOMPARE(readySpy.first().at(0).toString(), m_root + QStringLiteral("/ZzXsrv.exe"));
         QCOMPARE(server.requestCount, 0);
     }
 

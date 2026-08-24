@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QSize>
 #include <QString>
 
 class QProcess;
@@ -21,9 +22,9 @@ struct ZzXLocalEndpoint
 /**
  * @brief X server 进程生命周期管理与 display 号分配。
  *
- * Windows：拉起 vcxsrv.exe（-multiwindow -clipboard -listen tcp -auth），区分
- * 崩溃与主动停止并支持重启；Unix：系统 X server 已由桌面环境运行，start() 只
- * 从 $DISPLAY 解析 display 号并记录端点，不拉起进程。
+ * Windows：拉起 ZzXsrv.exe（独立窗口：-multiwindow -clipboard -listen tcp -auth；
+ * 嵌入：-parent/-screen），区分崩溃与主动停止并支持重启；Unix：系统 X server
+ * 已由桌面环境运行，start() 只从 $DISPLAY 解析 display 号并记录端点，不拉起进程。
  */
 class ZzXServerManager : public QObject
 {
@@ -38,12 +39,24 @@ public:
     static int allocateDisplay();
 
     /**
-     * @brief 启动 server（Windows：vcxsrv.exe；Unix 复用系统 X server 只记录端点）。
-     * @param executablePath vcxsrv 可执行路径（Unix 无进程分支忽略）。
+     * @brief 启动 server（Windows：ZzXsrv.exe；Unix 复用系统 X server 只记录端点）。
+     * @param executablePath ZzXsrv 可执行路径（Unix 无进程分支忽略）。
      * @param xauthorityPath 授权文件路径（拼入 -auth 参数）。
      * @param display 目标 display 号（Unix 无进程分支优先采用 $DISPLAY 解析值）。
      */
     void start(const QString &executablePath, const QString &xauthorityPath, int display);
+
+    /**
+     * @brief 以嵌入模式启动 server：-parent <hwnd> -screen <W>x<H>。
+     * @param executablePath ZzXsrv.exe 路径。
+     * @param xauthorityPath cookie 文件路径。
+     * @param display display 号。
+     * @param parentWindow 嵌入父窗口句柄（ZzX11Viewport::embeddingHandle()）。
+     * @param initialSize 容器初始像素尺寸（映射 -screen 参数）。
+     * @note 仅 Windows 真用；restart() 复用同一份嵌入参数。
+     */
+    void startEmbedded(const QString &executablePath, const QString &xauthorityPath,
+                       int display, quintptr parentWindow, const QSize &initialSize);
 
     /**
      * @brief 主动停止 server 并释放 display（异步收尾，不阻塞调用线程）。
@@ -83,8 +96,10 @@ signals:
     void stopped();                     ///< 主动停止或退出码为 0 的正常退出后复位发射
 
 private:
-    /** @brief 以给定参数拉起 server 进程（start 与 restart 共用）。 */
-    void launchProcess(const QString &program, const QString &xauthorityPath, int displayNum);
+    /** @brief 以给定参数拉起 server 进程（start/startEmbedded 与 restart 共用）。 */
+    void launchProcess(const QString &program, const QString &xauthorityPath,
+                       int displayNum, quintptr parentWindow = 0,
+                       const QSize &initialSize = QSize());
 
     /** @brief 从 $DISPLAY 解析 display 号（":0.0"/"localhost:10.0"），失败返回 -1。 */
     static int parseSystemDisplay();
@@ -97,4 +112,6 @@ private:
     QString m_lastProgram;         ///< 上次启动程序（供 restart）
     QString m_lastXauthorityPath;  ///< 上次授权文件路径（供 restart）
     int m_lastDisplay = -1;        ///< 上次 display 号（供 restart）
+    quintptr m_lastParentWindow = 0; ///< 上次嵌入父窗口句柄（0=独立窗口；供 restart）
+    QSize m_lastInitialSize;       ///< 上次嵌入初始尺寸（供 restart）
 };

@@ -5,6 +5,7 @@
 #include <QtGui/QKeySequence>
 #include <QtGui/QShortcut>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QSplitter>
 #include <QtWidgets/QTabBar>
 
 #include "qtermwidget.h"
@@ -12,6 +13,7 @@
 #include "terminal/ZzTerminalView.h"
 #include "transport/ZzSshTransport.h"
 #include "transport/ZzTransportRegistry.h"
+#include "x11/ZzX11Viewport.h"
 
 ZzTabManager::ZzTabManager(QWidget *parent)
     : QTabWidget(parent)
@@ -72,13 +74,40 @@ void ZzTabManager::openSession(const ZzSessionProfile &profile)
     }
     container->addInitialView(view);
     m_tabProfiles.insert(view, profile);
-    const int index = addTab(container, profile.name);
+
+    QWidget *page = container;
+    ZzX11Viewport *x11Viewport = nullptr;
+#ifdef Q_OS_WIN
+    // X11 嵌入模式（仅 Windows）：终端与 X 桌面装入垂直 QSplitter，初始比例 3:1；
+    // viewport 随标签页销毁（父子关系）
+    if (profile.x11Forwarding && profile.x11EmbedMode
+        && profile.protocol != QStringLiteral("local")) {
+        auto *splitter = new QSplitter(Qt::Vertical, this);
+        x11Viewport = new ZzX11Viewport(splitter);
+        splitter->addWidget(container);
+        splitter->addWidget(x11Viewport);
+        splitter->setStretchFactor(0, 3);
+        splitter->setStretchFactor(1, 1);
+        page = splitter;
+    }
+#endif
+    const int index = addTab(page, profile.name);
     setCurrentIndex(index);
     wireView(view);
     wireContainer(container);
 
     view->enableScrollback(profile.id.toString(QUuid::WithoutBraces));
-    view->openEndpoint(endpointFor(profile));
+    ZzTransportEndpoint endpoint = endpointFor(profile);
+#ifdef Q_OS_WIN
+    if (x11Viewport) {
+        endpoint.x11ParentWindow = x11Viewport->embeddingHandle();
+        // 布局未就绪时 size 可能为空：给 -screen 一个合理初值，
+        // 后续尺寸变化由 viewport resize 跟随（SetWindowPos 拉伸）
+        endpoint.x11InitialSize = x11Viewport->size().isEmpty()
+            ? QSize(800, 600) : x11Viewport->size();
+    }
+#endif
+    view->openEndpoint(endpoint);
 }
 
 ZzTerminalView *ZzTabManager::createPane(const ZzSessionProfile &profile,
@@ -182,8 +211,10 @@ void ZzTabManager::closeTab(int index)
         m_tabProfiles.remove(view);
         m_tabTunnelCounts.remove(view);
     }
+    // 嵌入标签页的页面为 QSplitter 包装：销毁页面，容器与 viewport 随父子树回收
+    QWidget *page = widget(index);
     removeTab(index);
-    container->deleteLater();
+    page->deleteLater();
 }
 
 void ZzTabManager::reconnectTab(int index)
@@ -233,7 +264,15 @@ ZzTerminalView *ZzTabManager::viewAt(int index) const
 
 ZzSplitContainer *ZzTabManager::containerAt(int index) const
 {
-    return qobject_cast<ZzSplitContainer *>(widget(index));
+    QWidget *page = widget(index);
+    if (auto *container = qobject_cast<ZzSplitContainer *>(page)) {
+        return container;
+    }
+    // X11 嵌入标签页：页面为垂直 QSplitter（container + ZzX11Viewport）
+    if (auto *splitter = qobject_cast<QSplitter *>(page)) {
+        return qobject_cast<ZzSplitContainer *>(splitter->widget(0));
+    }
+    return nullptr;
 }
 
 QList<ZzTerminalView *> ZzTabManager::viewsAt(int index) const
@@ -270,13 +309,18 @@ void ZzTabManager::wireContainer(ZzSplitContainer *container)
                 m_tabProfiles.remove(view);
                 m_tabTunnelCounts.remove(view);
             });
-    // 最后窗格已关：收掉整个标签
+    // 最后窗格已关：收掉整个标签（嵌入标签页的页面为 QSplitter 包装，按页面索引）
     connect(container, &ZzSplitContainer::emptied, this,
             [this, container]() {
-                const int index = indexOf(container);
+                QWidget *page = container;
+                if (QWidget *parent = container->parentWidget();
+                    parent && indexOf(parent) >= 0) {
+                    page = parent;
+                }
+                const int index = indexOf(page);
                 if (index >= 0) {
                     removeTab(index);
-                    container->deleteLater();
+                    page->deleteLater();
                 }
             });
     // 焦点窗格切换：状态栏跟随刷新（仅当前标签）
@@ -379,8 +423,9 @@ ZzTransportEndpoint ZzTabManager::endpointFor(const ZzSessionProfile &profile) c
         endpoint.x11Forwarding = profile.x11Forwarding;
     }
     // 初始行列以视图当前尺寸为准，open 后由 termSizeChange 信号持续同步
-    auto *view = qobject_cast<ZzSplitContainer *>(currentWidget());
-    ZzTerminalView *focused = view ? view->focusedView() : nullptr;
+    // （经 containerAt 取容器：嵌入标签页的页面是 QSplitter 包装，直接 cast 会落空）
+    ZzSplitContainer *container = containerAt(currentIndex());
+    ZzTerminalView *focused = container ? container->focusedView() : nullptr;
     endpoint.cols = focused ? focused->termWidget()->screenColumnsCount() : 80;
     endpoint.rows = focused ? focused->termWidget()->screenLinesCount() : 24;
     return endpoint;

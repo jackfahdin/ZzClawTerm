@@ -158,6 +158,15 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
     m_x11CheckBox->setChecked(m_profile.x11Forwarding);
     layout->addRow(QStringLiteral("图形转发："), m_x11CheckBox);
 
+    // X11 嵌入模式：ZzXsrv 桌面嵌入会话标签页下半区；取消勾选则以独立窗口运行
+    auto *x11EmbedCheckBox =
+        new QCheckBox(QStringLiteral("嵌入标签页显示（否则独立窗口）"), this);
+    x11EmbedCheckBox->setObjectName(QStringLiteral("x11EmbedCheckBox"));
+    x11EmbedCheckBox->setToolTip(QStringLiteral(
+        "仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示"));
+    x11EmbedCheckBox->setChecked(m_profile.x11EmbedMode);
+    layout->addRow(QString(), x11EmbedCheckBox);
+
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &ZzSessionEditDialog::accept);
@@ -195,6 +204,10 @@ void ZzSessionEditDialog::accept()
         static_cast<ZzAuthMethod>(m_authCombo->currentData().toInt());
     m_profile.privateKeyPath = m_keyPathEdit->text().trimmed();
     m_profile.x11Forwarding = m_x11CheckBox->isChecked();
+    // 嵌入勾选项按 objectName 反查（选项属 X11 附加设置，未单设成员）
+    if (auto *embedCheck = findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"))) {
+        m_profile.x11EmbedMode = embedCheck->isChecked();
+    }
 
     // 端口转发规则：逐条校验 + 列表去重，非法禁止保存（规格 §五）
     const QVector<ZzForwardRule> rules = rulesFromTable();
