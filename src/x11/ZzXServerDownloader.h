@@ -5,7 +5,13 @@
 #include <QUrl>
 
 /**
- * @brief vcxsrv 官方发布物事实常量（X11 forwarding 应用侧，按需下载器前置交付）。
+ * @brief X server 发布物事实常量（X11 forwarding 应用侧，按需下载器前置交付）。
+ *
+ * M4a 起下载源从官方 vcxsrv 切换为 ZzXsrv 自有构建
+ *（github.com/jackfahdin/ZzXsrv，release zz-21.1.16.1-1）：基于官方
+ * 21.1.16.1 + xtrans 回环绑定 patch，默认仅监听 127.0.0.1/::1（满足
+ * 2026-08-23 安全裁决）；环境变量 ZZXSRV_LISTEN_ANY=1 恢复全网卡监听，
+ * 仅限隔离调试。官方发布物调研证据保留于下，供溯源。
  *
  * 本头文件只固化常量，不含实现；后续 Windows 按需下载器（ZzXServerDownloader）
  * 直接引用本命名空间。以下信息均经真实网络调研核实，核实日期 2026-08-22。
@@ -49,18 +55,19 @@
  */
 namespace ZzXServerRelease {
 
-/// 官方最新版本号（GitHub marchaesen/vcxsrv releases，2026-08-22 核实）。
-inline constexpr char kVersion[] = "21.1.16.1";
+/// ZzXsrv 自有构建版本标识（基于 vcxsrv 21.1.16.1 + xtrans 回环绑定 patch）。
+/// 与官方版版本串不等，已装官方版的用户据此触发重装。
+inline constexpr char kVersion[] = "21.1.16.1-zz1";
 
-/// 64 位免管理员 NSIS 安装包的稳定下载 URL。
+/// ZzXsrv release 的 64 位免管理员 NSIS 安装包下载 URL。
 inline constexpr char kUrl[] =
-    "https://github.com/marchaesen/vcxsrv/releases/download/21.1.16.1/"
+    "https://github.com/jackfahdin/ZzXsrv/releases/download/zz-21.1.16.1-1/"
     "vcxsrv-64.21.1.16.1.installer.noadmin.exe";
 
-/// kUrl 所指安装包的 SHA256（官方未公布，2026-08-22 实际下载后本地计算；
-/// 文件大小 42,998,523 字节）。
+/// kUrl 所指安装包的 SHA256（ZzXsrv CI 发布物随附 .sha256，2026-08-24 实测；
+/// 文件大小 42,546,902 字节）。
 inline constexpr char kSha256[] =
-    "dea6c7d67d3d15b4ed45c87b63a83c88f4aceaaef5425630f0e97a0bad70d620";
+    "4c6e568ba332e2934c55375624c61fe3c65f75f63dd76bce02dc3a119aaa0fa6";
 
 } // namespace ZzXServerRelease
 
@@ -71,7 +78,7 @@ class QFile;
 class QCryptographicHash;
 
 /**
- * @brief vcxsrv 按需下载器：官方发布物下载 → SHA256 流式校验 → NSIS 静默安装。
+ * @brief X server 按需下载器：ZzXsrv 发布物下载 → SHA256 流式校验 → NSIS 静默安装。
  *
  * 仅 Windows 真用：其他平台 ensureAvailable() 编译期直通，直接发 ready(QString())。
  * 流程：下载到临时文件（边下边算 SHA256）→ 校验通过才以
@@ -105,7 +112,7 @@ public:
     /** @brief 覆盖安装根目录（默认 QStandardPaths::AppDataLocation/xserver）。 */
     void setInstallRoot(const QString &root);
 
-    /** @brief 覆盖下载 URL 与期望 SHA256（默认 ZzXServerRelease 官方常量）。 */
+    /** @brief 覆盖下载 URL 与期望 SHA256（默认 ZzXServerRelease 常量）。 */
     void setReleaseSource(const QUrl &url, const QString &sha256Hex);
 
     /**

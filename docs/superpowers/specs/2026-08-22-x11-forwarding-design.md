@@ -100,7 +100,7 @@ profile.x11Forwarding = on
 
 ### 5.1 vcxsrv 对接面（调研结论，均为现成功能）
 
-- **监听**：Windows 版仅 TCP 传输（`os/xstrans.c` 强制 TCPCONN），标准端口 6000+display。实证结论：官方预编译二进制的 xtrans 层硬编码 `INADDR_ANY`，无地址绑定 CLI 选项，`-listen tcp` 必然监听全网卡。**用户裁决（2026-08-23）：不接受全网卡监听形态交付**——M1-M3 的 Windows 端 X11 暂不上线（应用侧已加门禁，见主仓库 `ZzSshTransport.cpp`）；xtrans 回环绑定魔改 + Windows 构建链提前为 v0.3 下一里程碑（原 M4 内容前置），回环绑定就绪后 Windows 端 X11 方可启用
+- **监听**：Windows 版仅 TCP 传输（`os/xstrans.c` 强制 TCPCONN），标准端口 6000+display。实证结论：官方预编译二进制的 xtrans 层硬编码 `INADDR_ANY`，无地址绑定 CLI 选项，`-listen tcp` 必然监听全网卡。**用户裁决（2026-08-23）：不接受全网卡监听形态交付**——M1-M3 的 Windows 端 X11 暂不上线（应用侧已加门禁）；xtrans 回环绑定魔改 + Windows 构建链提前为 v0.3 下一里程碑（原 M4 内容前置）。**M4a 已交付（2026-08-24，commit 见任务 5 收口）**：ZzXsrv 回环绑定构建已发布（release `zz-21.1.16.1-1`），主仓库下载源已切换至该构建、Windows 门禁已解除，Windows 端默认走 downloader→manager→bridge 链路
 - **认证**：`-auth <xauthority 文件>` 走标准 DIX 解析；不用 `-ac`（关闭访问控制）除非仅绑回环的调试场景
 - **内部 cookie**：vcxsrv 自身用 `winGenerateAuthorization()`（`hw/xwin/winauth.c`）供剪贴板线程 / multiwindow WM 内部连接，与我们的 cookie 管理不冲突
 - **事件循环**：server 线程自泵 Win32 消息（`winwakeup.c` PeekMessage），嵌入时保持「server 独立线程自泵、Qt 侧只持有 HWND 做 reparent」模型，不进 Qt 主事件循环
@@ -121,7 +121,7 @@ profile.x11Forwarding = on
 
 **M4a 回环绑定（本里程碑核心 patch）**：
 
-- `xorg-server/os/xtrans/Xtranssock.c:1372` `SocketINETCreateListener` 硬编码 `INADDR_ANY` → 默认改绑 `127.0.0.1`，保留环境变量/CLI 旁路（与主程序 `ZZCLAWTERM_X11_ALLOW_ANY_BIND` 语义对应）
+- `xorg-server/os/xtrans/Xtranssock.c:1372` `SocketINETCreateListener` 硬编码 `INADDR_ANY` → 默认改绑 `127.0.0.1`（IPv6 分支同步绑 `::1`），保留环境变量旁路 `ZZXSRV_LISTEN_ANY=1` 恢复全网卡（仅限隔离调试；主程序原 `ZZCLAWTERM_X11_ALLOW_ANY_BIND` 旁路已于 M4a 解除门禁时删除）
 - 同步检查 `Xtranslcl.c`（本地 IPC 传输）与 IPv6 分支（`::1`）行为一致性
 
 **M4b 嵌入侵入点（届时细化）**：
@@ -189,7 +189,7 @@ profile.x11Forwarding = on
 ## 十、验收标准
 
 - M2 完成定义：Docker 端到端用例通过（经 SSH 转发 xdpyinfo 返回正确 display 信息），X11 性能门控入库
-- M3 完成定义：Linux 本机勾选 X11 的 SSH 会话可跑远端 xeyes 并显示在系统 X server；macOS 同链路（XQuartz）代码就绪；Windows 端待回环绑定魔改完成后验收（2026-08-23 裁决：官方二进制监听全网卡，不按现状交付）
-- M4a 完成定义：ZzXsrv CI 原链基线构建通过；回环绑定 patch 后产物冒烟仅监听 127.0.0.1:6000+N；主仓库下载源切换至 ZzXsrv release、Windows 门禁解除；Windows 端 X11 会话经 SSH 转发跑远端 GUI 程序人工验收通过
+- M3 完成定义：Linux 本机勾选 X11 的 SSH 会话可跑远端 xeyes 并显示在系统 X server；macOS 同链路（XQuartz）代码就绪；Windows 端随 M4a 交付（2026-08-24，原 2026-08-23 裁决：官方二进制监听全网卡，不按现状交付）
+- M4a 完成定义（已交付 2026-08-24，commit 见任务 5 收口）：ZzXsrv CI 原链基线构建通过；回环绑定 patch 后产物冒烟仅监听 127.0.0.1:6000+N；主仓库下载源切换至 ZzXsrv release（`zz-21.1.16.1-1`）、Windows 门禁解除；Windows 端 X11 会话经 SSH 转发跑远端 GUI 程序人工验收通过
 - M4b 完成定义：裁剪后 CI 构建出自有 ZzXsrv.exe，rootful 嵌入 Qt 标签页，截图冒烟通过 + 人工验收通过
 - 全量回归：主仓库既有 40 项测试与 ZzSshCore 既有 14+14 项测试保持全绿，性能记录无超 5% 回归
