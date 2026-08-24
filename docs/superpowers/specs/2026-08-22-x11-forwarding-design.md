@@ -121,7 +121,7 @@ profile.x11Forwarding = on
 
 **M4a 回环绑定（本里程碑核心 patch）**：
 
-- `xorg-server/os/xtrans/Xtranssock.c:1372` `SocketINETCreateListener` 硬编码 `INADDR_ANY` → 默认改绑 `127.0.0.1`（IPv6 分支同步绑 `::1`），保留环境变量旁路 `ZZXSRV_LISTEN_ANY=1` 恢复全网卡（仅限隔离调试；主程序原 `ZZCLAWTERM_X11_ALLOW_ANY_BIND` 旁路已于 M4a 解除门禁时删除）
+- `X11/xtrans/Xtranssock.c` `SocketINETCreateListener`（vcxsrv 把 xtrans 作为独立 vendored 库，不在 `xorg-server/os/` 下；patch 后绑定点 :1391 IPv4 / :1401 IPv6）硬编码 `INADDR_ANY` → 默认改绑 `127.0.0.1`（IPv6 分支同步绑 `::1`），保留环境变量旁路 `ZZXSRV_LISTEN_ANY=1` 恢复全网卡（仅限隔离调试；主程序原 `ZZCLAWTERM_X11_ALLOW_ANY_BIND` 旁路已于 M4a 解除门禁时删除）
 - 同步检查 `Xtranslcl.c`（本地 IPC 传输）与 IPv6 分支（`::1`）行为一致性
 
 **M4b 嵌入侵入点（届时细化）**：
@@ -193,7 +193,7 @@ profile.x11Forwarding = on
 - M4a 完成定义（2026-08-24 核销：前三条已达成，人工验收待用户实机执行）：
   - ZzXsrv CI 原链基线构建通过 — 已达成（2026-08-24）：run 32662240347（commit 60f8158b3，含 xkbdata 内容核验，约 26 分钟）
   - 回环绑定 patch 后产物冒烟仅监听 127.0.0.1:6000+N — 已达成（2026-08-24）：反例 run 32673661364（未 patch 基线监听 0.0.0.0:6099 被断言如期抓住）+ 正例 run 32676838484（patch 48a279edd 后仅监听 127.0.0.1:6099 + [::1]:6099，IPv6 对称断言 a8b15680e）
-  - 主仓库下载源切换至 ZzXsrv release（`zz-21.1.16.1-1`）、Windows 门禁解除 — 已达成（2026-08-24）：主仓库 commit 7cc787a（kVersion 21.1.16.1-zz1，SHA256 4c6e568b…a0fa6，回归 43/43）
+  - 主仓库下载源切换至 ZzXsrv release（`zz-21.1.16.1-1`）、Windows 门禁解除 — 已达成（2026-08-24）：主仓库 commit 7cc787a（kVersion 21.1.16.1-zz1，SHA256 4c6e568b…a0fa6，回归 43/43）；该 release 由 ZzXsrv 流水线 commit 62a11463b 产出
   - Windows 端 X11 会话经 SSH 转发跑远端 GUI 程序人工验收通过 — 待用户实机验收（验收清单见任务 5 步骤 3）
 - M4b 完成定义：裁剪后 CI 构建出自有 ZzXsrv.exe，rootful 嵌入 Qt 标签页，截图冒烟通过 + 人工验收通过
-- 全量回归：主仓库既有 40 项测试与 ZzSshCore 既有 14+14 项测试保持全绿，性能记录无超 5% 回归
+- 全量回归：主仓库既有 43 项测试与 ZzSshCore 既有 14+14 项测试保持全绿，性能记录无超 5% 回归
