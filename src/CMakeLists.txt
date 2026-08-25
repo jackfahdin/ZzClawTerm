@@ -47,6 +47,8 @@ set(ZZCLAWTERM_APP_SOURCES
     x11/ZzXAuthority.cpp
     x11/ZzXServerManager.h
     x11/ZzXServerManager.cpp
+    x11/ZzX11Service.h
+    x11/ZzX11Service.cpp
     x11/ZzX11Viewport.h
     x11/ZzX11Viewport.cpp
     x11/ZzX11ViewportPrivate.h
