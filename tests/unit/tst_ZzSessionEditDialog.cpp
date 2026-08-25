@@ -230,6 +230,7 @@ private slots:
         plain.id = QUuid::createUuid();
         plain.name = QStringLiteral("终端机");
         plain.host = QStringLiteral("10.0.0.4");
+        plain.x11Forwarding = false; // M5 后缺省为 true，此处显式置 false
         ZzSessionEditDialog dlg2(store.get(), plain);
         auto *check2 = dlg2.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
         QVERIFY(check2);
@@ -263,18 +264,30 @@ private slots:
         QCOMPARE(finishSpy.count(), 1);
         QCOMPARE(dlg.profile().x11EmbedMode, true);
 
-        // 反向：缺省 profile（true）加载为勾选，取消勾选后保存为 false
+        // 反向：true profile 加载为勾选，取消勾选后保存为 false
         ZzSessionProfile plain;
         plain.id = QUuid::createUuid();
         plain.name = QStringLiteral("终端机");
         plain.host = QStringLiteral("10.0.0.4");
+        plain.x11EmbedMode = true; // M5 后缺省为 false，此处显式置 true
         ZzSessionEditDialog dlg2(store.get(), plain);
         auto *check2 = dlg2.findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"));
         QVERIFY(check2);
-        QVERIFY(check2->isChecked()); // x11EmbedMode 缺省 true
+        QVERIFY(check2->isChecked());
         check2->setChecked(false);
         clickOk(dlg2);
         QCOMPARE(dlg2.profile().x11EmbedMode, false);
+    }
+
+    /** @brief 默认 profile 打开对话框：转发勾选、嵌入不勾选（M5 默认值翻转）。 */
+    void x11CheckBoxesMatchNewDefaults()
+    {
+        auto store = makeStore();
+        ZzSessionEditDialog dlg(store.get(), ZzSessionProfile{});
+        auto *x11 = dlg.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
+        auto *embed = dlg.findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"));
+        QVERIFY(x11 && x11->isChecked());
+        QVERIFY(embed && !embed->isChecked());
     }
 
     /** @brief 密码认证下私钥口令引用被清空，旧口令凭据一并删除（不留孤儿条目）。 */

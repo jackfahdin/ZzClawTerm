@@ -114,12 +114,12 @@ private slots:
         QVERIFY(restored == profile);
     }
 
-    /** @brief 旧版 JSON 无 x11Forwarding 字段：缺省 false（向后兼容）。 */
-    void x11DefaultsOff()
+    /** @brief 旧版 JSON 无 x11Forwarding 字段：缺省 true（M5 翻转，对齐 MobaXterm）。 */
+    void x11DefaultsOn()
     {
         const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
-        QCOMPARE(profile.x11Forwarding, false);
-        QCOMPARE(ZzSessionProfile{}.x11Forwarding, false);
+        QCOMPARE(profile.x11Forwarding, true);
+        QCOMPARE(ZzSessionProfile{}.x11Forwarding, true);
     }
 
     /** @brief x11EmbedMode 字段序列化/反序列化往返保持（true/false 两值）。 */
@@ -136,12 +136,41 @@ private slots:
         }
     }
 
-    /** @brief 旧版 JSON 无 x11EmbedMode 字段：缺省 true（嵌入标签页，向后兼容）。 */
-    void x11EmbedModeDefaultsOn()
+    /** @brief 旧版 JSON 无 x11EmbedMode 字段：缺省 false（独立窗口，M5 翻转）。 */
+    void x11EmbedModeDefaultsOff()
     {
         const ZzSessionProfile profile = ZzSessionProfile::fromJson(QJsonObject());
-        QCOMPARE(profile.x11EmbedMode, true);
-        QCOMPARE(ZzSessionProfile{}.x11EmbedMode, true);
+        QCOMPARE(profile.x11EmbedMode, false);
+        QCOMPARE(ZzSessionProfile{}.x11EmbedMode, false);
+    }
+
+    /** @brief M5 规格 §三决策 2/3：转发默认开、嵌入默认关。 */
+    void x11DefaultsAlignMobaXterm()
+    {
+        const ZzSessionProfile profile;
+        QVERIFY(profile.x11Forwarding);
+        QVERIFY(!profile.x11EmbedMode);
+    }
+
+    /** @brief M5 规格 §九：旧 JSON 缺键取代码新默认。 */
+    void oldJsonWithoutX11KeysTakesNewDefaults()
+    {
+        QJsonObject obj;
+        obj.insert(QStringLiteral("name"), QStringLiteral("s"));
+        const ZzSessionProfile parsed = ZzSessionProfile::fromJson(obj);
+        QVERIFY(parsed.x11Forwarding);
+        QVERIFY(!parsed.x11EmbedMode);
+    }
+
+    /** @brief 显式存过的值不受默认值翻转影响。 */
+    void explicitX11ValuesSurviveRoundtrip()
+    {
+        ZzSessionProfile profile;
+        profile.x11Forwarding = false;
+        profile.x11EmbedMode = true;
+        const ZzSessionProfile parsed = ZzSessionProfile::fromJson(profile.toJson());
+        QVERIFY(!parsed.x11Forwarding);
+        QVERIFY(parsed.x11EmbedMode);
     }
 };
 

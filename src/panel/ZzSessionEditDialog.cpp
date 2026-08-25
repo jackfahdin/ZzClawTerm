@@ -150,17 +150,17 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
         }
     });
 
-    // X11 转发开关（实验性）：Windows 走内建 X server，Linux/macOS 依赖本机 X server
-    m_x11CheckBox = new QCheckBox(QStringLiteral("X11 转发（实验性）"), this);
+    // X11 转发开关：默认开启对齐 MobaXterm；Windows 走内建 X server，Linux/macOS 依赖本机 X server
+    m_x11CheckBox = new QCheckBox(QStringLiteral("X11 转发"), this);
     m_x11CheckBox->setObjectName(QStringLiteral("x11CheckBox"));
     m_x11CheckBox->setToolTip(QStringLiteral(
         "Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz"));
     m_x11CheckBox->setChecked(m_profile.x11Forwarding);
     layout->addRow(QStringLiteral("图形转发："), m_x11CheckBox);
 
-    // X11 嵌入模式：ZzXsrv 桌面嵌入会话标签页下半区；取消勾选则以独立窗口运行
+    // X11 嵌入模式（实验）：ZzXsrv 桌面嵌入会话标签页下半区；取消勾选则以独立窗口运行
     auto *x11EmbedCheckBox =
-        new QCheckBox(QStringLiteral("嵌入标签页显示（否则独立窗口）"), this);
+        new QCheckBox(QStringLiteral("嵌入标签页显示（实验；否则独立窗口）"), this);
     x11EmbedCheckBox->setObjectName(QStringLiteral("x11EmbedCheckBox"));
     x11EmbedCheckBox->setToolTip(QStringLiteral(
         "仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示"));

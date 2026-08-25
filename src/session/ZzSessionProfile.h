@@ -42,8 +42,8 @@ struct ZzSessionProfile {
     QString encoding = QStringLiteral("UTF-8");              ///< 字符编码
     QString colorSchemeName;        ///< 配色方案名，空串表示使用全局默认
     int keepAliveIntervalSeconds = 0; ///< keepalive 间隔（秒），0 表示禁用
-    bool x11Forwarding = false;       ///< 是否启用 X11 转发（实验性；缺省 false，旧 JSON 无此字段时兼容）
-    bool x11EmbedMode = true;         ///< X11 嵌入标签页显示（false=独立窗口；缺省 true，旧 JSON 兼容）
+    bool x11Forwarding = true;        ///< 是否启用 X11 转发（缺省 true 对齐 MobaXterm；旧 JSON 无此字段时兼容）
+    bool x11EmbedMode = false;        ///< X11 嵌入标签页显示（实验；false=独立窗口，缺省 false，旧 JSON 兼容）
     QVector<ZzForwardRule> portForwards;  ///< 端口转发规则（规格 §五；空=不启用转发）
 
     /**
