@@ -1,5 +1,6 @@
 #include "ZzSettingsPage.h"
 
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QLabel>
@@ -66,6 +67,12 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
                        "切换到系统密钥环不会自动迁移旧 AES 文件中的凭据（旧文件保留不删）。"));
     layout->addRow(QStringLiteral("凭据后端："), m_credentialBackendCombo);
 
+    m_x11ServerCheck = new QCheckBox(QStringLiteral("启用 X server（启动时自动运行）"), this);
+    m_x11ServerCheck->setChecked(m_settings->x11ServerEnabled());
+    m_x11ServerCheck->setToolTip(QStringLiteral(
+        "关闭后停止内建 X server，新会话不再发起 X11 转发；重新开启即恢复"));
+    layout->addRow(QStringLiteral("X11："), m_x11ServerCheck);
+
     auto *note = new QLabel(
         QStringLiteral("改动立即生效：新标签使用新值，已打开标签实时应用字号/配色/编码。"),
         this);
@@ -94,6 +101,8 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         m_settings->setCredentialBackend(
             m_credentialBackendCombo->itemData(index).toString());
     });
+    connect(m_x11ServerCheck, &QCheckBox::toggled,
+            m_settings, &ZzAppSettings::setX11ServerEnabled);
 }
 
 QComboBox *ZzSettingsPage::terminalTypeCombo() const { return m_terminalTypeCombo; }
@@ -102,3 +111,4 @@ QSpinBox *ZzSettingsPage::fontSizeSpin() const { return m_fontSizeSpin; }
 QComboBox *ZzSettingsPage::colorSchemeCombo() const { return m_colorSchemeCombo; }
 QSpinBox *ZzSettingsPage::historyLinesSpin() const { return m_historyLinesSpin; }
 QComboBox *ZzSettingsPage::credentialBackendCombo() const { return m_credentialBackendCombo; }
+QCheckBox *ZzSettingsPage::x11ServerCheck() const { return m_x11ServerCheck; }

@@ -104,3 +104,17 @@ void ZzAppSettings::setCredentialBackend(const QString &backend)
     m_settings->setValue(QStringLiteral("credential/backend"), backend);
     emit settingsChanged();
 }
+
+bool ZzAppSettings::x11ServerEnabled() const
+{
+    return m_settings->value(QStringLiteral("x11/serverEnabled"), true).toBool();
+}
+
+void ZzAppSettings::setX11ServerEnabled(bool enabled)
+{
+    if (x11ServerEnabled() == enabled) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("x11/serverEnabled"), enabled);
+    emit settingsChanged();
+}

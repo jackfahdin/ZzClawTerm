@@ -1,5 +1,6 @@
 #include <QtTest/QtTest>
 
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QSpinBox>
@@ -60,6 +61,16 @@ private slots:
         QCOMPARE(settings.terminalType(),
                  page.terminalTypeCombo()->currentText());
         QVERIFY(spy.count() > 2);
+    }
+
+    void x11ServerCheckBoxReflectsAndWrites()
+    {
+        ZzAppSettings settings(m_path);
+        ZzSettingsPage page(&settings);
+        auto *box = page.x11ServerCheck();
+        QVERIFY(box && box->isChecked());      // 默认开
+        box->setChecked(false);                // toggled 即写设置
+        QVERIFY(!settings.x11ServerEnabled());
     }
 
     void colorSchemesComeFromTerminal()

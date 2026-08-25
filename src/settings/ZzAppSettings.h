@@ -6,7 +6,7 @@
 class QSettings;
 
 /**
- * @brief 全局设置存储（规格 §七）：默认终端类型、编码、字号、配色、热层内存行数。
+ * @brief 全局设置存储（规格 §七）：默认终端类型、编码、字号、配色、热层内存行数、启用 X server。
  *
  * 生产环境用 instance()（INI 文件落在 QStandardPaths::AppConfigLocation）；
  * 测试用显式路径构造。任何字段变更发射 settingsChanged()，已打开标签实时应用。
@@ -48,6 +48,10 @@ public:
      */
     [[nodiscard]] QString credentialBackend() const;
     void setCredentialBackend(const QString &backend);
+
+    /** @brief 启用内建 X server（应用启动时自动拉起共享实例），默认 true。 */
+    [[nodiscard]] bool x11ServerEnabled() const;
+    void setX11ServerEnabled(bool enabled);
 
 signals:
     /** @brief 任一字段变更后发射；UI 层收到后实时应用到已打开标签。 */

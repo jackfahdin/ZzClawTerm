@@ -64,6 +64,31 @@ private slots:
         QCOMPARE(spy.count(), 1);
         QFile::remove(path);
     }
+
+    void x11ServerEnabledDefaultsTrue()
+    {
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-x11-default-test.ini"));
+        QFile::remove(path);
+        ZzAppSettings settings(path);
+        QVERIFY(settings.x11ServerEnabled()); // M5 规格 §三决策 1：默认开
+        QFile::remove(path);
+    }
+
+    void x11ServerEnabledRoundtrip()
+    {
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-x11-roundtrip-test.ini"));
+        QFile::remove(path);
+        ZzAppSettings settings(path);
+        QSignalSpy spy(&settings, &ZzAppSettings::settingsChanged);
+        settings.setX11ServerEnabled(false);
+        QVERIFY(!settings.x11ServerEnabled());
+        QCOMPARE(spy.count(), 1);
+        settings.setX11ServerEnabled(false); // 同值短路不再发射
+        QCOMPARE(spy.count(), 1);
+        QFile::remove(path);
+    }
 };
 
 QTEST_MAIN(tst_ZzAppSettings)

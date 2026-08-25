@@ -2,6 +2,7 @@
 
 #include <QtWidgets/QWidget>
 
+class QCheckBox;
 class QComboBox;
 class QSpinBox;
 class ZzAppSettings;
@@ -25,6 +26,7 @@ public:
     [[nodiscard]] QComboBox *colorSchemeCombo() const;
     [[nodiscard]] QSpinBox *historyLinesSpin() const;
     [[nodiscard]] QComboBox *credentialBackendCombo() const;
+    [[nodiscard]] QCheckBox *x11ServerCheck() const;
 
 private:
     ZzAppSettings *m_settings;
@@ -34,4 +36,5 @@ private:
     QComboBox *m_colorSchemeCombo;
     QSpinBox *m_historyLinesSpin;
     QComboBox *m_credentialBackendCombo;
+    QCheckBox *m_x11ServerCheck;
 };
