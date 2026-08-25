@@ -40,6 +40,13 @@ ZzX11Service::ZzX11Service(QObject *parent)
         m_starting = false;
         m_display = -1;
         m_cookie.clear();
+        // 快速 toggle 补拉：stop() 收尾期间重开开关时，start() 会被 manager 的
+        // 收尾守卫静默拒绝；此处 m_process 已清空，可正常拉起。
+        // 无递归风险：Unix 无进程分支 stopped 同步发射时 m_enabled 已为 false，
+        // 主动 stop() 路径 m_enabled 同样已先置 false，只有重开场景才进入。
+        if (m_enabled) {
+            start();
+        }
     });
 }
 

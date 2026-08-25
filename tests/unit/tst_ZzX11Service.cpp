@@ -105,6 +105,30 @@ private slots:
         QSKIP("桩 server 为 POSIX 脚本，仅 Unix 有效");
 #endif
     }
+
+    /** @brief 快速 toggle（开→关→立即开）后 server 最终回到运行态（审查修复：stopped 处理器补拉）。 */
+    void rapidToggleRelaunches()
+    {
+#ifdef Q_OS_UNIX
+        const QString argsFile = m_dir.filePath(QStringLiteral("args3.txt"));
+        const QString stub = makeSleepingStub(argsFile);
+        QVERIFY(!stub.isEmpty());
+        ZzX11Service service;
+        service.setServerProgramForTesting(stub);
+        service.setEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(service.isRunning(), 5000);
+
+        // 关后立即重开：stop() 异步收尾未完，重开的 start() 被 manager 收尾守卫
+        // 静默拒绝；收尾到达 stopped 后由处理器按 m_enabled 补拉
+        service.setEnabled(false);
+        service.setEnabled(true);
+        QTRY_VERIFY_WITH_TIMEOUT(service.isRunning(), 10000);
+        QVERIFY(service.display() >= 0);
+        QVERIFY(!service.cookie().isEmpty());
+#else
+        QSKIP("桩 server 为 POSIX 脚本，仅 Unix 有效");
+#endif
+    }
 };
 
 QTEST_MAIN(tst_ZzX11Service)
