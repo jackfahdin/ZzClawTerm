@@ -31,10 +31,18 @@ ZzX11Service::ZzX11Service(QObject *parent)
     });
     connect(m_manager, &ZzXServerManager::crashed, this,
             [this](const QString &message) {
+                // 拉起/懒重拉进行中的崩溃（如 exe 被查杀 FailedToStart）：除转发
+                // serverCrashed 外补发 startFailed，使挂起等待的 transport 能走
+                // "失败不阻断会话"收尾；运行态崩溃仍只发 serverCrashed（规格：不
+                // 自动热恢复）
+                const bool wasStarting = m_starting;
                 m_starting = false;
                 m_display = -1;
                 m_cookie.clear();
                 emit serverCrashed(message);
+                if (wasStarting) {
+                    emit startFailed(message);
+                }
             });
     connect(m_manager, &ZzXServerManager::stopped, this, [this] {
         m_starting = false;
@@ -131,7 +139,10 @@ void ZzX11Service::setServerProgramForTesting(const QString &program)
 void ZzX11Service::onDownloaderReady(const QString &executablePath)
 {
     if (!m_enabled) {
-        m_starting = false; // 下载期间开关被关闭：放弃拉起
+        // 下载期间开关被关闭：放弃拉起，并补发 startFailed 让等待中的
+        // transport 收尾（否则两个 SingleShot 都不触发，会话挂在 Connecting）
+        m_starting = false;
+        emit startFailed(tr("X11 转发已跳过：X server 已被禁用"));
         return;
     }
     const int d = ZzXServerManager::allocateDisplay();
