@@ -245,6 +245,13 @@ void ZzSshTransportAdapter::startX11Forwarding()
         return;
     }
 #if defined(Q_OS_WIN)
+    // 总开关门（M5 审查修复）：注入了共享服务且被禁用时，嵌入与非嵌入会话
+    // 一视同仁跳过 X11；未注入服务（如单测场景）不拦截，保持嵌入路径原行为
+    if (m_x11Service && !m_x11Service->isEnabled()) {
+        emit statusNotice(QStringLiteral("X11 转发已跳过：X server 未启用"));
+        openShellChannel();
+        return;
+    }
     if (m_endpoint.x11ParentWindow != 0) {
         startX11ForwardingEmbedded(); // 嵌入实验路径：会话自带独立 server
         return;
