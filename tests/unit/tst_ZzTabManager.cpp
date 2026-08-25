@@ -11,7 +11,9 @@
 #include "session/ZzSessionProfile.h"
 #include "tab/ZzTabManager.h"
 #include "terminal/ZzTerminalView.h"
+#include "transport/ZzSshTransport.h"
 #include "transport/ZzTransportRegistry.h"
+#include "x11/ZzX11Service.h"
 
 /**
  * @brief 验证标签管理生命周期：开会话、关闭、断线变灰保留、右键重连（规格 §七/§九）。
@@ -45,6 +47,12 @@ private slots:
         QVERIFY(ZzTransportRegistry::instance().registerTransport(
             QStringLiteral("mock"),
             [](QObject *parent) { return new ZzMockTransport(parent); }));
+        // SSH 协议在测试进程内手动注册（生产路径由 main.cpp 注册）
+        QVERIFY(ZzTransportRegistry::instance().registerTransport(
+            QStringLiteral("ssh"),
+            [](QObject *parent) -> ZzTransportInterface * {
+                return new ZzSshTransport(parent);
+            }));
     }
 
     void cleanupTestCase()
@@ -149,6 +157,29 @@ private slots:
         QCOMPARE(secondMock->lastEndpoint.x11ParentWindow, quintptr(0));
         QVERIFY(secondMock->lastEndpoint.x11InitialSize.isEmpty());
 #endif
+    }
+
+    void x11ServiceInjectedIntoSshTransport()
+    {
+        // M5 装配契约：ZzTabManager 把共享门面注入每个 SSH 传输
+        ZzX11Service service;
+        ZzTabManager tabs;
+        tabs.setX11Service(&service);
+
+        ZzSessionProfile profile;
+        profile.name = QStringLiteral("ssh-x11");
+        profile.protocol = QStringLiteral("ssh");
+        profile.host = QStringLiteral("127.0.0.1");
+        profile.port = 1; // 不可达即可：只需传输实例被创建，不需真连接
+        profile.userName = QStringLiteral("nobody");
+        tabs.openSession(profile);
+
+        ZzTerminalView *view = tabs.viewAt(0);
+        QVERIFY(view);
+        auto *ssh = qobject_cast<ZzSshTransport *>(view->transport());
+        QVERIFY(ssh);
+        QCOMPARE(ssh->x11Service(), &service);
+        tabs.closeTab(0);
     }
 
     void unknownProtocolShowsStatusMessage()

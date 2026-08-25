@@ -11,6 +11,7 @@
 #include "transport/ZzTransportInterface.h"
 
 class ZzTerminalView;
+class ZzX11Service;
 
 /**
  * @brief 多标签管理：每标签一个 ZzSplitContainer（叶子为 ZzTerminalView，规格 §七）。
@@ -76,6 +77,9 @@ public:
     /** @brief 装配主机密钥确认回调（ZzAppShell 注入）。 */
     void setHostKeyConfirmer(ZzHostKeyConfirmer confirmer);
 
+    /** @brief 注入应用级共享 X server 门面（ZzAppShell 装配；观察指针不拥有）。 */
+    void setX11Service(ZzX11Service *service) { m_x11Service = service; }
+
 signals:
     /** @brief 当前标签传输状态变化（状态栏）。 */
     void currentStateChanged(ZzTransportInterface::State state);
@@ -116,4 +120,5 @@ private:
     QHash<ZzTerminalView *, int> m_tabTunnelCounts; ///< 每窗格活动隧道数（按 ZzTerminalView 键控）
     ZzPasswordProvider m_passwordProvider;
     ZzHostKeyConfirmer m_hostKeyConfirmer;
+    ZzX11Service *m_x11Service = nullptr; ///< 观察指针：注入各 SSH 传输
 };

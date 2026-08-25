@@ -167,6 +167,7 @@ ZzTransportInterface *ZzTabManager::createTransport(
                     ? confirmer(host, fingerprint, oldFingerprint, changed)
                     : false;
             });
+        ssh->setX11Service(m_x11Service); // 共享 X server 门面（M5；nullptr 时传输内跳过 X11）
     }
     return transport;
 }

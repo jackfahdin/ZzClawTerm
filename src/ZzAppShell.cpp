@@ -22,6 +22,7 @@
 #include "tab/ZzTabManager.h"
 #include "terminal/ZzTerminalView.h"
 #include "transport/ZzSshTransport.h"
+#include "x11/ZzX11Service.h"
 
 namespace {
 
@@ -55,6 +56,14 @@ ZzAppShell::ZzAppShell(const QString &configDir, QObject *parent)
         ZzCredentialStore::backendModeFromString(
             ZzAppSettings::instance().credentialBackend()),
         m_configDir + QStringLiteral("/credentials.dat"), this);
+
+    // 应用级共享 X server（M5 对齐 MobaXterm：启动即拉起、全局开关可关闭、
+    // 关会话不杀；应用退出时随本对象析构，QProcess 析构终止 ZzXsrv）
+    m_x11Service = new ZzX11Service(this);
+    m_x11Service->setEnabled(ZzAppSettings::instance().x11ServerEnabled());
+    connect(&ZzAppSettings::instance(), &ZzAppSettings::settingsChanged, this, [this] {
+        m_x11Service->setEnabled(ZzAppSettings::instance().x11ServerEnabled());
+    });
 }
 
 ZzAppShell::~ZzAppShell()
@@ -194,6 +203,15 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
                                             changed, tabs);
         });
 
+    // 共享 X server 门面注入各 SSH 传输；服务级异常上状态栏（无会话时也能感知）
+    tabs->setX11Service(m_x11Service);
+    connect(m_x11Service, &ZzX11Service::startFailed, this,
+            &ZzAppShell::showStatusMessage);
+    connect(m_x11Service, &ZzX11Service::serverCrashed, this,
+            [this](const QString &message) {
+                showStatusMessage(QStringLiteral("X server 异常退出：%1").arg(message));
+            });
+
     // 状态栏：状态 / 编码 / 行列 / 瞬时消息
     tabs->connect(tabs, &ZzTabManager::currentStateChanged, this,
                   [this](ZzTransportInterface::State state) {
@@ -251,3 +269,4 @@ QLabel *ZzAppShell::statusStateLabel() const { return m_stateLabel; }
 QLabel *ZzAppShell::statusEncodingLabel() const { return m_encodingLabel; }
 QLabel *ZzAppShell::statusSizeLabel() const { return m_sizeLabel; }
 QLabel *ZzAppShell::statusTunnelLabel() const { return m_tunnelLabel; }
+ZzX11Service *ZzAppShell::x11Service() const { return m_x11Service; }

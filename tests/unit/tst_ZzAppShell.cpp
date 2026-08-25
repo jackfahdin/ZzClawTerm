@@ -9,8 +9,10 @@
 #include "panel/ZzSessionPanel.h"
 #include "session/ZzSessionModel.h"
 #include "session/ZzSessionProfile.h"
+#include "settings/ZzAppSettings.h"
 #include "tab/ZzTabManager.h"
 #include "transport/ZzTransportRegistry.h"
+#include "x11/ZzX11Service.h"
 
 /**
  * @brief 壳层装配冒烟：普通 QMainWindow 上验证 dock、状态栏、双击到标签的完整链路。
@@ -85,6 +87,21 @@ private slots:
         QCOMPARE(shell.tabManager()->count(), 1);
         QTRY_COMPARE(shell.statusStateLabel()->text(), QStringLiteral("已连接"));
         QVERIFY(!shell.statusEncodingLabel()->text().isEmpty());
+    }
+    void x11ServiceFollowsGlobalSetting()
+    {
+        // M5 规格 §三决策 1：全局开关驱动共享服务启停
+        const bool original = ZzAppSettings::instance().x11ServerEnabled();
+        ZzAppShell shell(m_dir); // 照本文件已有用例的构造参数
+        QVERIFY(shell.x11Service());
+        QCOMPARE(shell.x11Service()->isEnabled(), original);
+
+        ZzAppSettings::instance().setX11ServerEnabled(false);
+        QTRY_VERIFY(!shell.x11Service()->isEnabled());
+        ZzAppSettings::instance().setX11ServerEnabled(true);
+        QTRY_VERIFY(shell.x11Service()->isEnabled());
+
+        ZzAppSettings::instance().setX11ServerEnabled(original); // 还原，免污染其他用例
     }
 };
 

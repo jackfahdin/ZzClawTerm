@@ -18,6 +18,7 @@ class ZzSessionModel;
 class ZzSessionPanel;
 class ZzSftpPanel;
 class ZzTabManager;
+class ZzX11Service;
 
 /**
  * @brief 组合根：持有后端服务（会话模型/凭据库），装配窗口 Dock、
@@ -65,6 +66,7 @@ public:
     [[nodiscard]] QLabel *statusEncodingLabel() const;
     [[nodiscard]] QLabel *statusSizeLabel() const;
     [[nodiscard]] QLabel *statusTunnelLabel() const;
+    [[nodiscard]] ZzX11Service *x11Service() const;
 
 public slots:
     /** @brief 状态栏瞬时提示（5 秒自动消退，规格 §八错误不弹窗）。 */
@@ -85,4 +87,5 @@ private:
     QPointer<QLabel> m_sizeLabel;
     QPointer<QLabel> m_tunnelLabel;
     QPointer<QStatusBar> m_statusBar;
+    ZzX11Service *m_x11Service = nullptr; ///< 本对象为父：应用级共享 X server（M5）
 };
