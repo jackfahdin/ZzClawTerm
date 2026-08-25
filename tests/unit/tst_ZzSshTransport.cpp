@@ -1,6 +1,7 @@
 #include <QtTest/QtTest>
 
 #include "transport/ZzSshTransport.h"
+#include "x11/ZzX11Service.h"
 
 /**
  * @brief 验证 SSH 适配器的错误透传与状态机（成功路径由计划 01 的 Docker 集成测试覆盖）。
@@ -36,6 +37,30 @@ private slots:
         ZzSshTransport transport;
         transport.write("x");
         transport.resize(80, 24);
+        transport.close();
+        QCOMPARE(transport.state(), ZzTransportInterface::State::Disconnected);
+    }
+
+    void x11ServiceInjectionRoundtrip()
+    {
+        // M5：共享门面经 ZzTabManager 注入，适配器只观察不拥有
+        ZzSshTransport transport;
+        QVERIFY(transport.x11Service() == nullptr);
+        ZzX11Service service;
+        transport.setX11Service(&service);
+        QCOMPARE(transport.x11Service(), &service);
+    }
+
+    void closeWithX11AndNoServiceIsSafe()
+    {
+        // x11Forwarding 开启但未注入服务：走"未启用跳过"分支，不得崩溃、照常断开
+        ZzSshTransport transport;
+        ZzTransportEndpoint endpoint;
+        endpoint.host = QStringLiteral("127.0.0.1");
+        endpoint.port = 1;
+        endpoint.user = QStringLiteral("nobody");
+        endpoint.x11Forwarding = true;
+        transport.open(endpoint);
         transport.close();
         QCOMPARE(transport.state(), ZzTransportInterface::State::Disconnected);
     }

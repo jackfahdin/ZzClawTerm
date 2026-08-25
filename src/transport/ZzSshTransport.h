@@ -11,6 +11,7 @@ class ZzSshShellChannel;
 class ZzSshX11Bridge;
 class ZzTunnelManager;
 class ZzSshTunnelFactory;
+class ZzX11Service;
 class ZzXServerDownloader;
 class ZzXServerManager;
 
@@ -52,6 +53,11 @@ public:
     void setPasswordProvider(ZzPasswordProvider provider);
     void setHostKeyConfirmer(ZzHostKeyConfirmer confirmer);
 
+    /** @brief 注入应用级共享 X server 门面（ZzTabManager 装配；观察指针不拥有）。 */
+    void setX11Service(ZzX11Service *service) { m_x11Service = service; }
+    /** @brief 测试观察口：当前注入的共享 X server 门面。 */
+    [[nodiscard]] ZzX11Service *x11Service() const { return m_x11Service; }
+
     /**
      * @brief 底层 SSH 连接只读访问器（SFTP 面板创建会话用）。
      * @return 当前连接对象（非拥有，随 open/close 重建）；未 open 时为 nullptr。
@@ -82,12 +88,15 @@ private:
     /** @brief 向 shell channel 发起 openShell（异步；shellOpened 后迁移 Connected）。 */
     void openShellChannel();
     /**
-     * @brief X11 装配（openShell 之前调用）：生成 cookie、备妥本地端点、先发
-     *        x11-req 再开 shell（OpenSSH 仅 LARVAL 态受理 x11-req）。
-     * @note 契约：无论成败都以 openShellChannel() 收尾（Unix 同步、Windows 经
-     *       downloader 异步续接）；任何失败只 statusNotice 瞬时提示，不阻断会话。
+     * @brief X11 装配（openShell 之前调用）：备妥本地端点（嵌入=会话自带 server，
+     *        非嵌入=注入的共享服务）、先发 x11-req 再开 shell（OpenSSH 仅 LARVAL 态
+     *        受理 x11-req）。
+     * @note 契约：无论成败都以 openShellChannel() 收尾（同步或经共享服务/downloader
+     *       信号异步续接）；任何失败只 statusNotice 瞬时提示，不阻断会话。
      */
     void startX11Forwarding();
+    /** @brief 嵌入实验路径（仅 Windows）：会话自带独立 server（M4b 原流程）。 */
+    void startX11ForwardingEmbedded();
     /** @brief Windows：vcxsrv 就绪后拉起 server、发 x11-req 并补 openShell。 */
     void onX11ServerReady(const QString &executablePath);
     /** @brief 创建 X11 桥接器并向 shell channel 发起 x11-req（两平台共用收尾）。 */
@@ -104,10 +113,11 @@ private:
     std::unique_ptr<ZzSshTunnelFactory> m_tunnelFactory; ///< 随 m_conn 重建
     ZzTunnelManager *m_tunnelManager = nullptr;          ///< 本对象为父；随 m_conn 重建
     ZzXAuthority m_x11Authority;             ///< 值成员：无状态 cookie/xauth 工具（规格 §5.3）
-    ZzXServerManager *m_x11Manager = nullptr;    ///< 本对象为父；随会话重建（每会话独立 server）
+    ZzXServerManager *m_x11Manager = nullptr;    ///< 本对象为父；仅嵌入实验路径创建（会话自带独立 server）
+    ZzX11Service *m_x11Service = nullptr;        ///< 观察指针：应用级共享 server（ZzAppShell 持有，M5）
     ZzSshX11Bridge *m_x11Bridge = nullptr;       ///< 本对象为父；观察 m_conn，随会话重建
-    ZzXServerDownloader *m_x11Downloader = nullptr; ///< 仅 Windows：按需下载 vcxsrv
-    QString m_x11Cookie;                     ///< 本次会话的 MIT-MAGIC-COOKIE-1（hex）
+    ZzXServerDownloader *m_x11Downloader = nullptr; ///< 仅 Windows 嵌入路径：按需下载 ZzXsrv
+    QString m_x11Cookie;                     ///< 嵌入路径的 MIT-MAGIC-COOKIE-1（hex）
     ///< 主动 close 期间压制底层 disconnected/closed 上报（接口契约：主动关闭不报断线）
     bool m_suppressDisconnect = false;
 };
