@@ -38,6 +38,11 @@ public:
     virtual quint64 download(const QString &remotePath, const QString &localPath) = 0;
     /** @brief 取消进行中的传输（结局为 transferError）。 */
     virtual void cancelTransfer(quint64 requestId) = 0;
+    /**
+     * @brief 设置传输块大小（字节）：0=自动（BDP 自适应）；手动值夹取 [16KB,4MB]。
+     * @note 对已发起的传输不生效。
+     */
+    virtual void setTransferBlockSize(int bytes) = 0;
     /** @brief 关闭会话（异步、幂等），完成后发射 closed()。 */
     virtual void closeSession() = 0;
 

@@ -75,6 +75,31 @@ private slots:
         QFile::remove(path);
     }
 
+    void sftpBlockSizeDefaultsToAuto()
+    {
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-sftp-bs-default-test.ini"));
+        QFile::remove(path);
+        ZzAppSettings settings(path);
+        QCOMPARE(settings.sftpBlockSize(), 0); // 0=自动（BDP 自适应，M6）
+        QFile::remove(path);
+    }
+
+    void sftpBlockSizeRoundtrip()
+    {
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-sftp-bs-roundtrip-test.ini"));
+        QFile::remove(path);
+        ZzAppSettings settings(path);
+        QSignalSpy spy(&settings, &ZzAppSettings::settingsChanged);
+        settings.setSftpBlockSize(1024 * 1024);
+        QCOMPARE(settings.sftpBlockSize(), 1024 * 1024);
+        QCOMPARE(spy.count(), 1);
+        settings.setSftpBlockSize(1024 * 1024); // 同值短路
+        QCOMPARE(spy.count(), 1);
+        QFile::remove(path);
+    }
+
     void x11ServerEnabledRoundtrip()
     {
         const QString path = QDir(QDir::tempPath())

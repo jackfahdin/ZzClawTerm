@@ -118,3 +118,17 @@ void ZzAppSettings::setX11ServerEnabled(bool enabled)
     m_settings->setValue(QStringLiteral("x11/serverEnabled"), enabled);
     emit settingsChanged();
 }
+
+int ZzAppSettings::sftpBlockSize() const
+{
+    return m_settings->value(QStringLiteral("sftp/blockSize"), 0).toInt();
+}
+
+void ZzAppSettings::setSftpBlockSize(int bytes)
+{
+    if (sftpBlockSize() == bytes) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("sftp/blockSize"), bytes);
+    emit settingsChanged();
+}

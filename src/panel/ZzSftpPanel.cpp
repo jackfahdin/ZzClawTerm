@@ -24,6 +24,7 @@
 #include <ZzSshConnection.h>
 
 #include "ZzSftpSessionOps.h"
+#include "settings/ZzAppSettings.h"
 #include "tab/ZzTabManager.h"
 #include "terminal/ZzTerminalView.h"
 #include "transport/ZzSshTransport.h"
@@ -187,6 +188,15 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     setWidget(central);
     setStatus(QStringLiteral("无活动会话"));
     updateAvailability();
+
+    // M6：设置变更兜底重应用传输块大小（0=自动同样传递，恢复 BDP 自适应）；
+    // 会话附着点（attachOps）已对新会话应用，这里覆盖已打开会话
+    connect(&ZzAppSettings::instance(), &ZzAppSettings::settingsChanged,
+            this, [this] {
+        if (m_ops) {
+            m_ops->setTransferBlockSize(ZzAppSettings::instance().sftpBlockSize());
+        }
+    });
 }
 
 QString ZzSftpPanel::panelId() const
@@ -291,6 +301,8 @@ void ZzSftpPanel::updateUnavailableHint(ZzSshTransportAdapter *ssh)
 void ZzSftpPanel::attachOps(ZzSftpOps *ops)
 {
     m_ops = ops;
+    // M6：新会话附着即应用当前传输块大小设置（0=自动 BDP 自适应）
+    ops->setTransferBlockSize(ZzAppSettings::instance().sftpBlockSize());
     connect(ops, &ZzSftpOps::opened, this, &ZzSftpPanel::onOpened);
     connect(ops, &ZzSftpOps::errorOccurred, this, &ZzSftpPanel::onOpsError);
     connect(ops, &ZzSftpOps::closed, this, &ZzSftpPanel::onClosed);

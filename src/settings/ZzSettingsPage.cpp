@@ -73,6 +73,22 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         "关闭后停止内建 X server，新会话不再发起 X11 转发；重新开启即恢复"));
     layout->addRow(QStringLiteral("X11："), m_x11ServerCheck);
 
+    // SFTP 块大小：itemData 存字节数，0=自动（BDP 自适应，M6）
+    m_sftpBlockSizeCombo = new QComboBox(this);
+    m_sftpBlockSizeCombo->addItem(QStringLiteral("自动（BDP 自适应）"), 0);
+    for (int kb : {64, 128, 256, 512, 1024, 2048, 4096}) {
+        m_sftpBlockSizeCombo->addItem(
+            kb >= 1024 ? QStringLiteral("%1 MB").arg(kb / 1024)
+                       : QStringLiteral("%1 KB").arg(kb),
+            kb * 1024);
+    }
+    const int bsIndex = m_sftpBlockSizeCombo->findData(m_settings->sftpBlockSize());
+    m_sftpBlockSizeCombo->setCurrentIndex(bsIndex >= 0 ? bsIndex : 0);
+    m_sftpBlockSizeCombo->setToolTip(QStringLiteral(
+        "手动值对高延迟链路可能更优；自动模式按链路 RTT 自适应（推荐）。\n"
+        "进行中的传输不受影响，下一传输生效。"));
+    layout->addRow(QStringLiteral("SFTP 块大小："), m_sftpBlockSizeCombo);
+
     auto *note = new QLabel(
         QStringLiteral("改动立即生效：新标签使用新值，已打开标签实时应用字号/配色/编码。"),
         this);
@@ -103,6 +119,11 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     });
     connect(m_x11ServerCheck, &QCheckBox::toggled,
             m_settings, &ZzAppSettings::setX11ServerEnabled);
+    // 用 currentIndexChanged 而非 activated：测试经 setCurrentIndex 驱动，
+    // 且二者都不含程序性回显误写（setter 同值短路兜底）
+    connect(m_sftpBlockSizeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        m_settings->setSftpBlockSize(m_sftpBlockSizeCombo->itemData(index).toInt());
+    });
 }
 
 QComboBox *ZzSettingsPage::terminalTypeCombo() const { return m_terminalTypeCombo; }
@@ -112,3 +133,4 @@ QComboBox *ZzSettingsPage::colorSchemeCombo() const { return m_colorSchemeCombo;
 QSpinBox *ZzSettingsPage::historyLinesSpin() const { return m_historyLinesSpin; }
 QComboBox *ZzSettingsPage::credentialBackendCombo() const { return m_credentialBackendCombo; }
 QCheckBox *ZzSettingsPage::x11ServerCheck() const { return m_x11ServerCheck; }
+QComboBox *ZzSettingsPage::sftpBlockSizeCombo() const { return m_sftpBlockSizeCombo; }

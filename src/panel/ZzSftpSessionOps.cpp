@@ -75,6 +75,13 @@ void ZzSftpSessionOps::cancelTransfer(quint64 requestId)
     }
 }
 
+void ZzSftpSessionOps::setTransferBlockSize(int bytes)
+{
+    if (m_session) {
+        m_session->setTransferBlockSize(bytes);
+    }
+}
+
 void ZzSftpSessionOps::closeSession()
 {
     if (m_session) {

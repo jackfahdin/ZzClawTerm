@@ -53,6 +53,11 @@ public:
     [[nodiscard]] bool x11ServerEnabled() const;
     void setX11ServerEnabled(bool enabled);
 
+    /** @brief SFTP 块大小（字节）：0=自动（库内 BDP 自适应，M6 默认）；
+     *        手动值夹取 [16KB,4MB]（经 ZzSftpSession::setTransferBlockSize 生效）。 */
+    [[nodiscard]] int sftpBlockSize() const;
+    void setSftpBlockSize(int bytes);
+
 signals:
     /** @brief 任一字段变更后发射；UI 层收到后实时应用到已打开标签。 */
     void settingsChanged();

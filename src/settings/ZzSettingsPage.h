@@ -27,6 +27,7 @@ public:
     [[nodiscard]] QSpinBox *historyLinesSpin() const;
     [[nodiscard]] QComboBox *credentialBackendCombo() const;
     [[nodiscard]] QCheckBox *x11ServerCheck() const;
+    [[nodiscard]] QComboBox *sftpBlockSizeCombo() const;
 
 private:
     ZzAppSettings *m_settings;
@@ -37,4 +38,5 @@ private:
     QSpinBox *m_historyLinesSpin;
     QComboBox *m_credentialBackendCombo;
     QCheckBox *m_x11ServerCheck;
+    QComboBox *m_sftpBlockSizeCombo;
 };

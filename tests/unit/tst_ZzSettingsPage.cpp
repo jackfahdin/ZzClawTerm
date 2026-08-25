@@ -73,6 +73,19 @@ private slots:
         QVERIFY(!settings.x11ServerEnabled());
     }
 
+    void sftpBlockSizeComboReflectsAndWrites()
+    {
+        ZzAppSettings settings(m_path);
+        ZzSettingsPage page(&settings);
+        auto *combo = page.sftpBlockSizeCombo();
+        QVERIFY(combo);
+        QCOMPARE(combo->currentData().toInt(), 0); // 默认"自动"
+        const int idx = combo->findData(1024 * 1024);
+        QVERIFY(idx >= 0);
+        combo->setCurrentIndex(idx);              // currentIndexChanged 即写
+        QCOMPARE(settings.sftpBlockSize(), 1024 * 1024);
+    }
+
     void colorSchemesComeFromTerminal()
     {
         ZzAppSettings settings(m_path);

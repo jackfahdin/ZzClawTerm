@@ -32,6 +32,7 @@ public:
     quint64 upload(const QString &localPath, const QString &remotePath) override;
     quint64 download(const QString &remotePath, const QString &localPath) override;
     void cancelTransfer(quint64 requestId) override;
+    void setTransferBlockSize(int bytes) override;
     void closeSession() override;
 
 private:

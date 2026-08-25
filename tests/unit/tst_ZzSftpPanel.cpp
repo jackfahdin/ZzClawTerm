@@ -4,6 +4,7 @@
 #include "ZzMockTransport.h"
 #include "panel/ZzSftpPanel.h"
 #include "session/ZzSessionProfile.h"
+#include "settings/ZzAppSettings.h"
 #include "tab/ZzTabManager.h"
 #include "transport/ZzTransportRegistry.h"
 
@@ -328,6 +329,23 @@ private slots:
         panel2.attachOpsForTesting(&mock2);
         mock2.simulateOpened();
         QTRY_COMPARE(panel2.visibleEntryCount(), 1);
+    }
+
+    void appliesSettingsBlockSizeToSession()
+    {
+        // M6：面板附着会话时把 sftp/blockSize 应用到 ops；
+        // settingsChanged 兜底重应用（0=自动同样传递，恢复 BDP 自适应）
+        auto &appSettings = ZzAppSettings::instance();
+        appSettings.setSftpBlockSize(1024 * 1024);
+
+        ZzMockSftpOps mock;
+        ZzSftpPanel panel;
+        attachOpenedMock(panel, mock, {});
+        QVERIFY(mock.recordedBlockSizes().contains(1024 * 1024));
+
+        // 运行中改回自动：settingsChanged 触发重应用
+        appSettings.setSftpBlockSize(0);
+        QVERIFY(mock.recordedBlockSizes().last() == 0);
     }
 
     void selectionEnablesDownloadForFilesOnly()

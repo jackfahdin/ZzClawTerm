@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QtCore/QList>
 #include <QtCore/QPair>
 #include <QtCore/QStringList>
 
@@ -30,6 +31,11 @@ public:
     quint64 download(const QString &remotePath, const QString &localPath) override;
     void cancelTransfer(quint64 requestId) override;
     void closeSession() override;
+
+    /** @brief 记录传输块大小设置（M6 接线断言用）。 */
+    void setTransferBlockSize(int bytes) override { m_blockSizes.append(bytes); }
+    /** @brief 历次 setTransferBlockSize 收到的字节数。 */
+    [[nodiscard]] QList<int> recordedBlockSizes() const { return m_blockSizes; }
 
     // ---- 事件注入 ----
     /** @brief 置为已打开并发射 opened()。 */
@@ -71,4 +77,5 @@ private:
     quint64 recordSimpleOp();
 
     bool m_open = false;
+    QList<int> m_blockSizes;              ///< setTransferBlockSize 收到的字节数
 };
