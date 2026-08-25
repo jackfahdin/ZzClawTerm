@@ -53,7 +53,8 @@ private slots:
 
     void closeWithX11AndNoServiceIsSafe()
     {
-        // x11Forwarding 开启但未注入服务：走"未启用跳过"分支，不得崩溃、照常断开
+        // 实际覆盖：x11Forwarding=true 时连接失败（端口必拒，onConnected 不触发，
+        // 因此不会走到"未启用跳过"分支）+ close 不崩溃、状态正常回收
         ZzSshTransport transport;
         ZzTransportEndpoint endpoint;
         endpoint.host = QStringLiteral("127.0.0.1");

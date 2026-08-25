@@ -261,16 +261,24 @@ void ZzSshTransportAdapter::startX11Forwarding()
         openShellChannel();
         return;
     }
-    // server 未就绪（首次下载/懒重拉中）：一次性续接，失败不阻断会话
-    connect(m_x11Service, &ZzX11Service::serverStarted, this, [this](int) {
-        if (!m_channel || !m_endpoint.x11Forwarding) {
-            return;
-        }
-        requestX11Forwarding();
-        openShellChannel();
-    }, Qt::SingleShotConnection);
-    connect(m_x11Service, &ZzX11Service::startFailed, this,
-            [this](const QString &message) {
+    // server 未就绪（首次下载/懒重拉中）：一次性续接，失败不阻断会话。
+    // 两个一次性连接互为兄弟：任一触发即解除对端，避免挂在共享服务（应用级长
+    // 生命周期）上的陈旧连接在跨会话/重连后误触发 openShellChannel()；
+    // close/重连路径另由 destroyX11() 统一 disconnect 兜底
+    auto startedConn = std::make_shared<QMetaObject::Connection>();
+    auto failedConn = std::make_shared<QMetaObject::Connection>();
+    *startedConn = connect(m_x11Service, &ZzX11Service::serverStarted, this,
+            [this, failedConn](int) {
+                disconnect(*failedConn);
+                if (!m_channel || !m_endpoint.x11Forwarding) {
+                    return;
+                }
+                requestX11Forwarding();
+                openShellChannel();
+            }, Qt::SingleShotConnection);
+    *failedConn = connect(m_x11Service, &ZzX11Service::startFailed, this,
+            [this, startedConn](const QString &message) {
+                disconnect(*startedConn);
                 emit statusNotice(message);
                 openShellChannel();
             }, Qt::SingleShotConnection);
@@ -375,6 +383,11 @@ void ZzSshTransportAdapter::requestX11Forwarding()
 
 void ZzSshTransportAdapter::destroyX11()
 {
+    // 撤除挂在共享服务上的续接连接（服务生命周期归 ZzAppShell，不随会话销毁，
+    // 不撤则 close/重连后陈旧连接可能误触发 openShellChannel）
+    if (m_x11Service) {
+        disconnect(m_x11Service, nullptr, this, nullptr);
+    }
     if (m_x11Bridge) {
         m_x11Bridge->deleteLater();
         m_x11Bridge = nullptr;
