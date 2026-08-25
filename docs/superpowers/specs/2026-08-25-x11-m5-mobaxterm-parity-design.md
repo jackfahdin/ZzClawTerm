@@ -1,7 +1,7 @@
 # X11 体验对齐 MobaXterm（M5）设计
 
 日期：2026-08-25
-状态：已获用户设计批准（头脑风暴四问裁决），待用户书面审查
+状态：已实现（M5a/M5b 自动化部分全部核销，2026-08-25）；人工验收（§八）挂起待用户时间
 上游：M4b《2026-08-24-x11-m4b-zzxsrv-embed-design.md》（嵌入模式实现，本规格将其降级为实验选项）
 
 ## 一、背景与目标
@@ -97,7 +97,7 @@ ZzSshTransport（每会话）
 - **会话连接**：x11Forwarding=true 且开关开 → transport 从共享单例取 display/cookie/localEndpoint → `requestX11Forwarding`；共享 server 未运行（崩溃未恢复）→ 尝试重拉一次，失败则通知并跳过转发
 - **会话关闭**：不触碰共享 server
 - **全局开关切换**：关→开：立即拉起；开→关：stop() 并阻止后续转发
-- **应用退出**：stop()（现有 terminate→3s→kill 收尾逻辑复用）
+- **应用退出**：随组合根（ZzAppShell）析构，QProcess 析构直接终止 ZzXsrv 子进程（实现按此落地；不走 stop() 的 terminate→3s→kill 异步收尾——应用已在退出路径上，异步收尾来不及完成）
 - **server 崩溃**：发通知（复用 crashed 信号链）；不做自动热恢复；下个 X11 会话连接或开关重拨时 lazy 重拉
 
 ## 五、主仓改动清单（M5a）
@@ -108,10 +108,10 @@ ZzSshTransport（每会话）
 | `src/session/ZzSessionProfile.cpp` | 序列化键不变；旧 JSON 无键时取新默认值（行为变化见 §九） |
 | `src/settings/ZzAppSettings.h/.cpp` | 新增 `x11ServerEnabled`（默认 true） |
 | `src/settings/ZzSettingsPage.h/.cpp` | 新增"启用 X server（启动时自动运行）"复选框，切换即生效（拉起/停止） |
-| `src/x11/ZzXServerManager.h/.cpp` | 注释改为共享单例语义；restart() 语义适配（崩溃后 lazy 重拉用）；行为不变的部分不动 |
+| `src/x11/ZzX11Service.h/.cpp`（新增） | 应用级共享门面：承载单例语义、cookie 生成、懒重拉与开关联动（原拟改动 ZzXServerManager 注释/restart() 语义，实现时由本类替代，manager 保持原样） |
 | `src/transport/ZzSshTransport.h/.cpp` | 非嵌入路径移除 m_x11Manager 拥有权，改为注入的共享实例引用（仅查询 display/cookie/localEndpoint 及触发 ensureRunning 重拉，不负责 start/stop 生命周期）；嵌入路径保留现状 |
 | `src/tab/ZzTabManager.h/.cpp` | 构造/装配处注入共享实例并透传给 transport；endpoint 映射逻辑适配 |
-| 主窗口装配处 | 创建并持有共享单例；应用退出时 stop() |
+| 主窗口装配处（ZzAppShell） | 创建并持有共享单例（ZzX11Service）；应用退出随析构终止子进程 |
 | `src/panel/ZzSessionEditDialog.cpp` | "嵌入标签页"选项标注（实验）；默认值随 profile 翻转 |
 
 ## 六、ZzXsrv 仓改动（M5b）
@@ -154,7 +154,7 @@ ZzSshTransport（每会话）
 
 ## 十一、完成定义
 
-1. M5a/M5b 全部自动化测试绿（主仓 44 基线 + 新增；ZzXsrv CI 冒烟双模式）
-2. ZzXsrv 新 release 资产发布，主仓下载常量升级并交叉核验 sha256
-3. 规格条目核销，代码审查通过
-4. 人工验收清单（§八）更新完毕——执行挂起待用户时间
+1. ✅ M5a/M5b 全部自动化测试绿（主仓 45 项全绿；ZzXsrv CI 冒烟双模式，zz3 release 构建 32815874367 成功）
+2. ✅ ZzXsrv 新 release 资产发布（zz-21.1.16.1-3 四资产），主仓下载常量升级并交叉核验 sha256（bd2e7b3e…fc4f 实测与随附 .sha256 一致）
+3. ✅ 规格条目核销，代码审查通过（逐任务审查 + 最终宽范围审查 1 Critical/1 Important 修复波，定向复审 2/2 ADDRESSED）
+4. ⏸ 人工验收清单（§八）更新完毕——执行挂起待用户时间（清单同时覆盖 multiwindow 主路径与嵌入实验路径；总开关对全部会话生效，含嵌入）

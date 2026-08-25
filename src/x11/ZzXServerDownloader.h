@@ -58,19 +58,20 @@
 namespace ZzXServerRelease {
 
 /// ZzXsrv 自有构建版本标识（基于 vcxsrv 21.1.16.1 + xtrans 回环绑定 patch；
-/// zz2 = 裁剪 + 品牌化 + -parent 嵌入）。与官方版版本串不等，已装官方版
-/// 或 zz1 的用户据此触发重装。
-inline constexpr char kVersion[] = "21.1.16.1-zz2";
+/// zz3 = 裁剪 + 品牌化 + -parent 嵌入 + -parent/-multiwindow 互斥校验
+/// + 快捷方式默认 -multiwindow）。与官方版版本串不等，已装官方版
+/// 或 zz1/zz2 的用户据此触发重装。
+inline constexpr char kVersion[] = "21.1.16.1-zz3";
 
 /// ZzXsrv release 的 64 位免管理员 NSIS 安装包下载 URL。
 inline constexpr char kUrl[] =
-    "https://github.com/jackfahdin/ZzXsrv/releases/download/zz-21.1.16.1-2/"
+    "https://github.com/jackfahdin/ZzXsrv/releases/download/zz-21.1.16.1-3/"
     "zzxsrv-64.21.1.16.1.installer.noadmin.exe";
 
-/// kUrl 所指安装包的 SHA256（ZzXsrv CI 发布物随附 .sha256，2026-08-24 实测；
-/// 文件大小 39,209,845 字节）。
+/// kUrl 所指安装包的 SHA256（ZzXsrv CI 发布物随附 .sha256，2026-08-25 实测
+/// 并交叉核验一致；文件大小 39,207,074 字节）。
 inline constexpr char kSha256[] =
-    "2c182ee294716c654fe8795d3bc634c8a5151cbef6ae8c85f0486090ba65b14b";
+    "bd2e7b3e491212cd12b3539f2cf4671c621cafca2834ed5dd858510be92fcf4f";
 
 } // namespace ZzXServerRelease
 
