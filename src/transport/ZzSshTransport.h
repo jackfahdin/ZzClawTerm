@@ -3,7 +3,10 @@
 #include <functional>
 #include <memory>
 
+#include <QtCore/QPointer>
+
 #include "ZzTransportInterface.h"
+#include "x11/ZzX11Service.h"
 #include "x11/ZzXAuthority.h"
 
 class ZzSshConnection;
@@ -11,7 +14,6 @@ class ZzSshShellChannel;
 class ZzSshX11Bridge;
 class ZzTunnelManager;
 class ZzSshTunnelFactory;
-class ZzX11Service;
 class ZzXServerDownloader;
 class ZzXServerManager;
 
@@ -114,7 +116,7 @@ private:
     ZzTunnelManager *m_tunnelManager = nullptr;          ///< 本对象为父；随 m_conn 重建
     ZzXAuthority m_x11Authority;             ///< 值成员：无状态 cookie/xauth 工具（规格 §5.3）
     ZzXServerManager *m_x11Manager = nullptr;    ///< 本对象为父；仅嵌入实验路径创建（会话自带独立 server）
-    ZzX11Service *m_x11Service = nullptr;        ///< 观察指针：应用级共享 server（ZzAppShell 持有，M5）
+    QPointer<ZzX11Service> m_x11Service;        ///< 观察指针（QPointer 防悬垂）：应用级共享 server（ZzAppShell 持有，M5）
     ZzSshX11Bridge *m_x11Bridge = nullptr;       ///< 本对象为父；观察 m_conn，随会话重建
     ZzXServerDownloader *m_x11Downloader = nullptr; ///< 仅 Windows 嵌入路径：按需下载 ZzXsrv
     QString m_x11Cookie;                     ///< 嵌入路径的 MIT-MAGIC-COOKIE-1（hex）

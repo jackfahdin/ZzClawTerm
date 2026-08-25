@@ -46,6 +46,9 @@ private:
 private slots:
     void initTestCase()
     {
+        // 设置写盘隔离到测试目录（必须早于 ZzAppSettings::instance() 首次调用，
+        // 否则单例按真实 AppConfigLocation 落盘 settings.ini）
+        QStandardPaths::setTestModeEnabled(true);
         qRegisterMetaType<ZzTransportInterface::State>();
         ZzTransportRegistry::instance().registerTransport(
             QStringLiteral("mock"),

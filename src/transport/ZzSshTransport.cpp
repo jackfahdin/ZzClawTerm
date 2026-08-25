@@ -368,6 +368,12 @@ void ZzSshTransportAdapter::requestX11Forwarding()
     } else {
         return;
     }
+    if (cookie.isEmpty()) {
+        // 授权写失败等异常下服务可能处于"运行但无 cookie"态：带空 cookie 发
+        // x11-req 会被 X 端静默拒连。提示后跳过，调用方照常开 shell，不阻断会话
+        emit statusNotice(QStringLiteral("X11 转发已跳过：本地授权不可用"));
+        return;
+    }
     // 应用侧 ZzXLocalEndpoint → 库侧 ZzSshX11Bridge::LocalEndpoint 字段映射
     ZzSshX11Bridge::LocalEndpoint endpoint;
     endpoint.host = local.host;

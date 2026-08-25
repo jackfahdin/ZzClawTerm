@@ -205,6 +205,8 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
 
     // 共享 X server 门面注入各 SSH 传输；服务级异常上状态栏（无会话时也能感知）
     tabs->setX11Service(m_x11Service);
+    // 防重复装配：wireTabManager 被多次调用时先撤后接（lambda 无法用 UniqueConnection）
+    disconnect(m_x11Service, nullptr, this, nullptr);
     connect(m_x11Service, &ZzX11Service::startFailed, this,
             &ZzAppShell::showStatusMessage);
     connect(m_x11Service, &ZzX11Service::serverCrashed, this,

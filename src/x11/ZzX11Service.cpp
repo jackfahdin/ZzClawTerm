@@ -22,6 +22,10 @@ ZzX11Service::ZzX11Service(QObject *parent)
             if (!m_authority.addToSystemAuthority(display, m_cookie, &error)) {
                 m_display = -1;
                 m_cookie.clear();
+                // 回退到一致的未运行态：否则 manager 滞留 isRunning=true，
+                // start() 被 isRunning 守卫挡住，授权写入永远无法重试。
+                // stopped 处理器因 m_starting 已复位（本处理器开头）不会补拉，无递归。
+                m_manager->stop();
                 emit startFailed(tr("X11 授权写入失败：%1").arg(error));
                 return;
             }
@@ -45,14 +49,16 @@ ZzX11Service::ZzX11Service(QObject *parent)
                 }
             });
     connect(m_manager, &ZzXServerManager::stopped, this, [this] {
+        // m_starting 滞留 true 即"有拉起请求被 manager 收尾守卫挡住"的标记
+        // （快速 toggle：stop() 收尾期间重开开关，start() 已被拒绝），先捕获再复位
+        const bool wasStarting = m_starting;
         m_starting = false;
         m_display = -1;
         m_cookie.clear();
-        // 快速 toggle 补拉：stop() 收尾期间重开开关时，start() 会被 manager 的
-        // 收尾守卫静默拒绝；此处 m_process 已清空，可正常拉起。
-        // 无递归风险：Unix 无进程分支 stopped 同步发射时 m_enabled 已为 false，
-        // 主动 stop() 路径 m_enabled 同样已先置 false，只有重开场景才进入。
-        if (m_enabled) {
+        // 仅补拉被挡的拉起请求：此处 m_process 已清空，可正常拉起。
+        // 无递归风险：Unix 无进程分支 stopped 同步发射时 m_enabled 已为 false；
+        // 授权写失败的回退 stop() 与主动 stop() 路径 m_starting 均已先复位。
+        if (m_enabled && wasStarting) {
             start();
         }
     });
