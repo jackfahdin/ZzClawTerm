@@ -27,13 +27,15 @@ jobs:
           submodules: false
 
       - name: 拉取子模块（SSH → https 重写；gitcode 带令牌）
+        shell: bash
         env:
           GITCODE_PAT: ${{ secrets.GITCODELIBSSH2 }}
         run: |
+          set -e
+          trap 'git config --global --unset url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf || true' EXIT
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git config --global url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf "git@gitcode.com:"
           git submodule update --init --recursive
-          git config --global --unset url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf
 
       - name: 安装 Qt 6.11.1
         uses: jurplel/install-qt-action@v4
@@ -79,13 +81,15 @@ jobs:
           submodules: false
 
       - name: 拉取子模块（SSH → https 重写；gitcode 带令牌）
+        shell: bash
         env:
           GITCODE_PAT: ${{ secrets.GITCODELIBSSH2 }}
         run: |
+          set -e
+          trap 'git config --global --unset url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf || true' EXIT
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git config --global url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf "git@gitcode.com:"
           git submodule update --init --recursive
-          git config --global --unset url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf
 
       - name: 安装 Qt 6.11.1（qtbase 即可）
         uses: jurplel/install-qt-action@v4
