@@ -80,6 +80,12 @@
 ## 8. 实现核销
 
 - 任务 1-5（ZzSshCore）：walker/scheduler/engine 集成/docker IT/perf 门控，全部完成（库侧 92ceea7；README 实测数据补充 8955cff）。
-- 任务 6（主仓接线）：面板入口 + gitlink bump，完成（主仓 e198b2e）。
+- 任务 6（主仓接线）：面板入口 + gitlink bump，完成（主仓 e198b2e，最终接线含 881466b、gitlink bump 至库侧 8955cff）。
 - 实测：回环比值 上/下 = 2.02/2.22（160.1/162.1 MB/s vs OpenSSH 79.1/73.0）；WAN 50ms 上/下 = 2.90/3.84（0.368/0.364 MB/s vs 0.127/0.095）。门控 ≥1.5 / ≥2.0 均过（records 见 ZzSshCore `tests/perf/records/2026-08-26-zzsftp-smallfiles-082558-3132477.json`）。
 - 人工验收挂起：Windows 实机「上传文件夹/下载文件夹」入口与真实服务器小文件体验，已并入 V0.2 验收清单（`docs/acceptance/v0.2-manual-acceptance.md`）。
+
+### 偏差记录（2026-08-26 终审核销）
+
+- **默认并发 8→32**：§2/§4 写「默认 8」，任务 5R 流水线化为覆盖 open→ACK→关句柄约 3 RTT 在途时延实测调优为 32（`ZzSftpEngine::m_batchConcurrency = 32`，构造后可调），性能门控实测通过。§4 内存不变式上界随之上调：读 128MB（32×4MB 读缓冲）/ 写理论 256MB（32×8MB staging）；小文件场景 staging 实际占用 ≈ 文件本身大小，远低于该上界。
+- **§2「现有单文件路径零改动」已被打破**：919ff83 的 pump 流水线化重写影响全部传输（含单文件），系性能达标所需；行为等价性经 M6 大文件防回归门控（回环 + WAN 三档）验证。
+- **主仓 SHA 补全**：§8 上文原只记到 e198b2e，最终接线为 881466b（gitlink bump 至库侧 8955cff）。
