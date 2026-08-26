@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} 构建+单测
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, preset: linux-gcc-release, qt-arch: gcc_64 }
+          - { os: windows-2022, preset: windows-msvc2022-release, qt-arch: win64_msvc2022_64 }
+          - { os: macos-14, preset: macos-clang-release, qt-arch: clang_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt 6.11.1
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          arch: ${{ matrix.qt-arch }}
+          modules: 'qtmultimedia'
+
+      - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）
+        shell: bash
+        run: echo "QT_ROOT=${Qt6_DIR%/lib/cmake/Qt6}" >> "$GITHUB_ENV"
+
+      - name: Linux 测试依赖（offscreen GUI）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-dev libdbus-1-dev
+
+      - name: macOS OpenSSL 回退（vendored bundle 无 macOS 产物）
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: 配置与构建
+        shell: bash
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }}
+
+      - name: 主仓单测（45 程序基线）
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --preset ${{ matrix.preset }}
+
+  zzsshcore:
+    name: ZzSshCore 单测 + docker 集成
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt 6.11.1（qtbase 即可）
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          arch: gcc_64
+
+      - name: 集成测试依赖（Xvfb / xdpyinfo）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils
+
+      - name: 库构建 + 单测（18 程序）
+        working-directory: third_party/ZzSshCore
+        run: |
+          cmake --preset linux-release
+          cmake --build --preset linux-release
+          ctest --test-dir build/linux-release -L unit --output-on-failure
+
+      - name: docker 集成（integration 标签，12 项）
+        working-directory: third_party/ZzSshCore
+        env:
+          ZZSSH_IT_LABELS: integration
+        run: tests/integration/docker/run-integration-tests.sh build/linux-release
