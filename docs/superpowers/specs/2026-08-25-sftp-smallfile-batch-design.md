@@ -1,7 +1,7 @@
 # SFTP 小文件批量传输优化 设计规格
 
 - 日期：2026-08-25
-- 状态：已批准（头脑风暴四节设计用户全部认可）
+- 状态：已实现（人工验收挂起）
 - 范围：ZzSshCore 库层目录递归传输 + 有界并发调度 + 主仓面板最小接线
 - 前置事实：engine 已支持多传输并发（`m_transfers` + `pumpTransfers()`），缺的是目录递归与有界调度；面板当前仅平铺多选文件、无目录递归、下载仅单文件。
 
@@ -76,3 +76,10 @@
 - ZzSshCore 回归：`cmake --build --preset linux-release && ctest --test-dir build/linux-release -L unit`（16 程序）+ `tests/integration/docker/run-integration-tests.sh build/linux-release`（17 项）；perf records 为入库滚动基线（留 5 份随 commit）。
 - 主仓回归：`cmake --build --preset linux-gcc-release && ctest --preset linux-gcc-release`（基线 45）；跑完全量 ctest 后 `git checkout -- tests/perf/records/` 并按当天日期前缀删未跟踪新记录（禁用月份通配）。
 - 库改动先推库、再 bump 主仓 gitlink（push 前逐项问用户）。
+
+## 8. 实现核销
+
+- 任务 1-5（ZzSshCore）：walker/scheduler/engine 集成/docker IT/perf 门控，全部完成（库侧 92ceea7；README 实测数据补充 8955cff）。
+- 任务 6（主仓接线）：面板入口 + gitlink bump，完成（主仓 e198b2e）。
+- 实测：回环比值 上/下 = 2.02/2.22（160.1/162.1 MB/s vs OpenSSH 79.1/73.0）；WAN 50ms 上/下 = 2.90/3.84（0.368/0.364 MB/s vs 0.127/0.095）。门控 ≥1.5 / ≥2.0 均过（records 见 ZzSshCore `tests/perf/records/2026-08-26-zzsftp-smallfiles-082558-3132477.json`）。
+- 人工验收挂起：Windows 实机「上传文件夹/下载文件夹」入口与真实服务器小文件体验，已并入 V0.2 验收清单（`docs/acceptance/v0.2-manual-acceptance.md`）。
