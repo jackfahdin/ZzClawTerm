@@ -31,6 +31,8 @@ public:
     quint64 rename(const QString &oldPath, const QString &newPath) override;
     quint64 upload(const QString &localPath, const QString &remotePath) override;
     quint64 download(const QString &remotePath, const QString &localPath) override;
+    quint64 uploadDir(const QString &localDir, const QString &remoteDir) override;
+    quint64 downloadDir(const QString &remoteDir, const QString &localDir) override;
     void cancelTransfer(quint64 requestId) override;
     void setTransferBlockSize(int bytes) override;
     void closeSession() override;

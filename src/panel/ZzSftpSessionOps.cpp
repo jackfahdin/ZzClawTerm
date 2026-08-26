@@ -68,6 +68,16 @@ quint64 ZzSftpSessionOps::download(const QString &remotePath, const QString &loc
     return m_session ? m_session->download(remotePath, localPath) : 0;
 }
 
+quint64 ZzSftpSessionOps::uploadDir(const QString &localDir, const QString &remoteDir)
+{
+    return m_session ? m_session->uploadDir(localDir, remoteDir) : 0;
+}
+
+quint64 ZzSftpSessionOps::downloadDir(const QString &remoteDir, const QString &localDir)
+{
+    return m_session ? m_session->downloadDir(remoteDir, localDir) : 0;
+}
+
 void ZzSftpSessionOps::cancelTransfer(quint64 requestId)
 {
     if (m_session) {

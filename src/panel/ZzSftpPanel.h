@@ -78,6 +78,10 @@ public:
     void startUploads(const QStringList &localPaths);
     /** @brief 下载远端文件到本地路径（等价下载按钮→保存对话框确认）。 */
     void startDownload(const QString &remotePath, const QString &localPath);
+    /** @brief 上传本地目录到当前远端目录（等价上传文件夹按钮→选目录确认）。 */
+    void startUploadDir(const QString &localDir);
+    /** @brief 下载远端目录到本地父目录下（等价目录右键→下载）。 */
+    void startDownloadDir(const QString &remotePath, const QString &localParentDir);
     /** @brief 在当前目录新建子目录（等价新建目录按钮→输入确认）。 */
     void requestMakeDir(const QString &name);
     /** @brief 删除远端文件/空目录（等价删除按钮→确认）。 */
@@ -124,7 +128,9 @@ private slots:
     void onPathEdited();
     void onEntryDoubleClicked(const QModelIndex &index);
     void onUploadClicked();
+    void onUploadDirClicked();
     void onDownloadClicked();
+    void onDownloadDirClicked();
     void onMakeDirClicked();
     void onDeleteClicked();
     void onRenameClicked();
@@ -177,6 +183,7 @@ private:
     QToolButton *m_upButton = nullptr;
     QToolButton *m_refreshButton = nullptr;
     QToolButton *m_uploadButton = nullptr;
+    QToolButton *m_uploadDirButton = nullptr;
     QToolButton *m_downloadButton = nullptr;
     QToolButton *m_mkdirButton = nullptr;
     QToolButton *m_deleteButton = nullptr;

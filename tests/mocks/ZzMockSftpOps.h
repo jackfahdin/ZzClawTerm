@@ -29,6 +29,8 @@ public:
     quint64 rename(const QString &oldPath, const QString &newPath) override;
     quint64 upload(const QString &localPath, const QString &remotePath) override;
     quint64 download(const QString &remotePath, const QString &localPath) override;
+    quint64 uploadDir(const QString &localDir, const QString &remoteDir) override;
+    quint64 downloadDir(const QString &remoteDir, const QString &localDir) override;
     void cancelTransfer(quint64 requestId) override;
     void closeSession() override;
 
@@ -69,6 +71,8 @@ public:
     QList<QPair<QString, QString>> renamed;      ///< rename（旧，新）
     QList<QPair<QString, QString>> uploaded;     ///< upload（本地，远端）
     QList<QPair<QString, QString>> downloaded;   ///< download（远端，本地）
+    QList<QPair<QString, QString>> uploadedDirs;    ///< uploadDir（本地，远端）
+    QList<QPair<QString, QString>> downloadedDirs;  ///< downloadDir（远端，本地）
     QList<quint64> cancelledTransfers;    ///< cancelTransfer 请求 ID
     int closeCallCount = 0;               ///< closeSession 调用次数
 

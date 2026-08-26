@@ -90,6 +90,24 @@ quint64 ZzMockSftpOps::download(const QString &remotePath, const QString &localP
     return nextReqId++;
 }
 
+quint64 ZzMockSftpOps::uploadDir(const QString &localDir, const QString &remoteDir)
+{
+    if (!m_open) {
+        return 0;
+    }
+    uploadedDirs.append({localDir, remoteDir});
+    return nextReqId++;
+}
+
+quint64 ZzMockSftpOps::downloadDir(const QString &remoteDir, const QString &localDir)
+{
+    if (!m_open) {
+        return 0;
+    }
+    downloadedDirs.append({remoteDir, localDir});
+    return nextReqId++;
+}
+
 void ZzMockSftpOps::cancelTransfer(quint64 requestId)
 {
     cancelledTransfers.append(requestId);

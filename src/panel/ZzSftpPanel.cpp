@@ -111,7 +111,7 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
 
-    // 工具行：上级/刷新/上传/下载/新建目录/删除/重命名
+    // 工具行：上级/刷新/上传/上传文件夹/下载/新建目录/删除/重命名
     auto *toolbar = new QHBoxLayout;
     toolbar->setSpacing(2);
     const auto addButton = [this, toolbar](const QString &text,
@@ -131,6 +131,8 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     toolbar->addSpacing(8);
     m_uploadButton = addButton(QStringLiteral("上传"), QStringLiteral("上传本地文件（可多选）"),
                                &ZzSftpPanel::onUploadClicked);
+    m_uploadDirButton = addButton(QStringLiteral("上传文件夹"), QStringLiteral("递归上传本地文件夹"),
+                                  &ZzSftpPanel::onUploadDirClicked);
     m_downloadButton = addButton(QStringLiteral("下载"), QStringLiteral("下载选中文件"),
                                  &ZzSftpPanel::onDownloadClicked);
     m_mkdirButton = addButton(QStringLiteral("新建目录"), QStringLiteral("在当前目录新建子目录"),
@@ -564,6 +566,33 @@ void ZzSftpPanel::startDownload(const QString &remotePath, const QString &localP
     }
 }
 
+void ZzSftpPanel::startUploadDir(const QString &localDir)
+{
+    if (!m_ops || !m_ops->isOpen() || m_currentPath.isEmpty()) {
+        return;
+    }
+    const QString name = QFileInfo(localDir).fileName();
+    if (name.isEmpty()) {
+        return;
+    }
+    const quint64 reqId = m_ops->uploadDir(localDir, zzJoinPath(m_currentPath, name));
+    if (reqId > 0) {
+        addTransferRow(reqId, name, QStringLiteral("上传"));
+    }
+}
+
+void ZzSftpPanel::startDownloadDir(const QString &remotePath, const QString &localParentDir)
+{
+    if (!m_ops || !m_ops->isOpen() || remotePath.isEmpty() || localParentDir.isEmpty()) {
+        return;
+    }
+    const QString name = remotePath.section(QLatin1Char('/'), -1);
+    const quint64 reqId = m_ops->downloadDir(remotePath, QDir(localParentDir).filePath(name));
+    if (reqId > 0) {
+        addTransferRow(reqId, name, QStringLiteral("下载"));
+    }
+}
+
 void ZzSftpPanel::requestMakeDir(const QString &name)
 {
     if (!m_ops || !m_ops->isOpen() || name.isEmpty()
@@ -781,6 +810,15 @@ void ZzSftpPanel::onUploadClicked()
         this, QStringLiteral("上传文件")));
 }
 
+void ZzSftpPanel::onUploadDirClicked()
+{
+    const QString localDir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("上传文件夹"));
+    if (!localDir.isEmpty()) {
+        startUploadDir(localDir);
+    }
+}
+
 void ZzSftpPanel::onDownloadClicked()
 {
     bool isDir = false;
@@ -794,6 +832,21 @@ void ZzSftpPanel::onDownloadClicked()
         QDir::home().filePath(path.section(QLatin1Char('/'), -1)));
     if (!localPath.isEmpty()) {
         startDownload(path, localPath);
+    }
+}
+
+void ZzSftpPanel::onDownloadDirClicked()
+{
+    bool isDir = false;
+    const QString path = selectedPath(&isDir);
+    if (path.isEmpty() || !isDir) {
+        emit statusMessage(QStringLiteral("请选择要下载的目录"));
+        return;
+    }
+    const QString localParent = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("下载文件夹到"));
+    if (!localParent.isEmpty()) {
+        startDownloadDir(path, localParent);
     }
 }
 
@@ -844,12 +897,17 @@ void ZzSftpPanel::showDirContextMenu(const QPoint &pos)
     const bool ready = m_ops && m_ops->isOpen();
     QMenu menu(this);
     QAction *downloadAction = nullptr;
+    QAction *downloadDirAction = nullptr;
     QAction *renameAction = nullptr;
     QAction *deleteAction = nullptr;
     if (index.isValid()) {
         const bool isDir = index.data(kIsDirRole).toBool();
         downloadAction = menu.addAction(QStringLiteral("下载"));
         downloadAction->setEnabled(ready && !isDir);
+        if (isDir) {
+            downloadDirAction = menu.addAction(QStringLiteral("下载文件夹"));
+            downloadDirAction->setEnabled(ready);
+        }
         renameAction = menu.addAction(QStringLiteral("重命名"));
         renameAction->setEnabled(ready);
         deleteAction = menu.addAction(QStringLiteral("删除"));
@@ -858,6 +916,8 @@ void ZzSftpPanel::showDirContextMenu(const QPoint &pos)
     }
     QAction *uploadAction = menu.addAction(QStringLiteral("上传"));
     uploadAction->setEnabled(ready);
+    QAction *uploadDirAction = menu.addAction(QStringLiteral("上传文件夹"));
+    uploadDirAction->setEnabled(ready);
     QAction *mkdirAction = menu.addAction(QStringLiteral("新建目录"));
     mkdirAction->setEnabled(ready);
     QAction *refreshAction = menu.addAction(QStringLiteral("刷新"));
@@ -866,12 +926,16 @@ void ZzSftpPanel::showDirContextMenu(const QPoint &pos)
     QAction *chosen = menu.exec(m_dirView->viewport()->mapToGlobal(pos));
     if (chosen == downloadAction && downloadAction) {
         onDownloadClicked();
+    } else if (chosen == downloadDirAction && downloadDirAction) {
+        onDownloadDirClicked();
     } else if (chosen == renameAction && renameAction) {
         onRenameClicked();
     } else if (chosen == deleteAction && deleteAction) {
         onDeleteClicked();
     } else if (chosen == uploadAction) {
         onUploadClicked();
+    } else if (chosen == uploadDirAction) {
+        onUploadDirClicked();
     } else if (chosen == mkdirAction) {
         onMakeDirClicked();
     } else if (chosen == refreshAction) {
@@ -895,6 +959,7 @@ void ZzSftpPanel::updateAvailability()
     m_upButton->setEnabled(ready);
     m_refreshButton->setEnabled(ready);
     m_uploadButton->setEnabled(ready);
+    m_uploadDirButton->setEnabled(ready);
     m_downloadButton->setEnabled(hasSelection && !selectedIsDir);
     m_mkdirButton->setEnabled(ready);
     m_deleteButton->setEnabled(hasSelection);

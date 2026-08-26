@@ -192,6 +192,47 @@ private slots:
         QCOMPARE(panel.transferRowCount(), 1);
     }
 
+    void uploadFolderCallsOpsUploadDir()
+    {
+        ZzMockSftpOps mock;
+        ZzSftpPanel panel;
+        attachOpenedMock(panel, mock,
+                         {makeDirEntry(QStringLiteral("subdir"))});
+        panel.navigateTo(QStringLiteral("/home/zztest"));
+        QTRY_COMPARE(panel.currentPath(), QStringLiteral("/home/zztest"));
+        const int baseRows = panel.transferRowCount();
+        const quint64 id = mock.nextReqId;
+
+        panel.startUploadDir(QStringLiteral("/tmp/localtree"));
+        QCOMPARE(mock.uploadedDirs.size(), 1);
+        QCOMPARE(mock.uploadedDirs.first().first,
+                 QStringLiteral("/tmp/localtree"));
+        QCOMPARE(mock.uploadedDirs.first().second,
+                 QStringLiteral("/home/zztest/localtree"));
+        QCOMPARE(panel.transferRowCount(), baseRows + 1);
+        QCOMPARE(panel.transferStatusText(id), QStringLiteral("进行中"));
+    }
+
+    void downloadFolderCallsOpsDownloadDir()
+    {
+        ZzMockSftpOps mock;
+        ZzSftpPanel panel;
+        attachOpenedMock(panel, mock,
+                         {makeDirEntry(QStringLiteral("subdir"))});
+        const int baseRows = panel.transferRowCount();
+        const quint64 id = mock.nextReqId;
+
+        panel.startDownloadDir(QStringLiteral("/home/zztest/subdir"),
+                               QStringLiteral("/tmp/dst"));
+        QCOMPARE(mock.downloadedDirs.size(), 1);
+        QCOMPARE(mock.downloadedDirs.first().first,
+                 QStringLiteral("/home/zztest/subdir"));
+        QCOMPARE(mock.downloadedDirs.first().second,
+                 QStringLiteral("/tmp/dst/subdir"));
+        QCOMPARE(panel.transferRowCount(), baseRows + 1);
+        QCOMPARE(panel.transferStatusText(id), QStringLiteral("进行中"));
+    }
+
     void cancelTransferMarksCancelled()
     {
         ZzMockSftpOps mock;

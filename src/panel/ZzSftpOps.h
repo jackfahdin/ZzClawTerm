@@ -36,6 +36,10 @@ public:
     virtual quint64 upload(const QString &localPath, const QString &remotePath) = 0;
     /** @brief 下载远端文件到本地（覆盖同名文件）。@return 请求 ID；未打开返回 0。 */
     virtual quint64 download(const QString &remotePath, const QString &localPath) = 0;
+    /** @brief 递归上传本地目录到远端（批进度聚合）。@return 批请求 ID；未打开返回 0。 */
+    virtual quint64 uploadDir(const QString &localDir, const QString &remoteDir) = 0;
+    /** @brief 递归下载远端目录到本地（批进度聚合）。@return 批请求 ID；未打开返回 0。 */
+    virtual quint64 downloadDir(const QString &remoteDir, const QString &localDir) = 0;
     /** @brief 取消进行中的传输（结局为 transferError）。 */
     virtual void cancelTransfer(quint64 requestId) = 0;
     /**
