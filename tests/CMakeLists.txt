@@ -2,8 +2,11 @@
 function(zz_add_qtest name)
     add_executable(${name} ${ARGN})
     target_link_libraries(${name} PRIVATE ZzClawTermApp ZzTestMocks Qt6::Test Qt6::Widgets)
-    add_test(NAME ${name} COMMAND ${name})
-    # 三平台统一离屏；Windows 上保持控制台子系统以便 ctest 捕获输出
+    add_test(NAME ${name} COMMAND ${name} -o "$<TARGET_FILE:${name}>.qtest.log,txt")
+    # 三平台统一离屏；Windows 上保持控制台子系统以便 ctest 捕获输出。
+    # -o 额外落一份 QTest 文本结果到可执行文件旁：GitHub Actions Windows
+    # runner 会丢弃 ctest 孙进程的终端输出（actions/runner#1206），文件
+    # 输出不受控制台代理影响，失败时 ci.yml 兜底 cat 这些日志。
     set_tests_properties(${name} PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     if(WIN32)

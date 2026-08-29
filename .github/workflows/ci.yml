@@ -102,12 +102,17 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         # Windows 上 ctest --output-on-failure 对“进程直接退出（如
-        # STATUS_DLL_NOT_FOUND 0xc0000135）”这类失败不打印子进程输出，
-        # 兜底打印 LastTest.log 保证总能看到失败详情。
+        # STATUS_DLL_NOT_FOUND 0xc0000135）”这类失败不打印子进程输出；
+        # 且 GitHub Actions Windows runner 会丢弃 ctest 孙进程的终端输出
+        # （actions/runner#1206），LastTest.log 的 Output 段也为空。
+        # 兜底打印 LastTest.log + 每个测试的 .qtest.log（QTest -o 文件输出，
+        # 不经控制台代理，必然有内容）。
         run: |
           ctest --preset ${{ matrix.preset }} -LE perf || {
             echo "===== LastTest.log ====="
             cat "build/${{ matrix.preset }}/Testing/Temporary/LastTest.log" 2>/dev/null || true
+            echo "===== QTest 文件输出 ====="
+            find "build/${{ matrix.preset }}/tests" -name '*.qtest.log' -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \; 2>/dev/null || true
             exit 1
           }
 
