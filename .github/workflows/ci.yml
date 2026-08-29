@@ -52,9 +52,15 @@ jobs:
           aqtsource: ${{ matrix.aqt-src }}
           aqtversion: '==3.3.*'
 
-      - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）
+      # install-qt-action 只保证 QT_ROOT_DIR（Qt6_DIR 并非其导出项，此前推导
+      # 恒为空、靠 CMake 兜底才碰巧能构建）；Windows 下 QT_ROOT_DIR 为反斜杠
+      # 路径，统一转正斜杠后供 presets（$env{QT_ROOT}）与打包脚本使用。
+      - name: 导出 QT_ROOT
         shell: bash
-        run: echo "QT_ROOT=${Qt6_DIR%/lib/cmake/Qt6}" >> "$GITHUB_ENV"
+        run: |
+          QT_ROOT="${QT_ROOT_DIR:-${Qt6_DIR%/lib/cmake/Qt6}}"
+          echo "QT_ROOT=${QT_ROOT//\\//}" >> "$GITHUB_ENV"
+
 
       - name: Linux 测试依赖（offscreen GUI）
         if: runner.os == 'Linux'
@@ -260,9 +266,15 @@ jobs:
           aqtsource: ${{ matrix.aqt-src }}
           aqtversion: '==3.3.*'
 
-      - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）
+      # install-qt-action 只保证 QT_ROOT_DIR（Qt6_DIR 并非其导出项，此前推导
+      # 恒为空、靠 CMake 兜底才碰巧能构建）；Windows 下 QT_ROOT_DIR 为反斜杠
+      # 路径，统一转正斜杠后供 presets（$env{QT_ROOT}）与打包脚本使用。
+      - name: 导出 QT_ROOT
         shell: bash
-        run: echo "QT_ROOT=${Qt6_DIR%/lib/cmake/Qt6}" >> "$GITHUB_ENV"
+        run: |
+          QT_ROOT="${QT_ROOT_DIR:-${Qt6_DIR%/lib/cmake/Qt6}}"
+          echo "QT_ROOT=${QT_ROOT//\\//}" >> "$GITHUB_ENV"
+
 
       - name: Linux 打包依赖（libfuse2 + linuxdeploy + plugin-qt）
         if: matrix.kind == 'linux'
