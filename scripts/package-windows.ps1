@@ -5,7 +5,8 @@
 #       需自行保证其可被 find_package 找到并处理运行时分发
 # 注意：本脚本在 Windows 平台人工验收时执行，当前未实机验证
 param(
-    [string]$QtRoot = $env:QT_ROOT
+    [string]$QtRoot = $env:QT_ROOT,
+    [string]$Version = $(if ($env:VERSION) { $env:VERSION } else { "v0.1" })
 )
 $ErrorActionPreference = "Stop"
 if (-not $QtRoot) { throw "请通过 -QtRoot 或 QT_ROOT 环境变量提供 Qt 前缀" }
@@ -26,8 +27,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "windeployqt 失败" }
 
     Compress-Archive -Path "$dist/*" `
-        -DestinationPath "$root/dist/ZzClawTerm-v0.1-windows-x64.zip" -Force
-    Write-Host "产出：dist/ZzClawTerm-v0.1-windows-x64.zip"
+        -DestinationPath "$root/dist/ZzClawTerm-$Version-windows-x64.zip" -Force
+    Write-Host "产出：dist/ZzClawTerm-$Version-windows-x64.zip"
 } finally {
     Pop-Location
 }

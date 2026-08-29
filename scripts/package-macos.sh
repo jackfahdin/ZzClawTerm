@@ -6,6 +6,8 @@
 #           macOS 打包前需先补齐 OpenSSL macOS 构建，否则 Release 配置阶段即失败
 set -euo pipefail
 : "${QT_ROOT:?请通过 QT_ROOT 环境变量提供 Qt 前缀}"
+# 版本号：默认 v0.1（手工用法不变）；CI 经 VERSION 环境变量注入
+VERSION="${VERSION:-v0.1}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -20,5 +22,5 @@ cp -R "$ROOT/build/macos-clang-release/src/ZzClawTerm.app" "$DIST/"
 
 "$QT_ROOT/bin/macdeployqt" "$DIST/ZzClawTerm.app" -dmg \
     -always-overwrite -verbose=1
-mv "$DIST/ZzClawTerm.dmg" "$ROOT/dist/ZzClawTerm-v0.1-macos.dmg"
-echo "产出：dist/ZzClawTerm-v0.1-macos.dmg"
+mv "$DIST/ZzClawTerm.dmg" "$ROOT/dist/ZzClawTerm-${VERSION}-macos.dmg"
+echo "产出：dist/ZzClawTerm-${VERSION}-macos.dmg"

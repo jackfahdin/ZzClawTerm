@@ -8,6 +8,8 @@
 #       LD_LIBRARY_PATH，否则 linuxdeploy-plugin-qt 会以 "Could not find dependency" 失败
 set -euo pipefail
 : "${QT_ROOT:?请通过 QT_ROOT 环境变量提供 Qt 前缀}"
+# 版本号：默认 v0.1（手工用法不变）；CI 经 VERSION 环境变量注入
+VERSION="${VERSION:-v0.1}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -44,5 +46,5 @@ linuxdeploy-x86_64.AppImage \
     --desktop-file "$APPDIR/usr/share/applications/zzclawterm.desktop" \
     --plugin qt \
     --output appimage
-mv ZzClawTerm-*.AppImage "$ROOT/dist/ZzClawTerm-v0.1-linux-x86_64.AppImage"
-echo "产出：dist/ZzClawTerm-v0.1-linux-x86_64.AppImage"
+mv ZzClawTerm-*.AppImage "$ROOT/dist/ZzClawTerm-${VERSION}-linux-x86_64.AppImage"
+echo "产出：dist/ZzClawTerm-${VERSION}-linux-x86_64.AppImage"

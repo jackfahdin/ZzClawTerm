@@ -209,3 +209,124 @@ jobs:
         env:
           ZZSSH_IT_LABELS: integration
         run: tests/integration/docker/run-integration-tests.sh build/linux-release
+
+  # Continuous Build（vnote 风格）：master push 且 needs 全部测试绿后，
+  # 三平台出包并更新固定标签 continuous-build 的预发布，供随时取最新验证包。
+  package:
+    name: ${{ matrix.kind }} 持续构建出包
+    needs: [build-test, zzsshcore]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+    # 组名带平台维度：同平台跨 run 串行（防 release 资产竞态），
+    # 同一次 run 的三平台 leg 可并行
+    concurrency:
+      group: continuous-build-${{ matrix.kind }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 自带 libtiff5（打包脚本既有约束；24.04 仅 libtiff.so.6）
+          - { os: ubuntu-22.04, kind: linux, qt-arch: linux_gcc_64, aqt-src: '' }
+          - { os: windows-2022, kind: windows, qt-arch: win64_msvc2022_64,
+              aqt-src: 'git+https://github.com/miurahr/aqtinstall.git@16db45a70b5905ad596941b223469bc86a56901e' }
+          - { os: macos-14, kind: macos, qt-arch: clang_64, aqt-src: '' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: 拉取子模块（SSH → https 重写；gitcode 带令牌）
+        shell: bash
+        env:
+          GITCODE_PAT: ${{ secrets.GITCODELIBSSH2 }}
+        run: |
+          set -e
+          trap 'git config --global --unset url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf || true' EXIT
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf "git@gitcode.com:"
+          git submodule update --init --recursive
+
+      # Windows 元数据缺口同 build-test：aqt 3.3.0 之后的修复需 aqtsource 固定
+      # 到上游提交；linux/mac 元数据完整，用稳定 3.3.x 发行版（aqt-src 为空）。
+      - name: 安装 Qt 6.11.1
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          arch: ${{ matrix.qt-arch }}
+          modules: 'qtmultimedia'
+          aqtsource: ${{ matrix.aqt-src }}
+          aqtversion: '==3.3.*'
+
+      - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）
+        shell: bash
+        run: echo "QT_ROOT=${Qt6_DIR%/lib/cmake/Qt6}" >> "$GITHUB_ENV"
+
+      - name: Linux 打包依赖（libfuse2 + linuxdeploy + plugin-qt）
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libfuse2
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-*.AppImage
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      # vendored bundle 无 macOS 产物，回退 brew openssl@3（同 build-test job）
+      - name: macOS OpenSSL 回退（vendored bundle 无 macOS 产物）
+        if: matrix.kind == 'macos'
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      # vendored bundle 的 Windows 产物不完整，回退 runner 自带 OpenSSL 3.x
+      #（同 build-test job）；打包为 Release 构建，同样依赖该回退。
+      - name: Windows OpenSSL 回退（vendored bundle Windows 产物不完整）
+        if: matrix.kind == 'windows'
+        shell: bash
+        run: |
+          for d in "/c/Program Files/OpenSSL" "/c/Program Files/OpenSSL-Win64"; do
+            if [ -f "${d}/include/openssl/ssl.h" ]; then
+              echo "OPENSSL_ROOT_DIR=$(cygpath -w "${d}")" >> "$GITHUB_ENV"
+              # GITHUB_PATH 条目会被原样追加进 Windows 原生 PATH，必须是
+              # Windows 风格路径；gitbash 风格 /c/... 对测试进程无效
+              echo "$(cygpath -w "${d}/bin")" >> "$GITHUB_PATH"
+              echo "OpenSSL 回退：${d}"
+              exit 0
+            fi
+          done
+          echo "未找到 runner 自带 OpenSSL" >&2
+          exit 1
+
+      - name: 打包
+        shell: bash
+        env:
+          VERSION: continuous-${{ github.sha }}
+        run: |
+          case "${{ matrix.kind }}" in
+            linux)   bash scripts/package-linux.sh ;;
+            macos)   bash scripts/package-macos.sh ;;
+            windows) pwsh scripts/package-windows.ps1 ;;
+          esac
+
+      - name: 更新 continuous-build 预发布
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if ! gh release view continuous-build >/dev/null 2>&1; then
+            gh release create continuous-build --prerelease \
+              --title "持续构建（Continuous Build）" \
+              --notes "master 每次 push 全绿后自动更新的验证包。"
+          fi
+          # glob 无匹配时 bash 给字面量，跳过防止误当文件名上传
+          for f in dist/ZzClawTerm-continuous-*; do
+            [ -f "$f" ] || continue
+            gh release delete-asset continuous-build "$(basename "$f")" -y 2>/dev/null || true
+            gh release upload continuous-build "$f" --clobber
+          done
+          SHORT_SHA="${GITHUB_SHA::8}"
+          gh release edit continuous-build \
+            --notes "commit ${GITHUB_SHA}（${SHORT_SHA}）· $(date -u +'%Y-%m-%d %H:%M UTC') · 触发：${{ github.event_name }}"
