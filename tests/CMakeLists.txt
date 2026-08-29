@@ -6,6 +6,16 @@ function(zz_add_qtest name)
     # 三平台统一离屏；Windows 上保持控制台子系统以便 ctest 捕获输出
     set_tests_properties(${name} PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    if(WIN32)
+        # ZzPureToolsPro 以 DLL 构建（BUILD_SHARED_LIBS 在主仓强制 OFF 之前
+        # 已按其默认值 ON 生效）；Windows 无 rpath，测试进程需经 PATH 找到
+        # ZzPureTools.dll / ZzCore.dll，否则 0xc0000135（STATUS_DLL_NOT_FOUND）。
+        # 显式钉死控制台子系统，防御继承 GUI 子系统导致 ctest 捕获不到输出。
+        set_target_properties(${name} PROPERTIES WIN32_EXECUTABLE OFF)
+        set_property(TEST ${name} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:ZzPureTools>"
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:ZzCore>")
+    endif()
 endfunction()
 
 add_subdirectory(mocks)
