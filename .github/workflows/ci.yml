@@ -18,7 +18,8 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-24.04, preset: linux-gcc-release, qt-arch: linux_gcc_64 }
-          - { os: windows-2022, preset: windows-msvc2022-release, qt-arch: win64_msvc2022_64 }
+          - { os: windows-2022, preset: windows-msvc2022-release, qt-arch: win64_msvc2022_64,
+              aqt-src: 'git+https://github.com/miurahr/aqtinstall.git@16db45a70b5905ad596941b223469bc86a56901e' }
           - { os: macos-14, preset: macos-clang-release, qt-arch: clang_64 }
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,25 +38,18 @@ jobs:
           git config --global url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf "git@gitcode.com:"
           git submodule update --init --recursive
 
-      # Qt 服务器缺失 windows_x86 的 Updates.xml 校验和（Updates.xml.sha256 确定性 404，
-      # linux/mac 正常；2026-08 验证），aqt 3.3.0 将校验和下载失败视为致命错误。
-      # 仅跳过哈希校验，Qt 版本固定 6.11.1，不影响安装可重复性。
-      - name: Windows aqt 跳过哈希校验（Qt 服务器缺 windows 校验和）
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          printf '[requests]\nINSECURE_NOT_FOR_PRODUCTION_ignore_hash: true\n' \
-            > "${RUNNER_TEMP}/aqt-settings.ini"
-          echo "AQT_CONFIG=${RUNNER_TEMP}/aqt-settings.ini" >> "${GITHUB_ENV}"
-
+      # Qt 服务器 windows_x86 侧元数据有缺口：Updates.xml.sha256 确定性 404，
+      # 且聚合目录 qt6_6111/qt6_6111/Updates.xml 不存在（仅有按架构子目录），
+      # aqt 3.3.0 两条都视为致命；上游 3.3.0 之后已修复（缺聚合 XML 时回退按
+      # 架构目录），故 Windows 用 aqtsource 固定到上游 master 提交。linux/mac
+      # 元数据完整，继续用稳定的 3.3.x 发行版。
       - name: 安装 Qt 6.11.1
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.11.1'
           arch: ${{ matrix.qt-arch }}
           modules: 'qtmultimedia'
-          # aqt 3.3.0 起校验和下载失败视为致命（Qt 服务器缺 windows 校验和），
-          # 固定 3.3.x 主版本避免其行为漂移；Windows 哈希跳过见上方 AQT_CONFIG 步骤
+          aqtsource: ${{ matrix.aqt-src }}
           aqtversion: '==3.3.*'
 
       - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）

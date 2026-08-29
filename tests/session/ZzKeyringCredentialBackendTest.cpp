@@ -51,11 +51,11 @@ class ZzKeyringCredentialBackendTest : public QObject
      */
     static bool isCiMacos()
     {
-        return false
 #ifdef Q_OS_MACOS
-            && qEnvironmentVariableIsSet("CI")
+        return qEnvironmentVariableIsSet("CI");
+#else
+        return false;
 #endif
-        ;
     }
 
 private slots:
