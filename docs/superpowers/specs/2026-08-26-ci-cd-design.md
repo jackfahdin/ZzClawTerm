@@ -95,8 +95,10 @@ continuous-build 预发布（run 33251261414）。相对本文档的实际偏差
    （0600 权限/只读目录/sh 脚本桩）Q_OS_WIN 声明式 QSKIP；ConPTY 用例修复
    （shell 绝对路径 + Enter 用 \r）；QTest 统一 `-o exe.qtest.log,txt` 文件
    输出绕开 actions/runner#1206（Windows runner 丢弃 ctest 孙进程终端输出）。
-7. **continuous-build 资产先清空再上传**：产物名含 SHA，同名覆盖策略会累积
-   旧资产。
+7. **continuous-build 产物固定命名（VERSION=continuous，不含 SHA）**：三平台
+   并行 leg 各以 `--clobber` 覆盖本平台同名资产，无跨 leg 竞态、不累积旧
+   资产；commit 信息写在 release notes。（终审曾发现「先清空全部资产再上传」
+   方案有跨 leg 竞态，已返工为此方案。）
 
 待决策/验收项：
 

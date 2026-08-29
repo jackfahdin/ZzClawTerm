@@ -43,7 +43,7 @@ class ZzKeyringCredentialBackendTest : public QObject
      * GitHub Actions macOS runner 上 probeAvailability() 为真、addCredential 也返回
      * 非空 id，但写入的条目在 allCredentials() 中不可见（login keychain 无头行为
      * 不可靠），属运行环境缺陷而非产品缺陷；本地（有桌面会话）不受影响。
-     * GitHub Actions 默认注入 CI=true，用 qEnvironmentVariableIsSet 识别。
+     * GitHub Actions 默认注入 CI=true，按值识别（见 isCiMacos 实现）。
      * 注意不能用 ZZCLAWTERM_KEYRING_DISABLE 禁用方式跳过：真实用例入口先调用
      * enableKeyring() 清除了该变量。
      * 谓词而非辅助函数内 QSKIP：QSKIP 宏的 return 只退出所在函数，slot 体仍继续
@@ -52,7 +52,9 @@ class ZzKeyringCredentialBackendTest : public QObject
     static bool isCiMacos()
     {
 #ifdef Q_OS_MACOS
-        return qEnvironmentVariableIsSet("CI");
+        // 收窄到 GitHub Actions 注入的 CI=true，避免其它设了 CI 变量的
+        // macOS 本地/自建环境静默跳过真实钥匙环用例
+        return qEnvironmentVariable("CI") == QLatin1String("true");
 #else
         return false;
 #endif

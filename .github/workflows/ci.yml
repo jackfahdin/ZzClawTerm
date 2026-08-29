@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# 默认只读；package job 按需提升 contents: write（最小权限）
+permissions:
+  contents: read
+
 jobs:
   build-test:
     name: ${{ matrix.os }} 构建+单测
@@ -322,8 +326,11 @@ jobs:
 
       - name: 打包
         shell: bash
+        # 产物名固定为 continuous（不含 SHA）：同名 delete+--clobber 天然幂等，
+        # 三平台并行 leg 各管各的文件名无竞态，也不会累积旧版本资产；
+        # 具体 commit 信息写在 release notes 里
         env:
-          VERSION: continuous-${{ github.sha }}
+          VERSION: continuous
         run: |
           case "${{ matrix.kind }}" in
             linux)   bash scripts/package-linux.sh ;;
@@ -342,16 +349,13 @@ jobs:
               --title "持续构建（Continuous Build）" \
               --notes "master 每次 push 全绿后自动更新的验证包。"
           fi
-          # 每个 commit 的产物文件名含 SHA，同名删除覆盖不了旧资产；
-          # 先清空 continuous-* 资产再上传，保持预发布只含最新一轮三平台包
-          for old in $(gh release view continuous-build --json assets -q '.assets[].name'); do
-            gh release delete-asset continuous-build "$old" -y 2>/dev/null || true
-          done
-          # glob 无匹配时 bash 给字面量，跳过防止误当文件名上传
+          # 产物文件名固定（VERSION=continuous），每个 leg 只覆盖本平台同名
+          # 资产，互不干渉；--clobber 幂等。glob 无匹配时 bash 给字面量，
+          # [ -f ] 跳过防止误当文件名上传。
           for f in dist/ZzClawTerm-continuous-*; do
             [ -f "$f" ] || continue
             gh release upload continuous-build "$f" --clobber
           done
           SHORT_SHA="${GITHUB_SHA::8}"
           gh release edit continuous-build \
-            --notes "commit ${GITHUB_SHA}（${SHORT_SHA}）· $(date -u +'%Y-%m-%d %H:%M UTC') · 触发：${{ github.event_name }}"
+            --notes "commit ${GITHUB_SHA}（${SHORT_SHA}）· $(date -u +'%Y-%m-%d %H:%M UTC')"

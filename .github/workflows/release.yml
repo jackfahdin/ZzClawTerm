@@ -124,5 +124,8 @@ jobs:
             gh release create "${{ github.ref_name }}" \
               --title "ZzClawTerm ${{ github.ref_name }}" --generate-notes
           fi
-          gh release upload "${{ github.ref_name }}" \
-            dist/ZzClawTerm-${{ github.ref_name }}-* --clobber
+          # glob 无匹配时 bash 给字面量，[ -f ] 跳过防止误当文件名上传
+          for f in dist/ZzClawTerm-${{ github.ref_name }}-*; do
+            [ -f "$f" ] || continue
+            gh release upload "${{ github.ref_name }}" "$f" --clobber
+          done
