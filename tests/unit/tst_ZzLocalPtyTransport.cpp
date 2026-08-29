@@ -1,4 +1,5 @@
 #include <QtTest/QtTest>
+#include <QStandardPaths>
 
 #include "transport/ZzLocalPtyTransport.h"
 
@@ -18,7 +19,12 @@ private slots:
     static QString platformShell()
     {
 #if defined(Q_OS_WIN)
-        return QStringLiteral("powershell.exe");
+        // ConPTY 要求 shell 路径为绝对路径（ptyqt 显式校验），
+        // 与 ZzLocalPtyTransport 生产默认一致；findExecutable 兜底解析。
+        const QString found = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+        return found.isEmpty()
+            ? QStringLiteral("C:/Windows/system32/WindowsPowerShell/v1.0/powershell.exe")
+            : found;
 #else
         return QString::fromLocal8Bit(qgetenv("SHELL")).isEmpty()
             ? QStringLiteral("/bin/sh")
@@ -30,6 +36,9 @@ private slots:
     {
         ZzLocalPtyTransport transport;
         QSignalSpy stateSpy(&transport, &ZzTransportInterface::stateChanged);
+        // 失败自解释：把传输层错误（如 ptyqt ConPTY 启动失败原因）打进 QTest 日志
+        connect(&transport, &ZzTransportInterface::errorOccurred, this,
+                [](int code, const QString &msg) { qWarning() << "errorOccurred:" << code << msg; });
 
         ZzTransportEndpoint endpoint;
         endpoint.localShell = true;
@@ -58,6 +67,8 @@ private slots:
     {
         ZzLocalPtyTransport transport;
         QSignalSpy disconnectSpy(&transport, &ZzTransportInterface::disconnected);
+        connect(&transport, &ZzTransportInterface::errorOccurred, this,
+                [](int code, const QString &msg) { qWarning() << "errorOccurred:" << code << msg; });
 
         ZzTransportEndpoint endpoint;
         endpoint.localShell = true;
