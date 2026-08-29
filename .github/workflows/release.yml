@@ -67,13 +67,12 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-*.AppImage
           echo "$PWD" >> "$GITHUB_PATH"
-          # libtiff5：24.04 只带 libtiff.so.6，从 jammy 源下载 deb 解包（不安装，
-          # 避免混用发行版包），经 LD_LIBRARY_PATH 供 linuxdeploy-plugin-qt 解析
-          echo 'deb http://archive.ubuntu.com/ubuntu jammy universe' | sudo tee /etc/apt/sources.list.d/jammy-libtiff5.list >/dev/null
-          sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/jammy-libtiff5.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
-          apt-get download libtiff5
-          sudo rm /etc/apt/sources.list.d/jammy-libtiff5.list
-          dpkg -x libtiff5_*.deb "$PWD/libtiff5"
+          # libtiff5：24.04 只带 libtiff.so.6，而 Qt 官方 gcc_64 的
+          # imageformats/libqtiff.so 依赖 libtiff.so.5。jammy 的 deb 经
+          # Launchpad 固定版本下载（Ubuntu pool 会清理旧版本，Launchpad
+          # 永久保留），解包不安装，LD_LIBRARY_PATH 供 plugin-qt 解析。
+          wget -q "https://launchpad.net/ubuntu/+archive/primary/+files/libtiff5_4.3.0-6ubuntu0.13_amd64.deb" -O libtiff5.deb
+          dpkg -x libtiff5.deb "$PWD/libtiff5"
           echo "LD_LIBRARY_PATH=$PWD/libtiff5/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       # vendored bundle 无 macOS 产物，回退 brew openssl@3（同 ci.yml build-test job）
