@@ -10,8 +10,10 @@ concurrency:
   group: perf-nightly
   cancel-in-progress: false
 
-# 仅做门控：吞吐阈值判断由 run-integration-tests.sh 依仓库内已校准阈值执行，
-# 不写基线——records 滚动基线由本地实跑维护，CI 不落库（避免 runner 噪声污染基线）。
+# CI 专用滚动基线：本轮门控前下载上一轮 nightly 自产的 records artifact 覆盖到
+# records 目录（runner 性能异构，不可用本地开发机基线）；跑完把新 records 回传，
+# 下一轮对本轮自比。首轮无 artifact 时测试 QSKIP 自动采集基线（不门控、退出码 0），
+# 上传后自愈。吞吐阈值判断仍由 run-integration-tests.sh 依仓库内阈值执行。
 jobs:
   perf:
     name: ZzSshCore 全量 integration + perf 门控
@@ -51,11 +53,29 @@ jobs:
           cmake --preset linux-release
           cmake --build --preset linux-release
 
+      - name: 下载上一轮 CI 滚动基线（records）
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true  # 首轮无该 artifact：测试 QSKIP 自动采集基线，不门控
+        with:
+          workflow: perf.yml
+          workflow_conclusion: success
+          name: perf-records-baseline
+          path: third_party/ZzSshCore/tests/perf/records/
+
       # 不传 ZZSSH_IT_LABELS 即全量：integration + perf（含 WAN 三档），
       # 全程约 40-80 分钟，超快门禁 CI 的覆盖范围，由本 nightly 承接。
       - name: 全量集成 + perf（integration|perf 门控）
         working-directory: third_party/ZzSshCore
         run: tests/integration/docker/run-integration-tests.sh build/linux-release
+
+      - name: 上传 CI 滚动基线（供下一轮门控）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-records-baseline
+          # 测试异常退出时 records 可能缺失/不完整，不阻塞工作流（诊断 artifact 仍会报错暴露）
+          if-no-files-found: warn
+          path: third_party/ZzSshCore/tests/perf/records/*.json
 
       - name: 上传 perf 记录与 LastTest.log
         if: always()

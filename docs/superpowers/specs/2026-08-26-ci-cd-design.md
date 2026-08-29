@@ -32,7 +32,13 @@
 
 - 触发：`schedule` cron `17 19 * * *`（UTC 19:17 ≈ 北京 03:17，避开整点）+ `workflow_dispatch`。
 - ubuntu-24.04 + docker：全量 `run-integration-tests.sh`（integration + perf 全部，含 WAN 三档 ~40 分钟与 zzsftp-smallfiles）。
-- **只门控不写基线**：CI 容器一次性，records 滚动基线仍由本地实跑维护并随 commit 入库；CI 产生的 records 与 ctest 日志上传 artifacts 供排查。
+- **CI 专用滚动基线（已决策）**：nightly 跑门控前用 `dawidd6/action-download-artifact@v3`
+  下载上一轮 nightly 自产、固定命名 `perf-records-baseline` 的 records artifact 覆盖到
+  `tests/perf/records/`；跑完（`if: always()`）用 `actions/upload-artifact@v4` 把
+  `records/*.json` 回传同名 artifact（`if-no-files-found: warn`），下一轮对本轮自比。
+  首轮无 artifact 时下载步失败但继续（`continue-on-error`），测试 QSKIP 自动采集
+  基线（不门控、退出码 0）→ 上传，下一轮起自愈。仓库内 records 基线仅用于本地实跑；
+  CI 另上传 `perf-records-<run_id>` 诊断 artifact 供排查。
 - nightly 红不堵开发；不做自动开 issue（YAGNI）。
 
 ## 4. Continuous Build（master push 出验证包）
@@ -102,9 +108,7 @@ continuous-build 预发布（run 33251261414）。相对本文档的实际偏差
 
 待决策/验收项：
 
-- **nightly perf 基线门控在 CI runner 上系统性不兼容**（两轮首跑 3 项失败且
-  集合漂移：Forward/Sftp/X11 的回归对基线与绝对阈值）。records 基线系本地
-  开发机滚动基线。三选一：CI 专用滚动基线（artifact 回传）/ nightly 降信息性
-  （continue-on-error）/ 维持门控容忍噪声。终审决策。
+- ~~**nightly perf 基线门控在 CI runner 上系统性不兼容**~~（已决策：CI 专用滚动
+  基线——artifact 回传固定命名 `perf-records-baseline`，首跑 QSKIP 采集、次轮起自愈）。
 - release.yml 端到端不打测试 tag（对外动作），人工验收：首个正式 tag 观察。
 - fork PR 无 secret 的子模块拉取场景未验证（当前无 PR）。
