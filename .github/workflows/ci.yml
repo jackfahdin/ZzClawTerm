@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, preset: linux-gcc-release, qt-arch: gcc_64 }
+          - { os: ubuntu-24.04, preset: linux-gcc-release, qt-arch: linux_gcc_64 }
           - { os: windows-2022, preset: windows-msvc2022-release, qt-arch: win64_msvc2022_64 }
           - { os: macos-14, preset: macos-clang-release, qt-arch: clang_64 }
     runs-on: ${{ matrix.os }}
@@ -95,7 +95,7 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.11.1'
-          arch: gcc_64
+          arch: linux_gcc_64
 
       - name: 集成测试依赖（Xvfb / xdpyinfo）
         run: |

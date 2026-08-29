@@ -48,8 +48,10 @@ add_subdirectory(${ZZ_PURETOOLS_SUBDIR})
 # 设置 OPENSSL_INCLUDE_DIR/OPENSSL_*_LIBRARY 变量；其后 libssh2 与
 # src/session 的 find_package(OpenSSL) 模块会沿用已设变量与既有导入目标，
 # FindOpenSSL 的 NOT TARGET 守卫保证不重复建目标）。
-# bundle 缺失（子模块未初始化）时回退系统 OpenSSL。
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSLBundleConfig.cmake")
+# bundle 无对应平台产物（如 macOS，third_party/openssl 仅有
+# android/linux/windows 目录）时跳过，回退系统 OpenSSL（CI 上经
+# OPENSSL_ROOT_DIR 指向 brew openssl@3）。
+if(NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSLBundleConfig.cmake")
     list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
     find_package(OpenSSLBundle QUIET)
     if(OpenSSLBundle_FOUND)
