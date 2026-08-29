@@ -32,6 +32,18 @@ private slots:
 #endif
     }
 
+    /** @brief 行结束符：真实终端 Enter 产生 \r；ConPTY 上 PowerShell PSReadLine
+     *  只认 \r 提交行，\n 仅是行内字符（命令不会执行）。Unix PTY 用 \n。
+     */
+    static QByteArray lineEnding()
+    {
+#if defined(Q_OS_WIN)
+        return QByteArrayLiteral("\r");
+#else
+        return QByteArrayLiteral("\n");
+#endif
+    }
+
     void openEchoClose()
     {
         ZzLocalPtyTransport transport;
@@ -51,12 +63,14 @@ private slots:
             transport.state() == ZzTransportInterface::State::Connected, 5000);
         QVERIFY(stateSpy.count() >= 2); // Disconnected→Connecting→Connected
 
-        // 写命令，应读到回显输出（PTY 默认回显 + 命令输出）
+        // 写命令。注意断言要区分 PTY 输入回显与命令真实输出：回显只出现 1 次
+        // 标记，命令执行后输出再出现 1 次；若只用 contains 判定，回显即可
+        // 让用例假绿（九跑 Windows 上 openEchoClose 即因此误判通过）。
         QByteArray received;
         connect(&transport, &ZzTransportInterface::dataReceived,
                 this, [&received](const QByteArray &data) { received += data; });
-        transport.write("echo zz-pty-ok\n");
-        QTRY_VERIFY_WITH_TIMEOUT(received.contains("zz-pty-ok"), 5000);
+        transport.write(QByteArrayLiteral("echo zz-pty-ok") + lineEnding());
+        QTRY_VERIFY_WITH_TIMEOUT(received.count("zz-pty-ok") >= 2, 5000);
 
         transport.resize(100, 40);
         transport.close();
@@ -77,7 +91,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(
             transport.state() == ZzTransportInterface::State::Connected, 5000);
 
-        transport.write("exit\n");
+        transport.write(QByteArrayLiteral("exit") + lineEnding());
         QTRY_VERIFY_WITH_TIMEOUT(disconnectSpy.count() >= 1, 5000);
         QCOMPARE(transport.state(), ZzTransportInterface::State::Disconnected);
     }
