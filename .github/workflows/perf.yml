@@ -78,6 +78,9 @@ jobs:
           # 库侧 tst_ZzSftpPerf::opensshBaseline 的开关：跳过与 CI runner 异构的
           # OpenSSH 本机基线对比（CI 滚动基线由下载步恢复，selftest 自备基线）
           ZZSSH_PERF_SKIP_OPENSSH_BASELINE: '1'
+          # 库侧 tst_ZzForwardPerf::forwardEchoThroughput 阈值：GitHub runner 稳态
+          # ~50 MB/s 贴着默认 50 阈值，实测三轮 47.98/49.92，降 20% 保防断崖语义
+          ZZSSH_PERF_FORWARD_THROUGHPUT_MIN: '40'
         run: tests/integration/docker/run-integration-tests.sh build/linux-release
 
       - name: 上传 CI 滚动基线（供下一轮门控）
