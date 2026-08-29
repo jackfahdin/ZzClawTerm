@@ -68,6 +68,24 @@ jobs:
           brew install openssl@3
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
+      # vendored bundle 的 Windows 产物未构建完整（static/shared 均缺
+      # include/ 与库文件），回退 runner 自带 OpenSSL 3.x（openssl/include
+      # 存在即认定），并把其 bin 加入 PATH 供测试进程加载 DLL。
+      - name: Windows OpenSSL 回退（vendored bundle Windows 产物不完整）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for d in "/c/Program Files/OpenSSL" "/c/Program Files/OpenSSL-Win64"; do
+            if [ -f "${d}/include/openssl/ssl.h" ]; then
+              echo "OPENSSL_ROOT_DIR=$(cygpath -w "${d}")" >> "$GITHUB_ENV"
+              echo "${d}/bin" >> "$GITHUB_PATH"
+              echo "OpenSSL 回退：${d}"
+              exit 0
+            fi
+          done
+          echo "未找到 runner 自带 OpenSSL" >&2
+          exit 1
+
       - name: 配置与构建
         shell: bash
         run: |

@@ -49,13 +49,26 @@ add_subdirectory(${ZZ_PURETOOLS_SUBDIR})
 # src/session 的 find_package(OpenSSL) 模块会沿用已设变量与既有导入目标，
 # FindOpenSSL 的 NOT TARGET 守卫保证不重复建目标）。
 # bundle 无对应平台产物（如 macOS，third_party/openssl 仅有
-# android/linux/windows 目录）时跳过，回退系统 OpenSSL（CI 上经
-# OPENSSL_ROOT_DIR 指向 brew openssl@3）。
+# android/linux/windows 目录）或产物未构建完整（Windows 侧 static/shared
+# 包缺 include/ 与库文件）时跳过，回退系统 OpenSSL（CI 上 macOS 经
+# OPENSSL_ROOT_DIR 指向 brew openssl@3，Windows 指向 runner 自带 OpenSSL 3.x）。
 if(NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSLBundleConfig.cmake")
-    list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
-    find_package(OpenSSLBundle QUIET)
-    if(OpenSSLBundle_FOUND)
-        message(STATUS "OpenSSL：使用 vendored bundle ${OPENSSL_VERSION}（${OPENSSL_BUNDLE_LINKAGE}）")
+    set(ZZ_OPENSSL_BUNDLE_USABLE TRUE)
+    if(WIN32)
+        # Windows 产物完整性的粗检：任一 toolchain/linkage 下存在 ssl.h 才算可用
+        file(GLOB ZZ_OPENSSL_BUNDLE_SSL_HEADERS
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/windows/*/x64/*/include/openssl/ssl.h")
+        if(NOT ZZ_OPENSSL_BUNDLE_SSL_HEADERS)
+            set(ZZ_OPENSSL_BUNDLE_USABLE FALSE)
+            message(STATUS "OpenSSL：vendored bundle Windows 产物不完整，回退系统 OpenSSL")
+        endif()
+    endif()
+    if(ZZ_OPENSSL_BUNDLE_USABLE)
+        list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl")
+        find_package(OpenSSLBundle QUIET)
+        if(OpenSSLBundle_FOUND)
+            message(STATUS "OpenSSL：使用 vendored bundle ${OPENSSL_VERSION}（${OPENSSL_BUNDLE_LINKAGE}）")
+        endif()
     endif()
 endif()
 
