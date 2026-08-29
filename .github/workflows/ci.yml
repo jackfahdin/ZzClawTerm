@@ -233,8 +233,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-22.04 自带 libtiff5（打包脚本既有约束；24.04 仅 libtiff.so.6）
-          - { os: ubuntu-22.04, kind: linux, qt-arch: linux_gcc_64, aqt-src: '' }
+          # ubuntu-24.04（GCC 13 满足 ZzPureToolsPro 编译要求；22.04 的 GCC 11
+          # 不满足）。libtiff5 从 jammy 源下载解包（24.04 仅 libtiff.so.6，
+          # Qt 官方 gcc_64 的 imageformats/libqtiff.so 依赖 libtiff.so.5）。
+          - { os: ubuntu-24.04, kind: linux, qt-arch: linux_gcc_64, aqt-src: '' }
           - { os: windows-2022, kind: windows, qt-arch: win64_msvc2022_64,
               aqt-src: 'git+https://github.com/miurahr/aqtinstall.git@16db45a70b5905ad596941b223469bc86a56901e' }
           - { os: macos-14, kind: macos, qt-arch: clang_64, aqt-src: '' }
@@ -276,7 +278,7 @@ jobs:
           echo "QT_ROOT=${QT_ROOT//\\//}" >> "$GITHUB_ENV"
 
 
-      - name: Linux 打包依赖（libfuse2 + linuxdeploy + plugin-qt）
+      - name: Linux 打包依赖（libfuse2 + linuxdeploy + plugin-qt + libtiff5）
         if: matrix.kind == 'linux'
         run: |
           sudo apt-get update && sudo apt-get install -y libfuse2
@@ -284,6 +286,14 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-*.AppImage
           echo "$PWD" >> "$GITHUB_PATH"
+          # libtiff5：24.04 只带 libtiff.so.6，从 jammy 源下载 deb 解包（不安装，
+          # 避免混用发行版包），经 LD_LIBRARY_PATH 供 linuxdeploy-plugin-qt 解析
+          echo 'deb http://archive.ubuntu.com/ubuntu jammy universe' | sudo tee /etc/apt/sources.list.d/jammy-libtiff5.list >/dev/null
+          sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/jammy-libtiff5.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+          apt-get download libtiff5
+          sudo rm /etc/apt/sources.list.d/jammy-libtiff5.list
+          dpkg -x libtiff5_*.deb "$PWD/libtiff5"
+          echo "LD_LIBRARY_PATH=$PWD/libtiff5/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       # vendored bundle 无 macOS 产物，回退 brew openssl@3（同 build-test job）
       - name: macOS OpenSSL 回退（vendored bundle 无 macOS 产物）
