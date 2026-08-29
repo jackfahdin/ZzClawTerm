@@ -69,3 +69,40 @@
 - deb/rpm/Flatpak、Homebrew Cask、自动更新通道。
 - PR 打包与 PR 预览环境。
 - 代码签名与公证（macOS notarization、Windows 签名）。
+
+## 8. 首跑核销（2026-08-29，任务 1-4 交付后补记）
+
+ci 十跑全绿（run 33244672049）；Continuous Build 全绿且三平台包已传
+continuous-build 预发布（run 33251261414）。相对本文档的实际偏差与决策：
+
+1. **快门禁 ctest 加 `-LE perf`**（计划外、预案内）：perf 标签阈值面向开发机
+   标定，CI runner 实测偏低（如冷存储写入 38-48 万行/秒 vs 阈值 50 万）。
+2. **Qt 安装架构命名**：Qt 6.10+ 元数据改为 `linux_gcc_64` /
+   `win64_msvc2022_64`；Windows 因 Qt 服务器 windows_x86 侧聚合 Updates.xml
+   与校验和缺口，aqt 固定到上游 master 提交 16db45a（3.3.0 之后修复），
+   linux/mac 用稳定 3.3.x。
+3. **OpenSSL**：vendored bundle 无 macOS 产物、Windows 产物不完整
+   （static/shared 缺 include/与库）→ CMake 注入前加 ssl.h 粗检，缺失时回退
+   系统 OpenSSL（macOS brew openssl@3；Windows runner 自带 3.x）。
+4. **QT_ROOT 取 `QT_ROOT_DIR`**：install-qt-action v4 不导出 Qt6_DIR，
+   原推导恒为空；Windows 反斜杠路径统一转正斜杠。
+5. **Linux 打包 runner 实为 ubuntu-24.04**（§5 写的 22.04 因 ZzPureToolsPro
+   要求 GCC 13.1+ 不可行）；libtiff5 从 Launchpad 固定版本
+   （libtiff5_4.3.0-6ubuntu0.13_amd64.deb）下载解包，LD_LIBRARY_PATH 注入
+   供 linuxdeploy-plugin-qt 解析。
+6. **Windows 单测**：ZzPureToolsPro 以 DLL 构建（BUILD_SHARED_LIBS 时序），
+   测试经 ENVIRONMENT_MODIFICATION 前置 PATH；三处 POSIX 装置用例
+   （0600 权限/只读目录/sh 脚本桩）Q_OS_WIN 声明式 QSKIP；ConPTY 用例修复
+   （shell 绝对路径 + Enter 用 \r）；QTest 统一 `-o exe.qtest.log,txt` 文件
+   输出绕开 actions/runner#1206（Windows runner 丢弃 ctest 孙进程终端输出）。
+7. **continuous-build 资产先清空再上传**：产物名含 SHA，同名覆盖策略会累积
+   旧资产。
+
+待决策/验收项：
+
+- **nightly perf 基线门控在 CI runner 上系统性不兼容**（两轮首跑 3 项失败且
+  集合漂移：Forward/Sftp/X11 的回归对基线与绝对阈值）。records 基线系本地
+  开发机滚动基线。三选一：CI 专用滚动基线（artifact 回传）/ nightly 降信息性
+  （continue-on-error）/ 维持门控容忍噪声。终审决策。
+- release.yml 端到端不打测试 tag（对外动作），人工验收：首个正式 tag 观察。
+- fork PR 无 secret 的子模块拉取场景未验证（当前无 PR）。

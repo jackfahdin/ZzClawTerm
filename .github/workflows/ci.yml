@@ -342,10 +342,14 @@ jobs:
               --title "持续构建（Continuous Build）" \
               --notes "master 每次 push 全绿后自动更新的验证包。"
           fi
+          # 每个 commit 的产物文件名含 SHA，同名删除覆盖不了旧资产；
+          # 先清空 continuous-* 资产再上传，保持预发布只含最新一轮三平台包
+          for old in $(gh release view continuous-build --json assets -q '.assets[].name'); do
+            gh release delete-asset continuous-build "$old" -y 2>/dev/null || true
+          done
           # glob 无匹配时 bash 给字面量，跳过防止误当文件名上传
           for f in dist/ZzClawTerm-continuous-*; do
             [ -f "$f" ] || continue
-            gh release delete-asset continuous-build "$(basename "$f")" -y 2>/dev/null || true
             gh release upload continuous-build "$f" --clobber
           done
           SHORT_SHA="${GITHUB_SHA::8}"

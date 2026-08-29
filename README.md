@@ -1,5 +1,9 @@
 # ZzClawTerm
 
+[![ci](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/ci.yml/badge.svg)](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/ci.yml)
+[![perf](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/perf.yml/badge.svg)](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/perf.yml)
+[![release](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/release.yml/badge.svg)](https://github.com/jackfahdin/ZzClawTerm/actions/workflows/release.yml)
+
 基于 Qt 6 + C++20 的跨平台终端工具，目标是在功能与体验上对标并超越 MobaXterm / WindTerm。
 
 差异化方向：
