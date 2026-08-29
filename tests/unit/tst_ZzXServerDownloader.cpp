@@ -135,6 +135,12 @@ private slots:
     /** @brief 桩返回合法包体 → 校验通过 → 以 /S /D= 正确参数发起静默安装 → ready。 */
     void downloadsAndInstallsWithCorrectArgs()
     {
+#ifdef Q_OS_WIN
+        // 桩安装包是 #!/bin/sh 脚本，Windows 生产路径按 NSIS exe 启动
+        // （QProcess + /S /D= 原生参数），桩无法跨平台执行；编排断言由
+        // Linux/macOS CI 覆盖
+        QSKIP("桩安装包为 Unix shell 脚本，Windows 上生产路径执行真实 NSIS 安装包");
+#endif
         const QByteArray pkg = makeStubInstaller(m_argsFile);
         ZzStubHttpServer server;
         server.body = pkg;
@@ -287,6 +293,9 @@ private slots:
     /** @brief 回归：旧版可用 + 静默安装失败 → 旧版原样保留，staging 清场。 */
     void oldVersionSurvivesFailedInstall()
     {
+#ifdef Q_OS_WIN
+        QSKIP("桩安装包为 Unix shell 脚本，Windows 上无法走到可控的安装失败路径");
+#endif
         seedOldInstall();
 
         // 桩安装包：落一个半成品文件后以 exit 1 失败

@@ -101,6 +101,12 @@ private slots:
      */
     void scrollbackDegradationPromptsOnOpen()
     {
+#ifdef Q_OS_WIN
+        // 用例靠「只读目录使温层文件创建失败」触发降级；Windows 无 POSIX 目录
+        // 权限位（QFile::setPermissions 只映射只读属性，不阻止目录写入），
+        // 触发装置无效，降级链路由 Linux/macOS CI 覆盖
+        QSKIP("只读目录触发装置依赖 POSIX 权限语义，Windows 不适用");
+#endif
         QStandardPaths::setTestModeEnabled(true); // 隔离用户真实配置目录
         // 温层文件名带每标签唯一后缀，无法预知精确路径；改为把 scrollback
         // 目录置为只读，任何温层文件创建都会失败 → open() 同步降级

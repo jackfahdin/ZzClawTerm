@@ -78,7 +78,9 @@ jobs:
           for d in "/c/Program Files/OpenSSL" "/c/Program Files/OpenSSL-Win64"; do
             if [ -f "${d}/include/openssl/ssl.h" ]; then
               echo "OPENSSL_ROOT_DIR=$(cygpath -w "${d}")" >> "$GITHUB_ENV"
-              echo "${d}/bin" >> "$GITHUB_PATH"
+              # GITHUB_PATH 条目会被原样追加进 Windows 原生 PATH，必须是
+              # Windows 风格路径；gitbash 风格 /c/... 对测试进程无效
+              echo "$(cygpath -w "${d}/bin")" >> "$GITHUB_PATH"
               echo "OpenSSL 回退：${d}"
               exit 0
             fi
@@ -99,7 +101,65 @@ jobs:
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --preset ${{ matrix.preset }} -LE perf
+        # Windows 上 ctest --output-on-failure 对“进程直接退出（如
+        # STATUS_DLL_NOT_FOUND 0xc0000135）”这类失败不打印子进程输出，
+        # 兜底打印 LastTest.log 保证总能看到失败详情。
+        run: |
+          ctest --preset ${{ matrix.preset }} -LE perf || {
+            echo "===== LastTest.log ====="
+            cat "build/${{ matrix.preset }}/Testing/Temporary/LastTest.log" 2>/dev/null || true
+            exit 1
+          }
+
+      # 0xc0000135（STATUS_DLL_NOT_FOUND）时 ctest/LastTest.log 都不含缺失 DLL 名，
+      # 用 dumpbin 沿静态导入链逐级解析依赖，按加载器搜索顺序定位缺失项。
+      - name: Windows 依赖诊断（仅失败时，定位缺失 DLL）
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BUILD_DIR: build/${{ matrix.preset }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { Write-Host '未找到 dumpbin，跳过依赖诊断'; exit 0 }
+          $searchDirs = @($env:SystemRoot + '\System32', $env:SystemRoot) + $env:Path.Split(';')
+          function Resolve-Dll([string]$name, [string]$exeDir) {
+              foreach ($d in @($exeDir) + $searchDirs) {
+                  if ($d -and (Test-Path (Join-Path $d $name))) { return $true }
+              }
+              return $false
+          }
+          function Get-Deps([string]$pe) {
+              & $dumpbin /DEPENDENTS $pe 2>$null |
+                  Select-String -Pattern '^\s+(\S+\.dll)\s*$' |
+                  ForEach-Object { $_.Matches[0].Groups[1].Value }
+          }
+          $exes = Get-ChildItem -Recurse -Filter *.exe "${env:BUILD_DIR}\tests" | Where-Object Name -like 'tst_*'
+          foreach ($exe in $exes) {
+              $visited = @{}
+              $queue = [System.Collections.Generic.Queue[string]]::new()
+              $exeDir = $exe.DirectoryName
+              foreach ($d in Get-Deps $exe.FullName) { $queue.Enqueue($d) }
+              $missing = @()
+              while ($queue.Count -gt 0) {
+                  $dll = $queue.Dequeue()
+                  if ($visited.ContainsKey($dll)) { continue }
+                  $visited[$dll] = $true
+                  if (Resolve-Dll $dll $exeDir) {
+                      foreach ($d in $searchDirs) {
+                          $p = Join-Path $d $dll
+                          if ($d -and (Test-Path $p)) { foreach ($x in Get-Deps $p) { $queue.Enqueue($x) }; break }
+                      }
+                  } else {
+                      $missing += $dll
+                  }
+              }
+              if ($missing.Count -gt 0) {
+                  Write-Host ("===== {0} 缺失依赖: {1}" -f $exe.Name, ($missing -join ', '))
+              }
+          }
+          Write-Host '依赖诊断完成（未列出程序 = 静态依赖均可解析）'
 
   zzsshcore:
     name: ZzSshCore 单测 + docker 集成

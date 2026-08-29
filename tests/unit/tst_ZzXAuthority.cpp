@@ -49,6 +49,11 @@ private slots:
     /** @brief 写出的授权文件权限必须为 0600（仅属主可读写）。 */
     void filePermissions0600()
     {
+#ifdef Q_OS_WIN
+        // Windows 无 POSIX 权限位：QFile::permissions 恒返回全量权限，
+        // 0600 语义不可验证（xauthority 文件内容格式仍由上一个用例覆盖）
+        QSKIP("POSIX 0600 权限语义在 Windows 不存在");
+#endif
         ZzXAuthority auth;
         const QString path = QDir::temp().filePath(QStringLiteral("zzxauth-perm-test"));
         QVERIFY(auth.writeXauthorityFile(path, 1, auth.generateCookie()));
