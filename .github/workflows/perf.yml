@@ -10,10 +10,11 @@ concurrency:
   group: perf-nightly
   cancel-in-progress: false
 
-# CI 专用滚动基线：本轮门控前下载上一轮 nightly 自产的 records artifact 覆盖到
-# records 目录（runner 性能异构，不可用本地开发机基线）；跑完把新 records 回传，
-# 下一轮对本轮自比。首轮无 artifact 时测试 QSKIP 自动采集基线（不门控、退出码 0），
-# 上传后自愈。吞吐阈值判断仍由 run-integration-tests.sh 依仓库内阈值执行。
+# CI 专用滚动基线：先清掉仓库自带的本机校准 records（维护者机器基线，CI runner
+# 性能异构不可用），再下载上一轮 nightly 自产的 records artifact 覆盖到 records 目录；
+# 跑完把新 records 回传，下一轮对本轮自比。首轮无 artifact 时测试 QSKIP 自动采集
+# 基线（不门控、退出码 0），上传后自愈。吞吐阈值判断仍由 run-integration-tests.sh
+# 依仓库内阈值执行。
 jobs:
   perf:
     name: ZzSshCore 全量 integration + perf 门控
@@ -53,6 +54,13 @@ jobs:
           cmake --preset linux-release
           cmake --build --preset linux-release
 
+      # 仓库跟踪的 records 是维护者本机校准基线，CI runner 性能异构不可用
+      # （本机基线会把首轮 SFTP 吞吐误判为回归）；清空后若上轮 artifact 存在，
+      # 由下载步恢复 CI 基线，首轮无 artifact 则测试 QSKIP 采集本 runner 基线
+      - name: 准备 records 目录（清掉仓库自带的本机基线）
+        shell: bash
+        run: rm -f third_party/ZzSshCore/tests/perf/records/*.json
+
       - name: 下载上一轮 CI 滚动基线（records）
         uses: dawidd6/action-download-artifact@v3
         continue-on-error: true  # 首轮无该 artifact：测试 QSKIP 自动采集基线，不门控
@@ -66,6 +74,10 @@ jobs:
       # 全程约 40-80 分钟，超快门禁 CI 的覆盖范围，由本 nightly 承接。
       - name: 全量集成 + perf（integration|perf 门控）
         working-directory: third_party/ZzSshCore
+        env:
+          # 库侧 tst_ZzSftpPerf::opensshBaseline 的开关：跳过与 CI runner 异构的
+          # OpenSSH 本机基线对比（CI 滚动基线由下载步恢复，selftest 自备基线）
+          ZZSSH_PERF_SKIP_OPENSSH_BASELINE: '1'
         run: tests/integration/docker/run-integration-tests.sh build/linux-release
 
       - name: 上传 CI 滚动基线（供下一轮门控）
