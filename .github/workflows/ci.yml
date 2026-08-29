@@ -37,12 +37,26 @@ jobs:
           git config --global url."https://oauth2:${GITCODE_PAT}@gitcode.com/".insteadOf "git@gitcode.com:"
           git submodule update --init --recursive
 
+      # Qt 服务器缺失 windows_x86 的 Updates.xml 校验和（Updates.xml.sha256 确定性 404，
+      # linux/mac 正常；2026-08 验证），aqt 3.3.0 将校验和下载失败视为致命错误。
+      # 仅跳过哈希校验，Qt 版本固定 6.11.1，不影响安装可重复性。
+      - name: Windows aqt 跳过哈希校验（Qt 服务器缺 windows 校验和）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          printf '[requests]\nINSECURE_NOT_FOR_PRODUCTION_ignore_hash: true\n' \
+            > "${RUNNER_TEMP}/aqt-settings.ini"
+          echo "AQT_CONFIG=${RUNNER_TEMP}/aqt-settings.ini" >> "${GITHUB_ENV}"
+
       - name: 安装 Qt 6.11.1
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.11.1'
           arch: ${{ matrix.qt-arch }}
           modules: 'qtmultimedia'
+          # aqt 3.3.0 起校验和下载失败视为致命（Qt 服务器缺 windows 校验和），
+          # 固定 3.3.x 主版本避免其行为漂移；Windows 哈希跳过见上方 AQT_CONFIG 步骤
+          aqtversion: '==3.3.*'
 
       - name: 导出 QT_ROOT（由 Qt6_DIR 推前缀）
         shell: bash
@@ -66,11 +80,14 @@ jobs:
           cmake --preset ${{ matrix.preset }}
           cmake --build --preset ${{ matrix.preset }}
 
-      - name: 主仓单测（45 程序基线）
+      # -LE perf：perf 标签程序的吞吐阈值面向开发机标定（如冷存储 50 万行/秒），
+      # CI runner 实测偏低（ubuntu 38 万 / macOS 48 万行/秒），按预案排除；
+      # perf 由 nightly perf.yml 在专用 runner 上承接。
+      - name: 主仓单测（45 程序基线，-LE perf 后 35 程序）
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --preset ${{ matrix.preset }}
+        run: ctest --preset ${{ matrix.preset }} -LE perf
 
   zzsshcore:
     name: ZzSshCore 单测 + docker 集成
@@ -96,6 +113,7 @@ jobs:
         with:
           version: '6.11.1'
           arch: linux_gcc_64
+          aqtversion: '==3.3.*'
 
       - name: 集成测试依赖（Xvfb / xdpyinfo）
         run: |
