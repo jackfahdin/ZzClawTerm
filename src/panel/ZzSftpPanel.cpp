@@ -99,15 +99,11 @@ bool zzEntryLess(const ZzSftpFileInfo &a, const ZzSftpFileInfo &b)
 } // namespace
 
 ZzSftpPanel::ZzSftpPanel(QWidget *parent)
-    : QDockWidget(QStringLiteral("SFTP"), parent)
+    : QWidget(parent)
 {
-    setObjectName(panelId()); // QDockWidget 布局持久化键
-    setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea); // 可停靠左右
-    setFeatures(QDockWidget::DockWidgetClosable
-                | QDockWidget::DockWidgetMovable); // 可折叠/拖动
+    setObjectName(panelId()); // 稳定标识：登记册与工作区注册共用
 
-    auto *central = new QWidget(this);
-    auto *layout = new QVBoxLayout(central);
+    auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
 
@@ -187,7 +183,6 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
-    setWidget(central);
     setStatus(QStringLiteral("无活动会话"));
     updateAvailability();
 

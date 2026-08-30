@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QtWidgets/QDockWidget>
+#include <QtWidgets/QWidget>
 
 #include "ZzPanelInterface.h"
 #include "session/ZzSessionProfile.h"
@@ -13,10 +13,11 @@ class ZzSessionModel;
 /**
  * @brief 会话面板：树形分组、双击连接、右键新建/编辑/删除/复制（规格 §七）。
  *
- * 实现 ZzPanelInterface 注册进壳层；数据完全来自 ZzSessionModel，
+ * 纯 QWidget 内容（第一期外壳替换后不再继承 QDockWidget），实现
+ * ZzPanelInterface 注册进壳层；数据完全来自 ZzSessionModel，
  * 模型 sessionsChanged() 即重建树（v0.1 会话量级下重建成本可忽略）。
  */
-class ZzSessionPanel : public QDockWidget, public ZzPanelInterface
+class ZzSessionPanel : public QWidget, public ZzPanelInterface
 {
     Q_OBJECT
 public:

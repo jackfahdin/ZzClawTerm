@@ -22,21 +22,20 @@ constexpr int kProfileIdRole = Qt::UserRole + 1;
 ZzSessionPanel::ZzSessionPanel(ZzSessionModel *model,
                                ZzCredentialStore *store,
                                QWidget *parent)
-    : QDockWidget(QStringLiteral("会话"), parent)
+    : QWidget(parent)
     , m_model(model)
     , m_store(store)
 {
-    setObjectName(panelId()); // QDockWidget 布局持久化键
-    setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea); // 可停靠左右
-    setFeatures(QDockWidget::DockWidgetClosable
-                | QDockWidget::DockWidgetMovable); // 可折叠/拖动
+    setObjectName(panelId()); // 稳定标识：登记册与工作区注册共用
 
     m_treeModel = new QStandardItemModel(this);
     m_tree = new QTreeView(this);
     m_tree->setModel(m_treeModel);
     m_tree->setHeaderHidden(true);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
-    setWidget(m_tree);
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(m_tree);
 
     connect(m_tree, &QTreeView::doubleClicked,
             this, &ZzSessionPanel::onTreeDoubleClicked);

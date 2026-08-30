@@ -6,7 +6,7 @@
 #include <QtCore/QList>
 #include <QtCore/QPointer>
 #include <QtCore/QSet>
-#include <QtWidgets/QDockWidget>
+#include <QtWidgets/QWidget>
 
 #include "ZzPanelInterface.h"
 #include "ZzSftpOps.h"
@@ -27,7 +27,7 @@ class ZzTerminalView;
 /**
  * @brief SFTP 侧边栏面板：远程目录浏览、文件操作与传输队列（规格 §2.3 面板）。
  *
- * 经 ZzPanelRegistry 注册、ZzAppShell 装配为右侧 Dock。会话跟随
+ * 经 ZzPanelRegistry 注册、ZzAppShell 装配为右侧侧栏面板。会话跟随
  * setTabManager() 注入的 ZzTabManager：绑定当前标签焦点窗格的 SSH 连接
  * （切标签/切窗格自动跟随）；本地 PTY 会话显示不可用提示。
  *
@@ -36,7 +36,7 @@ class ZzTerminalView;
  * 所有 SFTP 调用本身异步，面板不在 GUI 线程做任何等待；目录列举结果
  * 按批（kFillBatchSize）填充模型，避免大目录阻塞 UI。
  */
-class ZzSftpPanel : public QDockWidget, public ZzPanelInterface
+class ZzSftpPanel : public QWidget, public ZzPanelInterface
 {
     Q_OBJECT
 public:

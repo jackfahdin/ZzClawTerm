@@ -1,14 +1,19 @@
 #include "ZzAppShell.h"
 
+#include <memory>
 #include <optional>
 #include <utility>
 
+#include <QtCore/QEvent>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QDebug>
-#include <QtWidgets/QDockWidget>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QStatusBar>
+
+#include <ZzFluentUI/ZzIconDescriptor.h>
+#include <ZzPureTools/ZzApplicationWindow.h>
+#include <ZzPureTools/ZzWorkspaceShell.h>
 
 #include "dialog/ZzHostKeyDialog.h"
 #include "dialog/ZzMasterPasswordDialog.h"
@@ -76,24 +81,75 @@ ZzAppShell::~ZzAppShell()
 
 ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
 {
-    // 会话面板 Dock（规格 §七：可折叠、可停靠左右）
-    auto *panel = new ZzSessionPanel(m_sessionModel, m_credentialStore, &window);
-    ZzPanelRegistry::instance().registerPanel(panel);
-    window.addDockWidget(Qt::LeftDockWidgetArea, panel);
-    m_sessionPanel = panel;
+    // 框架窗口（生产路径）取 Fluent 标题栏；普通 QMainWindow（离屏测试）允许为空
+    auto *applicationWindow =
+        qobject_cast<ZzPureTools::ZzApplicationWindow *>(&window);
+    auto *titleBar =
+        applicationWindow != nullptr ? applicationWindow->titleBar() : nullptr;
 
-    // SFTP 面板 Dock：跟随当前标签焦点窗格的 SSH 连接（本地会话面板内提示不可用）
-    auto *sftpPanel = new ZzSftpPanel(&window);
-    ZzPanelRegistry::instance().registerPanel(sftpPanel);
-    window.addDockWidget(Qt::RightDockWidgetArea, sftpPanel);
-    connect(sftpPanel, &ZzSftpPanel::statusMessage,
-            this, &ZzAppShell::showStatusMessage);
-    if (m_tabManager) {
-        sftpPanel->setTabManager(m_tabManager); // 终端页先于 assemble 创建时补绑
+    auto created = ZzPureTools::ZzWorkspaceShell::create(&window, titleBar);
+    if (!created) {
+        return ZzCore::ZzResult<void>::failure(created.error());
     }
-    m_sftpPanel = sftpPanel;
+    m_workspaceShell = std::move(created).value();
+    m_window = &window;
 
-    // 状态栏三要素：连接状态 | 编码 | 行列
+    // 会话面板 → 活动栏 LeftPrimary「会话」，延迟工厂首开才创建；
+    // 面板内容无父对象交给 Shell，登记册与双击接线在工厂内完成
+    auto sessions = m_workspaceShell->registerSidePanelFactory(
+        ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sessions")),
+        QStringLiteral("会话"),
+        ZzFluentUI::ZzIconDescriptor::fromFontIcon(
+            ZzFluentUI::ZzFontIcon::Terminal),
+        ZzFluentUI::ZzActivityArea::LeftPrimary,
+        [this]() -> ZzCore::ZzResult<std::unique_ptr<QWidget>> {
+            auto panel = std::make_unique<ZzSessionPanel>(
+                m_sessionModel, m_credentialStore);
+            wireSessionPanel(panel.get());
+            m_sessionPanel = panel.get();
+            return ZzCore::ZzResult<std::unique_ptr<QWidget>>::success(
+                std::move(panel));
+        });
+    if (!sessions) {
+        return sessions;
+    }
+
+    // SFTP 面板 → 活动栏 RightPrimary「文件」，同样延迟创建
+    auto files = m_workspaceShell->registerSidePanelFactory(
+        ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sftp")),
+        QStringLiteral("文件"),
+        ZzFluentUI::ZzIconDescriptor::fromFontIcon(
+            ZzFluentUI::ZzFontIcon::Folder),
+        ZzFluentUI::ZzActivityArea::RightPrimary,
+        [this]() -> ZzCore::ZzResult<std::unique_ptr<QWidget>> {
+            auto panel = std::make_unique<ZzSftpPanel>();
+            wireSftpPanel(panel.get());
+            m_sftpPanel = panel.get();
+            return ZzCore::ZzResult<std::unique_ptr<QWidget>>::success(
+                std::move(panel));
+        });
+    if (!files) {
+        return files;
+    }
+
+    // 页面路由事务式迁入 IDE 侧栏（官方捷径：导航面板入侧栏、页面宿主入中央
+    // 固定标签，导航身份不变；失败回滚原状态）。仅框架窗口存在导航表面，
+    // 普通 QMainWindow（离屏测试）无导航可迁，跳过
+    if (applicationWindow != nullptr) {
+        auto integrated = m_workspaceShell->integrateApplicationNavigation(
+            ZzPureTools::ZzWorkspacePanelId(QStringLiteral("navigation")),
+            QStringLiteral("导航"),
+            ZzFluentUI::ZzIconDescriptor::fromFontIcon(
+                ZzFluentUI::ZzFontIcon::Sitemap),
+            ZzFluentUI::ZzActivityArea::LeftPrimary,
+            QStringLiteral("ZzClawTerm"));
+        if (!integrated) {
+            return integrated;
+        }
+    }
+    window.setCentralWidget(m_workspaceShell->workspaceWidget());
+
+    // 状态栏四件套：连接状态 | 编码 | 行列 | 隧道数
     m_statusBar = window.statusBar();
     m_stateLabel = new QLabel(QStringLiteral("未连接"), m_statusBar);
     m_encodingLabel = new QLabel(m_statusBar);
@@ -104,6 +160,26 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     m_tunnelLabel = new QLabel(QStringLiteral("隧道: 0"), m_statusBar);
     m_statusBar->addPermanentWidget(m_tunnelLabel);
 
+    // 布局持久化：恢复上次工作区布局（版本化字节由 Shell 校验，不自解析）；
+    // 恢复失败仅回落默认布局，不中止装配。窗口 Close 时经事件过滤保存
+    const QByteArray layout = ZzAppSettings::instance().workspaceLayout();
+    if (!layout.isEmpty()) {
+        auto restored = m_workspaceShell->restoreLayout(layout);
+        if (!restored) {
+            qWarning().noquote() << QStringLiteral(
+                "工作区布局恢复失败，使用默认布局：%1")
+                .arg(restored.error().technicalMessage());
+        }
+    }
+    window.installEventFilter(this);
+
+    return ZzCore::ZzResult<void>::success();
+}
+
+void ZzAppShell::wireSessionPanel(ZzSessionPanel *panel)
+{
+    ZzPanelRegistry::instance().registerPanel(panel);
+
     // 双击会话 → 开标签（终端页可能尚未创建，经 QPointer 惰性转发）
     connect(panel, &ZzSessionPanel::connectRequested, this,
             [this](const ZzSessionProfile &profile) {
@@ -111,7 +187,40 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
                     m_tabManager->openSession(profile);
                 }
             });
-    return ZzCore::ZzResult<void>::success();
+}
+
+void ZzAppShell::wireSftpPanel(ZzSftpPanel *panel)
+{
+    ZzPanelRegistry::instance().registerPanel(panel);
+    connect(panel, &ZzSftpPanel::statusMessage,
+            this, &ZzAppShell::showStatusMessage);
+    if (m_tabManager) {
+        panel->setTabManager(m_tabManager); // 终端页先于面板创建时补绑
+    }
+}
+
+bool ZzAppShell::saveWorkspaceLayout()
+{
+    if (!m_workspaceShell) {
+        return false;
+    }
+    auto saved = m_workspaceShell->saveLayout();
+    if (!saved) {
+        qWarning().noquote() << QStringLiteral("工作区布局保存失败：%1")
+            .arg(saved.error().technicalMessage());
+        return false;
+    }
+    ZzAppSettings::instance().setWorkspaceLayout(std::move(saved).value());
+    return true;
+}
+
+bool ZzAppShell::eventFilter(QObject *watched, QEvent *event)
+{
+    // 窗口 Close 时保存工作区布局（此刻控件树仍存活；QCloseEvent 后窗口未必立即销毁）
+    if (watched == m_window && event->type() == QEvent::Close) {
+        saveWorkspaceLayout();
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 ZzCore::ZzResult<std::unique_ptr<ZzPureTools::ZzPageInstance>>
@@ -260,6 +369,11 @@ void ZzAppShell::showStatusMessage(const QString &message)
     if (m_statusBar) {
         m_statusBar->showMessage(message, 5000);
     }
+}
+
+ZzPureTools::ZzWorkspaceShell *ZzAppShell::workspaceShell() const
+{
+    return m_workspaceShell.get();
 }
 
 ZzSessionPanel *ZzAppShell::sessionPanel() const { return m_sessionPanel; }

@@ -132,3 +132,17 @@ void ZzAppSettings::setSftpBlockSize(int bytes)
     m_settings->setValue(QStringLiteral("sftp/blockSize"), bytes);
     emit settingsChanged();
 }
+
+QByteArray ZzAppSettings::workspaceLayout() const
+{
+    return m_settings->value(QStringLiteral("workspace/layout")).toByteArray();
+}
+
+void ZzAppSettings::setWorkspaceLayout(const QByteArray &layout)
+{
+    if (workspaceLayout() == layout) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("workspace/layout"), layout);
+    emit settingsChanged();
+}

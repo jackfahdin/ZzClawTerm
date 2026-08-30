@@ -1,8 +1,9 @@
 #include <QtTest/QtTest>
 
-#include <QtWidgets/QDockWidget>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
+
+#include <ZzPureTools/ZzWorkspaceShell.h>
 
 #include "ZzAppShell.h"
 #include "ZzMockTransport.h"
@@ -15,9 +16,10 @@
 #include "x11/ZzX11Service.h"
 
 /**
- * @brief 壳层装配冒烟：普通 QMainWindow 上验证 dock、状态栏、双击到标签的完整链路。
+ * @brief 壳层装配冒烟：普通 QMainWindow 上验证 IDE 工作区、状态栏、双击到标签的完整链路。
  *
- * ZzAppShell::assemble 只依赖 QMainWindow&，因此无需拉起完整框架即可离屏测试。
+ * ZzAppShell::assemble 只依赖 QMainWindow&，因此无需拉起完整框架即可离屏测试；
+ * 侧栏面板经延迟工厂首开才创建，用例里用 showPanel 触发实例化（等价点击活动栏入口）。
  */
 class tst_ZzAppShell : public QObject
 {
@@ -74,20 +76,35 @@ private slots:
         QDir().mkpath(m_dir);
     }
 
-    void assembleInstallsDockAndStatusBar()
+    void assembleCreatesWorkspaceAndStatusBar()
     {
         ZzAppShell shell(m_dir);
         QMainWindow window;
         QVERIFY(shell.assemble(window));
-        QVERIFY(shell.sessionPanel() != nullptr);
-        // 会话面板已停靠
-        QCOMPARE(window.findChild<QDockWidget *>(
-                     QStringLiteral("sessions")),
-                 static_cast<QDockWidget *>(shell.sessionPanel()));
-        // 状态栏三要素
+        QVERIFY(shell.workspaceShell() != nullptr);
+        // 工作区根控件已挂为中央控件
+        QCOMPARE(window.centralWidget(),
+                 shell.workspaceShell()->workspaceWidget());
+        // 状态栏四件套
         QVERIFY(shell.statusStateLabel() != nullptr);
         QVERIFY(shell.statusEncodingLabel() != nullptr);
         QVERIFY(shell.statusSizeLabel() != nullptr);
+        QVERIFY(shell.statusTunnelLabel() != nullptr);
+
+        // 会话面板为延迟工厂：首开（等价点击活动栏「会话」）才创建
+        QVERIFY(shell.sessionPanel() == nullptr);
+        auto shown = shell.workspaceShell()->showPanel(
+            ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sessions")));
+        QVERIFY(shown);
+        QVERIFY(shell.sessionPanel() != nullptr);
+        QCOMPARE(shell.sessionPanel()->panelTitle(),
+                 QStringLiteral("会话"));
+        // SFTP 面板同理首开
+        QVERIFY(shell.sftpPanel() == nullptr);
+        auto filesShown = shell.workspaceShell()->showPanel(
+            ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sftp")));
+        QVERIFY(filesShown);
+        QVERIFY(shell.sftpPanel() != nullptr);
     }
 
     void doubleClickOpensTabAndUpdatesStatusBar()
@@ -95,6 +112,9 @@ private slots:
         ZzAppShell shell(m_dir);
         QMainWindow window;
         QVERIFY(shell.assemble(window));
+        auto shown = shell.workspaceShell()->showPanel(
+            ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sessions")));
+        QVERIFY(shown);
         QWidget container;
         // 页面实例必须存活到用例结束（析构会连带销毁 View）
         auto page = shell.createTerminalPage(&container);

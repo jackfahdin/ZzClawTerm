@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QtCore/QByteArray>
 #include <QtCore/QObject>
 #include <QtCore/QString>
 
@@ -57,6 +58,13 @@ public:
      *        手动值夹取 [16KB,4MB]（经 ZzSftpSession::setTransferBlockSize 生效）。 */
     [[nodiscard]] int sftpBlockSize() const;
     void setSftpBlockSize(int bytes);
+
+    /**
+     * @brief 工作区布局持久化字节（ZzWorkspaceShell saveLayout 产物，含版本与校验）。
+     * @note 应用只存取版本化字节，不解析内部格式；空串=从未保存过，用默认布局。
+     */
+    [[nodiscard]] QByteArray workspaceLayout() const;
+    void setWorkspaceLayout(const QByteArray &layout);
 
 signals:
     /** @brief 任一字段变更后发射；UI 层收到后实时应用到已打开标签。 */
