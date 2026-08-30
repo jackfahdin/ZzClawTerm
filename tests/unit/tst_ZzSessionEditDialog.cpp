@@ -317,6 +317,53 @@ private slots:
         // 旧口令凭据已从凭据库删除
         QVERIFY(!store->credential(profile.keyPassphraseCredentialId).has_value());
     }
+
+    /**
+     * @brief 凭据库锁定时保存密码：就地弹主密码框解锁（首次使用即在此初始化
+     *        主密码）后重试并成功落库。回归测试——修复前保存对话框无解锁入口，
+     *        新用户永远无法初始化凭据库（连接流程只在已有凭据引用时才解锁）。
+     */
+    void lockedStoreUnlocksAndSavesPassword()
+    {
+        auto store = makeStore();
+        QVERIFY(!store->isUnlocked()); // 新库未解锁
+        QVERIFY(!store->hasMasterPassword()); // 首次使用：连主密码都没设置过
+
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("生产机");
+        profile.host = QStringLiteral("10.0.0.8");
+        profile.userName = QStringLiteral("zz");
+        profile.authMethod = ZzAuthMethod::Password;
+        ZzSessionEditDialog dlg(store.get(), profile);
+        auto *pwdEdit = dlg.findChild<QLineEdit *>(QStringLiteral("passwordEdit"));
+        QVERIFY(pwdEdit);
+        pwdEdit->setText(QStringLiteral("secret-pw"));
+
+        // 点保存后 addCredential 失败触发就地解锁：主密码框进入嵌套事件循环，
+        // singleShot 在其中完成「首次设置主密码」并点确定
+        QTimer::singleShot(0, [] {
+            auto *modal = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            if (!modal)
+                return;
+            // 首个运行对话框有两个输入框（主密码 + 确认密码），全部填同值即匹配
+            const QList<QLineEdit *> edits = modal->findChildren<QLineEdit *>();
+            for (QLineEdit *edit : edits)
+                edit->setText(QStringLiteral("master-pw"));
+            auto *buttons = modal->findChild<QDialogButtonBox *>();
+            if (buttons)
+                buttons->button(QDialogButtonBox::Ok)->click();
+        });
+
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        // 解锁成功 + 密码重试落库：profile 拿到凭据引用且可按引用取回明文
+        QVERIFY(store->isUnlocked());
+        const QUuid credentialId = dlg.profile().credentialId;
+        QVERIFY(!credentialId.isNull());
+        QCOMPARE(store->credential(credentialId).value(), QStringLiteral("secret-pw"));
+    }
 };
 
 QTEST_MAIN(tst_ZzSessionEditDialog)

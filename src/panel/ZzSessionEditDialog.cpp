@@ -19,6 +19,7 @@
 #include <QtWidgets/QWidget>
 
 #include "session/ZzCredentialStore.h"
+#include "dialog/ZzMasterPasswordDialog.h"
 
 ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
                                          ZzSessionProfile profile,
@@ -110,6 +111,7 @@ ZzSessionEditDialog::ZzSessionEditDialog(ZzCredentialStore *store,
     layout->addRow(QStringLiteral("私钥口令："), m_keyPassphraseEdit);
 
     m_passwordEdit = new QLineEdit(this);
+    m_passwordEdit->setObjectName(QStringLiteral("passwordEdit"));
     m_passwordEdit->setEchoMode(QLineEdit::Password);
     m_passwordEdit->setPlaceholderText(
         m_originalCredentialId.isNull()
@@ -228,10 +230,19 @@ void ZzSessionEditDialog::accept()
     // 密码：输入了新密码则写入凭据库换新引用；留空保留原引用
     if (m_profile.authMethod == ZzAuthMethod::Password) {
         if (!m_passwordEdit->text().isEmpty()) {
-            const QUuid credentialId = m_store->addCredential(
+            QUuid credentialId = m_store->addCredential(
                 m_profile.name, m_passwordEdit->text());
+            if (credentialId.isNull() && !m_store->isUnlocked()) {
+                // 凭据库锁定：就地弹主密码框解锁（首次使用即在此初始化主密码）
+                // 后重试一次——保存对话框是初始化凭据库的唯一入口（连接流程只在
+                // 已有凭据引用时才解锁），不能让用户在「保存被拒」里走进死胡同
+                if (ZzMasterPasswordDialog::ensureUnlocked(m_store, this)) {
+                    credentialId = m_store->addCredential(
+                        m_profile.name, m_passwordEdit->text());
+                }
+            }
             if (credentialId.isNull()) {
-                // 凭据库锁定/写入失败：不能静默丢密码，拒绝 accept 让用户处理
+                // 解锁后仍写入失败：不能静默丢密码，拒绝 accept 让用户处理
                 QMessageBox::warning(this, QStringLiteral("密码未保存"),
                     QStringLiteral("凭据库未解锁，密码未保存。\n"
                                    "请解锁凭据库后重试，或改用其他认证方式。"));
@@ -257,11 +268,19 @@ void ZzSessionEditDialog::accept()
     // 私钥口令：与密码同策略——输入新口令写凭据库换引用，留空保留原引用
     if (m_profile.authMethod == ZzAuthMethod::PrivateKey) {
         if (!m_keyPassphraseEdit->text().isEmpty()) {
-            const QUuid passphraseId = m_store->addCredential(
+            QUuid passphraseId = m_store->addCredential(
                 m_profile.name + QStringLiteral(" 私钥口令"),
                 m_keyPassphraseEdit->text());
+            if (passphraseId.isNull() && !m_store->isUnlocked()) {
+                // 同密码路径：锁定时就地解锁后重试一次（首次使用在此初始化主密码）
+                if (ZzMasterPasswordDialog::ensureUnlocked(m_store, this)) {
+                    passphraseId = m_store->addCredential(
+                        m_profile.name + QStringLiteral(" 私钥口令"),
+                        m_keyPassphraseEdit->text());
+                }
+            }
             if (passphraseId.isNull()) {
-                // 凭据库锁定/写入失败：不能静默丢口令，拒绝 accept 让用户处理
+                // 解锁后仍写入失败：不能静默丢口令，拒绝 accept 让用户处理
                 QMessageBox::warning(this, QStringLiteral("私钥口令未保存"),
                     QStringLiteral("凭据库未解锁，私钥口令未保存。\n"
                                    "请解锁凭据库后重试，或留空口令。"));
