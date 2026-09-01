@@ -1,29 +1,24 @@
-// 顶部 Windows 头文件块必须用 _WIN32（编译器预定义）：本块位于全文件
-// 首部，早于任何 Qt 头文件，Q_OS_WIN（qglobal.h 定义）此刻尚不可用。
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <windows.h>
-#endif
-
 #include "ZzAppShell.h"
 
 #include <memory>
 #include <optional>
 #include <utility>
 
+#include <QtCore/QCoreApplication>
 #include <QtCore/QEvent>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QDebug>
-#include <QtCore/QTimer>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QStatusBar>
 
+#include <ZzFluentUI/ZzColorToken.h>
 #include <ZzFluentUI/ZzIconDescriptor.h>
+#include <ZzFluentUI/ZzThemeChangeKind.h>
+#include <ZzFluentUI/ZzThemeController.h>
+#include <ZzFluentUI/ZzThemeSnapshot.h>
 #include <ZzPureTools/ZzApplicationWindow.h>
+#include <ZzPureTools/ZzPureApplication.h>
 #include <ZzPureTools/ZzWorkspaceShell.h>
 #include <ZzPureTools/ZzWorkspaceTitleMode.h>
 
@@ -171,13 +166,21 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     m_statusBar->addPermanentWidget(m_sizeLabel);
     m_tunnelLabel = new QLabel(QStringLiteral("隧道: 0"), m_statusBar);
     m_statusBar->addPermanentWidget(m_tunnelLabel);
-    // 诊断埋点：状态栏几何/可见性（Windows 真机状态栏不可见定位，Show 后再采一次）
-    qInfo().noquote() << QStringLiteral(
-        "诊断：assemble 时状态栏 visible=%1 geo=%2,%3 %4x%5 windowSize=%6x%7")
-        .arg(m_statusBar->isVisibleTo(&window))
-        .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
-        .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
-        .arg(window.width()).arg(window.height());
+
+    // 状态栏主题化样式（背景/分隔线/文字色取自 Fluent 快照），主题切换时重刷
+    applyStatusBarTheme();
+    if (auto *application = qobject_cast<ZzPureTools::ZzPureApplication *>(
+            QCoreApplication::instance())) {
+        if (ZzFluentUI::ZzThemeController *theme =
+                application->themeController()) {
+            connect(theme, &ZzFluentUI::ZzThemeController::snapshotChanged,
+                    this, [this](quint64, ZzFluentUI::ZzThemeChangeKinds kinds) {
+                        if (kinds.testFlag(ZzFluentUI::ZzThemeChangeKind::Colors)) {
+                            applyStatusBarTheme();
+                        }
+                    });
+        }
+    }
 
     // 布局持久化：恢复上次工作区布局（版本化字节由 Shell 校验，不自解析）；
     // 恢复失败仅回落默认布局，不中止装配。窗口 Close 时经事件过滤保存
@@ -248,53 +251,6 @@ bool ZzAppShell::eventFilter(QObject *watched, QEvent *event)
     // 窗口 Close 时保存工作区布局（此刻控件树仍存活；QCloseEvent 后窗口未必立即销毁）
     if (watched == m_window && event->type() == QEvent::Close) {
         saveWorkspaceLayout();
-    }
-    // 诊断埋点：窗口首次 Show 时状态栏几何/可见性（Windows 状态栏不可见定位）
-    if (watched == m_window && event->type() == QEvent::Show && m_statusBar) {
-        qInfo().noquote() << QStringLiteral(
-            "诊断：窗口 Show 时状态栏 visible=%1 hidden=%2 geo=%3,%4 %5x%6 winGeo=%7,%8 %9x%10 central=%11")
-            .arg(m_statusBar->isVisible()).arg(m_statusBar->isHidden())
-            .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
-            .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
-            .arg(m_window->geometry().x()).arg(m_window->geometry().y())
-            .arg(m_window->geometry().width()).arg(m_window->geometry().height())
-            .arg(m_window->centralWidget() != nullptr);
-        // 诊断临时：状态栏红色背景，肉眼确认绘制区域是否落在可见区（定位后移除）
-        m_statusBar->setStyleSheet(QStringLiteral("QStatusBar { background: #ff0000; }"));
-        // 延迟复查：Show 完成/DWM 归位后再采一次，并与原生窗口矩形对比。
-        // Qt 几何与原生客户区不一致（QWindowKit 帧扩展）时，底部区域会被
-        // 画在可见区之外——「Qt 报告可见但屏幕上看不到横条」的判别探针。
-        QTimer::singleShot(1500, this, [this] {
-            if (!m_window || !m_statusBar) {
-                return;
-            }
-#ifdef Q_OS_WIN
-            const HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
-            RECT winRect{};
-            RECT clientRect{};
-            GetWindowRect(hwnd, &winRect);
-            GetClientRect(hwnd, &clientRect);
-            POINT clientOrigin{0, 0};
-            ClientToScreen(hwnd, &clientOrigin);
-            qInfo().noquote() << QStringLiteral(
-                "诊断：状态栏延迟复查 visible=%1 geo=%2,%3 %4x%5 "
-                "qtWin=%6x%7 nativeWin=%8x%9 nativeClient=%10x%11 clientOrigin=%12,%13")
-                .arg(m_statusBar->isVisible())
-                .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
-                .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
-                .arg(m_window->width()).arg(m_window->height())
-                .arg(winRect.right - winRect.left).arg(winRect.bottom - winRect.top)
-                .arg(clientRect.right).arg(clientRect.bottom)
-                .arg(clientOrigin.x).arg(clientOrigin.y);
-#else
-            qInfo().noquote() << QStringLiteral(
-                "诊断：状态栏延迟复查 visible=%1 geo=%2,%3 %4x%5 qtWin=%6x%7")
-                .arg(m_statusBar->isVisible())
-                .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
-                .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
-                .arg(m_window->width()).arg(m_window->height());
-#endif
-        });
     }
     return QObject::eventFilter(watched, event);
 }
@@ -444,6 +400,43 @@ void ZzAppShell::showStatusMessage(const QString &message)
 {
     if (m_statusBar) {
         m_statusBar->showMessage(message, 5000);
+    }
+}
+
+void ZzAppShell::applyStatusBarTheme()
+{
+    if (!m_statusBar) {
+        return;
+    }
+    auto *application = qobject_cast<ZzPureTools::ZzPureApplication *>(
+        QCoreApplication::instance());
+    ZzFluentUI::ZzThemeController *theme =
+        application != nullptr ? application->themeController() : nullptr;
+    const std::shared_ptr<const ZzFluentUI::ZzThemeSnapshot> snapshot =
+        theme != nullptr ? theme->snapshot() : nullptr;
+    if (!snapshot) {
+        return;
+    }
+    // 背景取 Surface 与窗口区分，顶部 1px 分隔线取 ControlStroke（深浅主题
+    // 下均与背景有轻微对比）；标签统一 TextSecondary，连接状态用 TextPrimary
+    const QColor surface =
+        snapshot->color(ZzFluentUI::ZzColorToken::Surface);
+    const QColor divider =
+        snapshot->color(ZzFluentUI::ZzColorToken::ControlStroke);
+    const QColor primaryText =
+        snapshot->color(ZzFluentUI::ZzColorToken::TextPrimary);
+    const QColor secondaryText =
+        snapshot->color(ZzFluentUI::ZzColorToken::TextSecondary);
+    m_statusBar->setStyleSheet(QStringLiteral(
+        "QStatusBar {"
+        " background-color: %1;"
+        " border-top: 1px solid %2;"
+        "}"
+        "QStatusBar QLabel { color: %3; }")
+        .arg(surface.name(), divider.name(), secondaryText.name()));
+    if (m_stateLabel) {
+        m_stateLabel->setStyleSheet(
+            QStringLiteral("color: %1;").arg(primaryText.name()));
     }
 }
 

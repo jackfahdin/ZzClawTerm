@@ -96,6 +96,9 @@ private:
     /** @brief 保存工作区布局字节到 ZzAppSettings；失败仅告警不影响关闭。 */
     bool saveWorkspaceLayout();
 
+    /** @brief 按 Fluent 主题快照重套状态栏样式（背景/分隔线/标签文字色）。 */
+    void applyStatusBarTheme();
+
     QString m_configDir;
     ZzSessionModel *m_sessionModel = nullptr;      ///< this 为父
     ZzCredentialStore *m_credentialStore = nullptr; ///< this 为父
