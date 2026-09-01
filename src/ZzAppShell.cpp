@@ -1,3 +1,11 @@
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <windows.h>
+#endif
+
 #include "ZzAppShell.h"
 
 #include <memory>
@@ -11,10 +19,6 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QStatusBar>
-
-#ifdef Q_OS_WIN
-#include <QtCore/qt_windows.h>
-#endif
 
 #include <ZzFluentUI/ZzIconDescriptor.h>
 #include <ZzPureTools/ZzApplicationWindow.h>

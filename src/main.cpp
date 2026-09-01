@@ -1,3 +1,11 @@
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <windows.h>
+#endif
+
 #include <cstdlib>
 #include <memory>
 #include <utility>
@@ -9,10 +17,6 @@
 #include <QtGui/QGuiApplication>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QStyleHints>
-
-#ifdef Q_OS_WIN
-#include <QtCore/qt_windows.h>
-#endif
 
 #include <ZzFluentUI/ZzNavigationPlacement.h>
 #include <ZzPureTools/ZzApplicationBuilder.h>
