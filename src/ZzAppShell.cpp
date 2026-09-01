@@ -7,9 +7,14 @@
 #include <QtCore/QEvent>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QDebug>
+#include <QtCore/QTimer>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QStatusBar>
+
+#ifdef Q_OS_WIN
+#include <QtCore/qt_windows.h>
+#endif
 
 #include <ZzFluentUI/ZzIconDescriptor.h>
 #include <ZzPureTools/ZzApplicationWindow.h>
@@ -248,6 +253,42 @@ bool ZzAppShell::eventFilter(QObject *watched, QEvent *event)
             .arg(m_window->geometry().x()).arg(m_window->geometry().y())
             .arg(m_window->geometry().width()).arg(m_window->geometry().height())
             .arg(m_window->centralWidget() != nullptr);
+        // 诊断临时：状态栏红色背景，肉眼确认绘制区域是否落在可见区（定位后移除）
+        m_statusBar->setStyleSheet(QStringLiteral("QStatusBar { background: #ff0000; }"));
+        // 延迟复查：Show 完成/DWM 归位后再采一次，并与原生窗口矩形对比。
+        // Qt 几何与原生客户区不一致（QWindowKit 帧扩展）时，底部区域会被
+        // 画在可见区之外——「Qt 报告可见但屏幕上看不到横条」的判别探针。
+        QTimer::singleShot(1500, this, [this] {
+            if (!m_window || !m_statusBar) {
+                return;
+            }
+#ifdef Q_OS_WIN
+            const HWND hwnd = reinterpret_cast<HWND>(m_window->winId());
+            RECT winRect{};
+            RECT clientRect{};
+            GetWindowRect(hwnd, &winRect);
+            GetClientRect(hwnd, &clientRect);
+            POINT clientOrigin{0, 0};
+            ClientToScreen(hwnd, &clientOrigin);
+            qInfo().noquote() << QStringLiteral(
+                "诊断：状态栏延迟复查 visible=%1 geo=%2,%3 %4x%5 "
+                "qtWin=%6x%7 nativeWin=%8x%9 nativeClient=%10x%11 clientOrigin=%12,%13")
+                .arg(m_statusBar->isVisible())
+                .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
+                .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
+                .arg(m_window->width()).arg(m_window->height())
+                .arg(winRect.right - winRect.left).arg(winRect.bottom - winRect.top)
+                .arg(clientRect.right).arg(clientRect.bottom)
+                .arg(clientOrigin.x).arg(clientOrigin.y);
+#else
+            qInfo().noquote() << QStringLiteral(
+                "诊断：状态栏延迟复查 visible=%1 geo=%2,%3 %4x%5 qtWin=%6x%7")
+                .arg(m_statusBar->isVisible())
+                .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
+                .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
+                .arg(m_window->width()).arg(m_window->height());
+#endif
+        });
     }
     return QObject::eventFilter(watched, event);
 }
