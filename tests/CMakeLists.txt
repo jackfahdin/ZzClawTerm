@@ -35,6 +35,9 @@ foreach(sub log session)
     endif()
 endforeach()
 
+zz_add_qtest(tst_ZzShellContextMenu unit/tst_ZzShellContextMenu.cpp)
+# 该用例自定义 main() 走 ZzWindowKit bootstrap（同生产 main.cpp），需显式链接
+target_link_libraries(tst_ZzShellContextMenu PRIVATE Zz::WindowKit)
 zz_add_qtest(tst_Skeleton unit/tst_Skeleton.cpp)
 zz_add_qtest(tst_ZzAppSettings unit/tst_ZzAppSettings.cpp)
 zz_add_qtest(tst_ZzTransportRegistry unit/tst_ZzTransportRegistry.cpp)
