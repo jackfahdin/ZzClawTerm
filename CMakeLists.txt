@@ -56,8 +56,9 @@ if(NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSL
     set(ZZ_OPENSSL_BUNDLE_USABLE TRUE)
     if(WIN32)
         # Windows 产物完整性的粗检：任一 toolchain/linkage 下存在 ssl.h 才算可用
+        #（bundle 布局为 windows/<toolchain>/x64/<cfg>/<linkage>/include/openssl/ssl.h）
         file(GLOB ZZ_OPENSSL_BUNDLE_SSL_HEADERS
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/windows/*/x64/*/include/openssl/ssl.h")
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/windows/*/x64/*/*/include/openssl/ssl.h")
         if(NOT ZZ_OPENSSL_BUNDLE_SSL_HEADERS)
             set(ZZ_OPENSSL_BUNDLE_USABLE FALSE)
             message(STATUS "OpenSSL：vendored bundle Windows 产物不完整，回退系统 OpenSSL")
