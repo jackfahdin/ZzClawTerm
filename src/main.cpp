@@ -1,4 +1,6 @@
-#ifdef Q_OS_WIN
+// 顶部 Windows 头文件块必须用 _WIN32（编译器预定义）：本块位于全文件
+// 首部，早于任何 Qt 头文件，Q_OS_WIN（qglobal.h 定义）此刻尚不可用。
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
