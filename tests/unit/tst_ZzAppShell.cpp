@@ -4,6 +4,7 @@
 #include <QtWidgets/QMainWindow>
 
 #include <ZzPureTools/ZzWorkspaceShell.h>
+#include <ZzPureTools/ZzWorkspaceTitleMode.h>
 
 #include "ZzAppShell.h"
 #include "ZzMockTransport.h"
@@ -85,6 +86,11 @@ private slots:
         // 工作区根控件已挂为中央控件
         QCOMPARE(window.centralWidget(),
                  shell.workspaceShell()->workspaceWidget());
+        // 窗口标题接管：应用名 + 当前标签模式（此前显示库默认「ZzPureTools」）
+        QCOMPARE(shell.workspaceShell()->applicationTitle(),
+                 QStringLiteral("ZzClawTerm"));
+        QCOMPARE(shell.workspaceShell()->titleMode(),
+                 ZzPureTools::ZzWorkspaceTitleMode::CurrentTabAndApplication);
         // 状态栏四件套
         QVERIFY(shell.statusStateLabel() != nullptr);
         QVERIFY(shell.statusEncodingLabel() != nullptr);

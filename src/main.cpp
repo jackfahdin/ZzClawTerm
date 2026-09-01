@@ -12,6 +12,7 @@
 #include <ZzPureTools/ZzPageRegistration.h>
 #include <ZzPureTools/ZzPureApplication.h>
 #include <ZzPureTools/ZzRouteId.h>
+#include <ZzPureTools/ZzWorkspaceShell.h>
 #include <ZzWindowKit/ZzWindowKitBootstrap.h>
 
 #include "ZzAppShell.h"
@@ -97,6 +98,13 @@ int main(int argc, char *argv[])
         || !builder.build(application)) {
         return EXIT_FAILURE;
     }
+
+    // 框架窗口初始化在 assemble() 之后还会执行 refreshTranslations()，把窗口与
+    // Fluent 标题栏标题重置为库默认「ZzPureTools」（ZzApplicationWindowPrivate），
+    // 覆盖装配期设置的标题。build 完成后重放一次标题刷新夺回设置（setApplicationTitle
+    // 无条件触发 refreshTitle，幂等）。
+    shell.workspaceShell()->setApplicationTitle(
+        QStringLiteral("ZzClawTerm"));
 
     return application.exec();
 }

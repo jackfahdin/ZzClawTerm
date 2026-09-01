@@ -78,6 +78,7 @@ target_link_libraries(ZzClawTermApp
         ZzQTermWidget::qtermwidget
         ZzPureTools
         ZzSshCore
+        ZzLog::ZzLog
 )
 # 计划 02/03 目标存在时才链接
 foreach(optional_target ZzSessionCore ZzLogEngine)

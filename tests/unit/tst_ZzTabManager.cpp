@@ -66,6 +66,14 @@ private slots:
         tabs.openSession(makeProfile(QStringLiteral("生产A")));
         QCOMPARE(tabs.count(), 1);
         QCOMPARE(tabs.tabText(0), QStringLiteral("生产A"));
+        // 页面 windowTitle 同步为会话名（工作区外壳「当前标签」标题来源）
+        QCOMPARE(tabs.windowTitle(), QStringLiteral("生产A"));
+
+        tabs.openSession(makeProfile(QStringLiteral("生产B")));
+        QCOMPARE(tabs.count(), 2);
+        QCOMPARE(tabs.windowTitle(), QStringLiteral("生产B"));
+        tabs.setCurrentIndex(0);
+        QCOMPARE(tabs.windowTitle(), QStringLiteral("生产A"));
 
         auto *view = tabs.viewAt(0);
         QVERIFY(view != nullptr);

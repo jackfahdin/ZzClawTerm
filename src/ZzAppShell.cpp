@@ -14,6 +14,7 @@
 #include <ZzFluentUI/ZzIconDescriptor.h>
 #include <ZzPureTools/ZzApplicationWindow.h>
 #include <ZzPureTools/ZzWorkspaceShell.h>
+#include <ZzPureTools/ZzWorkspaceTitleMode.h>
 
 #include "dialog/ZzHostKeyDialog.h"
 #include "dialog/ZzMasterPasswordDialog.h"
@@ -171,6 +172,16 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
                 .arg(restored.error().technicalMessage());
         }
     }
+
+    // 窗口标题接管：库默认 Application 模式显示宿主窗口标题（框架
+    // ZzApplicationWindowPrivate::refreshTranslations 固化为「ZzPureTools」），
+    // 改为 当前标签标题 - 应用名；当前标签标题由页面 windowTitle 提供
+    // （ZzWorkspaceShellPrivate::refreshTitle），终端页同步为会话名（见
+    // ZzTabManager::refreshWindowTitle）。放在 restoreLayout 之后：布局字节
+    // 含标题投影，旧版本存下的布局会覆盖此处设置（库事务语义，主仓不改库）。
+    m_workspaceShell->setApplicationTitle(QStringLiteral("ZzClawTerm"));
+    m_workspaceShell->setTitleMode(
+        ZzPureTools::ZzWorkspaceTitleMode::CurrentTabAndApplication);
     window.installEventFilter(this);
 
     return ZzCore::ZzResult<void>::success();

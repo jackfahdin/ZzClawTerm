@@ -50,6 +50,7 @@ ZzTabManager::ZzTabManager(QWidget *parent)
     connect(this, &QTabWidget::currentChanged, this, [this](int index) {
         ZzTerminalView *view = viewAt(index);
         emit currentViewChanged(view); // SFTP 面板跟随（末标签关闭后为 nullptr）
+        refreshWindowTitle(); // 窗口标题的「当前标签」部分
         if (!view) {
             return;
         }
@@ -508,6 +509,20 @@ void ZzTabManager::wireView(ZzTerminalView *view)
             });
     connect(view, &ZzTerminalView::statusNotice, this,
             [this](const QString &message) { emit statusMessage(message); });
+}
+
+void ZzTabManager::refreshWindowTitle()
+{
+    // 工作区外壳取当前页面 windowTitle 作为窗口标题的「当前标签」部分
+    // （ZzWorkspaceShellPrivate::refreshTitle，且监听 windowTitleChanged），
+    // 此处同步为当前会话标签文本，使窗口标题呈现 「会话名 - ZzClawTerm」。
+    // 末标签关闭后清空，外壳回退为纯应用名。断线语义保持既有约定
+    // （标签变灰 + tooltip 原因，不改文本、不加前缀）。
+    const int index = currentIndex();
+    const QString title = index >= 0 ? tabText(index) : QString();
+    if (title != windowTitle()) {
+        setWindowTitle(title);
+    }
 }
 
 void ZzTabManager::markTabDisconnected(int index, const QString &reason)

@@ -67,6 +67,13 @@ public:
     [[nodiscard]] ZzSshConnection *sshConnection() const { return m_conn; }
 
     /**
+     * @brief 全局默认 known_hosts.json 路径（AppConfigLocation 下）。
+     * @return 绝对路径；writableLocation 取不到目录时返回空串。
+     * @note 纯计算不建目录、不触碰文件，供 open() 与单测共用。
+     */
+    static QString defaultKnownHostsFilePath();
+
+    /**
      * @brief 进程级安装私钥口令解析器（由组合根 ZzAppShell 装配一次）。
      *
      * 传输实例由终端视图深处按需创建，口令引用（ZzSessionProfile::

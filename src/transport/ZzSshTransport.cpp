@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include <QDir>
+#include <QFileInfo>
 #include <QStandardPaths>
 
 #include <ZzSshAuthConfig.h>
@@ -43,6 +45,15 @@ void ZzSshTransportAdapter::setKeyPassphraseResolver(ZzKeyPassphraseResolver res
     s_keyPassphraseResolver = std::move(resolver);
 }
 
+QString ZzSshTransportAdapter::defaultKnownHostsFilePath()
+{
+    const QString configDir =
+        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    return configDir.isEmpty()
+        ? QString()
+        : configDir + QStringLiteral("/known_hosts.json");
+}
+
 void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
 {
     if (state() != State::Disconnected) {
@@ -64,6 +75,20 @@ void ZzSshTransportAdapter::open(const ZzTransportEndpoint &endpoint)
 
     m_conn = new ZzSshConnection(this);
     wireConnection();
+    // known_hosts 全局默认路径：此前全应用未接线 setKnownHostsFilePath，每次连接
+    // 都弹主机密钥确认、信任后指纹写空路径失败（TOFU 失效）。profile/endpoint 无
+    // per-session 覆盖字段，统一落 AppConfigLocation/known_hosts.json（ZzSshHostKeyStore
+    // 的 JSON 格式，同库集成测试用法）。
+    // 并发语义（不改库，仅记录）：库侧每条连接的工作线程持有独立 ZzSshHostKeyStore
+    // 实例（load→verify→add→save 全程私有），save 用 QSaveFile 原子写单文件；但
+    // 跨会话并发首次信任不同主机时是「整文件读-改-写」，后写者覆盖先写者，极端并发
+    // 下可能丢失一条新信任记录（下次连接回退为重新确认，不破坏已存指纹的安全性）。
+    const QString knownHostsPath = defaultKnownHostsFilePath();
+    if (!knownHostsPath.isEmpty()) {
+        // QSaveFile 不创建父目录：目录缺失时信任落盘静默失败（库侧仅 qWarning）
+        QDir().mkpath(QFileInfo(knownHostsPath).absolutePath());
+        m_conn->setKnownHostsFilePath(knownHostsPath);
+    }
     // keepalive 必须在 connectToHost 之前配置（ZzSshConnection 契约）
     m_conn->setKeepaliveInterval(endpoint.keepaliveIntervalSeconds);
     if (!endpoint.keyPath.isEmpty()) {

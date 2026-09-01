@@ -10,9 +10,25 @@ class tst_ZzSshTransport : public QObject
 {
     Q_OBJECT
 private slots:
+    void initTestCase()
+    {
+        // 隔离 QStandardPaths（known_hosts 默认路径断言落到测试目录）
+        QStandardPaths::setTestModeEnabled(true);
+    }
+
     void init()
     {
         qRegisterMetaType<ZzTransportInterface::State>();
+    }
+
+    void knownHostsDefaultsToAppConfigLocation()
+    {
+        // 回归：open() 必须接线库侧 setKnownHostsFilePath（此前全应用未接线，
+        // 每次连接弹主机密钥确认且信任后写空路径失败）
+        const QString expected = QStandardPaths::writableLocation(
+            QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/known_hosts.json");
+        QCOMPARE(ZzSshTransport::defaultKnownHostsFilePath(), expected);
     }
 
     void connectionRefusedEmitsError()

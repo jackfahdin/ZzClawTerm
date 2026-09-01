@@ -114,6 +114,8 @@ private:
     void splitTab(int index, Qt::Orientation orientation);
     void wireView(ZzTerminalView *view);
     void wireContainer(ZzSplitContainer *container);
+    /** @brief 把自身 windowTitle 同步为当前标签文本（工作区外壳「当前标签」标题来源）。 */
+    void refreshWindowTitle();
     void markTabDisconnected(int index, const QString &reason);
 
     QHash<ZzTerminalView *, ZzSessionProfile> m_tabProfiles;
