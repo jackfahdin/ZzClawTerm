@@ -44,10 +44,12 @@ set(ZZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${ZZ_PURETOOLS_SUBDIR})
 
 # OpenSSL：优先接入 vendored 预编译 bundle（third_party/openssl 提供
-# OpenSSLBundleConfig.cmake，创建 OpenSSL::Crypto/OpenSSL::SSL 导入目标并
-# 设置 OPENSSL_INCLUDE_DIR/OPENSSL_*_LIBRARY 变量；其后 libssh2 与
-# src/session 的 find_package(OpenSSL) 模块会沿用已设变量与既有导入目标，
-# FindOpenSSL 的 NOT TARGET 守卫保证不重复建目标）。
+# OpenSSLBundleConfig.cmake，创建 OpenSSL::Crypto/OpenSSL::SSL 导入目标）。
+# 注意 FindOpenSSL 模块模式不认 bundle 设置的普通变量，会自行 find_library
+# 搜索（结果入缓存）：命中后可能指向系统库（Linux）或 NOTFOUND（Windows
+# 无系统库时 REQUIRED 直接失败）。因此命中 bundle 后把其选中根写入缓存
+# OPENSSL_ROOT_DIR（见下），让后续各 find_package(OpenSSL) 一致解析到
+# bundle 真实产物；FindOpenSSL 的 NOT TARGET 守卫保证不重复建导入目标。
 # bundle 无对应平台产物（如 macOS，third_party/openssl 仅有
 # android/linux/windows 目录）或产物未构建完整（Windows 侧 static/shared
 # 包缺 include/ 与库文件）时跳过，回退系统 OpenSSL（CI 上 macOS 经
@@ -69,6 +71,14 @@ if(NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openssl/OpenSSL
         find_package(OpenSSLBundle QUIET)
         if(OpenSSLBundle_FOUND)
             message(STATUS "OpenSSL：使用 vendored bundle ${OPENSSL_VERSION}（${OPENSSL_BUNDLE_LINKAGE}）")
+            # 把 bundle 选中根固化为缓存 OPENSSL_ROOT_DIR：此后任何作用域的
+            # find_package(OpenSSL)（ZzSshCore、其嵌套 libssh2、src/session）
+            # 的 find_library/find_path 都按 <根>/lib、<根>/include 命中 bundle 真实
+            # 产物。否则模块模式会无视 bundle 的普通变量自行搜索：Linux 上静默
+            # 命中系统库导致变量与导入目标指向两套产物，Windows 上无系统库可中
+            # 直接 NOTFOUND 而 REQUIRED 失败。
+            set(OPENSSL_ROOT_DIR "${OPENSSL_BUNDLE_SELECTED_ROOT}" CACHE PATH
+                "vendored OpenSSL bundle 选中根" FORCE)
         endif()
     endif()
 endif()
