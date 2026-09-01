@@ -52,6 +52,10 @@ private slots:
     void editSession(const QString &profileId);
     void duplicateSession(const QString &profileId);
 
+protected:
+    /** @brief 诊断埋点：记录右键按下/抬起是否到达树控件（Windows 右键菜单失效定位）。 */
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
     ZzSessionModel *m_model;
     ZzCredentialStore *m_store;

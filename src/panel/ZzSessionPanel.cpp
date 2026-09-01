@@ -4,7 +4,11 @@
 #include <optional>
 
 #include <QtCore/QUuid>
+#include <QtGui/QGuiApplication>
+#include <QtGui/QMouseEvent>
 #include <QtGui/QStandardItemModel>
+#include <QtGui/QStyleHints>
+#include <QtWidgets/QApplication>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QTreeView>
 #include <QtWidgets/QVBoxLayout>
@@ -43,6 +47,9 @@ ZzSessionPanel::ZzSessionPanel(ZzSessionModel *model,
             this, &ZzSessionPanel::showContextMenu);
     connect(m_model, &ZzSessionModel::sessionsChanged,
             this, &ZzSessionPanel::rebuildTree);
+    // 诊断埋点：确认右键按下/抬起是否到达树（Windows 右键菜单失效定位）
+    m_tree->installEventFilter(this);
+    m_tree->viewport()->installEventFilter(this);
     rebuildTree();
 }
 
@@ -150,13 +157,23 @@ void ZzSessionPanel::onTreeDoubleClicked(const QModelIndex &index)
 void ZzSessionPanel::showContextMenu(const QPoint &pos)
 {
     const QModelIndex index = m_tree->indexAt(pos);
+    qInfo().noquote() << QStringLiteral(
+        "诊断：showContextMenu 进入（indexValid=%1 触发模式=%2）")
+        .arg(index.isValid())
+        .arg(static_cast<int>(QGuiApplication::styleHints()->contextMenuTrigger()));
     QMenu menu(this);
+    QAction *result = nullptr;
     if (!index.isValid()) {
         // 空白区：新建会话
         QAction *newAction = menu.addAction(QStringLiteral("新建会话"));
-        if (menu.exec(m_tree->viewport()->mapToGlobal(pos)) == newAction) {
+        result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+        if (result == newAction) {
             newSession(QString());
         }
+        qInfo().noquote() << QStringLiteral(
+            "诊断：showContextMenu 退出（空白区 exec 返回 %1 activePopup=%2）")
+            .arg(result ? QStringLiteral("有选择") : QStringLiteral("空/被取消"))
+            .arg(QApplication::activePopupWidget() != nullptr);
         return;
     }
     const QString profileId = index.data(kProfileIdRole).toString();
@@ -164,7 +181,8 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
         // 分组项：在此分组下新建
         QAction *newAction =
             menu.addAction(QStringLiteral("在此分组新建会话"));
-        if (menu.exec(m_tree->viewport()->mapToGlobal(pos)) == newAction) {
+        result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+        if (result == newAction) {
             // 分组的完整路径 = 逐层标题拼接
             QStringList segments;
             for (QModelIndex it = index; it.isValid(); it = it.parent()) {
@@ -172,6 +190,9 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
             }
             newSession(segments.join(QLatin1Char('/')));
         }
+        qInfo().noquote() << QStringLiteral(
+            "诊断：showContextMenu 退出（分组区 exec 返回 %1）")
+            .arg(result ? QStringLiteral("有选择") : QStringLiteral("空/被取消"));
         return;
     }
     // 会话项：新建/编辑/删除/复制（规格 §七）
@@ -179,16 +200,37 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
     QAction *editAction = menu.addAction(QStringLiteral("编辑"));
     QAction *deleteAction = menu.addAction(QStringLiteral("删除"));
     QAction *duplicateAction = menu.addAction(QStringLiteral("复制"));
-    QAction *chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
-    if (chosen == newAction) {
+    result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    if (result == newAction) {
         newSession(QString());
-    } else if (chosen == editAction) {
+    } else if (result == editAction) {
         editSession(profileId);
-    } else if (chosen == deleteAction) {
+    } else if (result == deleteAction) {
         triggerDelete(profileId);
-    } else if (chosen == duplicateAction) {
+    } else if (result == duplicateAction) {
         duplicateSession(profileId);
     }
+    qInfo().noquote() << QStringLiteral(
+        "诊断：showContextMenu 退出（会话项 exec 返回 %1）")
+        .arg(result ? QStringLiteral("有选择") : QStringLiteral("空/被取消"));
+}
+
+bool ZzSessionPanel::eventFilter(QObject *watched, QEvent *event)
+{
+    // 只观测右键：判定按下/抬起是否到达树控件（Windows 右键菜单失效定位）
+    if ((event->type() == QEvent::MouseButtonPress
+         || event->type() == QEvent::MouseButtonRelease)
+        && static_cast<QMouseEvent *>(event)->button() == Qt::RightButton) {
+        const auto *mouse = static_cast<QMouseEvent *>(event);
+        qInfo().noquote() << QStringLiteral(
+            "诊断：树右键%1 到达（watched=%2 local=%3,%4 accepted=%5）")
+            .arg(event->type() == QEvent::MouseButtonPress
+                     ? QStringLiteral("按下") : QStringLiteral("抬起"))
+            .arg(watched == m_tree ? QStringLiteral("tree") : QStringLiteral("viewport"))
+            .arg(mouse->position().x()).arg(mouse->position().y())
+            .arg(mouse->isAccepted());
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ZzSessionPanel::newSession(const QString &groupPathPrefix)

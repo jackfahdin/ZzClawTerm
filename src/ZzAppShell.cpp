@@ -160,6 +160,13 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     m_statusBar->addPermanentWidget(m_sizeLabel);
     m_tunnelLabel = new QLabel(QStringLiteral("隧道: 0"), m_statusBar);
     m_statusBar->addPermanentWidget(m_tunnelLabel);
+    // 诊断埋点：状态栏几何/可见性（Windows 真机状态栏不可见定位，Show 后再采一次）
+    qInfo().noquote() << QStringLiteral(
+        "诊断：assemble 时状态栏 visible=%1 geo=%2,%3 %4x%5 windowSize=%6x%7")
+        .arg(m_statusBar->isVisibleTo(&window))
+        .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
+        .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
+        .arg(window.width()).arg(window.height());
 
     // 布局持久化：恢复上次工作区布局（版本化字节由 Shell 校验，不自解析）；
     // 恢复失败仅回落默认布局，不中止装配。窗口 Close 时经事件过滤保存
@@ -230,6 +237,17 @@ bool ZzAppShell::eventFilter(QObject *watched, QEvent *event)
     // 窗口 Close 时保存工作区布局（此刻控件树仍存活；QCloseEvent 后窗口未必立即销毁）
     if (watched == m_window && event->type() == QEvent::Close) {
         saveWorkspaceLayout();
+    }
+    // 诊断埋点：窗口首次 Show 时状态栏几何/可见性（Windows 状态栏不可见定位）
+    if (watched == m_window && event->type() == QEvent::Show && m_statusBar) {
+        qInfo().noquote() << QStringLiteral(
+            "诊断：窗口 Show 时状态栏 visible=%1 hidden=%2 geo=%3,%4 %5x%6 winGeo=%7,%8 %9x%10 central=%11")
+            .arg(m_statusBar->isVisible()).arg(m_statusBar->isHidden())
+            .arg(m_statusBar->geometry().x()).arg(m_statusBar->geometry().y())
+            .arg(m_statusBar->geometry().width()).arg(m_statusBar->geometry().height())
+            .arg(m_window->geometry().x()).arg(m_window->geometry().y())
+            .arg(m_window->geometry().width()).arg(m_window->geometry().height())
+            .arg(m_window->centralWidget() != nullptr);
     }
     return QObject::eventFilter(watched, event);
 }

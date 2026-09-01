@@ -3,6 +3,8 @@
 #include <utility>
 
 #include <QtCore/QCoreApplication>
+#include <QtGui/QGuiApplication>
+#include <QtGui/QStyleHints>
 
 #include <ZzFluentUI/ZzNavigationPlacement.h>
 #include <ZzPureTools/ZzApplicationBuilder.h>
@@ -34,6 +36,16 @@ int main(int argc, char *argv[])
     ZzPureTools::ZzPureApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ZzClawTerm"));
     QCoreApplication::setOrganizationName(QStringLiteral("ZzClaw"));
+
+    // ContextMenu 触发改到按下：QWindowKit win32 会消费客户区 WM_RBUTTONUP
+    // （误判进标题栏拖拽区时去吃系统菜单），而 Windows 平台 Qt 靠 release
+    // 合成 ContextMenu——右键菜单因此永不到达应用（会话树右键失效，真机实测）。
+    // 若后续库侧修复该拦截，可移除本开关恢复 release 触发。
+    QGuiApplication::styleHints()->setContextMenuTrigger(
+        Qt::ContextMenuTrigger::Press);
+    qInfo().noquote() << QStringLiteral("诊断：ContextMenu 触发模式=%1")
+        .arg(static_cast<int>(
+            QGuiApplication::styleHints()->contextMenuTrigger()));
 
     // 内置传输协议注册（规格 §2.3：与未来第三方插件同一条注册路径）
     auto &transports = ZzTransportRegistry::instance();
