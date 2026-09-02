@@ -3,6 +3,7 @@
 #include <utility>
 
 #include <QtCore/QCoreApplication>
+#include <QtGui/QIcon>
 
 #include <ZzFluentUI/ZzNavigationPlacement.h>
 #include <ZzPureTools/ZzApplicationBuilder.h>
@@ -34,6 +35,11 @@ int main(int argc, char *argv[])
     ZzPureTools::ZzPureApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("ZzClawTerm"));
     QCoreApplication::setOrganizationName(QStringLiteral("ZzClaw"));
+
+    // 运行时窗口图标：Wayland 任务栏图标的唯一来源；Windows/macOS 下
+    // 与 exe 资源 / bundle 图标同源（resources/icons/generated/png/256.png）
+    application.setWindowIcon(
+        QIcon(QStringLiteral(":/icons/zzclawterm.png")));
 
     // 内置传输协议注册（规格 §2.3：与未来第三方插件同一条注册路径）
     auto &transports = ZzTransportRegistry::instance();

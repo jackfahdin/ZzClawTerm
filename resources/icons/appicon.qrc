@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="zzclawterm.png">generated/png/256.png</file>
+    </qresource>
+</RCC>

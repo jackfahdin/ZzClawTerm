@@ -97,6 +97,29 @@ set_target_properties(ZzClawTerm PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
 )
+if(WIN32)
+    # Windows 应用图标：.rc 把多尺寸 ico 编译进 exe 资源
+    target_sources(ZzClawTerm PRIVATE windows/zzclawterm.rc)
+endif()
+if(APPLE)
+    # macOS 应用图标：icns 打进 Contents/Resources，Info.plist 声明
+    set(ZZ_APP_ICNS "${CMAKE_SOURCE_DIR}/resources/icons/generated/zzclawterm.icns")
+    set_source_files_properties("${ZZ_APP_ICNS}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources)
+    target_sources(ZzClawTerm PRIVATE "${ZZ_APP_ICNS}")
+    set_target_properties(ZzClawTerm PROPERTIES
+        MACOSX_BUNDLE_ICON_FILE zzclawterm.icns
+        MACOSX_BUNDLE_BUNDLE_NAME "ZzClawTerm"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.1"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist"
+    )
+endif()
+# 运行时窗口图标（Wayland 任务栏图标唯一来源）：AUTORCC 编译 appicon.qrc
+#（Qt 6.11 的 qt_add_resources 仅认 <target> <name> FILES 新签名，弃用 .qrc 列表旧式）
+set(ZZ_APP_ICON_QRC "${CMAKE_SOURCE_DIR}/resources/icons/appicon.qrc")
+set_target_properties(ZzClawTerm PROPERTIES AUTORCC ON)
+target_sources(ZzClawTerm PRIVATE "${ZZ_APP_ICON_QRC}")
 # main.cpp 直接使用 ZzWindowKit bootstrap 头文件；ZzPureTools 仅私有链接它，需显式链接
 target_link_libraries(ZzClawTerm PRIVATE ZzClawTermApp Zz::WindowKit)
 
