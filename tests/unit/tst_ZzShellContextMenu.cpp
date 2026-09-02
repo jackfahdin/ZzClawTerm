@@ -169,7 +169,7 @@ private slots:
         QVERIFY2(!blankTitles.isEmpty(),
                  "context menu did not become the active popup");
         QVERIFY(visibleAtCapture);
-        QCOMPARE(blankTitles, QStringList{QStringLiteral("新建会话")});
+        QCOMPARE(blankTitles, QStringList{ZzSessionPanel::tr("新建会话")});
 
         // 会话项右键：新建/编辑/删除/复制
         ZzSessionProfile profile;
@@ -186,10 +186,10 @@ private slots:
         QVERIFY(!itemTitles.isEmpty());
         QVERIFY(visibleAtCapture);
         QCOMPARE(itemTitles,
-                 (QStringList{QStringLiteral("新建会话"),
-                              QStringLiteral("编辑"),
-                              QStringLiteral("删除"),
-                              QStringLiteral("复制")}));
+                 (QStringList{ZzSessionPanel::tr("新建会话"),
+                              ZzSessionPanel::tr("编辑"),
+                              ZzSessionPanel::tr("删除"),
+                              ZzSessionPanel::tr("复制")}));
     }
 };
 

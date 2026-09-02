@@ -28,7 +28,7 @@ void ZzTunnelManager::startAll()
         ZzTunnelHandle *handle = m_factory->createHandle(rule, this);
         if (!handle) {
             m_failed.append(rule);
-            emit ruleFailed(rule, QStringLiteral("创建隧道失败（连接未就绪）"));
+            emit ruleFailed(rule, tr("创建隧道失败（连接未就绪）"));
             continue;
         }
 

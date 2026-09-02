@@ -50,7 +50,7 @@ private slots:
         QVERIFY(tabManager);
         QLabel *tunnelLabel = shell.statusTunnelLabel();
         QVERIFY(tunnelLabel);
-        QCOMPARE(tunnelLabel->text(), QStringLiteral("隧道: 0"));
+        QCOMPARE(tunnelLabel->text(), ZzAppShell::tr("隧道: %1").arg(0));
 
         // 开一个 mock 会话并注入隧道计数
         ZzSessionProfile profile;
@@ -67,10 +67,10 @@ private slots:
         // 全链为同线程直接连接，注入后同步到位
         mock->simulateTunnelCount(2);
         QCOMPARE(countSpy.count(), 1);
-        QCOMPARE(tunnelLabel->text(), QStringLiteral("隧道: 2"));
+        QCOMPARE(tunnelLabel->text(), ZzAppShell::tr("隧道: %1").arg(2));
 
         mock->simulateTunnelCount(0);
-        QCOMPARE(tunnelLabel->text(), QStringLiteral("隧道: 0"));
+        QCOMPARE(tunnelLabel->text(), ZzAppShell::tr("隧道: %1").arg(0));
     }
 
     /** @brief statusNotice 链路到状态栏瞬时消息（不经错误横幅）。 */

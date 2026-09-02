@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <QtCore/QDir>
+#include <QtCore/QEvent>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QStringConverter>
 #include <QtWidgets/QHBoxLayout>
@@ -34,7 +35,7 @@ ZzTerminalView::ZzTerminalView(QWidget *parent)
     bannerLayout->setContentsMargins(8, 4, 8, 4);
     m_errorLabel = new QLabel(m_errorBanner);
     m_errorLabel->setWordWrap(true);
-    m_retryButton = new QPushButton(QStringLiteral("重试"), m_errorBanner);
+    m_retryButton = new QPushButton(m_errorBanner);
     m_retryButton->setObjectName(QStringLiteral("zzRetryButton"));
     bannerLayout->addWidget(m_errorLabel, 1);
     bannerLayout->addWidget(m_retryButton);
@@ -47,6 +48,8 @@ ZzTerminalView::ZzTerminalView(QWidget *parent)
     });
     layout->addWidget(m_errorBanner);
     layout->addWidget(m_term, 1);
+
+    retranslateUi();
 
     // 终端 → 传输（键盘输入方向）
     connect(m_term, &QTermWidget::sendData, this,
@@ -109,6 +112,19 @@ ZzTransportInterface *ZzTerminalView::transport() const
 QWidget *ZzTerminalView::errorBanner() const { return m_errorBanner; }
 QLabel *ZzTerminalView::errorLabel() const { return m_errorLabel; }
 QPushButton *ZzTerminalView::retryButton() const { return m_retryButton; }
+
+void ZzTerminalView::retranslateUi()
+{
+    m_retryButton->setText(tr("重试"));
+}
+
+void ZzTerminalView::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange) {
+        retranslateUi();
+    }
+    QWidget::changeEvent(event);
+}
 
 void ZzTerminalView::showErrorBanner(const QString &message)
 {
@@ -198,13 +214,13 @@ void ZzTerminalView::enableScrollback(const QString &sessionId)
     // 降级 → 状态栏提示（经 errorOccurred 同一路径到 ZzTabManager::statusMessage）
     connect(m_scrollbackBridge, &ZzScrollbackBridge::degraded, this,
             [this](const QString &reason) {
-                emit errorOccurred(QStringLiteral("滚动历史已降级为内存模式：%1")
+                emit errorOccurred(tr("滚动历史已降级为内存模式：%1")
                                        .arg(reason));
             });
     // 冷层降级 → 状态栏提示（与温层降级同一路径，不打断终端）
     connect(engine, &ZzLogEngine::degradedToWarmOnly, this,
             [this](const QString &reason) {
-                emit errorOccurred(QStringLiteral("滚动历史已降级为温层模式：%1")
+                emit errorOccurred(tr("滚动历史已降级为温层模式：%1")
                                        .arg(reason));
             });
     // open 必须最后调用：温层打开失败时它会同步发射 degradedToMemoryOnly，

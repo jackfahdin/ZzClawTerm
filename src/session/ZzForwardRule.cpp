@@ -1,5 +1,7 @@
 #include "ZzForwardRule.h"
 
+#include <QtCore/QCoreApplication>
+
 namespace {
 
 const QString kTypeKey = QStringLiteral("type");
@@ -8,15 +10,18 @@ const QString kListenPortKey = QStringLiteral("listenPort");
 const QString kTargetHostKey = QStringLiteral("targetHost");
 const QString kTargetPortKey = QStringLiteral("targetPort");
 
-/** @brief 类型 → 中文名（describe 用）。 */
+/** @brief 类型 → 显示名（describe/validateList 用，用户可见，走 i18n）。 */
 QString typeDisplayName(ZzForwardRule::Type type)
 {
     switch (type) {
-    case ZzForwardRule::Type::Local:   return QStringLiteral("本地");
-    case ZzForwardRule::Type::Remote:  return QStringLiteral("远程");
-    case ZzForwardRule::Type::Dynamic: return QStringLiteral("动态");
+    case ZzForwardRule::Type::Local:
+        return QCoreApplication::translate("ZzForwardRule", "本地");
+    case ZzForwardRule::Type::Remote:
+        return QCoreApplication::translate("ZzForwardRule", "远程");
+    case ZzForwardRule::Type::Dynamic:
+        return QCoreApplication::translate("ZzForwardRule", "动态");
     }
-    return QStringLiteral("本地");
+    return QCoreApplication::translate("ZzForwardRule", "本地");
 }
 
 } // namespace
@@ -65,14 +70,14 @@ ZzForwardRule ZzForwardRule::fromJson(const QJsonObject &obj)
 QString ZzForwardRule::validate() const
 {
     if (listenHost.trimmed().isEmpty())
-        return QStringLiteral("监听地址不能为空");
+        return QCoreApplication::translate("ZzForwardRule", "监听地址不能为空");
     if (listenPort == 0)
-        return QStringLiteral("监听端口必须在 1-65535 之间");
+        return QCoreApplication::translate("ZzForwardRule", "监听端口必须在 1-65535 之间");
     if (type != Type::Dynamic) {
         if (targetHost.trimmed().isEmpty())
-            return QStringLiteral("本地/远程转发必须填写目标地址");
+            return QCoreApplication::translate("ZzForwardRule", "本地/远程转发必须填写目标地址");
         if (targetPort == 0)
-            return QStringLiteral("目标端口必须在 1-65535 之间");
+            return QCoreApplication::translate("ZzForwardRule", "目标端口必须在 1-65535 之间");
     }
     return QString();
 }
@@ -84,7 +89,8 @@ QString ZzForwardRule::validateList(const QVector<ZzForwardRule> &rules)
             if (rules[i].type == rules[j].type
                 && rules[i].listenHost == rules[j].listenHost
                 && rules[i].listenPort == rules[j].listenPort) {
-                return QStringLiteral("存在重复的转发规则：%1 %2:%3")
+                return QCoreApplication::translate(
+                    "ZzForwardRule", "存在重复的转发规则：%1 %2:%3")
                     .arg(typeDisplayName(rules[i].type), rules[i].listenHost)
                     .arg(rules[i].listenPort);
             }

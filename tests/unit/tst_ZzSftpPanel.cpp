@@ -60,7 +60,7 @@ private slots:
         QCOMPARE(panel.panelTitle(), QStringLiteral("SFTP"));
         QCOMPARE(panel.panelWidget(), static_cast<QWidget *>(&panel));
         QVERIFY(!panel.opsAttached());
-        QCOMPARE(panel.statusText(), QStringLiteral("无活动会话"));
+        QCOMPARE(panel.statusText(), ZzSftpPanel::tr("无活动会话"));
     }
 
     void localSessionShowsUnavailable()
@@ -71,18 +71,18 @@ private slots:
         ZzTabManager tabs;
         ZzSftpPanel panel;
         panel.setTabManager(&tabs);
-        QCOMPARE(panel.statusText(), QStringLiteral("无活动会话"));
+        QCOMPARE(panel.statusText(), ZzSftpPanel::tr("无活动会话"));
 
         ZzSessionProfile profile;
         profile.name = QStringLiteral("本机");
         profile.protocol = QStringLiteral("mock");
         tabs.openSession(profile); // mock 传输非 SSH 适配器 → 面板提示不可用
         QVERIFY(!panel.opsAttached());
-        QVERIFY(panel.statusText().contains(QStringLiteral("不可用")));
+        QVERIFY(panel.statusText().contains(ZzSftpPanel::tr("当前会话为本地 Shell，SFTP 不可用")));
 
         tabs.closeTab(0); // 末标签关闭 → 回到无活动会话
         QCoreApplication::processEvents();
-        QCOMPARE(panel.statusText(), QStringLiteral("无活动会话"));
+        QCOMPARE(panel.statusText(), ZzSftpPanel::tr("无活动会话"));
         ZzTransportRegistry::instance().clear();
     }
 
@@ -165,12 +165,12 @@ private slots:
         QCOMPARE(mock.uploaded.at(0).second, QStringLiteral("/a.bin"));
         QCOMPARE(mock.uploaded.at(1).second, QStringLiteral("/b.bin"));
         QCOMPARE(panel.transferRowCount(), 2);
-        QCOMPARE(panel.transferStatusText(firstId), QStringLiteral("进行中"));
+        QCOMPARE(panel.transferStatusText(firstId), ZzSftpPanel::tr("进行中"));
 
         mock.simulateProgress(firstId, 50, 100);
-        QCOMPARE(panel.transferStatusText(firstId), QStringLiteral("进行中"));
+        QCOMPARE(panel.transferStatusText(firstId), ZzSftpPanel::tr("进行中"));
         mock.simulateTransferFinished(firstId);
-        QCOMPARE(panel.transferStatusText(firstId), QStringLiteral("完成"));
+        QCOMPARE(panel.transferStatusText(firstId), ZzSftpPanel::tr("完成"));
 
         mock.simulateTransferError(firstId + 1, 1, QStringLiteral("io error"));
         QVERIFY(panel.transferStatusText(firstId + 1)
@@ -210,7 +210,7 @@ private slots:
         QCOMPARE(mock.uploadedDirs.first().second,
                  QStringLiteral("/home/zztest/localtree"));
         QCOMPARE(panel.transferRowCount(), baseRows + 1);
-        QCOMPARE(panel.transferStatusText(id), QStringLiteral("进行中"));
+        QCOMPARE(panel.transferStatusText(id), ZzSftpPanel::tr("进行中"));
     }
 
     void downloadFolderCallsOpsDownloadDir()
@@ -230,7 +230,7 @@ private slots:
         QCOMPARE(mock.downloadedDirs.first().second,
                  QStringLiteral("/tmp/dst/subdir"));
         QCOMPARE(panel.transferRowCount(), baseRows + 1);
-        QCOMPARE(panel.transferStatusText(id), QStringLiteral("进行中"));
+        QCOMPARE(panel.transferStatusText(id), ZzSftpPanel::tr("进行中"));
     }
 
     void cancelTransferMarksCancelled()
@@ -245,7 +245,7 @@ private slots:
         QCOMPARE(mock.cancelledTransfers, QList<quint64>{id});
         // 取消结局为 transferError（Cancelled），状态标记"已取消"
         mock.simulateTransferError(id, 2, QStringLiteral("cancelled"));
-        QCOMPARE(panel.transferStatusText(id), QStringLiteral("已取消"));
+        QCOMPARE(panel.transferStatusText(id), ZzSftpPanel::tr("已取消"));
     }
 
     void closedDetachesOps()
@@ -256,7 +256,7 @@ private slots:
                          {makeFileEntry(QStringLiteral("a.txt"), 1)});
         mock.simulateClosed();
         QVERIFY(!panel.opsAttached());
-        QVERIFY(panel.statusText().contains(QStringLiteral("已关闭")));
+        QVERIFY(panel.statusText().contains(ZzSftpPanel::tr("SFTP 会话已关闭")));
         // 会话关闭后操作退化为提示，不再产生请求
         panel.navigateTo(QStringLiteral("/etc"));
         QCOMPARE(mock.listedPaths.count(QStringLiteral("/etc")), 0);
@@ -271,7 +271,7 @@ private slots:
         attachOpenedMock(panel, mock, {});
         mock.simulateClosed();
         QVERIFY(!panel.opsAttached());
-        QTRY_COMPARE(panel.statusText(), QStringLiteral("无活动会话"));
+        QTRY_COMPARE(panel.statusText(), ZzSftpPanel::tr("无活动会话"));
     }
 
     void listDirErrorUnlocksLoading()
@@ -341,11 +341,11 @@ private slots:
         QCOMPARE(panel.transferRowCount(), 100);
         // 最早的行已被修剪；最近的行可查
         QCOMPARE(panel.transferStatusText(mock.nextReqId - 1),
-                 QStringLiteral("完成"));
+                 ZzSftpPanel::tr("完成"));
         // 换绑清空请求哈希后，历史行观察口仍可用（行内角色数据回退）
         mock.simulateClosed();
         QCOMPARE(panel.transferStatusText(mock.nextReqId - 1),
-                 QStringLiteral("完成"));
+                 ZzSftpPanel::tr("完成"));
     }
 
     void largeDirFillsInBatches()

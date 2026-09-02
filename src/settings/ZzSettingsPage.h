@@ -4,6 +4,8 @@
 
 class QCheckBox;
 class QComboBox;
+class QFormLayout;
+class QLabel;
 class QSpinBox;
 class ZzAppSettings;
 
@@ -29,8 +31,16 @@ public:
     [[nodiscard]] QCheckBox *x11ServerCheck() const;
     [[nodiscard]] QComboBox *sftpBlockSizeCombo() const;
 
+protected:
+    /** @brief LanguageChange 时重设全部文本（该页长驻，必须响应）。 */
+    void changeEvent(QEvent *event) override;
+
 private:
+    /** @brief 集中重设全部用户可见文本（构造时同样调用，单一路径）。 */
+    void retranslateUi();
+
     ZzAppSettings *m_settings;
+    QFormLayout *m_formLayout;
     QComboBox *m_terminalTypeCombo;
     QComboBox *m_encodingCombo;
     QSpinBox *m_fontSizeSpin;
@@ -39,4 +49,5 @@ private:
     QComboBox *m_credentialBackendCombo;
     QCheckBox *m_x11ServerCheck;
     QComboBox *m_sftpBlockSizeCombo;
+    QLabel *m_noteLabel;
 };

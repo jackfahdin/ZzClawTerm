@@ -2,6 +2,8 @@
 
 #include <QtWidgets/QDialog>
 
+class QFormLayout;
+class QLabel;
 class QLineEdit;
 class ZzCredentialStore;
 
@@ -30,8 +32,18 @@ public:
      */
     static bool ensureStoreReady(ZzCredentialStore *store, const QString &password);
 
+protected:
+    /** @brief LanguageChange 时重设全部文本。 */
+    void changeEvent(QEvent *event) override;
+
 private:
+    /** @brief 集中重设全部用户可见文本（构造时同样调用，单一路径）。 */
+    void retranslateUi();
+
     ZzCredentialStore *m_store;
+    bool m_firstRun;            ///< 首次设置主密码形态（决定标题/提示/确认行）
+    QFormLayout *m_formLayout;  ///< 行标签经 labelForField 反查重设
+    QLabel *m_hintLabel;
     QLineEdit *m_passwordEdit;
     QLineEdit *m_confirmEdit;   ///< 仅首次设置时可见
 };

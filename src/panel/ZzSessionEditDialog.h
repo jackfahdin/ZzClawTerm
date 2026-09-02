@@ -6,6 +6,7 @@
 
 class QComboBox;
 class QCheckBox;
+class QFormLayout;
 class QLineEdit;
 class QSpinBox;
 class QStackedWidget;
@@ -38,8 +39,12 @@ public:
 
 protected:
     void accept() override;
+    /** @brief LanguageChange 时重设全部文本。 */
+    void changeEvent(QEvent *event) override;
 
 private:
+    /** @brief 重设全部用户可见文本（构造与 LanguageChange 共用单一路径）。 */
+    void retranslateUi();
     /** @brief 用 m_profile.portForwards 填充规则表。 */
     void populateForwardTable();
     /** @brief 向表格追加一行（默认值或给定规则）。 */
@@ -56,6 +61,9 @@ private:
     QLineEdit *m_groupEdit;
     QComboBox *m_protocolCombo;
     QStackedWidget *m_hostStack;       ///< ssh 页 / local 页
+    QFormLayout *m_formLayout = nullptr;  ///< 主表单（retranslateUi 按字段反查行标签）
+    QFormLayout *m_sshForm = nullptr;     ///< ssh 页表单（主机/端口行标签）
+    QFormLayout *m_localForm = nullptr;   ///< local 页表单（Shell 程序行标签）
     QLineEdit *m_hostEdit;
     QSpinBox *m_portSpin;
     QLineEdit *m_shellEdit;            ///< local 会话的 shell 路径

@@ -15,6 +15,9 @@ include(cmake/ZzGitRevision.cmake)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Test Xml Multimedia)
 
+# 翻译工具链（可选）：缺失时跳过翻译嵌入，不影响主构建
+find_package(Qt6 QUIET COMPONENTS LinguistTools)
+
 # ---- 第三方子模块 ----
 # 子模块未初始化时给出明确指引，而不是漫天报错。
 function(zz_require_submodule path)

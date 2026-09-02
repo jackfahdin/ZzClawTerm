@@ -65,6 +65,26 @@ private slots:
         QFile::remove(path);
     }
 
+    void languageRoundTrip()
+    {
+        const QString path = QDir(QDir::tempPath())
+            .filePath(QStringLiteral("zzclawterm-settings-language-test.ini"));
+        QFile::remove(path);
+        {
+            ZzAppSettings settings(path);
+            QCOMPARE(settings.language(), QStringLiteral("system")); // 默认
+            QSignalSpy spy(&settings, &ZzAppSettings::settingsChanged);
+            settings.setLanguage(QStringLiteral("en"));
+            QCOMPARE(settings.language(), QStringLiteral("en"));
+            QCOMPARE(spy.count(), 1);
+        }
+        {   // 重开持久化
+            ZzAppSettings settings(path);
+            QCOMPARE(settings.language(), QStringLiteral("en"));
+        }
+        QFile::remove(path);
+    }
+
     void x11ServerEnabledDefaultsTrue()
     {
         const QString path = QDir(QDir::tempPath())

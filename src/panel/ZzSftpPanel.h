@@ -112,6 +112,10 @@ signals:
     /** @brief 需要状态栏展示的瞬时消息（ZzAppShell 接状态栏，规格 §八）。 */
     void statusMessage(const QString &message);
 
+protected:
+    /** @brief LanguageChange 时重设全部静态文本。 */
+    void changeEvent(QEvent *event) override;
+
 private slots:
     void onCurrentViewChanged(ZzTerminalView *view);
     void onOpened();
@@ -137,6 +141,8 @@ private slots:
     void showDirContextMenu(const QPoint &pos);
 
 private:
+    /** @brief 重设全部静态文本（构造与 LanguageChange 共用单一路径）。 */
+    void retranslateUi();
     /** @brief 大目录分批填充：每批条目数（UI 线程一次填充上限）。 */
     static constexpr int kFillBatchSize = 500;
     /** @brief 传输队列已结束（非进行中）历史行上限，超出时移除最早的行。 */

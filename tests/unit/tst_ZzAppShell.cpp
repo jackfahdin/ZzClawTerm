@@ -8,10 +8,12 @@
 
 #include "ZzAppShell.h"
 #include "ZzMockTransport.h"
+#include "menu/ZzMenuBarService.h"
 #include "panel/ZzSessionPanel.h"
 #include "session/ZzSessionModel.h"
 #include "session/ZzSessionProfile.h"
 #include "settings/ZzAppSettings.h"
+#include "settings/ZzLanguageManager.h"
 #include "tab/ZzTabManager.h"
 #include "transport/ZzTransportRegistry.h"
 #include "x11/ZzX11Service.h"
@@ -104,7 +106,7 @@ private slots:
         QVERIFY(shown);
         QVERIFY(shell.sessionPanel() != nullptr);
         QCOMPARE(shell.sessionPanel()->panelTitle(),
-                 QStringLiteral("会话"));
+                 ZzSessionPanel::tr("会话"));
         // SFTP 面板同理首开
         QVERIFY(shell.sftpPanel() == nullptr);
         auto filesShown = shell.workspaceShell()->showPanel(
@@ -138,7 +140,8 @@ private slots:
             id.toString(QUuid::WithoutBraces));
 
         QCOMPARE(shell.tabManager()->count(), 1);
-        QTRY_COMPARE(shell.statusStateLabel()->text(), QStringLiteral("已连接"));
+        QTRY_COMPARE(shell.statusStateLabel()->text(),
+                     QCoreApplication::translate("ZzAppShell", "已连接"));
         QVERIFY(!shell.statusEncodingLabel()->text().isEmpty());
     }
     void x11ServiceFollowsGlobalSetting()
@@ -164,6 +167,25 @@ private slots:
         QTRY_VERIFY(shell.x11Service()->isEnabled());
 
         ZzAppSettings::instance().setX11ServerEnabled(original); // 还原，免污染其他用例
+    }
+    void menuFallbacksOffscreen()
+    {
+        // 未装配（无工作区/窗口/状态栏）：槽位走兜底分支不崩。
+        // 注意不能在已装配 shell 上直接调 requestNewSession：面板会经延迟工厂
+        // 物化并弹出模态 ZzSessionEditDialog::exec()，离屏测试将永久阻塞
+        ZzAppShell bare(m_dir);
+        QVERIFY(bare.languageManager() != nullptr);
+        QVERIFY(bare.menuBarService() == nullptr);
+        bare.requestNewSession();   // 工作区为空 → 状态栏兜底提示（无状态栏则静默）
+        bare.openSettingsPage();    // 无窗口 → 静默返回
+
+        // 离屏普通 QMainWindow 无 Fluent 标题栏：菜单服务不装配
+        ZzAppShell shell(m_dir);
+        QMainWindow window;
+        QVERIFY(shell.assemble(window));
+        QVERIFY(shell.menuBarService() == nullptr);
+        QVERIFY(shell.languageManager() != nullptr);
+        shell.openSettingsPage();   // 普通窗口无导航控制器 → 静默返回
     }
 };
 

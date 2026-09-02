@@ -14,6 +14,8 @@ class QMainWindow;
 class QStatusBar;
 class QWidget;
 class ZzCredentialStore;
+class ZzLanguageManager;
+class ZzMenuBarService;
 class ZzSessionModel;
 class ZzSessionPanel;
 class ZzSftpPanel;
@@ -75,10 +77,19 @@ public:
     [[nodiscard]] QLabel *statusSizeLabel() const;
     [[nodiscard]] QLabel *statusTunnelLabel() const;
     [[nodiscard]] ZzX11Service *x11Service() const;
+    [[nodiscard]] ZzMenuBarService *menuBarService() const;
+    [[nodiscard]] ZzLanguageManager *languageManager() const;
 
 public slots:
     /** @brief 状态栏瞬时提示（5 秒自动消退，规格 §八错误不弹窗）。 */
     void showStatusMessage(const QString &message);
+
+    /** @brief 菜单「新建会话」：确保会话面板物化后转发 newSession()。 */
+    void requestNewSession();
+    /** @brief 菜单「更多方案…」：导航到设置页路由。 */
+    void openSettingsPage();
+    /** @brief 菜单「打开日志目录」：系统文件管理器打开 logs 目录。 */
+    void openLogDirectory();
 
 protected:
     /** @brief 窗口 Close 时保存工作区布局（此时控件树仍存活，saveLayout 可用）。 */
@@ -113,4 +124,6 @@ private:
     QPointer<QLabel> m_tunnelLabel;
     QPointer<QStatusBar> m_statusBar;
     ZzX11Service *m_x11Service = nullptr; ///< 本对象为父：应用级共享 X server（M5）
+    ZzLanguageManager *m_languageManager = nullptr;   ///< this 为父，构造时创建并 apply
+    ZzMenuBarService *m_menuBarService = nullptr;     ///< 窗口为父（menuBar 生命周期绑定）
 };

@@ -63,6 +63,10 @@ public:
     /** @brief 重试按钮。 */
     [[nodiscard]] QPushButton *retryButton() const;
 
+protected:
+    /** @brief LanguageChange 时重设静态文本（错误横幅重试按钮）。 */
+    void changeEvent(QEvent *event) override;
+
 signals:
     /** @brief 传输状态透传（ZzTabManager 据此刷新标签外观与状态栏）。 */
     void stateChanged(ZzTransportInterface::State state);
@@ -78,6 +82,9 @@ signals:
     void statusNotice(const QString &message);
 
 private:
+    /** @brief 集中重设全部用户可见静态文本（构造时同样调用，单一路径）。 */
+    void retranslateUi();
+
     void showErrorBanner(const QString &message);
     void hideErrorBanner();
 

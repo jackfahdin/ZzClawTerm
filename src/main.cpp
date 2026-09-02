@@ -84,13 +84,13 @@ int main(int argc, char *argv[])
 
     ZzPureTools::ZzNavigationNode terminalNode{
         terminalRoute, QStringLiteral("ZzClawTerm"),
-        QStringLiteral("Terminal"), {}};
+        QCoreApplication::translate("main", "Terminal"), {}};
     if (!builder.addNavigationNode(std::move(terminalNode))) {
         return EXIT_FAILURE;
     }
     ZzPureTools::ZzNavigationNode settingsNode{
         settingsRoute, QStringLiteral("ZzClawTerm"),
-        QStringLiteral("Settings"), {}};
+        QCoreApplication::translate("main", "Settings"), {}};
     settingsNode.placement = ZzFluentUI::ZzNavigationPlacement::Footer;
     if (!builder.addNavigationNode(std::move(settingsNode))) {
         return EXIT_FAILURE;

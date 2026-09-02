@@ -96,10 +96,14 @@ private slots:
     {
         const ZzForwardRule local{ZzForwardRule::Type::Local, QStringLiteral("127.0.0.1"), 13306,
                                   QStringLiteral("db.internal"), 3306};
-        QCOMPARE(local.describe(), QStringLiteral("本地 127.0.0.1:13306 → db.internal:3306"));
+        QCOMPARE(local.describe(),
+                 QCoreApplication::translate("ZzForwardRule", "本地")
+                     + QStringLiteral(" 127.0.0.1:13306 → db.internal:3306"));
         const ZzForwardRule dynamic{ZzForwardRule::Type::Dynamic, QStringLiteral("127.0.0.1"), 1080,
                                     QString(), 0};
-        QCOMPARE(dynamic.describe(), QStringLiteral("动态 127.0.0.1:1080"));
+        QCOMPARE(dynamic.describe(),
+                 QCoreApplication::translate("ZzForwardRule", "动态")
+                     + QStringLiteral(" 127.0.0.1:1080"));
     }
 };
 

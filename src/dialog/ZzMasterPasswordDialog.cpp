@@ -1,5 +1,6 @@
 #include "ZzMasterPasswordDialog.h"
 
+#include <QtCore/QEvent>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QLabel>
@@ -11,46 +12,71 @@ ZzMasterPasswordDialog::ZzMasterPasswordDialog(ZzCredentialStore *store,
                                                QWidget *parent)
     : QDialog(parent)
     , m_store(store)
+    , m_firstRun(!store->hasMasterPassword())
 {
-    const bool firstRun = !store->hasMasterPassword();
-    setWindowTitle(firstRun ? QStringLiteral("设置主密码")
-                            : QStringLiteral("解锁凭据库"));
-
-    auto *layout = new QFormLayout(this);
-    auto *hint = new QLabel(firstRun
-        ? QStringLiteral("首次使用凭据存储，请设置主密码（AES-256-GCM 加密，规格 §6.2）：")
-        : QStringLiteral("请输入主密码解锁凭据库："), this);
-    layout->addRow(hint);
+    m_formLayout = new QFormLayout(this);
+    m_hintLabel = new QLabel(this);
+    m_formLayout->addRow(m_hintLabel);
 
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setEchoMode(QLineEdit::Password);
-    layout->addRow(QStringLiteral("主密码："), m_passwordEdit);
+    m_formLayout->addRow(QString(), m_passwordEdit);
 
     m_confirmEdit = new QLineEdit(this);
     m_confirmEdit->setEchoMode(QLineEdit::Password);
-    if (firstRun) {
-        layout->addRow(QStringLiteral("确认密码："), m_confirmEdit);
+    if (m_firstRun) {
+        m_formLayout->addRow(QString(), m_confirmEdit);
     } else {
         m_confirmEdit->hide();
     }
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    connect(buttons, &QDialogButtonBox::accepted, this, [this, firstRun]() {
-        if (firstRun && m_passwordEdit->text() != m_confirmEdit->text()) {
+    connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
+        if (m_firstRun && m_passwordEdit->text() != m_confirmEdit->text()) {
             m_confirmEdit->clear();
-            m_confirmEdit->setPlaceholderText(QStringLiteral("两次输入不一致"));
+            m_confirmEdit->setPlaceholderText(tr("两次输入不一致"));
             return;
         }
         if (ensureStoreReady(m_store, m_passwordEdit->text())) {
             accept();
         } else {
             m_passwordEdit->clear();
-            m_passwordEdit->setPlaceholderText(QStringLiteral("密码错误或为空"));
+            m_passwordEdit->setPlaceholderText(tr("密码错误或为空"));
         }
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    layout->addRow(buttons);
+    m_formLayout->addRow(buttons);
+
+    retranslateUi();
+}
+
+void ZzMasterPasswordDialog::retranslateUi()
+{
+    setWindowTitle(m_firstRun ? tr("设置主密码")
+                              : tr("解锁凭据库"));
+    m_hintLabel->setText(m_firstRun
+        ? tr("首次使用凭据存储，请设置主密码（AES-256-GCM 加密，规格 §6.2）：")
+        : tr("请输入主密码解锁凭据库："));
+    // 行标签经 labelForField 按字段部件反查；确认密码行仅首次设置形态存在
+    const auto setRowLabel = [this](QWidget *field, const QString &text) {
+        if (auto *label =
+                qobject_cast<QLabel *>(m_formLayout->labelForField(field))) {
+            label->setText(text);
+        }
+    };
+    setRowLabel(m_passwordEdit, tr("主密码："));
+    if (m_firstRun) {
+        setRowLabel(m_confirmEdit, tr("确认密码："));
+    }
+}
+
+void ZzMasterPasswordDialog::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange) {
+        retranslateUi();
+    }
+    QDialog::changeEvent(event);
 }
 
 bool ZzMasterPasswordDialog::ensureUnlocked(ZzCredentialStore *store,

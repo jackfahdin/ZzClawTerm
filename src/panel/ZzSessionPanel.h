@@ -44,11 +44,17 @@ signals:
     /** @brief 双击会话请求连接（规格 §七连接流程起点）。 */
     void connectRequested(const ZzSessionProfile &profile);
 
+public slots:
+    /**
+     * @brief 新建会话（菜单与右键共用入口）：弹编辑对话框，接受后落库。
+     * @param groupPathPrefix 预填分组路径（右键"在此分组新建"时传入）。
+     */
+    void newSession(const QString &groupPathPrefix = QString());
+
 private slots:
     void rebuildTree();
     void onTreeDoubleClicked(const QModelIndex &index);
     void showContextMenu(const QPoint &pos);
-    void newSession(const QString &groupPathPrefix);
     void editSession(const QString &profileId);
     void duplicateSession(const QString &profileId);
 

@@ -135,7 +135,7 @@ ZzTerminalView *ZzTabManager::createPane(const ZzSessionProfile &profile,
     auto *view = new ZzTerminalView(parent);
     ZzTransportInterface *transport = createTransport(profile, view);
     if (!transport) {
-        emit statusMessage(QStringLiteral("未知协议「%1」：会话 %2 未打开")
+        emit statusMessage(tr("未知协议「%1」：会话 %2 未打开")
                                .arg(profile.protocol, profile.name));
         view->deleteLater();
         return nullptr;
@@ -265,7 +265,7 @@ void ZzTabManager::reconnectTab(int index)
         }
         ZzTransportInterface *transport = createTransport(profile, view);
         if (!transport) {
-            emit statusMessage(QStringLiteral("重连失败：协议「%1」未注册")
+            emit statusMessage(tr("重连失败：协议「%1」未注册")
                                    .arg(profile.protocol));
             continue;
         }
@@ -409,16 +409,16 @@ void ZzTabManager::showTabContextMenu(const QPoint &pos)
     }
     QMenu menu(this);
     QAction *splitHorizontalAction =
-        menu.addAction(QStringLiteral("左右分屏\tCtrl+Shift+E"));
+        menu.addAction(tr("左右分屏\tCtrl+Shift+E"));
     QAction *splitVerticalAction =
-        menu.addAction(QStringLiteral("上下分屏\tCtrl+Shift+O"));
+        menu.addAction(tr("上下分屏\tCtrl+Shift+O"));
     QAction *closePaneAction =
-        menu.addAction(QStringLiteral("关闭窗格\tCtrl+Shift+W"));
+        menu.addAction(tr("关闭窗格\tCtrl+Shift+W"));
     menu.addSeparator();
     QAction *reconnectAction =
-        menu.addAction(QStringLiteral("重新连接"));
+        menu.addAction(tr("重新连接"));
     reconnectAction->setEnabled(isTabDisconnected(index));
-    QAction *closeAction = menu.addAction(QStringLiteral("关闭标签"));
+    QAction *closeAction = menu.addAction(tr("关闭标签"));
     QAction *chosen = menu.exec(tabBar()->mapToGlobal(pos));
     if (chosen == splitHorizontalAction) {
         splitTab(index, Qt::Horizontal);
@@ -529,6 +529,6 @@ void ZzTabManager::markTabDisconnected(int index, const QString &reason)
 {
     tabBar()->setTabTextColor(index, QColor(Qt::gray)); // 断线变灰保留
     tabBar()->setTabToolTip(index, reason);
-    emit statusMessage(QStringLiteral("%1 已断开：%2")
+    emit statusMessage(tr("%1 已断开：%2")
                            .arg(tabText(index), reason));
 }

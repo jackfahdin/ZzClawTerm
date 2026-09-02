@@ -57,7 +57,7 @@ bool ZzLogEngine::open()
             // 冷层不可用：残留温层无续传去向，按 v0.1 崩溃语义删除后全新开始
             QFile::remove(m_config.warmFilePath);
             emit degradedToWarmOnly(
-                QStringLiteral("冷层库打开失败，降级为温层模式：%1").arg(error));
+                tr("冷层库打开失败，降级为温层模式：%1").arg(error));
         } else {
             recoverResidualWarm(); // 崩溃恢复（失败时内部降级并发射信号）
             if (isColdEnabled()) {
@@ -76,7 +76,7 @@ bool ZzLogEngine::open()
         m_cold.reset(); // 无温层即无归档线程，冷层对本会话无意义
         m_coldDegraded = false;
         emit degradedToMemoryOnly(
-            QStringLiteral("温层文件打开失败，降级为纯内存模式：%1").arg(path));
+            tr("温层文件打开失败，降级为纯内存模式：%1").arg(path));
         return true; // 降级不影响终端交互（规格 §八）
     }
     // 恢复既有温层数据（引擎重开场景；冷层模式下残留已在上方处理，此处读回为空）
@@ -146,7 +146,7 @@ void ZzLogEngine::recoverResidualWarm()
         m_coldDegraded = true;
         m_cold.reset();
         QFile::remove(m_config.warmFilePath);
-        emit degradedToWarmOnly(QStringLiteral("残留温层续传失败，降级为温层模式"));
+        emit degradedToWarmOnly(tr("残留温层续传失败，降级为温层模式"));
         return;
     }
     QFile::remove(m_config.warmFilePath); // 续传完成，删除残留

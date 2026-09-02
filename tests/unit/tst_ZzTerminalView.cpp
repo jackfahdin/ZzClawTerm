@@ -121,8 +121,11 @@ private slots:
         QSignalSpy spy(&view, &ZzTerminalView::errorOccurred);
         view.enableScrollback(QStringLiteral("test-degrade-open"));
         QCOMPARE(spy.count(), 2); // 冷层降级 + 温层降级各一条
-        QVERIFY(spy.at(0).at(0).toString().contains(QStringLiteral("温层模式")));
-        QVERIFY(spy.at(1).at(0).toString().contains(QStringLiteral("内存模式")));
+        // 断言 tr 同键前缀（%1 前的外壳文案），随界面语言切换不失效
+        QVERIFY(spy.at(0).at(0).toString().contains(
+            ZzTerminalView::tr("滚动历史已降级为温层模式：%1").arg(QString())));
+        QVERIFY(spy.at(1).at(0).toString().contains(
+            ZzTerminalView::tr("滚动历史已降级为内存模式：%1").arg(QString())));
 
         // 恢复写权限，避免影响同进程后续用例
         QVERIFY(QFile::setPermissions(

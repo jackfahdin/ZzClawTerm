@@ -157,7 +157,7 @@ void ZzSshTransportAdapter::onConnected()
     m_channel = m_conn->createShellChannel();
     if (!m_channel) {
         setState(State::Disconnected);
-        emit errorOccurred(3001, QStringLiteral("创建 shell 通道失败"));
+        emit errorOccurred(3001, tr("创建 shell 通道失败"));
         return;
     }
     connect(m_channel, &ZzSshShellChannel::dataReceived, this,
@@ -173,7 +173,7 @@ void ZzSshTransportAdapter::onConnected()
         m_channel = nullptr;
         setState(State::Disconnected);
         if (!m_suppressDisconnect) {
-            emit disconnected(QStringLiteral("远程 shell 已关闭"));
+            emit disconnected(tr("远程 shell 已关闭"));
         }
     });
 
@@ -251,7 +251,7 @@ void ZzSshTransportAdapter::startTunnels()
     // 规则级失败 → 状态栏瞬时提示（规格 §六：单规则失败隔离，不动错误横幅）
     connect(m_tunnelManager, &ZzTunnelManager::ruleFailed, this,
             [this](const ZzForwardRule &rule, const QString &message) {
-                emit statusNotice(QStringLiteral("转发规则 %1 启动失败：%2")
+                emit statusNotice(tr("转发规则 %1 启动失败：%2")
                                       .arg(rule.describe(), message));
             });
     connect(m_tunnelManager, &ZzTunnelManager::tunnelConnectionError, this,
@@ -273,7 +273,7 @@ void ZzSshTransportAdapter::startX11Forwarding()
     // 总开关门（M5 审查修复）：注入了共享服务且被禁用时，嵌入与非嵌入会话
     // 一视同仁跳过 X11；未注入服务（如单测场景）不拦截，保持嵌入路径原行为
     if (m_x11Service && !m_x11Service->isEnabled()) {
-        emit statusNotice(QStringLiteral("X11 转发已跳过：X server 未启用"));
+        emit statusNotice(tr("X11 转发已跳过：X server 未启用"));
         openShellChannel();
         return;
     }
@@ -284,7 +284,7 @@ void ZzSshTransportAdapter::startX11Forwarding()
 #endif
     // 非嵌入会话走应用级共享 server（M5 规格 §4.2）
     if (!m_x11Service || !m_x11Service->isEnabled()) {
-        emit statusNotice(QStringLiteral("X11 转发已跳过：X server 未启用"));
+        emit statusNotice(tr("X11 转发已跳过：X server 未启用"));
         openShellChannel();
         return;
     }
@@ -328,7 +328,7 @@ void ZzSshTransportAdapter::startX11ForwardingEmbedded()
                 &ZzSshTransportAdapter::onX11ServerReady);
         connect(m_x11Downloader, &ZzXServerDownloader::downloadFailed, this,
                 [this](const QString &message) {
-                    emit statusNotice(QStringLiteral("X11 转发不可用：%1").arg(message));
+                    emit statusNotice(tr("X11 转发不可用：%1").arg(message));
                     openShellChannel(); // X11 失败不阻断会话
                 });
     }
@@ -347,12 +347,12 @@ void ZzSshTransportAdapter::onX11ServerReady(const QString &executablePath)
         m_x11Manager = new ZzXServerManager(this);
         connect(m_x11Manager, &ZzXServerManager::crashed, this,
                 [this](const QString &message) {
-                    emit statusNotice(QStringLiteral("X11 本地 server 异常：%1").arg(message));
+                    emit statusNotice(tr("X11 本地 server 异常：%1").arg(message));
                 });
     }
     const int display = ZzXServerManager::allocateDisplay();
     if (display < 0) {
-        emit statusNotice(QStringLiteral("X11 转发不可用：无空闲 display 号"));
+        emit statusNotice(tr("X11 转发不可用：无空闲 display 号"));
         openShellChannel();
         return;
     }
@@ -360,7 +360,7 @@ void ZzSshTransportAdapter::onX11ServerReady(const QString &executablePath)
         QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
         + QStringLiteral("/xserver/xauth-%1").arg(display);
     if (!m_x11Authority.writeXauthorityFile(xauthPath, display, m_x11Cookie)) {
-        emit statusNotice(QStringLiteral("X11 授权写入失败：%1").arg(xauthPath));
+        emit statusNotice(tr("X11 授权写入失败：%1").arg(xauthPath));
         openShellChannel();
         return;
     }
@@ -396,7 +396,7 @@ void ZzSshTransportAdapter::requestX11Forwarding()
     if (cookie.isEmpty()) {
         // 授权写失败等异常下服务可能处于"运行但无 cookie"态：带空 cookie 发
         // x11-req 会被 X 端静默拒连。提示后跳过，调用方照常开 shell，不阻断会话
-        emit statusNotice(QStringLiteral("X11 转发已跳过：本地授权不可用"));
+        emit statusNotice(tr("X11 转发已跳过：本地授权不可用"));
         return;
     }
     // 应用侧 ZzXLocalEndpoint → 库侧 ZzSshX11Bridge::LocalEndpoint 字段映射
@@ -407,14 +407,14 @@ void ZzSshTransportAdapter::requestX11Forwarding()
     m_x11Bridge = new ZzSshX11Bridge(m_conn, endpoint, this);
     connect(m_x11Bridge, &ZzSshX11Bridge::bridgeFailed, this,
             [this](quint32 /*channelId*/, int /*code*/, const QString &message) {
-                emit statusNotice(QStringLiteral("X11 转发通道失败：%1").arg(message));
+                emit statusNotice(tr("X11 转发通道失败：%1").arg(message));
             });
     connect(m_channel, &ZzSshShellChannel::x11ForwardingReady, this, [this]() {
-        emit statusNotice(QStringLiteral("X11 转发已启用"));
+        emit statusNotice(tr("X11 转发已启用"));
     });
     connect(m_channel, &ZzSshShellChannel::x11ForwardingFailed, this,
             [this](int /*code*/, const QString &message) {
-                emit statusNotice(QStringLiteral("X11 转发被服务端拒绝：%1").arg(message));
+                emit statusNotice(tr("X11 转发被服务端拒绝：%1").arg(message));
             });
     m_channel->requestX11Forwarding(cookie);
 }

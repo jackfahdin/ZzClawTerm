@@ -63,3 +63,23 @@ zz_add_qtest(tst_ZzXServerDownloader unit/tst_ZzXServerDownloader.cpp)
 zz_add_qtest(tst_ZzXServerManager unit/tst_ZzXServerManager.cpp)
 zz_add_qtest(tst_ZzX11Service unit/tst_ZzX11Service.cpp)
 zz_add_qtest(tst_ZzX11Viewport unit/tst_ZzX11Viewport.cpp)
+zz_add_qtest(tst_ZzLanguageManager unit/tst_ZzLanguageManager.cpp)
+zz_add_qtest(tst_ZzAboutDialog unit/tst_ZzAboutDialog.cpp)
+zz_add_qtest(tst_ZzMenuBarService unit/tst_ZzMenuBarService.cpp)
+
+# i18n 冒烟用例需真实 en.qm：lrelease 编译 ts 后嵌入两个测试二进制的资源
+#（前缀 /i18n，与 ZzLanguageManager 装载路径 :/i18n/zzclawterm_en.qm 一致）。
+# 刻意不用 qt_add_translations：它会注册 lupdate 并扫描测试源码，污染 en.ts。
+if(TARGET Qt6::lrelease)
+    qt_add_lrelease(
+        TS_FILES "${CMAKE_SOURCE_DIR}/resources/i18n/zzclawterm_en.ts"
+        LRELEASE_TARGET zz_test_translations_lrelease
+        OPTIONS -compress -nounfinished
+        QM_FILES_OUTPUT_VARIABLE zz_test_qm_files)
+    foreach(i18n_test tst_ZzLanguageManager tst_ZzMenuBarService)
+        qt_add_resources(${i18n_test} "${i18n_test}_translations"
+            PREFIX "/i18n"
+            BASE "${CMAKE_CURRENT_BINARY_DIR}"
+            FILES ${zz_test_qm_files})
+    endforeach()
+endif()

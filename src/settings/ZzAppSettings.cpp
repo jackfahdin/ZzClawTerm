@@ -119,6 +119,21 @@ void ZzAppSettings::setX11ServerEnabled(bool enabled)
     emit settingsChanged();
 }
 
+QString ZzAppSettings::language() const
+{
+    return m_settings->value(QStringLiteral("app/language"),
+                             QStringLiteral("system")).toString();
+}
+
+void ZzAppSettings::setLanguage(const QString &language)
+{
+    if (this->language() == language) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("app/language"), language);
+    emit settingsChanged();
+}
+
 int ZzAppSettings::sftpBlockSize() const
 {
     return m_settings->value(QStringLiteral("sftp/blockSize"), 0).toInt();

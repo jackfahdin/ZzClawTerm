@@ -54,6 +54,13 @@ public:
     [[nodiscard]] bool x11ServerEnabled() const;
     void setX11ServerEnabled(bool enabled);
 
+    /**
+     * @brief 界面语言："system"（默认，跟随系统）/ "zh_CN" / "en"。
+     * @note 变更后由 ZzLanguageManager 立即应用，无需重启。
+     */
+    [[nodiscard]] QString language() const;
+    void setLanguage(const QString &language);
+
     /** @brief SFTP 块大小（字节）：0=自动（库内 BDP 自适应，M6 默认）；
      *        手动值夹取 [16KB,4MB]（经 ZzSftpSession::setTransferBlockSize 生效）。 */
     [[nodiscard]] int sftpBlockSize() const;

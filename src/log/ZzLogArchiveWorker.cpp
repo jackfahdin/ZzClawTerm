@@ -71,7 +71,7 @@ void ZzLogArchiveWorker::coldAdvance(bool includePartial)
                 QWriteLocker locker(m_lock);
                 m_buffer->clearRetentionFloor(); // 回到 v0.1 容量丢弃（规格 §六失败隔离）
             }
-            emit coldFailed(QStringLiteral("冷层写入失败（已重试 3 次）：%1").arg(error));
+            emit coldFailed(tr("冷层写入失败（已重试 3 次）：%1").arg(error));
             return;
         }
         // 记录映射：引擎区间 [m_coldCursor, +batch) ↔ 库内全局 [actualFirst, +batch)

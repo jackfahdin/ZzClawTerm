@@ -27,6 +27,8 @@ set(ZZCLAWTERM_APP_SOURCES
     panel/ZzSessionEditDialog.cpp
     settings/ZzAppSettings.h
     settings/ZzAppSettings.cpp
+    settings/ZzLanguageManager.h
+    settings/ZzLanguageManager.cpp
     settings/ZzSettingsPage.h
     settings/ZzSettingsPage.cpp
     terminal/ZzTerminalView.h
@@ -37,6 +39,10 @@ set(ZZCLAWTERM_APP_SOURCES
     tab/ZzTabManager.cpp
     tab/ZzSplitContainer.h
     tab/ZzSplitContainer.cpp
+    dialog/ZzAboutDialog.h
+    dialog/ZzAboutDialog.cpp
+    menu/ZzMenuBarService.h
+    menu/ZzMenuBarService.cpp
     dialog/ZzHostKeyDialog.h
     dialog/ZzHostKeyDialog.cpp
     dialog/ZzMasterPasswordDialog.h
@@ -77,6 +83,7 @@ target_link_libraries(ZzClawTermApp
         Qt6::Network
         ZzQTermWidget::qtermwidget
         ZzPureTools
+        Zz::FluentUI
         ZzSshCore
         ZzLog::ZzLog
 )
@@ -93,6 +100,26 @@ target_compile_definitions(ZzClawTermApp PUBLIC
 
 # Windows 下可执行不带控制台窗口；macOS 生成 .app
 qt_add_executable(ZzClawTerm main.cpp)
+
+# 界面翻译：lrelease 把 en.ts 编成 qm 嵌入 exe 资源（:/i18n/zzclawterm_en.qm）；
+# lupdate 手动目标 update_translations 供翻译维护时刷新 ts。
+# 简体中文为源文本，无需 zh_CN.qm（卸载 translator 即回退）。
+if(TARGET Qt6::lrelease)
+    # 子库存在时才纳入 tr() 扫描范围（session/log 经条件 add_subdirectory）
+    set(ZZ_I18N_SOURCE_TARGETS ZzClawTermApp ZzClawTerm)
+    foreach(optional_target ZzSessionCore ZzLogEngine)
+        if(TARGET ${optional_target})
+            list(APPEND ZZ_I18N_SOURCE_TARGETS ${optional_target})
+        endif()
+    endforeach()
+    qt_add_translations(ZzClawTerm
+        TS_FILES "${CMAKE_SOURCE_DIR}/resources/i18n/zzclawterm_en.ts"
+        SOURCE_TARGETS ${ZZ_I18N_SOURCE_TARGETS}
+        LRELEASE_OPTIONS -compress -nounfinished)
+else()
+    message(STATUS "LinguistTools 不可用：跳过界面翻译嵌入")
+endif()
+
 set_target_properties(ZzClawTerm PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE

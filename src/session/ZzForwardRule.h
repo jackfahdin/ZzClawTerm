@@ -39,7 +39,7 @@ struct ZzForwardRule {
 
     /**
      * @brief 单条规则校验（规格 §五）。
-     * @return 合法返回空串；否则返回中文错误描述。
+     * @return 合法返回空串；否则返回错误描述（用户可见，i18n 源文案为简体中文）。
      * @note 端口字段为 quint16，天然不超 65535；此处拒绝 0 与缺目标。
      */
     QString validate() const;
@@ -47,12 +47,12 @@ struct ZzForwardRule {
     /**
      * @brief 列表级校验：同 (type, listenHost, listenPort) 不允许重复（规格 §五）。
      * @param rules 待校验规则列表。
-     * @return 无冲突返回空串；否则返回首个冲突的中文描述。
+     * @return 无冲突返回空串；否则返回首个冲突的描述（用户可见，i18n 源文案为简体中文）。
      */
     static QString validateList(const QVector<ZzForwardRule> &rules);
 
     /**
-     * @brief 一行可读描述（状态栏/日志提示用）。
+     * @brief 一行可读描述（状态栏/日志提示用；类型名随界面语言走 i18n）。
      * @return 如「本地 127.0.0.1:13306 → db.internal:3306」「动态 127.0.0.1:1080」。
      */
     QString describe() const;

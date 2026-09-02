@@ -4,6 +4,7 @@
 
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
+#include <QtCore/QEvent>
 #include <QtCore/QFileInfo>
 #include <QtCore/QLocale>
 #include <QtCore/QTimer>
@@ -108,51 +109,35 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     layout->setSpacing(4);
 
     // 工具行：上级/刷新/上传/上传文件夹/下载/新建目录/删除/重命名
+    // 按钮文本与提示由 retranslateUi() 统一设置（构造末尾调用）
     auto *toolbar = new QHBoxLayout;
     toolbar->setSpacing(2);
-    const auto addButton = [this, toolbar](const QString &text,
-                                           const QString &tip,
-                                           void (ZzSftpPanel::*slot)()) {
+    const auto addButton = [this, toolbar](void (ZzSftpPanel::*slot)()) {
         auto *button = new QToolButton(this);
-        button->setText(text);
-        button->setToolTip(tip);
         toolbar->addWidget(button);
         connect(button, &QToolButton::clicked, this, slot);
         return button;
     };
-    m_upButton = addButton(QStringLiteral("上级"), QStringLiteral("返回上级目录"),
-                           &ZzSftpPanel::onUpClicked);
-    m_refreshButton = addButton(QStringLiteral("刷新"), QStringLiteral("刷新当前目录"),
-                                &ZzSftpPanel::triggerRefresh);
+    m_upButton = addButton(&ZzSftpPanel::onUpClicked);
+    m_refreshButton = addButton(&ZzSftpPanel::triggerRefresh);
     toolbar->addSpacing(8);
-    m_uploadButton = addButton(QStringLiteral("上传"), QStringLiteral("上传本地文件（可多选）"),
-                               &ZzSftpPanel::onUploadClicked);
-    m_uploadDirButton = addButton(QStringLiteral("上传文件夹"), QStringLiteral("递归上传本地文件夹"),
-                                  &ZzSftpPanel::onUploadDirClicked);
-    m_downloadButton = addButton(QStringLiteral("下载"), QStringLiteral("下载选中文件"),
-                                 &ZzSftpPanel::onDownloadClicked);
-    m_mkdirButton = addButton(QStringLiteral("新建目录"), QStringLiteral("在当前目录新建子目录"),
-                              &ZzSftpPanel::onMakeDirClicked);
-    m_deleteButton = addButton(QStringLiteral("删除"), QStringLiteral("删除选中文件/空目录"),
-                               &ZzSftpPanel::onDeleteClicked);
-    m_renameButton = addButton(QStringLiteral("重命名"), QStringLiteral("重命名选中条目"),
-                               &ZzSftpPanel::onRenameClicked);
+    m_uploadButton = addButton(&ZzSftpPanel::onUploadClicked);
+    m_uploadDirButton = addButton(&ZzSftpPanel::onUploadDirClicked);
+    m_downloadButton = addButton(&ZzSftpPanel::onDownloadClicked);
+    m_mkdirButton = addButton(&ZzSftpPanel::onMakeDirClicked);
+    m_deleteButton = addButton(&ZzSftpPanel::onDeleteClicked);
+    m_renameButton = addButton(&ZzSftpPanel::onRenameClicked);
     toolbar->addStretch(1);
     layout->addLayout(toolbar);
 
     // 路径栏：回车导航
     m_pathEdit = new QLineEdit(this);
-    m_pathEdit->setPlaceholderText(QStringLiteral("远端路径，回车跳转"));
     connect(m_pathEdit, &QLineEdit::returnPressed,
             this, &ZzSftpPanel::onPathEdited);
     layout->addWidget(m_pathEdit);
 
     // 目录列表：名称/大小/权限/修改时间
     m_dirModel = new QStandardItemModel(this);
-    m_dirModel->setHorizontalHeaderLabels({QStringLiteral("名称"),
-                                           QStringLiteral("大小"),
-                                           QStringLiteral("权限"),
-                                           QStringLiteral("修改时间")});
     m_dirView = new QTreeView(this);
     m_dirView->setModel(m_dirModel);
     m_dirView->setRootIsDecorated(false);
@@ -171,9 +156,6 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
 
     // 传输队列：文件/方向/进度/状态/取消
     m_transferView = new QTreeWidget(this);
-    m_transferView->setHeaderLabels({QStringLiteral("文件"), QStringLiteral("方向"),
-                                     QStringLiteral("进度"), QStringLiteral("状态"),
-                                     QStringLiteral("操作")});
     m_transferView->setRootIsDecorated(false);
     m_transferView->setMaximumHeight(140);
     m_transferView->setColumnWidth(0, 140);
@@ -183,7 +165,8 @@ ZzSftpPanel::ZzSftpPanel(QWidget *parent)
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
-    setStatus(QStringLiteral("无活动会话"));
+    retranslateUi();
+    setStatus(tr("无活动会话"));
     updateAvailability();
 
     // M6：设置变更兜底重应用传输块大小（0=自动同样传递，恢复 BDP 自适应）；
@@ -209,6 +192,41 @@ QString ZzSftpPanel::panelTitle() const
 QWidget *ZzSftpPanel::panelWidget()
 {
     return this;
+}
+
+void ZzSftpPanel::retranslateUi()
+{
+    m_upButton->setText(tr("上级"));
+    m_upButton->setToolTip(tr("返回上级目录"));
+    m_refreshButton->setText(tr("刷新"));
+    m_refreshButton->setToolTip(tr("刷新当前目录"));
+    m_uploadButton->setText(tr("上传"));
+    m_uploadButton->setToolTip(tr("上传本地文件（可多选）"));
+    m_uploadDirButton->setText(tr("上传文件夹"));
+    m_uploadDirButton->setToolTip(tr("递归上传本地文件夹"));
+    m_downloadButton->setText(tr("下载"));
+    m_downloadButton->setToolTip(tr("下载选中文件"));
+    m_mkdirButton->setText(tr("新建目录"));
+    m_mkdirButton->setToolTip(tr("在当前目录新建子目录"));
+    m_deleteButton->setText(tr("删除"));
+    m_deleteButton->setToolTip(tr("删除选中文件/空目录"));
+    m_renameButton->setText(tr("重命名"));
+    m_renameButton->setToolTip(tr("重命名选中条目"));
+
+    m_pathEdit->setPlaceholderText(tr("远端路径，回车跳转"));
+    m_dirModel->setHorizontalHeaderLabels({tr("名称"), tr("大小"),
+                                           tr("权限"), tr("修改时间")});
+    m_transferView->setHeaderLabels({tr("文件"), tr("方向"), tr("进度"),
+                                     tr("状态"), tr("操作")});
+    // 状态栏文本随绑定状态动态变化，不在此重设（下次状态刷新即跟随新语言）
+}
+
+void ZzSftpPanel::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange) {
+        retranslateUi();
+    }
+    QWidget::changeEvent(event);
 }
 
 void ZzSftpPanel::setTabManager(ZzTabManager *tabs)
@@ -274,7 +292,7 @@ void ZzSftpPanel::evaluateBinding()
     detachOps();
     m_boundConn = conn;
     if (conn) {
-        setStatus(QStringLiteral("正在打开 SFTP 会话…"));
+        setStatus(tr("正在打开 SFTP 会话…"));
         attachOps(m_opsFactory ? m_opsFactory(conn, this)
                                : createDefaultOps(conn, this));
     } else {
@@ -287,11 +305,11 @@ void ZzSftpPanel::evaluateBinding()
 void ZzSftpPanel::updateUnavailableHint(ZzSshTransportAdapter *ssh)
 {
     if (!m_boundView) {
-        setStatus(QStringLiteral("无活动会话"));
+        setStatus(tr("无活动会话"));
     } else if (!ssh) {
-        setStatus(QStringLiteral("当前会话为本地 Shell，SFTP 不可用"));
+        setStatus(tr("当前会话为本地 Shell，SFTP 不可用"));
     } else {
-        setStatus(QStringLiteral("等待 SSH 连接…"));
+        setStatus(tr("等待 SSH 连接…"));
     }
 }
 
@@ -341,8 +359,8 @@ void ZzSftpPanel::detachOps()
     // 进行中的传输行标记中断（旧会话的请求 ID 不再配对）
     for (auto it = m_transferRows.begin(); it != m_transferRows.end(); ++it) {
         QTreeWidgetItem *item = it.value();
-        if (item->text(kColStatus) == QStringLiteral("进行中")) {
-            item->setText(kColStatus, QStringLiteral("已中断"));
+        if (item->text(kColStatus) == tr("进行中")) {
+            item->setText(kColStatus, tr("已中断"));
             m_transferView->removeItemWidget(item, kColAction);
         }
     }
@@ -357,7 +375,7 @@ void ZzSftpPanel::onOpened()
 void ZzSftpPanel::onOpsError(int code, const QString &message)
 {
     Q_UNUSED(code);
-    setStatus(QStringLiteral("SFTP 会话错误：%1").arg(message));
+    setStatus(tr("SFTP 会话错误：%1").arg(message));
     emit statusMessage(message);
 }
 
@@ -368,7 +386,7 @@ void ZzSftpPanel::onClosed()
     }
     detachOps();
     m_boundConn = nullptr; // 会话已死：即使连接仍在也不再复用旧绑定
-    setStatus(QStringLiteral("SFTP 会话已关闭"));
+    setStatus(tr("SFTP 会话已关闭"));
     updateAvailability();
     // 延迟重评估绑定：连接仍在（瞬时失败）时自动重建 SFTP 会话，
     // 连接已走时刷新为对应提示，避免面板停在"已关闭"直到切窗格
@@ -384,12 +402,12 @@ void ZzSftpPanel::onClosed()
 void ZzSftpPanel::navigateTo(const QString &path)
 {
     if (!m_ops || !m_ops->isOpen()) {
-        setStatus(QStringLiteral("SFTP 会话未打开"));
+        setStatus(tr("SFTP 会话未打开"));
         return;
     }
     const quint64 reqId = m_ops->listDir(path);
     if (reqId == 0) {
-        setStatus(QStringLiteral("SFTP 会话未打开"));
+        setStatus(tr("SFTP 会话未打开"));
         return;
     }
     m_listReqId = reqId;
@@ -398,7 +416,7 @@ void ZzSftpPanel::navigateTo(const QString &path)
     ++m_fillGeneration; // 作废上一批未跑完的延迟填充回调
     m_fillQueue.clear();
     m_dirModel->removeRows(0, m_dirModel->rowCount());
-    setStatus(QStringLiteral("加载 %1 …").arg(path));
+    setStatus(tr("加载 %1 …").arg(path));
     updateAvailability();
 }
 
@@ -463,7 +481,7 @@ void ZzSftpPanel::fillNextBatch()
         return;
     }
     m_loading = false;
-    setStatus(QStringLiteral("%1 项").arg(m_dirModel->rowCount()));
+    setStatus(tr("%1 项").arg(m_dirModel->rowCount()));
     updateAvailability();
 }
 
@@ -544,7 +562,7 @@ void ZzSftpPanel::startUploads(const QStringList &localPaths)
         const quint64 reqId =
             m_ops->upload(localPath, zzJoinPath(m_currentPath, name));
         if (reqId > 0) {
-            addTransferRow(reqId, name, QStringLiteral("上传"));
+            addTransferRow(reqId, name, tr("上传"));
         }
     }
 }
@@ -557,7 +575,7 @@ void ZzSftpPanel::startDownload(const QString &remotePath, const QString &localP
     const quint64 reqId = m_ops->download(remotePath, localPath);
     if (reqId > 0) {
         addTransferRow(reqId, remotePath.section(QLatin1Char('/'), -1),
-                     QStringLiteral("下载"));
+                     tr("下载"));
     }
 }
 
@@ -572,7 +590,7 @@ void ZzSftpPanel::startUploadDir(const QString &localDir)
     }
     const quint64 reqId = m_ops->uploadDir(localDir, zzJoinPath(m_currentPath, name));
     if (reqId > 0) {
-        addTransferRow(reqId, name, QStringLiteral("上传"));
+        addTransferRow(reqId, name, tr("上传"));
     }
 }
 
@@ -584,7 +602,7 @@ void ZzSftpPanel::startDownloadDir(const QString &remotePath, const QString &loc
     const QString name = remotePath.section(QLatin1Char('/'), -1);
     const quint64 reqId = m_ops->downloadDir(remotePath, QDir(localParentDir).filePath(name));
     if (reqId > 0) {
-        addTransferRow(reqId, name, QStringLiteral("下载"));
+        addTransferRow(reqId, name, tr("下载"));
     }
 }
 
@@ -643,7 +661,7 @@ void ZzSftpPanel::onOperationError(quint64 requestId, int code,
         m_loading = false;
         updateAvailability();
     }
-    setStatus(QStringLiteral("操作失败：%1").arg(message));
+    setStatus(tr("操作失败：%1").arg(message));
     emit statusMessage(message);
 }
 
@@ -655,7 +673,7 @@ void ZzSftpPanel::addTransferRow(quint64 requestId, const QString &name,
     auto *item = new QTreeWidgetItem(m_transferView);
     item->setText(kColName, name);
     item->setText(kColDirection, direction);
-    item->setText(kColStatus, QStringLiteral("进行中"));
+    item->setText(kColStatus, tr("进行中"));
     item->setData(0, Qt::UserRole, QVariant::fromValue(requestId)); // 历史行回查用
 
     auto *bar = new QProgressBar(m_transferView);
@@ -664,7 +682,7 @@ void ZzSftpPanel::addTransferRow(quint64 requestId, const QString &name,
     m_transferView->setItemWidget(item, kColProgress, bar);
 
     auto *cancel = new QToolButton(m_transferView);
-    cancel->setText(QStringLiteral("取消"));
+    cancel->setText(tr("取消"));
     connect(cancel, &QToolButton::clicked, this,
             [this, requestId] { requestCancelTransfer(requestId); });
     m_transferView->setItemWidget(item, kColAction, cancel);
@@ -680,7 +698,7 @@ void ZzSftpPanel::pruneTransferHistory()
     int finished = 0;
     for (int i = 0; i < m_transferView->topLevelItemCount(); ++i) {
         if (m_transferView->topLevelItem(i)->text(kColStatus)
-            != QStringLiteral("进行中")) {
+            != tr("进行中")) {
             ++finished;
         }
     }
@@ -688,7 +706,7 @@ void ZzSftpPanel::pruneTransferHistory()
     for (int i = 0;
          finished > kMaxTransferHistory && i < m_transferView->topLevelItemCount();) {
         QTreeWidgetItem *item = m_transferView->topLevelItem(i);
-        if (item->text(kColStatus) == QStringLiteral("进行中")) {
+        if (item->text(kColStatus) == tr("进行中")) {
             ++i;
             continue;
         }
@@ -710,7 +728,7 @@ void ZzSftpPanel::requestCancelTransfer(quint64 requestId)
     // 会话已走时取消不会产生结局信号，直接标记
     if (!m_ops || !m_ops->isOpen()) {
         QTreeWidgetItem *item = m_transferRows.value(requestId);
-        item->setText(kColStatus, QStringLiteral("已取消"));
+        item->setText(kColStatus, tr("已取消"));
         m_transferView->removeItemWidget(item, kColAction);
     }
 }
@@ -743,7 +761,7 @@ void ZzSftpPanel::onTransferFinished(quint64 requestId)
     if (!item) {
         return;
     }
-    item->setText(kColStatus, QStringLiteral("完成"));
+    item->setText(kColStatus, tr("完成"));
     if (auto *bar = qobject_cast<QProgressBar *>(
             m_transferView->itemWidget(item, kColProgress))) {
         bar->setRange(0, 100);
@@ -763,9 +781,9 @@ void ZzSftpPanel::onTransferError(quint64 requestId, int code,
         return;
     }
     if (m_cancelled.remove(requestId)) {
-        item->setText(kColStatus, QStringLiteral("已取消"));
+        item->setText(kColStatus, tr("已取消"));
     } else {
-        item->setText(kColStatus, QStringLiteral("失败：%1").arg(message));
+        item->setText(kColStatus, tr("失败：%1").arg(message));
         emit statusMessage(message);
     }
     m_transferView->removeItemWidget(item, kColAction);
@@ -802,13 +820,13 @@ bool ZzSftpPanel::selectEntry(const QString &name)
 void ZzSftpPanel::onUploadClicked()
 {
     startUploads(QFileDialog::getOpenFileNames(
-        this, QStringLiteral("上传文件")));
+        this, tr("上传文件")));
 }
 
 void ZzSftpPanel::onUploadDirClicked()
 {
     const QString localDir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("上传文件夹"));
+        this, tr("上传文件夹"));
     if (!localDir.isEmpty()) {
         startUploadDir(localDir);
     }
@@ -819,11 +837,11 @@ void ZzSftpPanel::onDownloadClicked()
     bool isDir = false;
     const QString path = selectedPath(&isDir);
     if (path.isEmpty() || isDir) {
-        emit statusMessage(QStringLiteral("请选择要下载的文件"));
+        emit statusMessage(tr("请选择要下载的文件"));
         return;
     }
     const QString localPath = QFileDialog::getSaveFileName(
-        this, QStringLiteral("下载到"),
+        this, tr("下载到"),
         QDir::home().filePath(path.section(QLatin1Char('/'), -1)));
     if (!localPath.isEmpty()) {
         startDownload(path, localPath);
@@ -835,11 +853,11 @@ void ZzSftpPanel::onDownloadDirClicked()
     bool isDir = false;
     const QString path = selectedPath(&isDir);
     if (path.isEmpty() || !isDir) {
-        emit statusMessage(QStringLiteral("请选择要下载的目录"));
+        emit statusMessage(tr("请选择要下载的目录"));
         return;
     }
     const QString localParent = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("下载文件夹到"));
+        this, tr("下载文件夹到"));
     if (!localParent.isEmpty()) {
         startDownloadDir(path, localParent);
     }
@@ -849,7 +867,7 @@ void ZzSftpPanel::onMakeDirClicked()
 {
     bool ok = false;
     const QString name = QInputDialog::getText(
-        this, QStringLiteral("新建目录"), QStringLiteral("目录名："),
+        this, tr("新建目录"), tr("目录名："),
         QLineEdit::Normal, QString(), &ok);
     if (ok && !name.trimmed().isEmpty()) {
         requestMakeDir(name.trimmed());
@@ -864,8 +882,8 @@ void ZzSftpPanel::onDeleteClicked()
         return;
     }
     const auto choice = QMessageBox::question(
-        this, QStringLiteral("删除"),
-        QStringLiteral("确定删除 %1 吗？").arg(path));
+        this, tr("删除"),
+        tr("确定删除 %1 吗？").arg(path));
     if (choice == QMessageBox::Yes) {
         requestRemove(path, isDir);
     }
@@ -879,7 +897,7 @@ void ZzSftpPanel::onRenameClicked()
     }
     bool ok = false;
     const QString name = QInputDialog::getText(
-        this, QStringLiteral("重命名"), QStringLiteral("新名称："),
+        this, tr("重命名"), tr("新名称："),
         QLineEdit::Normal, path.section(QLatin1Char('/'), -1), &ok);
     if (ok && !name.trimmed().isEmpty()) {
         requestRename(path, name.trimmed());
@@ -897,25 +915,25 @@ void ZzSftpPanel::showDirContextMenu(const QPoint &pos)
     QAction *deleteAction = nullptr;
     if (index.isValid()) {
         const bool isDir = index.data(kIsDirRole).toBool();
-        downloadAction = menu.addAction(QStringLiteral("下载"));
+        downloadAction = menu.addAction(tr("下载"));
         downloadAction->setEnabled(ready && !isDir);
         if (isDir) {
-            downloadDirAction = menu.addAction(QStringLiteral("下载文件夹"));
+            downloadDirAction = menu.addAction(tr("下载文件夹"));
             downloadDirAction->setEnabled(ready);
         }
-        renameAction = menu.addAction(QStringLiteral("重命名"));
+        renameAction = menu.addAction(tr("重命名"));
         renameAction->setEnabled(ready);
-        deleteAction = menu.addAction(QStringLiteral("删除"));
+        deleteAction = menu.addAction(tr("删除"));
         deleteAction->setEnabled(ready);
         menu.addSeparator();
     }
-    QAction *uploadAction = menu.addAction(QStringLiteral("上传"));
+    QAction *uploadAction = menu.addAction(tr("上传"));
     uploadAction->setEnabled(ready);
-    QAction *uploadDirAction = menu.addAction(QStringLiteral("上传文件夹"));
+    QAction *uploadDirAction = menu.addAction(tr("上传文件夹"));
     uploadDirAction->setEnabled(ready);
-    QAction *mkdirAction = menu.addAction(QStringLiteral("新建目录"));
+    QAction *mkdirAction = menu.addAction(tr("新建目录"));
     mkdirAction->setEnabled(ready);
-    QAction *refreshAction = menu.addAction(QStringLiteral("刷新"));
+    QAction *refreshAction = menu.addAction(tr("刷新"));
     refreshAction->setEnabled(ready);
 
     QAction *chosen = menu.exec(m_dirView->viewport()->mapToGlobal(pos));

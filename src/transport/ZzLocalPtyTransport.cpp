@@ -68,7 +68,7 @@ void ZzLocalPtyTransport::open(const ZzTransportEndpoint &endpoint)
         }
         if (!m_closing) {
             setState(State::Disconnected);
-            emit disconnected(QStringLiteral("本地 shell 已退出（退出码 %1）")
+            emit disconnected(tr("本地 shell 已退出（退出码 %1）")
                                   .arg(m_pty->exitCode()));
         }
     };
@@ -85,7 +85,7 @@ void ZzLocalPtyTransport::open(const ZzTransportEndpoint &endpoint)
         const QString reason = m_pty->lastError();
         m_pty.reset();
         setState(State::Disconnected);
-        emit errorOccurred(2001, QStringLiteral("启动本地 shell 失败：%1").arg(reason));
+        emit errorOccurred(2001, tr("启动本地 shell 失败：%1").arg(reason));
         return;
     }
     setState(State::Connected);

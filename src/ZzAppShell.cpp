@@ -8,28 +8,36 @@
 #include <QtCore/QEvent>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QDebug>
+#include <QtCore/QUrl>
+#include <QtGui/QDesktopServices>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QStatusBar>
 
+#include <ZzCore/ZzApplicationPaths.h>
 #include <ZzFluentUI/ZzColorToken.h>
+#include <ZzFluentUI/ZzFluentTitleBar.h>
 #include <ZzFluentUI/ZzIconDescriptor.h>
 #include <ZzFluentUI/ZzThemeChangeKind.h>
 #include <ZzFluentUI/ZzThemeController.h>
 #include <ZzFluentUI/ZzThemeSnapshot.h>
 #include <ZzPureTools/ZzApplicationWindow.h>
+#include <ZzPureTools/ZzNavigationController.h>
 #include <ZzPureTools/ZzPureApplication.h>
+#include <ZzPureTools/ZzRouteId.h>
 #include <ZzPureTools/ZzWorkspaceShell.h>
 #include <ZzPureTools/ZzWorkspaceTitleMode.h>
 
 #include "dialog/ZzHostKeyDialog.h"
 #include "dialog/ZzMasterPasswordDialog.h"
+#include "menu/ZzMenuBarService.h"
 #include "panel/ZzPanelRegistry.h"
 #include "panel/ZzSessionPanel.h"
 #include "panel/ZzSftpPanel.h"
 #include "session/ZzCredentialStore.h"
 #include "session/ZzSessionModel.h"
 #include "settings/ZzAppSettings.h"
+#include "settings/ZzLanguageManager.h"
 #include "settings/ZzSettingsPage.h"
 #include "tab/ZzTabManager.h"
 #include "terminal/ZzTerminalView.h"
@@ -43,13 +51,13 @@ QString zzStateText(ZzTransportInterface::State state)
 {
     switch (state) {
     case ZzTransportInterface::State::Connected:
-        return QStringLiteral("已连接");
+        return QCoreApplication::translate("ZzAppShell", "已连接");
     case ZzTransportInterface::State::Connecting:
-        return QStringLiteral("连接中…");
+        return QCoreApplication::translate("ZzAppShell", "连接中…");
     case ZzTransportInterface::State::Disconnected:
-        return QStringLiteral("未连接");
+        return QCoreApplication::translate("ZzAppShell", "未连接");
     }
-    return QStringLiteral("未连接");
+    return QCoreApplication::translate("ZzAppShell", "未连接");
 }
 
 } // namespace
@@ -76,6 +84,11 @@ ZzAppShell::ZzAppShell(const QString &configDir, QObject *parent)
     connect(&ZzAppSettings::instance(), &ZzAppSettings::settingsChanged, this, [this] {
         m_x11Service->setEnabled(ZzAppSettings::instance().x11ServerEnabled());
     });
+
+    // 界面语言：构造即按设置档位应用（shell 构造于 QApplication 之后、窗口
+    // build 之前，时机正确；apply 广播 LanguageChange 给已存在组件）
+    m_languageManager = new ZzLanguageManager(&ZzAppSettings::instance(), this);
+    m_languageManager->apply(m_languageManager->option());
 }
 
 ZzAppShell::~ZzAppShell()
@@ -101,11 +114,19 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     m_workspaceShell = std::move(created).value();
     m_window = &window;
 
+    // 标题栏菜单：仅框架窗口有 Fluent 标题栏（离屏测试的普通 QMainWindow 无，
+    // 菜单服务不装配，对应槽位走兜底分支）；服务以窗口为父随 menuBar 销毁
+    if (titleBar != nullptr) {
+        m_menuBarService = new ZzMenuBarService(
+            titleBar->menuBar(), &ZzAppSettings::instance(),
+            m_languageManager, this, &window);
+    }
+
     // 会话面板 → 活动栏 LeftPrimary「会话」，延迟工厂首开才创建；
     // 面板内容无父对象交给 Shell，登记册与双击接线在工厂内完成
     auto sessions = m_workspaceShell->registerSidePanelFactory(
         ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sessions")),
-        QStringLiteral("会话"),
+        tr("会话"),
         ZzFluentUI::ZzIconDescriptor::fromFontIcon(
             ZzFluentUI::ZzFontIcon::Terminal),
         ZzFluentUI::ZzActivityArea::LeftPrimary,
@@ -124,7 +145,7 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     // SFTP 面板 → 活动栏 RightPrimary「文件」，同样延迟创建
     auto files = m_workspaceShell->registerSidePanelFactory(
         ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sftp")),
-        QStringLiteral("文件"),
+        tr("文件"),
         ZzFluentUI::ZzIconDescriptor::fromFontIcon(
             ZzFluentUI::ZzFontIcon::Folder),
         ZzFluentUI::ZzActivityArea::RightPrimary,
@@ -145,7 +166,7 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
     if (applicationWindow != nullptr) {
         auto integrated = m_workspaceShell->integrateApplicationNavigation(
             ZzPureTools::ZzWorkspacePanelId(QStringLiteral("navigation")),
-            QStringLiteral("导航"),
+            tr("导航"),
             ZzFluentUI::ZzIconDescriptor::fromFontIcon(
                 ZzFluentUI::ZzFontIcon::Sitemap),
             ZzFluentUI::ZzActivityArea::LeftPrimary,
@@ -158,13 +179,14 @@ ZzCore::ZzResult<void> ZzAppShell::assemble(QMainWindow &window)
 
     // 状态栏四件套：连接状态 | 编码 | 行列 | 隧道数
     m_statusBar = window.statusBar();
-    m_stateLabel = new QLabel(QStringLiteral("未连接"), m_statusBar);
+    m_stateLabel = new QLabel(zzStateText(ZzTransportInterface::State::Disconnected),
+                              m_statusBar);
     m_encodingLabel = new QLabel(m_statusBar);
     m_sizeLabel = new QLabel(m_statusBar);
     m_statusBar->addPermanentWidget(m_stateLabel);
     m_statusBar->addPermanentWidget(m_encodingLabel);
     m_statusBar->addPermanentWidget(m_sizeLabel);
-    m_tunnelLabel = new QLabel(QStringLiteral("隧道: 0"), m_statusBar);
+    m_tunnelLabel = new QLabel(tr("隧道: %1").arg(0), m_statusBar);
     m_statusBar->addPermanentWidget(m_tunnelLabel);
 
     // 状态栏主题化样式（背景/分隔线/文字色取自 Fluent 快照），主题切换时重刷
@@ -352,7 +374,7 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
             &ZzAppShell::showStatusMessage);
     connect(m_x11Service, &ZzX11Service::serverCrashed, this,
             [this](const QString &message) {
-                showStatusMessage(QStringLiteral("X server 异常退出：%1").arg(message));
+                showStatusMessage(tr("X server 异常退出：%1").arg(message));
             });
 
     // 状态栏：状态 / 编码 / 行列 / 瞬时消息
@@ -378,7 +400,7 @@ void ZzAppShell::wireTabManager(ZzTabManager *tabs)
     tabs->connect(tabs, &ZzTabManager::currentTunnelCountChanged, this,
                   [this](int count) {
                       if (m_tunnelLabel) {
-                          m_tunnelLabel->setText(QStringLiteral("隧道: %1").arg(count));
+                          m_tunnelLabel->setText(tr("隧道: %1").arg(count));
                       }
                   });
     tabs->connect(tabs, &ZzTabManager::statusMessage, this,
@@ -401,6 +423,46 @@ void ZzAppShell::showStatusMessage(const QString &message)
     if (m_statusBar) {
         m_statusBar->showMessage(message, 5000);
     }
+}
+
+void ZzAppShell::requestNewSession()
+{
+    // 会话面板为延迟工厂：未物化时先经工作区显示触发创建
+    if (m_sessionPanel == nullptr && m_workspaceShell != nullptr) {
+        const auto shown = m_workspaceShell->showPanel(
+            ZzPureTools::ZzWorkspacePanelId(QStringLiteral("sessions")), true);
+        if (!shown) {
+            showStatusMessage(tr("会话面板不可用"));
+            return;
+        }
+    }
+    if (m_sessionPanel != nullptr) {
+        m_sessionPanel->newSession(QString());
+    } else {
+        showStatusMessage(tr("会话面板尚未就绪"));
+    }
+}
+
+void ZzAppShell::openSettingsPage()
+{
+    auto *window = qobject_cast<ZzPureTools::ZzApplicationWindow *>(
+        m_window.data());
+    if (window == nullptr || window->navigationController() == nullptr) {
+        return;
+    }
+    const auto result = window->navigationController()->navigate(
+        ZzPureTools::ZzRouteId(QStringLiteral("settings")));
+    if (!result) {
+        showStatusMessage(tr("无法打开设置页"));
+    }
+}
+
+void ZzAppShell::openLogDirectory()
+{
+    const ZzCore::ZzApplicationPaths paths(
+        QCoreApplication::organizationName(), QCoreApplication::applicationName());
+    QDesktopServices::openUrl(
+        QUrl::fromLocalFile(paths.logDirectory()));
 }
 
 void ZzAppShell::applyStatusBarTheme()
@@ -455,3 +517,5 @@ QLabel *ZzAppShell::statusEncodingLabel() const { return m_encodingLabel; }
 QLabel *ZzAppShell::statusSizeLabel() const { return m_sizeLabel; }
 QLabel *ZzAppShell::statusTunnelLabel() const { return m_tunnelLabel; }
 ZzX11Service *ZzAppShell::x11Service() const { return m_x11Service; }
+ZzMenuBarService *ZzAppShell::menuBarService() const { return m_menuBarService; }
+ZzLanguageManager *ZzAppShell::languageManager() const { return m_languageManager; }

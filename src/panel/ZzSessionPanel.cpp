@@ -53,7 +53,7 @@ QString ZzSessionPanel::panelId() const
 
 QString ZzSessionPanel::panelTitle() const
 {
-    return QStringLiteral("会话");
+    return tr("会话");
 }
 
 QWidget *ZzSessionPanel::panelWidget()
@@ -134,7 +134,7 @@ void ZzSessionPanel::rebuildTree()
         sessionItem->setData(profile.id.toString(QUuid::WithoutBraces),
                              kProfileIdRole);
         sessionItem->setToolTip(profile.protocol == QStringLiteral("local")
-            ? QStringLiteral("本地 Shell")
+            ? tr("本地 Shell")
             : QStringLiteral("%1@%2:%3").arg(profile.userName, profile.host)
                   .arg(profile.port));
         parentItem->appendRow(sessionItem);
@@ -154,7 +154,7 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
     QAction *result = nullptr;
     if (!index.isValid()) {
         // 空白区：新建会话
-        QAction *newAction = menu.addAction(QStringLiteral("新建会话"));
+        QAction *newAction = menu.addAction(tr("新建会话"));
         result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
         if (result == newAction) {
             newSession(QString());
@@ -165,7 +165,7 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
     if (profileId.isEmpty()) {
         // 分组项：在此分组下新建
         QAction *newAction =
-            menu.addAction(QStringLiteral("在此分组新建会话"));
+            menu.addAction(tr("在此分组新建会话"));
         result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
         if (result == newAction) {
             // 分组的完整路径 = 逐层标题拼接
@@ -178,10 +178,10 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
         return;
     }
     // 会话项：新建/编辑/删除/复制（规格 §七）
-    QAction *newAction = menu.addAction(QStringLiteral("新建会话"));
-    QAction *editAction = menu.addAction(QStringLiteral("编辑"));
-    QAction *deleteAction = menu.addAction(QStringLiteral("删除"));
-    QAction *duplicateAction = menu.addAction(QStringLiteral("复制"));
+    QAction *newAction = menu.addAction(tr("新建会话"));
+    QAction *editAction = menu.addAction(tr("编辑"));
+    QAction *deleteAction = menu.addAction(tr("删除"));
+    QAction *duplicateAction = menu.addAction(tr("复制"));
     result = menu.exec(m_tree->viewport()->mapToGlobal(pos));
     if (result == newAction) {
         newSession(QString());
@@ -227,7 +227,7 @@ void ZzSessionPanel::duplicateSession(const QString &profileId)
     }
     ZzSessionProfile copy = *source;
     copy.id = QUuid(); // 置空，由 addSession 重新生成
-    copy.name = copy.name + QStringLiteral("（副本）");
+    copy.name = copy.name + tr("（副本）");
     // 密码引用随副本共享同一条凭据记录，语义正确（同一台机器同一个密码）
     m_model->addSession(copy);
 }

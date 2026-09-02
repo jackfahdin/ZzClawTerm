@@ -1,5 +1,6 @@
 #include "ZzSettingsPage.h"
 
+#include <QtCore/QEvent>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFormLayout>
@@ -14,7 +15,7 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     : QWidget(parent)
     , m_settings(settings)
 {
-    auto *layout = new QFormLayout(this);
+    m_formLayout = new QFormLayout(this);
 
     m_terminalTypeCombo = new QComboBox(this);
     m_terminalTypeCombo->setEditable(true);
@@ -23,7 +24,7 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         QStringLiteral("vt100"), QStringLiteral("linux"),
     });
     m_terminalTypeCombo->setCurrentText(m_settings->terminalType());
-    layout->addRow(QStringLiteral("终端类型："), m_terminalTypeCombo);
+    m_formLayout->addRow(QString(), m_terminalTypeCombo);
 
     m_encodingCombo = new QComboBox(this);
     m_encodingCombo->addItems({
@@ -32,50 +33,43 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         QStringLiteral("Shift-JIS"), QStringLiteral("EUC-KR"),
     });
     m_encodingCombo->setCurrentText(m_settings->encoding());
-    layout->addRow(QStringLiteral("默认编码："), m_encodingCombo);
+    m_formLayout->addRow(QString(), m_encodingCombo);
 
     m_fontSizeSpin = new QSpinBox(this);
     m_fontSizeSpin->setRange(6, 32);
     m_fontSizeSpin->setSuffix(QStringLiteral(" pt"));
     m_fontSizeSpin->setValue(m_settings->fontSize());
-    layout->addRow(QStringLiteral("字号："), m_fontSizeSpin);
+    m_formLayout->addRow(QString(), m_fontSizeSpin);
 
     m_colorSchemeCombo = new QComboBox(this);
     m_colorSchemeCombo->addItems(QTermWidget::availableColorSchemes());
     m_colorSchemeCombo->setCurrentText(m_settings->colorScheme());
-    layout->addRow(QStringLiteral("配色方案："), m_colorSchemeCombo);
+    m_formLayout->addRow(QString(), m_colorSchemeCombo);
 
     m_historyLinesSpin = new QSpinBox(this);
     m_historyLinesSpin->setRange(1000, 100000);
     m_historyLinesSpin->setSingleStep(1000);
     m_historyLinesSpin->setValue(m_settings->historyLines());
-    layout->addRow(QStringLiteral("内存历史行数："), m_historyLinesSpin);
+    m_formLayout->addRow(QString(), m_historyLinesSpin);
 
     // 凭据后端：auto（密钥环可用则用，否则 AES 文件）/ aes-file / system-keyring
+    // 显示文本集中在 retranslateUi()（setItemText 保留 itemData 与当前选中）
     m_credentialBackendCombo = new QComboBox(this);
-    m_credentialBackendCombo->addItem(QStringLiteral("自动（优先系统密钥环）"),
-                                      QStringLiteral("auto"));
-    m_credentialBackendCombo->addItem(QStringLiteral("AES 加密文件"),
-                                      QStringLiteral("aes-file"));
-    m_credentialBackendCombo->addItem(QStringLiteral("系统密钥环"),
-                                      QStringLiteral("system-keyring"));
+    m_credentialBackendCombo->addItem(QString(), QStringLiteral("auto"));
+    m_credentialBackendCombo->addItem(QString(), QStringLiteral("aes-file"));
+    m_credentialBackendCombo->addItem(QString(), QStringLiteral("system-keyring"));
     const int backendIndex =
         m_credentialBackendCombo->findData(m_settings->credentialBackend());
     m_credentialBackendCombo->setCurrentIndex(backendIndex >= 0 ? backendIndex : 0);
-    m_credentialBackendCombo->setToolTip(
-        QStringLiteral("凭据库在应用启动时构造，本项改动重启后生效。\n"
-                       "切换到系统密钥环不会自动迁移旧 AES 文件中的凭据（旧文件保留不删）。"));
-    layout->addRow(QStringLiteral("凭据后端："), m_credentialBackendCombo);
+    m_formLayout->addRow(QString(), m_credentialBackendCombo);
 
-    m_x11ServerCheck = new QCheckBox(QStringLiteral("启用 X server（启动时自动运行）"), this);
+    m_x11ServerCheck = new QCheckBox(this);
     m_x11ServerCheck->setChecked(m_settings->x11ServerEnabled());
-    m_x11ServerCheck->setToolTip(QStringLiteral(
-        "关闭后停止内建 X server，新会话不再发起 X11 转发；重新开启即恢复"));
-    layout->addRow(QStringLiteral("X11："), m_x11ServerCheck);
+    m_formLayout->addRow(QString(), m_x11ServerCheck);
 
     // SFTP 块大小：itemData 存字节数，0=自动（BDP 自适应，M6）
     m_sftpBlockSizeCombo = new QComboBox(this);
-    m_sftpBlockSizeCombo->addItem(QStringLiteral("自动（BDP 自适应）"), 0);
+    m_sftpBlockSizeCombo->addItem(QString(), 0); // 文本见 retranslateUi()
     for (int kb : {64, 128, 256, 512, 1024, 2048, 4096}) {
         m_sftpBlockSizeCombo->addItem(
             kb >= 1024 ? QStringLiteral("%1 MB").arg(kb / 1024)
@@ -84,16 +78,13 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     }
     const int bsIndex = m_sftpBlockSizeCombo->findData(m_settings->sftpBlockSize());
     m_sftpBlockSizeCombo->setCurrentIndex(bsIndex >= 0 ? bsIndex : 0);
-    m_sftpBlockSizeCombo->setToolTip(QStringLiteral(
-        "手动值对高延迟链路可能更优；自动模式按链路 RTT 自适应（推荐）。\n"
-        "进行中的传输不受影响，下一传输生效。"));
-    layout->addRow(QStringLiteral("SFTP 块大小："), m_sftpBlockSizeCombo);
+    m_formLayout->addRow(QString(), m_sftpBlockSizeCombo);
 
-    auto *note = new QLabel(
-        QStringLiteral("改动立即生效：新标签使用新值，已打开标签实时应用字号/配色/编码。"),
-        this);
-    note->setWordWrap(true);
-    layout->addRow(note);
+    m_noteLabel = new QLabel(this);
+    m_noteLabel->setWordWrap(true);
+    m_formLayout->addRow(m_noteLabel);
+
+    retranslateUi();
 
     // 即改即存
     // 终端类型 combo 可编辑：currentTextChanged 逐键触发会写盘 "x"/"xt"/...
@@ -124,6 +115,52 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     connect(m_sftpBlockSizeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
         m_settings->setSftpBlockSize(m_sftpBlockSizeCombo->itemData(index).toInt());
     });
+}
+
+void ZzSettingsPage::retranslateUi()
+{
+    // 行标签经 labelForField 按字段部件反查，不依赖行序号
+    const auto setRowLabel = [this](QWidget *field, const QString &text) {
+        if (auto *label =
+                qobject_cast<QLabel *>(m_formLayout->labelForField(field))) {
+            label->setText(text);
+        }
+    };
+    setRowLabel(m_terminalTypeCombo, tr("终端类型："));
+    setRowLabel(m_encodingCombo, tr("默认编码："));
+    setRowLabel(m_fontSizeSpin, tr("字号："));
+    setRowLabel(m_colorSchemeCombo, tr("配色方案："));
+    setRowLabel(m_historyLinesSpin, tr("内存历史行数："));
+    setRowLabel(m_credentialBackendCombo, tr("凭据后端："));
+    setRowLabel(m_x11ServerCheck, tr("X11："));
+    setRowLabel(m_sftpBlockSizeCombo, tr("SFTP 块大小："));
+
+    m_credentialBackendCombo->setItemText(0, tr("自动（优先系统密钥环）"));
+    m_credentialBackendCombo->setItemText(1, tr("AES 加密文件"));
+    m_credentialBackendCombo->setItemText(2, tr("系统密钥环"));
+    m_credentialBackendCombo->setToolTip(
+        tr("凭据库在应用启动时构造，本项改动重启后生效。\n"
+           "切换到系统密钥环不会自动迁移旧 AES 文件中的凭据（旧文件保留不删）。"));
+
+    m_x11ServerCheck->setText(tr("启用 X server（启动时自动运行）"));
+    m_x11ServerCheck->setToolTip(
+        tr("关闭后停止内建 X server，新会话不再发起 X11 转发；重新开启即恢复"));
+
+    m_sftpBlockSizeCombo->setItemText(0, tr("自动（BDP 自适应）"));
+    m_sftpBlockSizeCombo->setToolTip(
+        tr("手动值对高延迟链路可能更优；自动模式按链路 RTT 自适应（推荐）。\n"
+           "进行中的传输不受影响，下一传输生效。"));
+
+    m_noteLabel->setText(
+        tr("改动立即生效：新标签使用新值，已打开标签实时应用字号/配色/编码。"));
+}
+
+void ZzSettingsPage::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::LanguageChange) {
+        retranslateUi();
+    }
+    QWidget::changeEvent(event);
 }
 
 QComboBox *ZzSettingsPage::terminalTypeCombo() const { return m_terminalTypeCombo; }
