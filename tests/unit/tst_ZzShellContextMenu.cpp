@@ -143,7 +143,11 @@ private slots:
         auto *application = qobject_cast<ZzPureTools::ZzPureApplication *>(
             QCoreApplication::instance());
         QVERIFY(application != nullptr);
-        QVERIFY(builder.build(*application));
+        const auto buildResult = builder.build(*application);
+        QVERIFY2(buildResult,
+                 qPrintable(QStringLiteral("build 失败：%1 | %2")
+                     .arg(buildResult ? QString() : buildResult.error().technicalMessage(),
+                          buildResult ? QString() : buildResult.error().context())));
 
         // 真实框架窗口（非离屏 QMainWindow 分支）
         QWidget *window = s_workspace->workspaceWidget()->window();
