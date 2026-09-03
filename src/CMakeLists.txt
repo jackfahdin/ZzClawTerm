@@ -43,6 +43,10 @@ set(ZZCLAWTERM_APP_SOURCES
     dialog/ZzAboutDialog.cpp
     dialog/ZzSshConfigPage.h
     dialog/ZzSshConfigPage.cpp
+    dialog/ZzLocalShellConfigPage.h
+    dialog/ZzLocalShellConfigPage.cpp
+    dialog/ZzSessionConfigWindow.h
+    dialog/ZzSessionConfigWindow.cpp
     menu/ZzMenuBarService.h
     menu/ZzMenuBarService.cpp
     dialog/ZzHostKeyDialog.h

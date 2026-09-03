@@ -8,15 +8,17 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTimer>
 
-#include "panel/ZzSessionEditDialog.h"
+#include "dialog/ZzSessionConfigWindow.h"
 #include "session/ZzCredentialStore.h"
 
 /**
- * @brief ZzSessionEditDialog 端口转发规则表单元测试（规格 §五）。
+ * @brief ZzSessionConfigWindow 窗口级单元测试：协议 tab 收集、端口转发规则表
+ *        （规格 §五）与凭据落库行为（用例自 ZzSessionConfigWindow 迁移）。
  */
-class tst_ZzSessionEditDialog : public QObject
+class tst_ZzSessionConfigWindow : public QObject
 {
     Q_OBJECT
 
@@ -70,7 +72,7 @@ private slots:
     void ctorPopulatesTableFromProfile()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), profileWithRules());
+        ZzSessionConfigWindow dlg(store.get(), profileWithRules());
         auto *table = dlg.findChild<QTableWidget *>(QStringLiteral("forwardTable"));
         QVERIFY(table);
         QCOMPARE(table->rowCount(), 2);
@@ -89,7 +91,7 @@ private slots:
     void acceptSavesValidRules()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), profileWithRules());
+        ZzSessionConfigWindow dlg(store.get(), profileWithRules());
         QSignalSpy finishSpy(&dlg, &QDialog::finished);
         clickOk(dlg);
         QCOMPARE(finishSpy.count(), 1);
@@ -102,7 +104,7 @@ private slots:
     void invalidRuleBlocksAccept()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), profileWithRules());
+        ZzSessionConfigWindow dlg(store.get(), profileWithRules());
         auto *table = dlg.findChild<QTableWidget *>(QStringLiteral("forwardTable"));
         table->item(0, 2)->setText(QStringLiteral("0")); // 非法监听端口
 
@@ -117,7 +119,7 @@ private slots:
     void duplicateRuleBlocksAccept()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), profileWithRules());
+        ZzSessionConfigWindow dlg(store.get(), profileWithRules());
         auto *table = dlg.findChild<QTableWidget *>(QStringLiteral("forwardTable"));
         // 把第二行改成与第一行同三元组
         auto *typeCombo = qobject_cast<QComboBox *>(table->cellWidget(1, 0));
@@ -135,7 +137,7 @@ private slots:
     void addRemoveButtonsWork()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), ZzSessionProfile{});
+        ZzSessionConfigWindow dlg(store.get(), ZzSessionProfile{});
         auto *table = dlg.findChild<QTableWidget *>(QStringLiteral("forwardTable"));
         auto *addBtn = dlg.findChild<QPushButton *>(QStringLiteral("addForwardButton"));
         auto *removeBtn = dlg.findChild<QPushButton *>(QStringLiteral("removeForwardButton"));
@@ -161,7 +163,7 @@ private slots:
         profile.host = QStringLiteral("10.0.0.2");
         profile.authMethod = ZzAuthMethod::PrivateKey;
         profile.privateKeyPath = QStringLiteral("/home/u/.ssh/id_ed25519");
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         auto *passEdit = dlg.findChild<QLineEdit *>(QStringLiteral("keyPassphraseEdit"));
         QVERIFY(passEdit);
         passEdit->setText(QStringLiteral("pass-口令"));
@@ -194,7 +196,7 @@ private slots:
             store->addCredential(QStringLiteral("密钥机 私钥口令"), QStringLiteral("old-pass"));
         QVERIFY(!profile.keyPassphraseCredentialId.isNull());
 
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         QSignalSpy finishSpy(&dlg, &QDialog::finished);
         clickOk(dlg);
         QCOMPARE(finishSpy.count(), 1);
@@ -212,7 +214,7 @@ private slots:
         profile.host = QStringLiteral("10.0.0.3");
         profile.x11Forwarding = true;
 
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         auto *check = dlg.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
         QVERIFY(check);
         QVERIFY(check->isChecked()); // 构造时按 profile 加载
@@ -231,7 +233,7 @@ private slots:
         plain.name = QStringLiteral("终端机");
         plain.host = QStringLiteral("10.0.0.4");
         plain.x11Forwarding = false; // M5 后缺省为 true，此处显式置 false
-        ZzSessionEditDialog dlg2(store.get(), plain);
+        ZzSessionConfigWindow dlg2(store.get(), plain);
         auto *check2 = dlg2.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
         QVERIFY(check2);
         QVERIFY(!check2->isChecked());
@@ -251,7 +253,7 @@ private slots:
         profile.host = QStringLiteral("10.0.0.3");
         profile.x11EmbedMode = false; // 独立窗口
 
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         auto *check = dlg.findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"));
         QVERIFY(check);
         QVERIFY(!check->isChecked()); // 构造时按 profile 加载
@@ -270,7 +272,7 @@ private slots:
         plain.name = QStringLiteral("终端机");
         plain.host = QStringLiteral("10.0.0.4");
         plain.x11EmbedMode = true; // M5 后缺省为 false，此处显式置 true
-        ZzSessionEditDialog dlg2(store.get(), plain);
+        ZzSessionConfigWindow dlg2(store.get(), plain);
         auto *check2 = dlg2.findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"));
         QVERIFY(check2);
         QVERIFY(check2->isChecked());
@@ -283,7 +285,7 @@ private slots:
     void x11CheckBoxesMatchNewDefaults()
     {
         auto store = makeStore();
-        ZzSessionEditDialog dlg(store.get(), ZzSessionProfile{});
+        ZzSessionConfigWindow dlg(store.get(), ZzSessionProfile{});
         auto *x11 = dlg.findChild<QCheckBox *>(QStringLiteral("x11CheckBox"));
         auto *embed = dlg.findChild<QCheckBox *>(QStringLiteral("x11EmbedCheckBox"));
         QVERIFY(x11 && x11->isChecked());
@@ -305,7 +307,7 @@ private slots:
         profile.keyPassphraseCredentialId =
             store->addCredential(QStringLiteral("密钥机 私钥口令"), QStringLiteral("old-pass"));
 
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         auto *authCombo = dlg.findChild<QComboBox *>(QStringLiteral("authCombo"));
         QVERIFY(authCombo);
         authCombo->setCurrentIndex(
@@ -335,7 +337,7 @@ private slots:
         profile.host = QStringLiteral("10.0.0.8");
         profile.userName = QStringLiteral("zz");
         profile.authMethod = ZzAuthMethod::Password;
-        ZzSessionEditDialog dlg(store.get(), profile);
+        ZzSessionConfigWindow dlg(store.get(), profile);
         auto *pwdEdit = dlg.findChild<QLineEdit *>(QStringLiteral("passwordEdit"));
         QVERIFY(pwdEdit);
         pwdEdit->setText(QStringLiteral("secret-pw"));
@@ -364,7 +366,44 @@ private slots:
         QVERIFY(!credentialId.isNull());
         QCOMPARE(store->credential(credentialId).value(), QStringLiteral("secret-pw"));
     }
+
+    /** @brief tab 切换决定产出协议：激活本地 tab 时 protocol=="local"。 */
+    void activeTabDeterminesProtocol()
+    {
+        auto store = makeStore();
+        ZzSessionConfigWindow dlg(store.get());
+        auto *tabs = dlg.findChild<QTabWidget *>(QStringLiteral("protocolTabWidget"));
+        QVERIFY(tabs);
+        QCOMPARE(tabs->count(), 2);
+        tabs->setCurrentIndex(1); // 本地 Shell
+        auto *shellEdit = dlg.findChild<QLineEdit *>(QStringLiteral("shellEdit"));
+        QVERIFY(shellEdit);
+        shellEdit->setText(QStringLiteral("/bin/bash"));
+        auto *nameEdit = dlg.findChild<QLineEdit *>(QStringLiteral("nameEdit"));
+        nameEdit->setText(QStringLiteral("本机"));
+        QSignalSpy finishSpy(&dlg, &QDialog::finished);
+        clickOk(dlg);
+        QCOMPARE(finishSpy.count(), 1);
+        QCOMPARE(dlg.profile().protocol, QStringLiteral("local"));
+        QCOMPARE(dlg.profile().host, QStringLiteral("/bin/bash"));
+    }
+
+    /** @brief 编辑 local 会话：构造后预选本地 tab。 */
+    void editLocalProfilePreselectsLocalTab()
+    {
+        auto store = makeStore();
+        ZzSessionProfile profile;
+        profile.id = QUuid::createUuid();
+        profile.name = QStringLiteral("本机");
+        profile.protocol = QStringLiteral("local");
+        profile.host = QStringLiteral("/bin/zsh");
+        ZzSessionConfigWindow dlg(store.get(), profile);
+        auto *tabs = dlg.findChild<QTabWidget *>(QStringLiteral("protocolTabWidget"));
+        QCOMPARE(tabs->currentIndex(), 1);
+        auto *shellEdit = dlg.findChild<QLineEdit *>(QStringLiteral("shellEdit"));
+        QCOMPARE(shellEdit->text(), QStringLiteral("/bin/zsh"));
+    }
 };
 
-QTEST_MAIN(tst_ZzSessionEditDialog)
-#include "tst_ZzSessionEditDialog.moc"
+QTEST_MAIN(tst_ZzSessionConfigWindow)
+#include "tst_ZzSessionConfigWindow.moc"
