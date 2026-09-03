@@ -178,6 +178,44 @@ Trust and save this fingerprint?</translation>
     </message>
 </context>
 <context>
+    <name>ZzLocalShellConfigPage</name>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="91"/>
+        <source>名称不能为空</source>
+        <translation>Name cannot be empty</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="120"/>
+        <source>常规</source>
+        <translation>General</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="132"/>
+        <source>名称：</source>
+        <translation>Name:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="133"/>
+        <source>分组路径：</source>
+        <translation>Group Path:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="134"/>
+        <source>Shell 程序：</source>
+        <translation>Shell Program:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="136"/>
+        <source>如：生产环境/Web 服务器</source>
+        <translation>e.g. Production/Web Server</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzLocalShellConfigPage.cpp" line="137"/>
+        <source>留空使用系统默认 shell</source>
+        <translation>Leave empty to use the system default shell</translation>
+    </message>
+</context>
+<context>
     <name>ZzLogArchiveWorker</name>
     <message>
         <location filename="../../src/log/ZzLogArchiveWorker.cpp" line="74"/>
@@ -249,340 +287,341 @@ Trust and save this fingerprint?</translation>
 <context>
     <name>ZzMenuBarService</name>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="187"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="174"/>
         <source>会话(&amp;S)</source>
         <translation>Session(&amp;S)</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="189"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="176"/>
         <source>新建会话(&amp;N)</source>
         <translation>New Session(&amp;N)</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="191"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="178"/>
         <source>视图(&amp;V)</source>
         <translation>View(&amp;V)</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="192"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="179"/>
         <source>主题</source>
         <translation>Theme</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="194"/>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="206"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="181"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="193"/>
         <source>跟随系统</source>
         <translation>Follow System</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="195"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="182"/>
         <source>浅色</source>
         <translation>Light</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="196"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="183"/>
         <source>深色</source>
         <translation>Dark</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="197"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="184"/>
         <source>高对比</source>
         <translation>High Contrast</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="202"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="189"/>
         <source>终端主题</source>
         <translation>Terminal Theme</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="203"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="190"/>
         <source>更多方案…</source>
         <translation>More Color Schemes…</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="204"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="191"/>
         <source>语言</source>
         <translation>Language</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="207"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="194"/>
         <source>简体中文</source>
         <translation>简体中文</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="208"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="195"/>
         <source>English</source>
         <translation>English</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="214"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="201"/>
         <source>帮助(&amp;H)</source>
         <translation>Help(&amp;H)</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="216"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="203"/>
         <source>关于 ZzClawTerm(&amp;A)</source>
         <translation>About ZzClawTerm(&amp;A)</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="218"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="205"/>
         <source>打开日志目录</source>
         <translation>Open Log Directory</translation>
     </message>
     <message>
-        <location filename="../../src/menu/ZzMenuBarService.cpp" line="220"/>
+        <location filename="../../src/menu/ZzMenuBarService.cpp" line="207"/>
         <source>GitHub 仓库</source>
         <translation>GitHub Repository</translation>
     </message>
 </context>
 <context>
-    <name>ZzSessionEditDialog</name>
+    <name>ZzSessionConfigWindow</name>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="168"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="93"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="100"/>
+        <source>输入无效</source>
+        <translation>Invalid Input</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="123"/>
         <source>新建会话</source>
         <translation>New Session</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="168"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="123"/>
         <source>编辑会话</source>
         <translation>Edit Session</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="177"/>
-        <source>名称：</source>
-        <translation>Name:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="178"/>
-        <source>分组路径：</source>
-        <translation>Group Path:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="179"/>
-        <source>协议：</source>
-        <translation>Protocol:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="180"/>
-        <source>主机：</source>
-        <translation>Host:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="181"/>
-        <source>端口：</source>
-        <translation>Port:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="182"/>
-        <source>Shell 程序：</source>
-        <translation>Shell Program:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="183"/>
-        <source>用户名：</source>
-        <translation>Username:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="184"/>
-        <source>认证方式：</source>
-        <translation>Authentication:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="185"/>
-        <source>私钥路径：</source>
-        <translation>Private Key Path:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="186"/>
-        <source>私钥口令：</source>
-        <translation>Private Key Passphrase:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="187"/>
-        <source>密码：</source>
-        <translation>Password:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="189"/>
-        <source>端口转发：</source>
-        <translation>Port Forwarding:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="190"/>
-        <source>图形转发：</source>
-        <translation>X11 Forwarding:</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="192"/>
-        <source>如：生产环境/Web 服务器</source>
-        <translation>e.g. Production/Web Server</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="193"/>
-        <source>留空使用系统默认 shell</source>
-        <translation>Leave empty to use the system default shell</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="194"/>
-        <source>私钥路径（公钥认证）</source>
-        <translation>Private key path (public key authentication)</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="197"/>
-        <source>私钥口令（无口令留空）</source>
-        <translation>Private key passphrase (leave empty if none)</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="198"/>
-        <source>留空保留已保存的口令</source>
-        <translation>Leave empty to keep the saved passphrase</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="201"/>
-        <source>登录密码</source>
-        <translation>Login password</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="202"/>
-        <source>留空保留已保存的密码</source>
-        <translation>Leave empty to keep the saved password</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="204"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="124"/>
         <source>SSH</source>
         <translation>SSH</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="205"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="125"/>
         <source>本地 Shell</source>
         <translation>Local Shell</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="206"/>
-        <source>SSH Agent</source>
-        <translation>SSH Agent</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="207"/>
-        <source>公钥文件</source>
-        <translation>Public Key File</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="208"/>
-        <source>密码</source>
-        <translation>Password</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="211"/>
-        <source>类型</source>
-        <translation>Type</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="211"/>
-        <source>监听地址</source>
-        <translation>Listen Address</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="211"/>
-        <source>监听端口</source>
-        <translation>Listen Port</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="212"/>
-        <source>目标地址</source>
-        <translation>Target Address</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="212"/>
-        <source>目标端口</source>
-        <translation>Target Port</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="217"/>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="393"/>
-        <source>本地 -L</source>
-        <translation>Local -L</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="218"/>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="394"/>
-        <source>远程 -R</source>
-        <translation>Remote -R</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="219"/>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="395"/>
-        <source>动态 -D</source>
-        <translation>Dynamic -D</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="224"/>
-        <source>添加</source>
-        <translation>Add</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="228"/>
-        <source>删除</source>
-        <translation>Delete</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="231"/>
-        <source>X11 转发</source>
-        <translation>X11 Forwarding</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="232"/>
-        <source>Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz</source>
-        <translation>On Windows, the built-in X server is downloaded on first use; on Linux/macOS a local X server / XQuartz is required</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="236"/>
-        <source>嵌入标签页显示（实验；否则独立窗口）</source>
-        <translation>Embed in tab (experimental; otherwise shown in a separate window)</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="237"/>
-        <source>仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示</source>
-        <translation>Windows only: the X11 desktop is embedded in the session tab; if unchecked, X programs are shown in separate windows</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="260"/>
-        <source>主机不能为空</source>
-        <translation>Host cannot be empty</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="264"/>
-        <source>名称不能为空</source>
-        <translation>Name cannot be empty</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="290"/>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="296"/>
-        <source>转发规则无效</source>
-        <translation>Invalid forwarding rule</translation>
-    </message>
-    <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="317"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="151"/>
         <source>密码未保存</source>
         <translation>Password Not Saved</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="318"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="152"/>
         <source>凭据库未解锁，密码未保存。
 请解锁凭据库后重试，或改用其他认证方式。</source>
         <translation>The credential store is locked, so the password was not saved.
 Unlock the credential store and try again, or use another authentication method.</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="355"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="189"/>
         <source>私钥口令未保存</source>
         <translation>Private Key Passphrase Not Saved</translation>
     </message>
     <message>
-        <location filename="../../src/panel/ZzSessionEditDialog.cpp" line="356"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="190"/>
         <source>凭据库未解锁，私钥口令未保存。
 请解锁凭据库后重试，或留空口令。</source>
         <translation>The credential store is locked, so the private key passphrase was not saved.
+Unlock the credential store and try again, or leave the passphrase empty.</translation>
+    </message>
+</context>
+<context>
+    <name>ZzSessionEditDialog</name>
+    <message>
+        <source>新建会话</source>
+        <translation type="vanished">New Session</translation>
+    </message>
+    <message>
+        <source>编辑会话</source>
+        <translation type="vanished">Edit Session</translation>
+    </message>
+    <message>
+        <source>名称：</source>
+        <translation type="vanished">Name:</translation>
+    </message>
+    <message>
+        <source>分组路径：</source>
+        <translation type="vanished">Group Path:</translation>
+    </message>
+    <message>
+        <source>协议：</source>
+        <translation type="vanished">Protocol:</translation>
+    </message>
+    <message>
+        <source>主机：</source>
+        <translation type="vanished">Host:</translation>
+    </message>
+    <message>
+        <source>端口：</source>
+        <translation type="vanished">Port:</translation>
+    </message>
+    <message>
+        <source>Shell 程序：</source>
+        <translation type="vanished">Shell Program:</translation>
+    </message>
+    <message>
+        <source>用户名：</source>
+        <translation type="vanished">Username:</translation>
+    </message>
+    <message>
+        <source>认证方式：</source>
+        <translation type="vanished">Authentication:</translation>
+    </message>
+    <message>
+        <source>私钥路径：</source>
+        <translation type="vanished">Private Key Path:</translation>
+    </message>
+    <message>
+        <source>私钥口令：</source>
+        <translation type="vanished">Private Key Passphrase:</translation>
+    </message>
+    <message>
+        <source>密码：</source>
+        <translation type="vanished">Password:</translation>
+    </message>
+    <message>
+        <source>端口转发：</source>
+        <translation type="vanished">Port Forwarding:</translation>
+    </message>
+    <message>
+        <source>图形转发：</source>
+        <translation type="vanished">X11 Forwarding:</translation>
+    </message>
+    <message>
+        <source>如：生产环境/Web 服务器</source>
+        <translation type="vanished">e.g. Production/Web Server</translation>
+    </message>
+    <message>
+        <source>留空使用系统默认 shell</source>
+        <translation type="vanished">Leave empty to use the system default shell</translation>
+    </message>
+    <message>
+        <source>私钥路径（公钥认证）</source>
+        <translation type="vanished">Private key path (public key authentication)</translation>
+    </message>
+    <message>
+        <source>私钥口令（无口令留空）</source>
+        <translation type="vanished">Private key passphrase (leave empty if none)</translation>
+    </message>
+    <message>
+        <source>留空保留已保存的口令</source>
+        <translation type="vanished">Leave empty to keep the saved passphrase</translation>
+    </message>
+    <message>
+        <source>登录密码</source>
+        <translation type="vanished">Login password</translation>
+    </message>
+    <message>
+        <source>留空保留已保存的密码</source>
+        <translation type="vanished">Leave empty to keep the saved password</translation>
+    </message>
+    <message>
+        <source>SSH</source>
+        <translation type="vanished">SSH</translation>
+    </message>
+    <message>
+        <source>本地 Shell</source>
+        <translation type="vanished">Local Shell</translation>
+    </message>
+    <message>
+        <source>SSH Agent</source>
+        <translation type="vanished">SSH Agent</translation>
+    </message>
+    <message>
+        <source>公钥文件</source>
+        <translation type="vanished">Public Key File</translation>
+    </message>
+    <message>
+        <source>密码</source>
+        <translation type="vanished">Password</translation>
+    </message>
+    <message>
+        <source>类型</source>
+        <translation type="vanished">Type</translation>
+    </message>
+    <message>
+        <source>监听地址</source>
+        <translation type="vanished">Listen Address</translation>
+    </message>
+    <message>
+        <source>监听端口</source>
+        <translation type="vanished">Listen Port</translation>
+    </message>
+    <message>
+        <source>目标地址</source>
+        <translation type="vanished">Target Address</translation>
+    </message>
+    <message>
+        <source>目标端口</source>
+        <translation type="vanished">Target Port</translation>
+    </message>
+    <message>
+        <source>本地 -L</source>
+        <translation type="vanished">Local -L</translation>
+    </message>
+    <message>
+        <source>远程 -R</source>
+        <translation type="vanished">Remote -R</translation>
+    </message>
+    <message>
+        <source>动态 -D</source>
+        <translation type="vanished">Dynamic -D</translation>
+    </message>
+    <message>
+        <source>添加</source>
+        <translation type="vanished">Add</translation>
+    </message>
+    <message>
+        <source>删除</source>
+        <translation type="vanished">Delete</translation>
+    </message>
+    <message>
+        <source>X11 转发</source>
+        <translation type="vanished">X11 Forwarding</translation>
+    </message>
+    <message>
+        <source>Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz</source>
+        <translation type="vanished">On Windows, the built-in X server is downloaded on first use; on Linux/macOS a local X server / XQuartz is required</translation>
+    </message>
+    <message>
+        <source>嵌入标签页显示（实验；否则独立窗口）</source>
+        <translation type="vanished">Embed in tab (experimental; otherwise shown in a separate window)</translation>
+    </message>
+    <message>
+        <source>仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示</source>
+        <translation type="vanished">Windows only: the X11 desktop is embedded in the session tab; if unchecked, X programs are shown in separate windows</translation>
+    </message>
+    <message>
+        <source>主机不能为空</source>
+        <translation type="vanished">Host cannot be empty</translation>
+    </message>
+    <message>
+        <source>名称不能为空</source>
+        <translation type="vanished">Name cannot be empty</translation>
+    </message>
+    <message>
+        <source>转发规则无效</source>
+        <translation type="vanished">Invalid forwarding rule</translation>
+    </message>
+    <message>
+        <source>密码未保存</source>
+        <translation type="vanished">Password Not Saved</translation>
+    </message>
+    <message>
+        <source>凭据库未解锁，密码未保存。
+请解锁凭据库后重试，或改用其他认证方式。</source>
+        <translation type="vanished">The credential store is locked, so the password was not saved.
+Unlock the credential store and try again, or use another authentication method.</translation>
+    </message>
+    <message>
+        <source>私钥口令未保存</source>
+        <translation type="vanished">Private Key Passphrase Not Saved</translation>
+    </message>
+    <message>
+        <source>凭据库未解锁，私钥口令未保存。
+请解锁凭据库后重试，或留空口令。</source>
+        <translation type="vanished">The credential store is locked, so the private key passphrase was not saved.
 Unlock the credential store and try again, or leave the passphrase empty.</translation>
     </message>
 </context>
@@ -999,6 +1038,257 @@ Ongoing transfers are not affected; the change applies to the next transfer.</tr
         <location filename="../../src/panel/ZzSftpPanel.cpp" line="921"/>
         <source>下载文件夹</source>
         <translation>Download Folder</translation>
+    </message>
+</context>
+<context>
+    <name>ZzSshConfigPage</name>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="126"/>
+        <source>选择私钥文件</source>
+        <translation>Select Private Key File</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="258"/>
+        <source>名称不能为空</source>
+        <translation>Name cannot be empty</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="263"/>
+        <source>主机不能为空</source>
+        <translation>Host cannot be empty</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <source>常规</source>
+        <translation>General</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <source>连接</source>
+        <translation>Connection</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <source>认证</source>
+        <translation>Authentication</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <source>端口转发</source>
+        <translation>Port Forwarding</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <source>X11</source>
+        <translation>X11</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <source>终端</source>
+        <translation>Terminal</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="334"/>
+        <source>名称：</source>
+        <translation>Name:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="335"/>
+        <source>分组路径：</source>
+        <translation>Group Path:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="339"/>
+        <source>主机：</source>
+        <translation>Host:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="340"/>
+        <source>端口：</source>
+        <translation>Port:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="341"/>
+        <source>终端类型：</source>
+        <translation>Terminal Type:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="342"/>
+        <source>编码：</source>
+        <translation>Encoding:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="343"/>
+        <source>保活间隔：</source>
+        <translation>Keepalive Interval:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="347"/>
+        <source>用户名：</source>
+        <translation>Username:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="348"/>
+        <source>认证方式：</source>
+        <translation>Authentication:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="350"/>
+        <source>私钥路径：</source>
+        <translation>Private Key Path:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="351"/>
+        <source>私钥口令：</source>
+        <translation>Private Key Passphrase:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="352"/>
+        <source>密码：</source>
+        <translation>Password:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="356"/>
+        <source>图形转发：</source>
+        <translation>X11 Forwarding:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="357"/>
+        <source>显示方式：</source>
+        <translation>Display Mode:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="361"/>
+        <source>配色方案：</source>
+        <translation>Color Scheme:</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="363"/>
+        <source>如：生产环境/Web 服务器</source>
+        <translation>e.g. Production/Web Server</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="364"/>
+        <source>私钥路径（公钥认证）</source>
+        <translation>Private key path (public key authentication)</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="365"/>
+        <source>私钥口令（无口令留空）</source>
+        <translation>Private key passphrase (leave empty if none)</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="366"/>
+        <source>登录密码</source>
+        <translation>Login password</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="368"/>
+        <source>关闭</source>
+        <translation>Off</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="369"/>
+        <source> 秒</source>
+        <translation> sec</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="370"/>
+        <source>保活间隔，单位秒；0 为关闭</source>
+        <translation>Keepalive interval in seconds; 0 disables it</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="372"/>
+        <source>SSH Agent</source>
+        <translation>SSH Agent</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="373"/>
+        <source>公钥文件</source>
+        <translation>Public Key File</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="374"/>
+        <source>密码</source>
+        <translation>Password</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="378"/>
+        <source>浏览…</source>
+        <translation>Browse…</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <source>类型</source>
+        <translation>Type</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <source>监听地址</source>
+        <translation>Listen Address</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <source>监听端口</source>
+        <translation>Listen Port</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="383"/>
+        <source>目标地址</source>
+        <translation>Target Address</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="383"/>
+        <source>目标端口</source>
+        <translation>Target Port</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="388"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="424"/>
+        <source>本地 -L</source>
+        <translation>Local -L</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="389"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="425"/>
+        <source>远程 -R</source>
+        <translation>Remote -R</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="390"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="426"/>
+        <source>动态 -D</source>
+        <translation>Dynamic -D</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="395"/>
+        <source>添加</source>
+        <translation>Add</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="399"/>
+        <source>删除</source>
+        <translation>Delete</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="402"/>
+        <source>X11 转发</source>
+        <translation>X11 Forwarding</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="403"/>
+        <source>Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz</source>
+        <translation>On Windows, the built-in X server is downloaded on first use; on Linux/macOS a local X server / XQuartz is required</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="405"/>
+        <source>嵌入标签页显示（实验；否则独立窗口）</source>
+        <translation>Embed in tab (experimental; otherwise shown in a separate window)</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="406"/>
+        <source>仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示</source>
+        <translation>Windows only: the X11 desktop is embedded in the session tab; if unchecked, X programs are shown in separate windows</translation>
     </message>
 </context>
 <context>

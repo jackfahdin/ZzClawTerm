@@ -172,7 +172,7 @@ private slots:
     {
         // 未装配（无工作区/窗口/状态栏）：槽位走兜底分支不崩。
         // 注意不能在已装配 shell 上直接调 requestNewSession：面板会经延迟工厂
-        // 物化并弹出模态 ZzSessionEditDialog::exec()，离屏测试将永久阻塞
+        // 物化并弹出模态 ZzSessionConfigWindow::exec()，离屏测试将永久阻塞
         ZzAppShell bare(m_dir);
         QVERIFY(bare.languageManager() != nullptr);
         QVERIFY(bare.menuBarService() == nullptr);

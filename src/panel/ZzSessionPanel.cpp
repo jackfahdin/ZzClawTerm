@@ -9,7 +9,7 @@
 #include <QtWidgets/QTreeView>
 #include <QtWidgets/QVBoxLayout>
 
-#include "ZzSessionEditDialog.h"
+#include "dialog/ZzSessionConfigWindow.h"
 #include "session/ZzSessionModel.h"
 
 namespace {
@@ -196,7 +196,7 @@ void ZzSessionPanel::showContextMenu(const QPoint &pos)
 
 void ZzSessionPanel::newSession(const QString &groupPathPrefix)
 {
-    ZzSessionEditDialog dialog(m_store, {}, groupPathPrefix, this);
+    ZzSessionConfigWindow dialog(m_store, {}, groupPathPrefix, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -211,7 +211,7 @@ void ZzSessionPanel::editSession(const QString &profileId)
     if (!existing.has_value()) {
         return;
     }
-    ZzSessionEditDialog dialog(m_store, *existing, QString(), this);
+    ZzSessionConfigWindow dialog(m_store, *existing, QString(), this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }

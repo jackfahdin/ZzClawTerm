@@ -23,8 +23,6 @@ set(ZZCLAWTERM_APP_SOURCES
     panel/ZzSftpSessionOps.cpp
     panel/ZzSftpPanel.h
     panel/ZzSftpPanel.cpp
-    panel/ZzSessionEditDialog.h
-    panel/ZzSessionEditDialog.cpp
     settings/ZzAppSettings.h
     settings/ZzAppSettings.cpp
     settings/ZzLanguageManager.h
