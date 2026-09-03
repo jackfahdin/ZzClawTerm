@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-24.04（GCC 13 满足 ZzPureToolsPro 编译要求；22.04 的 GCC 11
+          # ubuntu-24.04（GCC 13 满足 ZzPureTools 编译要求；22.04 的 GCC 11
           # 不满足）。libtiff5 从 jammy 源下载解包（24.04 仅 libtiff.so.6，
           # Qt 官方 gcc_64 的 imageformats/libqtiff.so 依赖 libtiff.so.5）。
           - { os: ubuntu-24.04, kind: linux, qt-arch: linux_gcc_64, aqt-src: '' }

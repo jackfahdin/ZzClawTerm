@@ -34,7 +34,9 @@ set(ZZQTERMWIDGET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZZQTERMWIDGET_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/ZzTermWidget)
 
-# ZzPureToolsPro（应用框架）：仓库内嵌套一层同名工程目录，做兼容探测。
+# ZzPureTools（应用框架）：仓库根即工程根（平铺布局），直接引入。
+# 注意库内存在同名组件子目录 third_party/ZzPureTools/ZzPureTools，勿做
+# 嵌套探测，否则会误命中组件级 CMakeLists。
 # 其 CMake 默认 BUILD_SHARED_LIBS=ON；此处在其 add_subdirectory 之前强制 OFF
 # 改静态链接——动态库打包依赖各平台 deploy 工具额外拷贝 ZzPureTools/ZzCore/
 # ZzFluentUI/ZzWindowKit 产物（windeployqt 不认非 Qt 依赖，已实际漏发），
@@ -42,16 +44,11 @@ add_subdirectory(third_party/ZzTermWidget)
 # 目标自动导出空宏；ZzFluentUI 图标资源由 ZzIconAssets.cpp 自 Q_INIT_RESOURCE，
 # 静态归档不会被链接器剥离（该对象文件被控件代码直接引用）。
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ZzPureToolsPro/ZzPureToolsPro/CMakeLists.txt")
-    set(ZZ_PURETOOLS_SUBDIR "third_party/ZzPureToolsPro/ZzPureToolsPro")
-else()
-    set(ZZ_PURETOOLS_SUBDIR "third_party/ZzPureToolsPro")
-endif()
-zz_require_submodule(${ZZ_PURETOOLS_SUBDIR})
+zz_require_submodule(third_party/ZzPureTools)
 set(ZZ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ZZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-add_subdirectory(${ZZ_PURETOOLS_SUBDIR})
+add_subdirectory(third_party/ZzPureTools)
 
 # OpenSSL：优先接入 vendored 预编译 bundle（third_party/openssl 提供
 # OpenSSLBundleConfig.cmake，创建 OpenSSL::Crypto/OpenSSL::SSL 导入目标）。
@@ -97,7 +94,7 @@ endif()
 #（third_party/ZzSshCore/third_party/libssh2）编译提供——其 CMake 检测到上层
 # 没有 libssh2 目标时会自动 add_subdirectory 嵌套副本（唯一事实源，
 # 消除主仓库/嵌套两份指针的漂移风险）。需要 git submodule update --init --recursive。
-# BUILD_SHARED_LIBS 已在 ZzPureToolsPro 之前统一强制 OFF，libssh2 同为静态构建，
+# BUILD_SHARED_LIBS 已在 ZzPureTools 之前统一强制 OFF，libssh2 同为静态构建，
 # 与计划 01 验证配置一致
 zz_require_submodule(third_party/ZzSshCore)
 # ZzSshCore 自带测试已在计划 01 全量验证，应用构建不重复编译

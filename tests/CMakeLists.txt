@@ -11,7 +11,7 @@ function(zz_add_qtest name)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     if(WIN32)
         # 显式钉死控制台子系统，防御继承 GUI 子系统导致 ctest 捕获不到输出。
-        #（ZzPureToolsPro 已改静态链接，测试进程不再依赖 ZzPureTools.dll /
+        #（ZzPureTools 已改静态链接，测试进程不再依赖 ZzPureTools.dll /
         # ZzCore.dll 的 PATH 搜索。）
         set_target_properties(${name} PROPERTIES WIN32_EXECUTABLE OFF)
     endif()
