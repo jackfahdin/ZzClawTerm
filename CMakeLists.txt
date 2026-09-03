@@ -34,7 +34,14 @@ set(ZZQTERMWIDGET_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ZZQTERMWIDGET_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/ZzTermWidget)
 
-# ZzPureToolsPro（应用框架）：仓库内嵌套一层同名工程目录，做兼容探测
+# ZzPureToolsPro（应用框架）：仓库内嵌套一层同名工程目录，做兼容探测。
+# 其 CMake 默认 BUILD_SHARED_LIBS=ON；此处在其 add_subdirectory 之前强制 OFF
+# 改静态链接——动态库打包依赖各平台 deploy 工具额外拷贝 ZzPureTools/ZzCore/
+# ZzFluentUI/ZzWindowKit 产物（windeployqt 不认非 Qt 依赖，已实际漏发），
+# 静态后产物只有一个可执行文件，不可能再漏。generate_export_header 对静态
+# 目标自动导出空宏；ZzFluentUI 图标资源由 ZzIconAssets.cpp 自 Q_INIT_RESOURCE，
+# 静态归档不会被链接器剥离（该对象文件被控件代码直接引用）。
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ZzPureToolsPro/ZzPureToolsPro/CMakeLists.txt")
     set(ZZ_PURETOOLS_SUBDIR "third_party/ZzPureToolsPro/ZzPureToolsPro")
 else()
@@ -90,8 +97,8 @@ endif()
 #（third_party/ZzSshCore/third_party/libssh2）编译提供——其 CMake 检测到上层
 # 没有 libssh2 目标时会自动 add_subdirectory 嵌套副本（唯一事实源，
 # 消除主仓库/嵌套两份指针的漂移风险）。需要 git submodule update --init --recursive。
-# ZzPureToolsPro 将 BUILD_SHARED_LIBS 默认置 ON；libssh2 固定静态构建，与计划 01 验证配置一致
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+# BUILD_SHARED_LIBS 已在 ZzPureToolsPro 之前统一强制 OFF，libssh2 同为静态构建，
+# 与计划 01 验证配置一致
 zz_require_submodule(third_party/ZzSshCore)
 # ZzSshCore 自带测试已在计划 01 全量验证，应用构建不重复编译
 set(ZZSSHCORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
