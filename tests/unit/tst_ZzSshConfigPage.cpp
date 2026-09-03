@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLineEdit>
@@ -123,6 +124,74 @@ private slots:
         int pageIndex = -1;
         QVERIFY(!page.validateInputs(&error, &pageIndex));
         QCOMPARE(pageIndex, 3);
+    }
+
+    /** @brief 空 terminalType/encoding/colorSchemeName 选中「跟随全局」首项并写回空串。 */
+    void emptyFieldsFollowGlobal()
+    {
+        ZzSshConfigPage page;
+        ZzSessionProfile profile = sampleProfile();
+        profile.terminalType.clear();
+        profile.encoding.clear();
+        profile.colorSchemeName.clear();
+        page.setProfile(profile);
+
+        auto *termType =
+            page.findChild<QComboBox *>(QStringLiteral("terminalTypeCombo"));
+        auto *encoding = page.findChild<QComboBox *>(QStringLiteral("encodingCombo"));
+        auto *scheme = page.findChild<QComboBox *>(QStringLiteral("colorSchemeCombo"));
+        QVERIFY(termType && encoding && scheme);
+        QCOMPARE(termType->currentIndex(), 0);
+        QCOMPARE(encoding->currentIndex(), 0);
+        QCOMPARE(scheme->currentIndex(), 0);
+        // 首项 itemData 为空串（跟随全局标记）
+        QVERIFY(termType->itemData(0).toString().isEmpty());
+        QVERIFY(encoding->itemData(0).toString().isEmpty());
+        QVERIFY(scheme->itemData(0).toString().isEmpty());
+
+        ZzSessionProfile out;
+        page.applyTo(out);
+        QVERIFY(out.terminalType.isEmpty());
+        QVERIFY(out.encoding.isEmpty());
+        QVERIFY(out.colorSchemeName.isEmpty());
+    }
+
+    /** @brief 编码与配色 combo 置灰占位（连接流程暂不消费每会话覆盖）。 */
+    void encodingAndColorSchemeDisabled()
+    {
+        ZzSshConfigPage page;
+        auto *encoding = page.findChild<QComboBox *>(QStringLiteral("encodingCombo"));
+        auto *scheme = page.findChild<QComboBox *>(QStringLiteral("colorSchemeCombo"));
+        QVERIFY(encoding && scheme);
+        QVERIFY(!encoding->isEnabled());
+        QVERIFY(!scheme->isEnabled());
+        QVERIFY(!encoding->toolTip().isEmpty());
+        QVERIFY(!scheme->toolTip().isEmpty());
+    }
+
+    /** @brief setCredentialHints 按已存凭据切换占位提示，LanguageChange 后提示不丢。 */
+    void credentialHintsSwitchPlaceholders()
+    {
+        ZzSshConfigPage page;
+        auto *pwd = page.findChild<QLineEdit *>(QStringLiteral("passwordEdit"));
+        auto *pass = page.findChild<QLineEdit *>(QStringLiteral("keyPassphraseEdit"));
+        QVERIFY(pwd && pass);
+        QCOMPARE(pwd->placeholderText(), QStringLiteral("登录密码"));
+        QCOMPARE(pass->placeholderText(), QStringLiteral("私钥口令（无口令留空）"));
+
+        page.setCredentialHints(true, true);
+        QCOMPARE(pwd->placeholderText(), QStringLiteral("留空保留已保存的密码"));
+        QCOMPARE(pass->placeholderText(), QStringLiteral("留空保留已保存的口令"));
+
+        // retranslateUi 重跑（语言切换）后提示保留
+        QEvent langEvent(QEvent::LanguageChange);
+        QApplication::sendEvent(&page, &langEvent);
+        QCOMPARE(pwd->placeholderText(), QStringLiteral("留空保留已保存的密码"));
+        QCOMPARE(pass->placeholderText(), QStringLiteral("留空保留已保存的口令"));
+
+        page.setCredentialHints(false, false);
+        QCOMPARE(pwd->placeholderText(), QStringLiteral("登录密码"));
+        QCOMPARE(pass->placeholderText(), QStringLiteral("私钥口令（无口令留空）"));
     }
 };
 

@@ -41,6 +41,13 @@ public:
     [[nodiscard]] QString enteredPassword() const;
     /** @brief 用户新输入的私钥口令（空串=未输入）。 */
     [[nodiscard]] QString enteredKeyPassphrase() const;
+    /**
+     * @brief 按是否已有已存凭据切换两个口令框的占位提示。
+     * @param hasSavedPassword 已有已保存的登录密码（占位提示「留空保留」）。
+     * @param hasSavedKeyPassphrase 已有已保存的私钥口令。
+     * @note 布尔值存为成员，retranslateUi 重跑（LanguageChange）后提示不丢。
+     */
+    void setCredentialHints(bool hasSavedPassword, bool hasSavedKeyPassphrase);
     /** @brief 切换到指定栈页并选中对应树节点（校验失败聚焦用）。 */
     void focusPage(int pageIndex);
 
@@ -82,4 +89,7 @@ private:
     QCheckBox *m_x11EmbedCheckBox;
     // 5 终端
     QComboBox *m_colorSchemeCombo;
+    // 已存凭据标记：决定密码/私钥口令框占位提示（setCredentialHints 设置）
+    bool m_hasSavedPassword = false;
+    bool m_hasSavedKeyPassphrase = false;
 };

@@ -69,6 +69,9 @@ ZzSessionConfigWindow::ZzSessionConfigWindow(ZzCredentialStore *store,
     // 编辑：按协议预选 tab 并回填；新建：两页都给默认值（groupPathPrefix）
     m_sshPage->setProfile(m_profile);
     m_localPage->setProfile(m_profile);
+    // 按是否已有已存凭据切换密码/私钥口令占位提示（「留空保留」）
+    m_sshPage->setCredentialHints(!m_originalCredentialId.isNull(),
+                                  !m_originalKeyPassphraseCredentialId.isNull());
     m_tabs->setCurrentIndex(
         m_profile.protocol == QStringLiteral("local") ? 1 : 0);
 

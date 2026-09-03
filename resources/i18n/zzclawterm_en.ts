@@ -376,50 +376,50 @@ Trust and save this fingerprint?</translation>
 <context>
     <name>ZzSessionConfigWindow</name>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="93"/>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="100"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="96"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="103"/>
         <source>输入无效</source>
         <translation>Invalid Input</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="123"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="126"/>
         <source>新建会话</source>
         <translation>New Session</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="123"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="126"/>
         <source>编辑会话</source>
         <translation>Edit Session</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="124"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="127"/>
         <source>SSH</source>
         <translation>SSH</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="125"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="128"/>
         <source>本地 Shell</source>
         <translation>Local Shell</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="151"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="154"/>
         <source>密码未保存</source>
         <translation>Password Not Saved</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="152"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="155"/>
         <source>凭据库未解锁，密码未保存。
 请解锁凭据库后重试，或改用其他认证方式。</source>
         <translation>The credential store is locked, so the password was not saved.
 Unlock the credential store and try again, or use another authentication method.</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="189"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="192"/>
         <source>私钥口令未保存</source>
         <translation>Private Key Passphrase Not Saved</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="190"/>
+        <location filename="../../src/dialog/ZzSessionConfigWindow.cpp" line="193"/>
         <source>凭据库未解锁，私钥口令未保存。
 请解锁凭据库后重试，或留空口令。</source>
         <translation>The credential store is locked, so the private key passphrase was not saved.
@@ -1043,250 +1043,272 @@ Ongoing transfers are not affected; the change applies to the next transfer.</tr
 <context>
     <name>ZzSshConfigPage</name>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="126"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="135"/>
         <source>选择私钥文件</source>
         <translation>Select Private Key File</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="258"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="294"/>
         <source>名称不能为空</source>
         <translation>Name cannot be empty</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="263"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="299"/>
         <source>主机不能为空</source>
         <translation>Host cannot be empty</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="361"/>
         <source>常规</source>
         <translation>General</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="361"/>
         <source>连接</source>
         <translation>Connection</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="317"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="361"/>
         <source>认证</source>
         <translation>Authentication</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="362"/>
         <source>端口转发</source>
         <translation>Port Forwarding</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="362"/>
         <source>X11</source>
         <translation>X11</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="318"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="362"/>
         <source>终端</source>
         <translation>Terminal</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="334"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="378"/>
         <source>名称：</source>
         <translation>Name:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="335"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="379"/>
         <source>分组路径：</source>
         <translation>Group Path:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="339"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="383"/>
         <source>主机：</source>
         <translation>Host:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="340"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="384"/>
         <source>端口：</source>
         <translation>Port:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="341"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="385"/>
         <source>终端类型：</source>
         <translation>Terminal Type:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="342"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="386"/>
         <source>编码：</source>
         <translation>Encoding:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="343"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="387"/>
         <source>保活间隔：</source>
         <translation>Keepalive Interval:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="347"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="391"/>
         <source>用户名：</source>
         <translation>Username:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="348"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="392"/>
         <source>认证方式：</source>
         <translation>Authentication:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="350"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="394"/>
         <source>私钥路径：</source>
         <translation>Private Key Path:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="351"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="395"/>
         <source>私钥口令：</source>
         <translation>Private Key Passphrase:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="352"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="396"/>
         <source>密码：</source>
         <translation>Password:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="356"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="400"/>
         <source>图形转发：</source>
         <translation>X11 Forwarding:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="357"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="401"/>
         <source>显示方式：</source>
         <translation>Display Mode:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="361"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="405"/>
         <source>配色方案：</source>
         <translation>Color Scheme:</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="363"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="407"/>
         <source>如：生产环境/Web 服务器</source>
         <translation>e.g. Production/Web Server</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="364"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="408"/>
         <source>私钥路径（公钥认证）</source>
         <translation>Private key path (public key authentication)</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="365"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="412"/>
+        <source>留空保留已保存的口令</source>
+        <translation>Leave empty to keep the saved passphrase</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="413"/>
         <source>私钥口令（无口令留空）</source>
         <translation>Private key passphrase (leave empty if none)</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="366"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="415"/>
         <source>登录密码</source>
         <translation>Login password</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="368"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="415"/>
+        <source>留空保留已保存的密码</source>
+        <translation>Leave empty to keep the saved password</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="420"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="422"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="424"/>
+        <source>跟随全局（%1）</source>
+        <translation>Follow global (%1)</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="428"/>
+        <source>暂未生效：连接流程暂不支持每会话覆盖，当前跟随全局设置</source>
+        <translation>Not applied yet: per-session override is not supported by the connect flow; currently follows the global setting</translation>
+    </message>
+    <message>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="432"/>
         <source>关闭</source>
         <translation>Off</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="369"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="433"/>
         <source> 秒</source>
         <translation> sec</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="370"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="434"/>
         <source>保活间隔，单位秒；0 为关闭</source>
         <translation>Keepalive interval in seconds; 0 disables it</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="372"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="436"/>
         <source>SSH Agent</source>
         <translation>SSH Agent</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="373"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="437"/>
         <source>公钥文件</source>
         <translation>Public Key File</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="374"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="438"/>
         <source>密码</source>
         <translation>Password</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="378"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="442"/>
         <source>浏览…</source>
         <translation>Browse…</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="446"/>
         <source>类型</source>
         <translation>Type</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="446"/>
         <source>监听地址</source>
         <translation>Listen Address</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="382"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="446"/>
         <source>监听端口</source>
         <translation>Listen Port</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="383"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="447"/>
         <source>目标地址</source>
         <translation>Target Address</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="383"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="447"/>
         <source>目标端口</source>
         <translation>Target Port</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="388"/>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="424"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="452"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="488"/>
         <source>本地 -L</source>
         <translation>Local -L</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="389"/>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="425"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="453"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="489"/>
         <source>远程 -R</source>
         <translation>Remote -R</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="390"/>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="426"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="454"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="490"/>
         <source>动态 -D</source>
         <translation>Dynamic -D</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="395"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="459"/>
         <source>添加</source>
         <translation>Add</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="399"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="463"/>
         <source>删除</source>
         <translation>Delete</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="402"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="466"/>
         <source>X11 转发</source>
         <translation>X11 Forwarding</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="403"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="467"/>
         <source>Windows 端首次使用将下载内建 X server；Linux/macOS 需本机 X server / XQuartz</source>
         <translation>On Windows, the built-in X server is downloaded on first use; on Linux/macOS a local X server / XQuartz is required</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="405"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="469"/>
         <source>嵌入标签页显示（实验；否则独立窗口）</source>
         <translation>Embed in tab (experimental; otherwise shown in a separate window)</translation>
     </message>
     <message>
-        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="406"/>
+        <location filename="../../src/dialog/ZzSshConfigPage.cpp" line="470"/>
         <source>仅 Windows 生效：X11 桌面嵌入会话标签页内；取消勾选则 X 程序以独立窗口显示</source>
         <translation>Windows only: the X11 desktop is embedded in the session tab; if unchecked, X programs are shown in separate windows</translation>
     </message>

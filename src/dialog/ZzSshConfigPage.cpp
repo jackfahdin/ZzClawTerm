@@ -21,6 +21,8 @@
 
 #include <qtermwidget.h> // availableColorSchemes()
 
+#include "settings/ZzAppSettings.h"
+
 namespace {
 /** @brief 树节点/栈页索引常量（顺序即 UI 顺序）。 */
 enum ZzSshPageIndex {
@@ -76,17 +78,24 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     m_portSpin = new QSpinBox(connectionPage);
     m_portSpin->setRange(1, 65535);
     m_terminalTypeCombo = new QComboBox(connectionPage);
+    m_terminalTypeCombo->setObjectName(QStringLiteral("terminalTypeCombo"));
     m_terminalTypeCombo->setEditable(true);
+    // 首项「跟随全局」（itemData 空串，文本由 retranslateUi 填）：空串=跟随全局设置
+    m_terminalTypeCombo->addItem(QString(), QString());
     m_terminalTypeCombo->addItems({
         QStringLiteral("xterm-256color"), QStringLiteral("xterm"),
         QStringLiteral("xterm-direct"), QStringLiteral("screen"),
         QStringLiteral("linux")});
     m_encodingCombo = new QComboBox(connectionPage);
-    m_encodingCombo->setEditable(true);
+    m_encodingCombo->setObjectName(QStringLiteral("encodingCombo"));
+    m_encodingCombo->setEditable(true); // 非列表内编码名也能回填（字段已置灰，仅保数据）
+    // 首项「跟随全局」（itemData 空串）；编码暂为死字段（连接流程只用全局），置灰占位
+    m_encodingCombo->addItem(QString(), QString());
     m_encodingCombo->addItems({
         QStringLiteral("UTF-8"), QStringLiteral("GBK"),
         QStringLiteral("GB18030"), QStringLiteral("Big5"),
         QStringLiteral("ISO-8859-1")});
+    m_encodingCombo->setEnabled(false);
     m_keepAliveSpin = new QSpinBox(connectionPage);
     m_keepAliveSpin->setRange(0, 3600);
     m_keepAliveSpin->setSpecialValueText(QString()); // retranslateUi 设「关闭」
@@ -189,7 +198,12 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     auto *terminalPage = new QWidget(this);
     auto *terminalForm = new QFormLayout(terminalPage);
     m_colorSchemeCombo = new QComboBox(terminalPage);
+    m_colorSchemeCombo->setObjectName(QStringLiteral("colorSchemeCombo"));
+    // 首项「跟随全局」（itemData 空串，空串=跟随全局设置）；
+    // 配色暂为死字段（连接流程只用全局），置灰占位
+    m_colorSchemeCombo->addItem(QString(), QString());
     m_colorSchemeCombo->addItems(QTermWidget::availableColorSchemes());
+    m_colorSchemeCombo->setEnabled(false);
     terminalForm->addRow(QString(), m_colorSchemeCombo);
     m_stack->addWidget(terminalPage);
 
@@ -211,11 +225,23 @@ void ZzSshConfigPage::setProfile(const ZzSessionProfile &profile)
     m_hostEdit->setText(profile.protocol == QStringLiteral("local")
                             ? QString() : profile.host);
     m_portSpin->setValue(profile.port == 0 ? 22 : profile.port);
-    m_terminalTypeCombo->setCurrentText(
-        profile.terminalType.isEmpty()
-            ? QStringLiteral("xterm-256color") : profile.terminalType);
-    m_encodingCombo->setCurrentText(
-        profile.encoding.isEmpty() ? QStringLiteral("UTF-8") : profile.encoding);
+    // 空串=跟随全局：选中首项（itemData 空串）；非空按值选中（可编辑 combo 的
+    // setCurrentText 不会改 currentIndex，须用 findText 定位，否则首项判定失真）
+    if (profile.terminalType.isEmpty()) {
+        m_terminalTypeCombo->setCurrentIndex(0);
+    } else if (const int i = m_terminalTypeCombo->findText(profile.terminalType);
+               i >= 0) {
+        m_terminalTypeCombo->setCurrentIndex(i);
+    } else {
+        m_terminalTypeCombo->setCurrentText(profile.terminalType); // 列表外自定义值
+    }
+    if (profile.encoding.isEmpty()) {
+        m_encodingCombo->setCurrentIndex(0);
+    } else if (const int i = m_encodingCombo->findText(profile.encoding); i >= 0) {
+        m_encodingCombo->setCurrentIndex(i);
+    } else {
+        m_encodingCombo->setCurrentText(profile.encoding);
+    }
     m_keepAliveSpin->setValue(profile.keepAliveIntervalSeconds);
     m_userEdit->setText(profile.userName);
     const int authIndex = m_authCombo->findData(static_cast<int>(profile.authMethod));
@@ -226,9 +252,12 @@ void ZzSshConfigPage::setProfile(const ZzSessionProfile &profile)
     populateForwardTable(profile.portForwards);
     m_x11CheckBox->setChecked(profile.x11Forwarding);
     m_x11EmbedCheckBox->setChecked(profile.x11EmbedMode);
-    const int schemeIndex = m_colorSchemeCombo->findText(profile.colorSchemeName);
-    if (schemeIndex >= 0) {
-        m_colorSchemeCombo->setCurrentIndex(schemeIndex);
+    // 配色空串=跟随全局：选中首项；找不到的配色名同样回落首项，避免固化
+    if (profile.colorSchemeName.isEmpty()) {
+        m_colorSchemeCombo->setCurrentIndex(0);
+    } else {
+        const int schemeIndex = m_colorSchemeCombo->findText(profile.colorSchemeName);
+        m_colorSchemeCombo->setCurrentIndex(schemeIndex >= 0 ? schemeIndex : 0);
     }
 }
 
@@ -239,8 +268,13 @@ void ZzSshConfigPage::applyTo(ZzSessionProfile &profile) const
     profile.protocol = QStringLiteral("ssh");
     profile.host = m_hostEdit->text().trimmed();
     profile.port = static_cast<quint16>(m_portSpin->value());
-    profile.terminalType = m_terminalTypeCombo->currentText().trimmed();
-    profile.encoding = m_encodingCombo->currentText().trimmed();
+    // 首项（索引 0）= 跟随全局：写回空串，保持 profile 的空串契约
+    profile.terminalType = m_terminalTypeCombo->currentIndex() == 0
+                               ? QString()
+                               : m_terminalTypeCombo->currentText().trimmed();
+    profile.encoding = m_encodingCombo->currentIndex() == 0
+                           ? QString()
+                           : m_encodingCombo->currentText().trimmed();
     profile.keepAliveIntervalSeconds = m_keepAliveSpin->value();
     profile.userName = m_userEdit->text().trimmed();
     profile.authMethod =
@@ -249,7 +283,9 @@ void ZzSshConfigPage::applyTo(ZzSessionProfile &profile) const
     profile.portForwards = rulesFromTable();
     profile.x11Forwarding = m_x11CheckBox->isChecked();
     profile.x11EmbedMode = m_x11EmbedCheckBox->isChecked();
-    profile.colorSchemeName = m_colorSchemeCombo->currentText();
+    profile.colorSchemeName = m_colorSchemeCombo->currentIndex() == 0
+                                  ? QString()
+                                  : m_colorSchemeCombo->currentText();
 }
 
 bool ZzSshConfigPage::validateInputs(QString *error, int *pageIndex) const
@@ -290,6 +326,14 @@ QString ZzSshConfigPage::enteredPassword() const
 QString ZzSshConfigPage::enteredKeyPassphrase() const
 {
     return m_keyPassphraseEdit->text();
+}
+
+void ZzSshConfigPage::setCredentialHints(bool hasSavedPassword,
+                                         bool hasSavedKeyPassphrase)
+{
+    m_hasSavedPassword = hasSavedPassword;
+    m_hasSavedKeyPassphrase = hasSavedKeyPassphrase;
+    retranslateUi(); // 立即刷新占位提示（含语言切换后的再次重设）
 }
 
 void ZzSshConfigPage::focusPage(int pageIndex)
@@ -362,8 +406,28 @@ void ZzSshConfigPage::retranslateUi()
 
     m_groupEdit->setPlaceholderText(tr("如：生产环境/Web 服务器"));
     m_keyPathEdit->setPlaceholderText(tr("私钥路径（公钥认证）"));
-    m_keyPassphraseEdit->setPlaceholderText(tr("私钥口令（无口令留空）"));
-    m_passwordEdit->setPlaceholderText(tr("登录密码"));
+    // 已有已存凭据时提示「留空保留」（同旧 ZzSessionEditDialog 策略）
+    m_keyPassphraseEdit->setPlaceholderText(
+        m_hasSavedKeyPassphrase
+            ? tr("留空保留已保存的口令")
+            : tr("私钥口令（无口令留空）"));
+    m_passwordEdit->setPlaceholderText(
+        m_hasSavedPassword ? tr("留空保留已保存的密码") : tr("登录密码"));
+
+    // 「跟随全局」首项文本：括号内为 ZzAppSettings 当前全局值，随语言/设置刷新
+    auto &appSettings = ZzAppSettings::instance();
+    m_terminalTypeCombo->setItemText(
+        0, tr("跟随全局（%1）").arg(appSettings.terminalType()));
+    m_encodingCombo->setItemText(
+        0, tr("跟随全局（%1）").arg(appSettings.encoding()));
+    m_colorSchemeCombo->setItemText(
+        0, tr("跟随全局（%1）").arg(appSettings.colorScheme()));
+
+    // 编码/配色为死字段（连接流程只用全局设置）：置灰占位并说明
+    const QString deadFieldTip =
+        tr("暂未生效：连接流程暂不支持每会话覆盖，当前跟随全局设置");
+    m_encodingCombo->setToolTip(deadFieldTip);
+    m_colorSchemeCombo->setToolTip(deadFieldTip);
 
     m_keepAliveSpin->setSpecialValueText(tr("关闭"));
     m_keepAliveSpin->setSuffix(tr(" 秒"));
