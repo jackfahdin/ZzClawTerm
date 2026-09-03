@@ -346,6 +346,7 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     auto *generalPage = new QWidget(this);
     auto *generalForm = new QFormLayout(generalPage);
     m_nameEdit = new QLineEdit(generalPage);
+    m_nameEdit->setObjectName(QStringLiteral("nameEdit"));
     m_groupEdit = new QLineEdit(generalPage);
     generalForm->addRow(QString(), m_nameEdit);
     generalForm->addRow(QString(), m_groupEdit);
