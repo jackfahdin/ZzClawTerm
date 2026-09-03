@@ -41,6 +41,8 @@ set(ZZCLAWTERM_APP_SOURCES
     tab/ZzSplitContainer.cpp
     dialog/ZzAboutDialog.h
     dialog/ZzAboutDialog.cpp
+    dialog/ZzSshConfigPage.h
+    dialog/ZzSshConfigPage.cpp
     menu/ZzMenuBarService.h
     menu/ZzMenuBarService.cpp
     dialog/ZzHostKeyDialog.h
