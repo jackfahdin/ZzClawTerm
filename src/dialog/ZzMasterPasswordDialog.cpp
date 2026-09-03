@@ -18,14 +18,16 @@ ZzMasterPasswordDialog::ZzMasterPasswordDialog(ZzCredentialStore *store,
     m_hintLabel = new QLabel(this);
     m_formLayout->addRow(m_hintLabel);
 
+    // 行标签须显式创建空 QLabel：QFormLayout 字符串重载收到空串时不建
+    // 标签部件，retranslateUi 的 labelForField 反查会落空（标签随后回填）
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setEchoMode(QLineEdit::Password);
-    m_formLayout->addRow(QString(), m_passwordEdit);
+    m_formLayout->addRow(new QLabel(this), m_passwordEdit);
 
     m_confirmEdit = new QLineEdit(this);
     m_confirmEdit->setEchoMode(QLineEdit::Password);
     if (m_firstRun) {
-        m_formLayout->addRow(QString(), m_confirmEdit);
+        m_formLayout->addRow(new QLabel(this), m_confirmEdit);
     } else {
         m_confirmEdit->hide();
     }

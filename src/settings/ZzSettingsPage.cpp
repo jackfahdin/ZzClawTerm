@@ -17,6 +17,9 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
 {
     m_formLayout = new QFormLayout(this);
 
+    // 行标签统一显式创建空 QLabel：QFormLayout 字符串重载收到空串时不建
+    // 标签部件，retranslateUi 的 labelForField 反查会落空（标签随后回填）
+
     m_terminalTypeCombo = new QComboBox(this);
     m_terminalTypeCombo->setEditable(true);
     m_terminalTypeCombo->addItems({
@@ -24,7 +27,7 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         QStringLiteral("vt100"), QStringLiteral("linux"),
     });
     m_terminalTypeCombo->setCurrentText(m_settings->terminalType());
-    m_formLayout->addRow(QString(), m_terminalTypeCombo);
+    m_formLayout->addRow(new QLabel(this), m_terminalTypeCombo);
 
     m_encodingCombo = new QComboBox(this);
     m_encodingCombo->addItems({
@@ -33,24 +36,24 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
         QStringLiteral("Shift-JIS"), QStringLiteral("EUC-KR"),
     });
     m_encodingCombo->setCurrentText(m_settings->encoding());
-    m_formLayout->addRow(QString(), m_encodingCombo);
+    m_formLayout->addRow(new QLabel(this), m_encodingCombo);
 
     m_fontSizeSpin = new QSpinBox(this);
     m_fontSizeSpin->setRange(6, 32);
     m_fontSizeSpin->setSuffix(QStringLiteral(" pt"));
     m_fontSizeSpin->setValue(m_settings->fontSize());
-    m_formLayout->addRow(QString(), m_fontSizeSpin);
+    m_formLayout->addRow(new QLabel(this), m_fontSizeSpin);
 
     m_colorSchemeCombo = new QComboBox(this);
     m_colorSchemeCombo->addItems(QTermWidget::availableColorSchemes());
     m_colorSchemeCombo->setCurrentText(m_settings->colorScheme());
-    m_formLayout->addRow(QString(), m_colorSchemeCombo);
+    m_formLayout->addRow(new QLabel(this), m_colorSchemeCombo);
 
     m_historyLinesSpin = new QSpinBox(this);
     m_historyLinesSpin->setRange(1000, 100000);
     m_historyLinesSpin->setSingleStep(1000);
     m_historyLinesSpin->setValue(m_settings->historyLines());
-    m_formLayout->addRow(QString(), m_historyLinesSpin);
+    m_formLayout->addRow(new QLabel(this), m_historyLinesSpin);
 
     // 凭据后端：auto（密钥环可用则用，否则 AES 文件）/ aes-file / system-keyring
     // 显示文本集中在 retranslateUi()（setItemText 保留 itemData 与当前选中）
@@ -61,11 +64,11 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     const int backendIndex =
         m_credentialBackendCombo->findData(m_settings->credentialBackend());
     m_credentialBackendCombo->setCurrentIndex(backendIndex >= 0 ? backendIndex : 0);
-    m_formLayout->addRow(QString(), m_credentialBackendCombo);
+    m_formLayout->addRow(new QLabel(this), m_credentialBackendCombo);
 
     m_x11ServerCheck = new QCheckBox(this);
     m_x11ServerCheck->setChecked(m_settings->x11ServerEnabled());
-    m_formLayout->addRow(QString(), m_x11ServerCheck);
+    m_formLayout->addRow(new QLabel(this), m_x11ServerCheck);
 
     // SFTP 块大小：itemData 存字节数，0=自动（BDP 自适应，M6）
     m_sftpBlockSizeCombo = new QComboBox(this);
@@ -78,7 +81,7 @@ ZzSettingsPage::ZzSettingsPage(ZzAppSettings *settings, QWidget *parent)
     }
     const int bsIndex = m_sftpBlockSizeCombo->findData(m_settings->sftpBlockSize());
     m_sftpBlockSizeCombo->setCurrentIndex(bsIndex >= 0 ? bsIndex : 0);
-    m_formLayout->addRow(QString(), m_sftpBlockSizeCombo);
+    m_formLayout->addRow(new QLabel(this), m_sftpBlockSizeCombo);
 
     m_noteLabel = new QLabel(this);
     m_noteLabel->setWordWrap(true);

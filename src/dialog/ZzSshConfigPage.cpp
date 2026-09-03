@@ -66,8 +66,10 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     m_nameEdit = new QLineEdit(generalPage);
     m_nameEdit->setObjectName(QStringLiteral("nameEdit"));
     m_groupEdit = new QLineEdit(generalPage);
-    generalForm->addRow(QString(), m_nameEdit);
-    generalForm->addRow(QString(), m_groupEdit);
+    // 行标签须显式创建空 QLabel：QFormLayout 字符串重载收到空串时不建
+    // 标签部件，retranslateUi 的 labelForField 反查会落空（标签随后回填）
+    generalForm->addRow(new QLabel(generalPage), m_nameEdit);
+    generalForm->addRow(new QLabel(generalPage), m_groupEdit);
     m_stack->addWidget(generalPage);
 
     // —— 1 连接：主机 / 端口 / 终端类型 / 编码 / 保活间隔 ——
@@ -99,11 +101,11 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     m_keepAliveSpin = new QSpinBox(connectionPage);
     m_keepAliveSpin->setRange(0, 3600);
     m_keepAliveSpin->setSpecialValueText(QString()); // retranslateUi 设「关闭」
-    connectionForm->addRow(QString(), m_hostEdit);
-    connectionForm->addRow(QString(), m_portSpin);
-    connectionForm->addRow(QString(), m_terminalTypeCombo);
-    connectionForm->addRow(QString(), m_encodingCombo);
-    connectionForm->addRow(QString(), m_keepAliveSpin);
+    connectionForm->addRow(new QLabel(connectionPage), m_hostEdit);
+    connectionForm->addRow(new QLabel(connectionPage), m_portSpin);
+    connectionForm->addRow(new QLabel(connectionPage), m_terminalTypeCombo);
+    connectionForm->addRow(new QLabel(connectionPage), m_encodingCombo);
+    connectionForm->addRow(new QLabel(connectionPage), m_keepAliveSpin);
     m_stack->addWidget(connectionPage);
 
     // —— 2 认证：用户名 / 认证方式 / 私钥路径+浏览 / 私钥口令 / 密码 ——
@@ -111,14 +113,14 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     auto *authPage = new QWidget(this);
     auto *authForm = new QFormLayout(authPage);
     m_userEdit = new QLineEdit(authPage);
-    authForm->addRow(QString(), m_userEdit);
+    authForm->addRow(new QLabel(authPage), m_userEdit);
 
     m_authCombo = new QComboBox(authPage);
     m_authCombo->setObjectName(QStringLiteral("authCombo"));
     m_authCombo->addItem(QString(), static_cast<int>(ZzAuthMethod::Agent));
     m_authCombo->addItem(QString(), static_cast<int>(ZzAuthMethod::PrivateKey));
     m_authCombo->addItem(QString(), static_cast<int>(ZzAuthMethod::Password));
-    authForm->addRow(QString(), m_authCombo);
+    authForm->addRow(new QLabel(authPage), m_authCombo);
 
     // 私钥路径行：QLineEdit + 「浏览…」QPushButton 水平布局
     auto *keyPathRow = new QWidget(authPage);
@@ -129,7 +131,7 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     browseButton->setObjectName(QStringLiteral("browseKeyButton"));
     keyPathLayout->addWidget(m_keyPathEdit);
     keyPathLayout->addWidget(browseButton);
-    authForm->addRow(QString(), keyPathRow);
+    authForm->addRow(new QLabel(authPage), keyPathRow);
     connect(browseButton, &QPushButton::clicked, this, [this]() {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("选择私钥文件"), m_keyPathEdit->text());
@@ -142,12 +144,12 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     m_keyPassphraseEdit = new QLineEdit(authPage);
     m_keyPassphraseEdit->setObjectName(QStringLiteral("keyPassphraseEdit"));
     m_keyPassphraseEdit->setEchoMode(QLineEdit::Password);
-    authForm->addRow(QString(), m_keyPassphraseEdit);
+    authForm->addRow(new QLabel(authPage), m_keyPassphraseEdit);
 
     m_passwordEdit = new QLineEdit(authPage);
     m_passwordEdit->setObjectName(QStringLiteral("passwordEdit"));
     m_passwordEdit->setEchoMode(QLineEdit::Password);
-    authForm->addRow(QString(), m_passwordEdit);
+    authForm->addRow(new QLabel(authPage), m_passwordEdit);
     m_stack->addWidget(authPage);
 
     // —— 3 端口转发 ——
@@ -187,11 +189,11 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     // X11 转发开关：默认开启对齐 MobaXterm；Windows 走内建 X server，Linux/macOS 依赖本机 X server
     m_x11CheckBox = new QCheckBox(x11Page);
     m_x11CheckBox->setObjectName(QStringLiteral("x11CheckBox"));
-    x11Form->addRow(QString(), m_x11CheckBox);
+    x11Form->addRow(new QLabel(x11Page), m_x11CheckBox);
     // X11 嵌入模式（实验）：ZzXsrv 桌面嵌入会话标签页下半区；取消勾选则以独立窗口运行
     m_x11EmbedCheckBox = new QCheckBox(x11Page);
     m_x11EmbedCheckBox->setObjectName(QStringLiteral("x11EmbedCheckBox"));
-    x11Form->addRow(QString(), m_x11EmbedCheckBox);
+    x11Form->addRow(new QLabel(x11Page), m_x11EmbedCheckBox);
     m_stack->addWidget(x11Page);
 
     // —— 5 终端：配色方案 ——
@@ -204,7 +206,7 @@ ZzSshConfigPage::ZzSshConfigPage(QWidget *parent)
     m_colorSchemeCombo->addItem(QString(), QString());
     m_colorSchemeCombo->addItems(QTermWidget::availableColorSchemes());
     m_colorSchemeCombo->setEnabled(false);
-    terminalForm->addRow(QString(), m_colorSchemeCombo);
+    terminalForm->addRow(new QLabel(terminalPage), m_colorSchemeCombo);
     m_stack->addWidget(terminalPage);
 
     connect(m_navTree->selectionModel(), &QItemSelectionModel::currentRowChanged,

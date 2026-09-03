@@ -51,9 +51,10 @@ ZzLocalShellConfigPage::ZzLocalShellConfigPage(QWidget *parent)
     m_groupEdit = new QLineEdit(generalPage);
     m_shellEdit = new QLineEdit(generalPage);
     m_shellEdit->setObjectName(QStringLiteral("shellEdit"));
-    generalForm->addRow(QString(), m_nameEdit);
-    generalForm->addRow(QString(), m_groupEdit);
-    generalForm->addRow(QString(), m_shellEdit);
+    // 行标签须显式创建空 QLabel（同 ZzSshConfigPage：空串重载不建标签部件）
+    generalForm->addRow(new QLabel(generalPage), m_nameEdit);
+    generalForm->addRow(new QLabel(generalPage), m_groupEdit);
+    generalForm->addRow(new QLabel(generalPage), m_shellEdit);
     m_stack->addWidget(generalPage);
 
     connect(m_navTree->selectionModel(), &QItemSelectionModel::currentRowChanged,
