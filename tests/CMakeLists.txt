@@ -38,6 +38,14 @@ endforeach()
 zz_add_qtest(tst_ZzShellContextMenu unit/tst_ZzShellContextMenu.cpp)
 # 该用例自定义 main() 走 ZzWindowKit bootstrap（同生产 main.cpp），需显式链接
 target_link_libraries(tst_ZzShellContextMenu PRIVATE Zz::WindowKit)
+if(APPLE)
+    # 该用例刻意走真实 ZzApplicationWindow 分支；ZzWindowKit Cocoa 后端硬性
+    # 要求 cocoa 平台（offscreen 下 attach 返回 Unsupported 导致 build 失败）。
+    # GitHub macOS runner 具备 WindowServer 会话，可真实创建窗口，故单独用
+    # cocoa 覆盖 zz_add_qtest 的 offscreen 默认。
+    set_tests_properties(tst_ZzShellContextMenu PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=cocoa")
+endif()
 zz_add_qtest(tst_Skeleton unit/tst_Skeleton.cpp)
 zz_add_qtest(tst_ZzAppSettings unit/tst_ZzAppSettings.cpp)
 zz_add_qtest(tst_ZzTransportRegistry unit/tst_ZzTransportRegistry.cpp)
