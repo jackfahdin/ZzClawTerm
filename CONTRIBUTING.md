@@ -1,4 +1,4 @@
-# Contributing to NyaTerm
+# Contributing to ZzClawTerm
 
 ## Before changing code
 
@@ -10,15 +10,15 @@ database access from GPUI views.
 Choose the crate that owns the behavior:
 
 - Pure models, parsing, compatibility formats, and policies belong in
-  `nyaterm-core`.
-- Database execution and compatibility readers belong in `nyaterm-store`.
+  `zzclawterm-core`.
+- Database execution and compatibility readers belong in `zzclawterm-store`.
 - PTY, SSH, Telnet, Serial, SFTP, transfer, and tunnel runtime code belongs in
-  `nyaterm-transport`.
-- Terminal parsing and snapshots belong in `nyaterm-terminal`; GPUI layout and
-  painting belong in `nyaterm-terminal-gpui`.
+  `zzclawterm-transport`.
+- Terminal parsing and snapshots belong in `zzclawterm-terminal`; GPUI layout and
+  painting belong in `zzclawterm-terminal-gpui`.
 - GPUI state, views, and background coordination belong in
-  `nyaterm-desktop`.
-- Shared GPUI controls and theme integration belong in `nyaterm-ui`.
+  `zzclawterm-desktop`.
+- Shared GPUI controls and theme integration belong in `zzclawterm-ui`.
 
 For a change that crosses crates, keep the boundary adapter small and document
 which crate owns the resulting state. Do not put filesystem, database, network,
@@ -67,16 +67,16 @@ helper lifecycle integration tests are included automatically in the workspace
 test; they can also be reproduced directly:
 
 ```bash
-cargo test -p nyaterm-rdp-helper --test lifecycle --locked
-cargo test -p nyaterm-vnc-helper --test lifecycle --locked
+cargo test -p zzclawterm-rdp-helper --test lifecycle --locked
+cargo test -p zzclawterm-vnc-helper --test lifecycle --locked
 ```
 
-Use `cargo run -p nyaterm-app --bin nyaterm` for a local graphical smoke test.
+Use `cargo run -p zzclawterm-app --bin zzclawterm` for a local graphical smoke test.
 That command builds only the application, not the RDP/VNC helpers. Build the
 helpers first when the smoke test includes those protocols:
 
 ```bash
-cargo build -p nyaterm-rdp-helper -p nyaterm-vnc-helper --locked
+cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper --locked
 ```
 
 The full workspace and application checks may need platform-native GPUI, PTY,
@@ -90,12 +90,12 @@ blanket workspace `--ignored`, which would also select credentialed integration
 tests and unrelated ignored fixtures:
 
 ```bash
-cargo test -p nyaterm-desktop --release --locked dense_action_link_selection_drag_benchmark -- --ignored --nocapture --test-threads=1
-cargo test -p nyaterm-desktop --release --locked overview_marker_fast_scroll_benchmark -- --ignored --nocapture --test-threads=1
-cargo test -p nyaterm-desktop --release --locked selected_occurrence_search_large_scrollback_benchmark -- --ignored --nocapture --test-threads=1
-cargo test -p nyaterm-desktop --release --locked root_render_hundred_sessions_eight_terminal_leaves_benchmark -- --ignored --nocapture --test-threads=1
-cargo test -p nyaterm-terminal-gpui --release --locked keyword_highlight_benchmark -- --ignored --nocapture --test-threads=1
-cargo test -p nyaterm-core --release --locked sustained_in_place_input_and_deletion -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-desktop --release --locked dense_action_link_selection_drag_benchmark -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-desktop --release --locked overview_marker_fast_scroll_benchmark -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-desktop --release --locked selected_occurrence_search_large_scrollback_benchmark -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-desktop --release --locked root_render_hundred_sessions_eight_terminal_leaves_benchmark -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-terminal-gpui --release --locked keyword_highlight_benchmark -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-core --release --locked sustained_in_place_input_and_deletion -- --ignored --nocapture --test-threads=1
 ```
 
 A benchmark exiting successfully means only that its assertions did not fail;
@@ -104,14 +104,14 @@ OS/architecture, CPU/GPU, display scale, font, build profile, workload, sample
 count, and raw output before comparing runs.
 
 The ignored SFTP end-to-end test requires
-`NYATERM_TEST_SFTP_HOST`, `NYATERM_TEST_SFTP_PORT`,
-`NYATERM_TEST_SFTP_USERNAME`, `NYATERM_TEST_SFTP_PASSWORD`, and
-`NYATERM_TEST_SFTP_ROOT`. The root must already exist, be writable, and be safe
+`ZZCLAWTERM_TEST_SFTP_HOST`, `ZZCLAWTERM_TEST_SFTP_PORT`,
+`ZZCLAWTERM_TEST_SFTP_USERNAME`, `ZZCLAWTERM_TEST_SFTP_PASSWORD`, and
+`ZZCLAWTERM_TEST_SFTP_ROOT`. The root must already exist, be writable, and be safe
 for the test to create and remove children. Use only an isolated test server and
 disposable root, keep credentials out of command lines and logs, then run:
 
 ```bash
-cargo test -p nyaterm-transport --test sftp_service_e2e --locked sftp_service_round_trips_file_manager_operations -- --ignored --nocapture --test-threads=1
+cargo test -p zzclawterm-transport --test sftp_service_e2e --locked sftp_service_round_trips_file_manager_operations -- --ignored --nocapture --test-threads=1
 ```
 
 ### Release packaging matrix
@@ -135,12 +135,12 @@ metadata, helper presence, and binary architecture. They do not replace manual
 installation, launch, upgrade/uninstall, URL-handler, platform trust/signing,
 GUI, PTY, GPU/IME, or real RDP/VNC acceptance on the target OS.
 
-`NYATERM_ARTIFACT_VERSION` changes only the version segment in artifact names;
+`ZZCLAWTERM_ARTIFACT_VERSION` changes only the version segment in artifact names;
 package metadata still uses the workspace SemVer. This is reserved for the
 manual snapshot workflow and must be passed to both packaging and verification:
 
 ```bash
-NYATERM_ARTIFACT_VERSION=main-snapshot \
+ZZCLAWTERM_ARTIFACT_VERSION=main-snapshot \
   python scripts/release/package_native.py "${TARGET}"
 python scripts/release/verify_native_package.py \
   --target "${TARGET}" --version "${VERSION}" \
@@ -170,8 +170,10 @@ generated metadata out of the change.
 
 Keep pull requests focused and explain compatibility-sensitive decisions in the
 description. Patched third-party dependencies are not vendored: each is a patch
-series on a fork under <https://github.com/nyakang> on branch `nyaterm`, pinned
-by revision in the root `Cargo.toml`. Change one by committing to its fork
+series on a fork under <https://github.com/jackfahdin> on branch `nyaterm`
+(forked from the original series under <https://github.com/nyakang>), mirrored
+to <https://gitcode.com/JackfahdinImport> for faster access in mainland China,
+and pinned by revision in the root `Cargo.toml`. Change one by committing to its fork
 branch and bumping that revision, and identify the upstream project/version or
 commit, the reason for the modification, and the validation performed. `temp/vendor/`
 holds untracked read-only copies for reading only; nothing there is compiled.

@@ -1,17 +1,14 @@
 <p align="center">
-  <img src="./docs-site/static/img/nyaterm.svg" alt="NyaTerm" width="128" height="128">
+  <img src="./docs-site/static/img/logo.svg" alt="ZzClawTerm" width="128" height="128">
 </p>
 
-<h1 align="center">NyaTerm</h1>
-
-<p align="center">
-  <em>妮雅</em>
-</p>
+<h1 align="center">ZzClawTerm</h1>
 
 <p align="center">
   <strong>基于 GPUI 构建的现代原生远程终端工作区。</strong><br/>
-  <a href="https://nyaterm.app"><strong>nyaterm.app</strong></a> ·
-  <a href="https://nyaterm.app/docs/"><strong>在线文档</strong></a>
+  本项目 fork 自 <a href="https://github.com/nyakang/nyaterm">NyaTerm</a>，感谢原作者的工作。<br/>
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><strong>GitHub</strong></a> ·
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><strong>在线文档</strong></a>
 </p>
 
 <p align="center">
@@ -23,12 +20,12 @@
   &nbsp;
   <a href="https://docs.qq.com/doc/DYW5TUkZnakxOWUFW" target="_blank"><img src="https://img.shields.io/badge/微信交流群-点击加入-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="微信交流群" /></a>
   <br/>
-  <a href="https://nyaterm.app"><img alt="Version" src="https://img.shields.io/github/v/release/nyakang/nyaterm.svg?style=flat-square&logo=github&color=0EA5E9&labelColor=334155&label=%E7%89%88%E6%9C%AC&cacheSeconds=300"></a>
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><img alt="Version" src="https://img.shields.io/github/v/release/jackfahdin/ZzClawTerm.svg?style=flat-square&logo=github&color=0EA5E9&labelColor=334155&label=%E7%89%88%E6%9C%AC&cacheSeconds=300"></a>
   &nbsp;
-  <a href="https://github.com/nyakang/nyaterm/releases">
+  <a href="https://github.com/jackfahdin/ZzClawTerm/releases">
     <img
       alt="GitHub downloads"
-      src="https://img.shields.io/github/downloads/nyakang/nyaterm/total.svg?style=flat-square&logo=github&color=0EA5E9&label=%E4%B8%8B%E8%BD%BD%E9%87%8F&labelColor=334155&v=2"
+      src="https://img.shields.io/github/downloads/jackfahdin/ZzClawTerm/total.svg?style=flat-square&logo=github&color=0EA5E9&label=%E4%B8%8B%E8%BD%BD%E9%87%8F&labelColor=334155&v=2"
     >
   </a>
   &nbsp;
@@ -40,7 +37,7 @@
   <a href="LICENSE">
     <img
       alt="License"
-      src="https://img.shields.io/badge/License-MIT-0EA5E9.svg?style=flat-square&logo=readthedocs&labelColor=334155&label=%E5%8D%8F%E8%AE%AE&v=2"
+      src="https://img.shields.io/badge/License-Apache--2.0-0EA5E9.svg?style=flat-square&logo=readthedocs&labelColor=334155&label=%E5%8D%8F%E8%AE%AE&v=2"
     >
   </a>
 </p>
@@ -54,7 +51,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/product-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/product-light.png">
-    <img alt="NyaTerm 主工作区" src="./docs-site/static/img/home/product-light.png">
+    <img alt="ZzClawTerm 主工作区" src="./docs-site/static/img/home/product-light.png">
   </picture>
 </p>
 
@@ -63,7 +60,7 @@
 <a name="ai-assistant"></a>
 # AI Assistant
 
-NyaTerm 内置 AI Assistant 面板，可用于生成命令、解释终端输出、分析错误，以及在终端上下文中执行多步辅助操作。
+ZzClawTerm 内置 AI Assistant 面板，可用于生成命令、解释终端输出、分析错误，以及在终端上下文中执行多步辅助操作。
 
 ## 它能做什么
 
@@ -80,28 +77,28 @@ NyaTerm 内置 AI Assistant 面板，可用于生成命令、解释终端输出�
 
 ---
 
-<a name="nyaterm-是什么"></a>
-# NyaTerm 是什么
+<a name="zzclawterm-是什么"></a>
+# ZzClawTerm 是什么
 
-**NyaTerm** 是一个面向 SSH 运维和混合终端工作流的原生 GPUI 桌面客户端。它通过 Rust 工作区统一实现桌面界面、终端渲染、传输协议、持久化、认证、网络工具、AI 辅助终端操作、导入导出、诊断、加密同步与备份。
+**ZzClawTerm** 是一个面向 SSH 运维和混合终端工作流的原生 GPUI 桌面客户端。它通过 Rust 工作区统一实现桌面界面、终端渲染、传输协议、持久化、认证、网络工具、AI 辅助终端操作、导入导出、诊断、加密同步与备份。
 
-- **NyaTerm 是** 面向开发者、系统管理员和 DevOps 工程师的 SSH 客户端
-- **NyaTerm 是** 支持标签页、横向分屏和纵向分屏的终端工作区
-- **NyaTerm 是** 带传输队列和“本地编辑后回传”流程的 SFTP 文件浏览器
-- **NyaTerm 支持** SSH、本地终端、Telnet、串口、RDP 和 VNC 会话
-- **NyaTerm 不是** Shell 替代品；它用于连接远程 Shell、本地 Shell、Telnet 端点和串口设备
+- **ZzClawTerm 是** 面向开发者、系统管理员和 DevOps 工程师的 SSH 客户端
+- **ZzClawTerm 是** 支持标签页、横向分屏和纵向分屏的终端工作区
+- **ZzClawTerm 是** 带传输队列和“本地编辑后回传”流程的 SFTP 文件浏览器
+- **ZzClawTerm 支持** SSH、本地终端、Telnet、串口、RDP 和 VNC 会话
+- **ZzClawTerm 不是** Shell 替代品；它用于连接远程 Shell、本地 Shell、Telnet 端点和串口设备
 
 ---
 
-<a name="为什么选择-nyaterm"></a>
-# 为什么选择 NyaTerm
+<a name="为什么选择-zzclawterm"></a>
+# 为什么选择 ZzClawTerm
 
-NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之间来回切换的工作方式。
+ZzClawTerm 适合每天在服务器、本地命令、设备调试和配置文件之间来回切换的工作方式。
 
 - **工作区优先**：用标签页、分屏、侧边面板和子窗口组织相关任务
 - **远程操作不脱离上下文**：在会话旁浏览 SFTP 文件、跟随终端路径、管理传输、编辑远程文件
 - **面向安全的工作流**：管理凭据、私钥、known hosts、OTP、锁屏和主密码保护的本地存储
-- **可迁移配置**：从已有工具导入会话，导出加密 `.nya` 备份，并通过 WebDAV 或 S3 兼容存储同步加密快照
+- **可迁移配置**：从已有工具导入会话，导出加密 `.zz` 备份，并通过 WebDAV 或 S3 兼容存储同步加密快照
 - **恰到好处的 AI**：从当前终端上下文生成命令、检查输出，并在审批后执行多步操作
 
 ---
@@ -166,8 +163,8 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
 - 启用同步、备份、加密导入导出或定时加密备份前必须设置主密码
 - 支持启动同步检查、本地变更后的防抖自动推送、详细状态更新和定时备份保留策略
 - 支持手动测试、推送、拉取、备份、远程备份恢复和快照级冲突处理
-- 支持从 Xshell、MobaXterm、WindTerm 和 NyaTerm JSON 定义导入会话
-- 支持完整 NyaTerm 配置的加密 `.nya` 导入导出
+- 支持从 Xshell、MobaXterm、WindTerm 和 ZzClawTerm JSON 定义导入会话
+- 支持完整 ZzClawTerm 配置的加密 `.zz` 导入导出
 
 ---
 
@@ -182,7 +179,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/overview-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/overview-light.png">
-    <img alt="NyaTerm 工作区概览" src="./docs-site/static/img/home/overview-light.png">
+    <img alt="ZzClawTerm 工作区概览" src="./docs-site/static/img/home/overview-light.png">
   </picture>
 </p>
 
@@ -194,7 +191,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/cover-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/cover-light.png">
-    <img alt="NyaTerm 背景图自定义" src="./docs-site/static/img/home/cover-light.png">
+    <img alt="ZzClawTerm 背景图自定义" src="./docs-site/static/img/home/cover-light.png">
   </picture>
 </p>
 
@@ -206,7 +203,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/terminal-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/terminal-light.png">
-    <img alt="NyaTerm 终端功能" src="./docs-site/static/img/home/terminal-light.png">
+    <img alt="ZzClawTerm 终端功能" src="./docs-site/static/img/home/terminal-light.png">
   </picture>
 </p>
 
@@ -218,7 +215,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/files-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/files-light.png">
-    <img alt="NyaTerm SFTP 文件工作流" src="./docs-site/static/img/home/files-light.png">
+    <img alt="ZzClawTerm SFTP 文件工作流" src="./docs-site/static/img/home/files-light.png">
   </picture>
 </p>
 
@@ -230,7 +227,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/security-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/security-light.png">
-    <img alt="NyaTerm 安全与网络工具" src="./docs-site/static/img/home/security-light.png">
+    <img alt="ZzClawTerm 安全与网络工具" src="./docs-site/static/img/home/security-light.png">
   </picture>
 </p>
 
@@ -242,7 +239,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/sync-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/sync-light.png">
-    <img alt="NyaTerm 同步与备份" src="./docs-site/static/img/home/sync-light.png">
+    <img alt="ZzClawTerm 同步与备份" src="./docs-site/static/img/home/sync-light.png">
   </picture>
 </p>
 
@@ -257,7 +254,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
 | **macOS** | macOS 12+，Intel / Apple Silicon |
 | **Linux** | Ubuntu 20.04+、Fedora 36+、Arch Linux 及类似发行版 |
 
-可从 [nyaterm.app](https://nyaterm.app) 或 [Releases](https://github.com/nyakang/nyaterm/releases) 页面下载安装包。
+可从 [GitHub](https://github.com/jackfahdin/ZzClawTerm) 或 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 页面下载安装包。
 
 ---
 
@@ -278,7 +275,7 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
 
 ## 下载
 
-从 [nyaterm.app](https://nyaterm.app) 或 [Releases](https://github.com/nyakang/nyaterm/releases) 下载适合你平台的最新版。
+从 [GitHub](https://github.com/jackfahdin/ZzClawTerm) 或 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 下载适合你平台的最新版。
 
 | 平台 | 格式 |
 |------|------|
@@ -286,51 +283,51 @@ NyaTerm 适合每天在服务器、本地命令、设备调试和配置文件之
 | macOS | `.dmg` |
 | Linux | `.deb` / `.AppImage` / `.rpm` |
 
-Windows 便携版解压后运行 `NyaTerm.exe` 即可。GPUI 版本的 **Help → 检查更新** 只检查 GitHub Releases 并打开发布页面，不会自动替换程序文件。更新前请关闭 NyaTerm，替换完整的便携目录并保留 `data/`。
+Windows 便携版解压后运行 `ZzClawTerm.exe` 即可。GPUI 版本的 **Help → 检查更新** 只检查 GitHub Releases 并打开发布页面，不会自动替换程序文件。更新前请关闭 ZzClawTerm，替换完整的便携目录并保留 `data/`。
 
 以前安装的 Tauri 安装版可以通过原有签名更新器迁移一次到 GPUI 安装版。旧 Tauri 便携更新器无法携带 GPUI 必需的 RDP/VNC helper，因此必须手动迁移：下载完整的 GPUI 便携 ZIP，再把原 `data/` 目录复制进去。
 
 ### macOS
 
-macOS 用户可以通过 Homebrew 安装 NyaTerm：
+macOS 用户可以通过 Homebrew 安装 ZzClawTerm：
 
 ```bash
-brew install nyakang/nyaterm/nyaterm
+brew install jackfahdin/zzclawterm/zzclawterm
 ```
 
-该命令会使用 [`nyakang/homebrew-nyaterm`](https://github.com/nyakang/homebrew-nyaterm) tap，并安装 `nyaterm` cask。也可以从 [nyaterm.app](https://nyaterm.app) 或 [Releases](https://github.com/nyakang/nyaterm/releases) 下载 `.dmg` 安装包，然后将 NyaTerm 拖入 `/Applications`。
+该命令会使用 [`jackfahdin/homebrew-zzclawterm`](https://github.com/jackfahdin/homebrew-zzclawterm) tap，并安装 `zzclawterm` cask。也可以从 [GitHub](https://github.com/jackfahdin/ZzClawTerm) 或 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 下载 `.dmg` 安装包，然后将 ZzClawTerm 拖入 `/Applications`。
 
-NyaTerm 目前还没有使用 Apple Developer 证书签名。安装后如果 macOS 提示应用已损坏或无法打开，可以移除 quarantine 属性后再打开：
+ZzClawTerm 目前还没有使用 Apple Developer 证书签名。安装后如果 macOS 提示应用已损坏或无法打开，可以移除 quarantine 属性后再打开：
 
 ```bash
-sudo xattr -cr /Applications/NyaTerm.app
+sudo xattr -cr /Applications/ZzClawTerm.app
 ```
 
 ### Arch Linux / AUR
 
-Arch Linux 用户可以通过 AUR 安装 NyaTerm：
+Arch Linux 用户可以通过 AUR 安装 ZzClawTerm：
 
 ```bash
-yay -S nyaterm-bin
+yay -S zzclawterm-bin
 ```
 
 或使用 `paru`：
 
 ```bash
-paru -S nyaterm-bin
+paru -S zzclawterm-bin
 ```
 
 也可以手动从 AUR 构建安装：
 
 ```bash
-git clone https://aur.archlinux.org/nyaterm-bin.git
-cd nyaterm-bin
+git clone https://aur.archlinux.org/zzclawterm-bin.git
+cd zzclawterm-bin
 makepkg -si
 ```
 
-AUR 软件包：[`nyaterm-bin`](https://aur.archlinux.org/packages/nyaterm-bin)
+AUR 软件包：[`zzclawterm-bin`](https://aur.archlinux.org/packages/zzclawterm-bin)
 
-> `nyaterm-bin` 为社区维护的 AUR 二进制包。如果 AUR 版本暂未同步到最新发布版，可以从 [Releases](https://github.com/nyakang/nyaterm/releases) 下载官方安装包。
+> `zzclawterm-bin` 为社区维护的 AUR 二进制包。如果 AUR 版本暂未同步到最新发布版，可以从 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 下载官方安装包。
 
 
 ## 开发环境要求
@@ -341,27 +338,27 @@ AUR 软件包：[`nyaterm-bin`](https://aur.archlinux.org/packages/nyaterm-bin)
 ## 本地开发
 
 ```bash
-git clone https://github.com/nyakang/nyaterm.git
-cd nyaterm
-cargo run -p nyaterm-app --bin nyaterm
+git clone https://github.com/jackfahdin/ZzClawTerm.git
+cd ZzClawTerm
+cargo run -p zzclawterm-app --bin zzclawterm
 ```
 
 ## 项目结构
 
 ```text
 ├── crates/
-│   ├── nyaterm-app/             # 原生 GPUI 应用入口和资源
-│   ├── nyaterm-desktop/         # GPUI 应用组合与功能状态
-│   ├── nyaterm-core/            # 与 UI 无关的领域模型和策略
-│   ├── nyaterm-terminal/        # 终端状态机和解析
-│   ├── nyaterm-terminal-gpui/   # GPUI 终端布局、输入和绘制
-│   ├── nyaterm-transport/       # SSH、PTY、SFTP、Telnet、串口和传输
-│   ├── nyaterm-store/           # 持久化和数据库兼容层
-│   ├── nyaterm-ui/              # 共享 GPUI 控件和主题集成
-│   ├── nyaterm-remote-desktop/  # 与 UI 无关的 RDP/VNC 会话和类型化 IPC
-│   ├── nyaterm-rdp-helper/      # 隔离的 IronRDP 协议 helper 进程
-│   ├── nyaterm-vnc-helper/      # 隔离的 VNC 协议 helper 进程
-│   └── nyaterm-otp/             # OTP 兼容实现
+│   ├── zzclawterm-app/             # 原生 GPUI 应用入口和资源
+│   ├── zzclawterm-desktop/         # GPUI 应用组合与功能状态
+│   ├── zzclawterm-core/            # 与 UI 无关的领域模型和策略
+│   ├── zzclawterm-terminal/        # 终端状态机和解析
+│   ├── zzclawterm-terminal-gpui/   # GPUI 终端布局、输入和绘制
+│   ├── zzclawterm-transport/       # SSH、PTY、SFTP、Telnet、串口和传输
+│   ├── zzclawterm-store/           # 持久化和数据库兼容层
+│   ├── zzclawterm-ui/              # 共享 GPUI 控件和主题集成
+│   ├── zzclawterm-remote-desktop/  # 与 UI 无关的 RDP/VNC 会话和类型化 IPC
+│   ├── zzclawterm-rdp-helper/      # 隔离的 IronRDP 协议 helper 进程
+│   ├── zzclawterm-vnc-helper/      # 隔离的 VNC 协议 helper 进程
+│   └── zzclawterm-otp/             # OTP 兼容实现
 ├── docs-site/                   # Docusaurus 文档站点
 ├── Cargo.toml                   # Rust workspace 定义
 └── Cargo.lock
@@ -371,10 +368,10 @@ cargo run -p nyaterm-app --bin nyaterm
 
 <a name="鸣谢"></a>
 # 鸣谢
-感谢以下项目和库使 NyaTerm 成为可能：
-- [WindTerm](https://github.com/kingToolbox/WindTerm) - 启发了 NyaTerm 的设计和功能
+感谢以下项目和库使 ZzClawTerm 成为可能：
+- [WindTerm](https://github.com/kingToolbox/WindTerm) - 启发了 ZzClawTerm 的设计和功能
 - [tabby](https://github.com/Eugeny/tabby) - 一个优秀的跨平台终端，提供了很多设计灵感
-- [Alacritty](https://github.com/alacritty/alacritty) - NyaTerm 使用的终端模拟组件
+- [Alacritty](https://github.com/alacritty/alacritty) - ZzClawTerm 使用的终端模拟组件
 - [russh](https://github.com/warp-tech/russh) - SSH 客户端和服务端 Rust 库
 
 ---
@@ -382,26 +379,24 @@ cargo run -p nyaterm-app --bin nyaterm
 <a name="赞助"></a>
 # 赞助
 
-如果 NyaTerm 对你的日常开发、运维或远程连接工作有所帮助，欢迎通过 [赞助文档](./docs-site/docs/sponsor.md) 支持项目持续维护。
+如果 ZzClawTerm 对你的日常开发、运维或远程连接工作有所帮助，欢迎通过 [赞助文档](./docs-site/docs/sponsor.md) 支持项目持续维护。
 
 ---
 
 <a name="contributors"></a>
 # 贡献者
 
-<a href="https://github.com/nyakang/nyaterm/graphs/contributors">
-  <img src="https://contrib-wall.coderkang.workers.dev/image?snapshot=tQPH3XaVAWIw41hXZ4V9Xd97&amp;sealed_token=eyJ2IjoxLCJ0eXBlIjoic25hcHNob3QiLCJzbmFwc2hvdCI6InRRUEgzWGFWQVdJdzQxaFhaNFY5WGQ5NyIsImV4cCI6MTgxNTAzNjI5Nn0.9-dqi08YYwadlKeNUEeoBnTyAPhF5hs83OOFgeT8cPs&amp;sealed_github_token=TKIdMnw6IIsp1TI-.ip9G3OywnI_nGDAKhFJUFCSnFyWfWL_HK9JlihiBedCkEXKCKNLt007stBH5MJKbCGQALquRAi8xxG1o3EfewtTTcs3zV12YEBCBLuWJTf4o3IgaIpA2oVTGROrO7vZh79sJEhJMM2NSRU6E6DpXk73JtHT0HDSFfY4Yyot3lBSaFNQ_VKmeo6hfP8c-oMMXn4vvUs1usWS4XHtp3AddeKHr1RjYl1rzOLGhUasRj60" alt="贡献者们" />
-</a>
+[在 GitHub 上查看贡献者](https://github.com/jackfahdin/ZzClawTerm/graphs/contributors)
 
 ---
 
 ## 星标历史
 
-<a href="https://www.star-history.com/?repos=nyakang%2Fnyaterm&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=jackfahdin%2FZzClawTerm&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&theme=dark&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&legend=top-left" />
  </picture>
 </a>
 
@@ -410,4 +405,4 @@ cargo run -p nyaterm-app --bin nyaterm
 <a name="许可证"></a>
 # 许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [Apache License 2.0](LICENSE) 开源。

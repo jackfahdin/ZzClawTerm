@@ -1,16 +1,16 @@
 # Security Policy
 
-NyaTerm handles credentials, private keys, OTP secrets, known hosts, cloud-sync
+ZzClawTerm handles credentials, private keys, OTP secrets, known hosts, cloud-sync
 configuration, and AI or translation provider credentials. Please do not report
 security issues in public issues or pull requests.
 
 ## Reporting
 
 Use GitHub's private security advisory form for
-[`nyakang/nyaterm`](https://github.com/nyakang/nyaterm/security/advisories/new)
+[`jackfahdin/ZzClawTerm`](https://github.com/jackfahdin/ZzClawTerm/security/advisories/new)
 when it is available. If private advisories are unavailable, contact the
 maintainers through the private contact method listed in the repository owner's
-profile and include `NyaTerm security report` in the subject. Do not attach real
+profile and include `ZzClawTerm security report` in the subject. Do not attach real
 passwords, private keys, OTP seeds, API tokens, or unredacted diagnostics;
 provide a minimal reproduction and redact all secrets.
 
@@ -35,5 +35,5 @@ unredacted terminal and command context. Secret-bearing types must use redacted
 readers must preserve unknown fields and must validate data before replacing
 existing user data.
 
-NyaTerm is provided under the Apache License, Version 2.0 and is not a
+ZzClawTerm is provided under the Apache License, Version 2.0 and is not a
 substitute for a security review of the host operating system or remote server.

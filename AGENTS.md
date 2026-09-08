@@ -2,58 +2,61 @@
 
 ## Project Overview
 
-NyaTerm is a native GPUI desktop application written in Rust. It provides SSH,
+ZzClawTerm is a native GPUI desktop application written in Rust. It provides SSH,
 local shell, Telnet, Serial, RDP, VNC, SFTP, tunnels, OTP, AI assistance, and
 encrypted sync and backup in one workspace.
 
 This repository is a Rust 2024 Cargo workspace using resolver `3`. Preserve
-compatibility with existing NyaTerm configuration, credentials, backups,
+compatibility with existing ZzClawTerm configuration, credentials, backups,
 cloud-sync data, known hosts, and sessions. Any incompatible data-format change
 must include explicit conversion logic and tests.
 
 ## Workspace Structure
 
-* `crates/nyaterm-app`: executable entry point, bundled assets, logging setup,
+* `crates/zzclawterm-app`: executable entry point, bundled assets, logging setup,
   and root-window creation.
-* `crates/nyaterm-core`: UI-independent domain models, parsing, policies, AI
+* `crates/zzclawterm-core`: UI-independent domain models, parsing, policies, AI
   settings/risk/provider logic, schema-neutral serialization and encryption
   contracts, and shared pure logic. Do not add GPUI dependencies here.
-* `crates/nyaterm-desktop`: GPUI application composition, `AppShell`,
-  `NyaTermApp`, feature state, views, platform adapters, background-job
+* `crates/zzclawterm-desktop`: GPUI application composition, `AppShell`,
+  `ZzClawTermApp`, feature state, views, platform adapters, background-job
   coordination, native HTTP adapters, and GPUI Entity stores.
-* `crates/nyaterm-terminal`: terminal state machine, snapshots,
+* `crates/zzclawterm-terminal`: terminal state machine, snapshots,
   control-sequence handling, encoding, and graphics protocols. It must remain
   independent of UI frameworks.
-* `crates/nyaterm-terminal-gpui`: GPUI-specific terminal layout, input,
+* `crates/zzclawterm-terminal-gpui`: GPUI-specific terminal layout, input,
   highlighting, images, and painting.
-* `crates/nyaterm-transport`: local PTY, SSH, Telnet, Serial, SFTP, tunnels,
+* `crates/zzclawterm-transport`: local PTY, SSH, Telnet, Serial, SFTP, tunnels,
   remote operations, and transfer-protocol runtime. It must remain independent
   of GPUI and desktop presentation types.
-* `crates/nyaterm-ui`: shared GPUI theme tokens, the `gpui-component`
-  integration boundary, and reusable NyaTerm presentation and interaction
+* `crates/zzclawterm-ui`: shared GPUI theme tokens, the `gpui-component`
+  integration boundary, and reusable ZzClawTerm presentation and interaction
   widgets.
-* `crates/nyaterm-store`: persistence implementation, transactions, redb
+* `crates/zzclawterm-store`: persistence implementation, transactions, redb
   schema, encryption adapters, and database compatibility readers. Keep pure
-  data models and serialization policies in `nyaterm-core`.
-* `crates/nyaterm-remote-desktop`: UI-independent RDP/VNC session management,
+  data models and serialization policies in `zzclawterm-core`.
+* `crates/zzclawterm-remote-desktop`: UI-independent RDP/VNC session management,
   framebuffer and input models, certificate policy, clipboard state, and the
   RDP/VNC helper IPC contracts. It owns no protocol decoder; both live in the
   helper crates below.
-* `crates/nyaterm-rdp-helper`: isolated IronRDP helper process that communicates
+* `crates/zzclawterm-rdp-helper`: isolated IronRDP helper process that communicates
   with the application through the typed IPC protocol in
-  `nyaterm-remote-desktop`.
-* `crates/nyaterm-vnc-helper`: isolated VNC helper process using the same IPC
+  `zzclawterm-remote-desktop`.
+* `crates/zzclawterm-vnc-helper`: isolated VNC helper process using the same IPC
   protocol. It owns the forked `vnc-rs` decoders, the VNC reconnect ladder, and
   the server-facing policy gates (`view_only`, `shared`, clipboard enablement).
   Those gates must stay enforced here, not only in the application.
-* `crates/nyaterm-otp`: bundled HOTP/TOTP implementation.
-* `crates/nyaterm-app/assets`: bundled icons and images. Assets under
+* `crates/zzclawterm-otp`: bundled HOTP/TOTP implementation.
+* `crates/zzclawterm-app/assets`: bundled icons and images. Assets under
   `icons/**` are normally tintable and rendered through `svg()` or
   `mono_icon()`; full-color assets use `img()` or `color_icon()`. Preserve the
   rendering distinction when adding assets.
-* Third-party dependencies that NyaTerm patches are not vendored. Each is a
-  patch series on a fork under <https://github.com/nyakang> on branch
-  `nyaterm`, consumed from a revision pinned in the root `Cargo.toml`:
+* Third-party dependencies that ZzClawTerm patches are not vendored. Each is a
+  patch series on a fork under <https://github.com/jackfahdin> on branch
+  `nyaterm` (forked from the original series under
+  <https://github.com/nyakang>), mirrored to
+  <https://gitcode.com/JackfahdinImport> for faster access in mainland China
+  and consumed from there at a revision pinned in the root `Cargo.toml`:
   `alacritty` (`alacritty_terminal`), `gpui-component`, `IronRDP`
   (`ironrdp-client`, `ironrdp-connector`), `russh`, `russh-sftp`, `sspi-rs`,
   `vnc-rs`, `zed` (`gpui`, `gpui_platform`), and `zmodem2`. Each branch carries
@@ -66,17 +69,17 @@ must include explicit conversion logic and tests.
 
 ## Application Architecture
 
-`NyaTermApp` is the central GPUI composition owner. Feature-specific state
+`ZzClawTermApp` is the central GPUI composition owner. Feature-specific state
 lives in focused structs for connections, commands, remote operations, remote
 desktop, security, settings, AI, terminal presentation, sessions, transfers,
 sync, translation, updates, tunnels, recording, and shell behavior.
 
 Persisted collections and compatibility-sensitive catalogs belong to their
 feature owners. Schema-neutral persistence formats and parsing contracts belong
-in `nyaterm-core`; database execution and compatibility readers belong in
-`nyaterm-store`.
+in `zzclawterm-core`; database execution and compatibility readers belong in
+`zzclawterm-store`.
 
-The GPUI Entity stores each own state that `NyaTermApp` does not own:
+The GPUI Entity stores each own state that `ZzClawTermApp` does not own:
 
 * `StartupRestoreStore`: startup-restore queue.
 * `OverlayStore`: authoritative quick-switch overlay state.
@@ -84,12 +87,12 @@ The GPUI Entity stores each own state that `NyaTermApp` does not own:
 For new or substantially changed features:
 
 * Prefer a focused feature-state struct or a deliberately authoritative GPUI
-  Entity over new top-level `NyaTermApp` fields.
+  Entity over new top-level `ZzClawTermApp` fields.
 * Keep exactly one authoritative mutable owner for each piece of state. Do not
-  mirror independently mutable state between `NyaTermApp`, feature state, and
+  mirror independently mutable state between `ZzClawTermApp`, feature state, and
   Entity stores.
 * If a method only reads and writes one feature-state struct, place that logic
-  on the state and keep the `NyaTermApp` method as a notifier or adapter when
+  on the state and keep the `ZzClawTermApp` method as a notifier or adapter when
   needed.
 * Keep GPUI element construction in views. Pure state types should not render
   UI.
@@ -98,12 +101,12 @@ For new or substantially changed features:
   decoding, or other blocking work in a render path or a long-running GPUI
   update callback.
 * Keep terminal parsing, snapshots, graphics protocols, and wire handling in
-  `nyaterm-terminal`.
+  `zzclawterm-terminal`.
 * Keep terminal layout, GPUI input adapters, highlighting, image presentation,
-  and painting in `nyaterm-terminal-gpui`.
+  and painting in `zzclawterm-terminal-gpui`.
 * Keep transport code independent of GPUI and desktop presentation types.
 * Keep remote-desktop protocol and session logic in
-  `nyaterm-remote-desktop`; keep GPUI presentation in `nyaterm-desktop`.
+  `zzclawterm-remote-desktop`; keep GPUI presentation in `zzclawterm-desktop`.
 * Keep protocol decoders that parse server-controlled bytes in the helper
   crates, never in a crate the application links. Both helpers must translate a
   decoder panic into a fatal IPC error rather than dying silently.
@@ -119,11 +122,11 @@ models, services, GPUI types, and helpers from their authoritative modules.
 ## UI and Input Rules
 
 Ordinary forms, prompts, searches, menus, selects, switches, and dialogs should
-use the wrappers exposed by `nyaterm-ui`. That crate owns the
-`gpui-component` integration, theme mapping, and stable NyaTerm component API;
+use the wrappers exposed by `zzclawterm-ui`. That crate owns the
+`gpui-component` integration, theme mapping, and stable ZzClawTerm component API;
 desktop feature modules must not depend directly on `gpui-component`.
 
-Ordinary text inputs should use `nyaterm-ui::NyaInput` and `NyaInputState`,
+Ordinary text inputs should use `zzclawterm-ui::ZzClawInput` and `ZzClawInputState`,
 either owned by a focused feature or through the id-keyed registry in
 `features/text_inputs.rs`. Do not add hand-painted ordinary text inputs.
 
@@ -136,7 +139,7 @@ handlers must not immediately steal focus from a field. Keep controls usable
 with keyboard navigation and ensure overlays and child windows restore focus
 predictably.
 
-GPUI's `overflow_y_scroll()` enables scrolling but paints nothing, and `scrollbar_width` only reserves gutter space, so use `NyaScrollable` (the `ScrollableElement` trait re-exported by `nyaterm-ui`):
+GPUI's `overflow_y_scroll()` enables scrolling but paints nothing, and `scrollbar_width` only reserves gutter space, so use `ZzClawScrollable` (the `ScrollableElement` trait re-exported by `zzclawterm-ui`):
 
 * In-flow containers: use `overflow_*_scrollbar()` instead of
   `overflow_*_scroll()`, and do not also reserve a `scrollbar_width` gutter -
@@ -178,7 +181,7 @@ above.
 ## Persistence and Compatibility
 
 Changes involving redb, credentials, known hosts, OTP, cloud sync, portable
-snapshots, `.nya` backups, AI or translation secrets, and application settings
+snapshots, `.zz` backups, AI or translation secrets, and application settings
 are compatibility-sensitive.
 
 Before changing these areas:
@@ -187,14 +190,14 @@ Before changing these areas:
   encryption prefixes, master-key wrapping, backup formats, and fallback
   decryption behavior unless the change explicitly updates the data contract.
 * Test both new-data round trips and loading representative data written by
-  supported NyaTerm versions.
+  supported ZzClawTerm versions.
 * Do not silently discard unknown or unsupported fields.
 * Validate fully before overwriting existing user data.
 * Keep secret-bearing values masked when returning settings to the UI.
 
-`nyaterm-store/src/storage/mod.rs` owns the database implementation, with
-domain-specific modules under `nyaterm-store/src/storage/`. Treat existing
-redb data, `.nya` backups, master-key wrapping, encrypted payload formats, and
+`zzclawterm-store/src/storage/mod.rs` owns the database implementation, with
+domain-specific modules under `zzclawterm-store/src/storage/`. Treat existing
+redb data, `.zz` backups, master-key wrapping, encrypted payload formats, and
 text-document fallbacks as public compatibility contracts.
 
 ## Security Rules
@@ -223,19 +226,19 @@ revision over accumulating snapshots.
 
 Use package-specific checks while iterating:
 
-* `cargo check -p nyaterm-app`
+* `cargo check -p zzclawterm-app`
 * `cargo test -p <crate-name>`
-* `cargo run -p nyaterm-app --bin nyaterm`
+* `cargo run -p zzclawterm-app --bin zzclawterm`
 
 RDP and VNC each run in a helper process that the application resolves beside its
-own executable. `cargo run -p nyaterm-app --bin nyaterm` builds only the
+own executable. `cargo run -p zzclawterm-app --bin zzclawterm` builds only the
 application, so build the helpers into the same target directory first or both
 protocols fail with `HelperMissing`:
 
-* `cargo build -p nyaterm-rdp-helper -p nyaterm-vnc-helper`
+* `cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper`
 
 A bare `cargo build` or `cargo check` covers all three: they are the workspace
-`default-members`. `NYATERM_RDP_HELPER` and `NYATERM_VNC_HELPER` override the
+`default-members`. `ZZCLAWTERM_RDP_HELPER` and `ZZCLAWTERM_VNC_HELPER` override the
 lookup with an explicit path. `scripts/release/package_native.py` is what puts the
 helpers next to the application in release packages; its `HELPER_BINS` list must
 name every helper.
@@ -276,12 +279,12 @@ type-only splits that leave coupling behind.
 Add tests beside the behavior being changed.
 
 * Terminal parsing, snapshots, graphics, selection, input, and rendering tests
-  belong in `nyaterm-terminal` or `nyaterm-terminal-gpui`.
+  belong in `zzclawterm-terminal` or `zzclawterm-terminal-gpui`.
 * SSH, SFTP, Telnet, Serial, tunnel, transfer, and terminal-session lifecycle
-  tests belong in `nyaterm-transport`.
+  tests belong in `zzclawterm-transport`.
 * RDP/VNC protocol, framebuffer, input mapping, IPC, certificate, clipboard,
-  and reconnect tests belong in `nyaterm-remote-desktop`, `nyaterm-rdp-helper`,
-  or `nyaterm-vnc-helper`. Helper crates carry a `tests/lifecycle.rs` covering
+  and reconnect tests belong in `zzclawterm-remote-desktop`, `zzclawterm-rdp-helper`,
+  or `zzclawterm-vnc-helper`. Helper crates carry a `tests/lifecycle.rs` covering
   the handshake, an ordinary disconnect, and crash/hang reaping; keep both in
   step when the IPC contract changes.
 * Storage changes require round-trip and supported-format compatibility tests.

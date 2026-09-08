@@ -1,17 +1,14 @@
 <p align="center">
-  <img src="./docs-site/static/img/nyaterm.svg" alt="NyaTerm" width="128" height="128">
+  <img src="./docs-site/static/img/logo.svg" alt="ZzClawTerm" width="128" height="128">
 </p>
 
-<h1 align="center">NyaTerm</h1>
-
-<p align="center">
-  <em>/ˈnjaː tɜːrm/</em>
-</p>
+<h1 align="center">ZzClawTerm</h1>
 
 <p align="center">
   <strong>A modern native remote terminal workspace built with GPUI.</strong><br/>
-  <a href="https://nyaterm.app"><strong>nyaterm.app</strong></a> ·
-  <a href="https://nyaterm.app/docs/"><strong>Documentation</strong></a>
+  Forked from <a href="https://github.com/nyakang/nyaterm">NyaTerm</a> — thanks to the original author.<br/>
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><strong>ZzClawTerm</strong></a> ·
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><strong>Documentation</strong></a>
 </p>
 
 <p align="center">
@@ -23,13 +20,13 @@
   &nbsp;
   <a href="https://docs.qq.com/doc/DYW5TUkZnakxOWUFW" target="_blank"><img src="https://img.shields.io/badge/WeChatGroup-Join-07C160?style=for-the-badge&logo=wechat&logoColor=white" alt="WeChatGroup" /></a>
   <br/>
-  <a href="https://nyaterm.app"><img alt="Version" src="https://img.shields.io/github/v/release/nyakang/nyaterm?style=flat-square&logo=github&color=0EA5E9&labelColor=334155"></a>
+  <a href="https://github.com/jackfahdin/ZzClawTerm"><img alt="Version" src="https://img.shields.io/github/v/release/jackfahdin/ZzClawTerm?style=flat-square&logo=github&color=0EA5E9&labelColor=334155"></a>
   &nbsp;
-  <a href="https://github.com/nyakang/nyaterm/releases"><img alt="GitHub downloads" src="https://img.shields.io/github/downloads/nyakang/nyaterm/total?style=flat-square&logo=github&color=0EA5E9&label=Downloads&labelColor=334155"></a>
+  <a href="https://github.com/jackfahdin/ZzClawTerm/releases"><img alt="GitHub downloads" src="https://img.shields.io/github/downloads/jackfahdin/ZzClawTerm/total?style=flat-square&logo=github&color=0EA5E9&label=Downloads&labelColor=334155"></a>
   &nbsp;
   <a href="#"><img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-0EA5E9?style=flat-square&logo=linux&labelColor=334155"></a>
   &nbsp;
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-0EA5E9?style=flat-square&logo=readthedocs&labelColor=334155"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache--2.0-0EA5E9?style=flat-square&logo=readthedocs&labelColor=334155"></a>
 </p>
 
 <p align="center">
@@ -42,7 +39,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/product-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/product-light.png">
-    <img alt="NyaTerm main workspace" src="./docs-site/static/img/home/product-light.png">
+    <img alt="ZzClawTerm main workspace" src="./docs-site/static/img/home/product-light.png">
   </picture>
 </p>
 
@@ -51,7 +48,7 @@
 <a name="ai-assistant"></a>
 # AI Assistant
 
-NyaTerm includes an AI Assistant panel for command generation, terminal output explanation, error analysis, and multi-step terminal workflows.
+ZzClawTerm includes an AI Assistant panel for command generation, terminal output explanation, error analysis, and multi-step terminal workflows.
 
 ## What It Can Do
 
@@ -67,28 +64,28 @@ NyaTerm includes an AI Assistant panel for command generation, terminal output e
 
 ---
 
-<a name="what-is-nyaterm"></a>
-# What is NyaTerm
+<a name="what-is-zzclawterm"></a>
+# What is ZzClawTerm
 
-**NyaTerm** is a native GPUI desktop client for SSH-centric operations and mixed terminal workflows. Its Rust workspace combines the desktop interface, terminal rendering, transport protocols, persistence, authentication, network tooling, AI-assisted terminal actions, session import/export, diagnostics, and encrypted sync/backup in one application.
+**ZzClawTerm** is a native GPUI desktop client for SSH-centric operations and mixed terminal workflows. Its Rust workspace combines the desktop interface, terminal rendering, transport protocols, persistence, authentication, network tooling, AI-assisted terminal actions, session import/export, diagnostics, and encrypted sync/backup in one application.
 
-- **NyaTerm is** an SSH client for developers, sysadmins, and DevOps engineers
-- **NyaTerm is** a terminal workspace with tabs, horizontal splits, and vertical splits
-- **NyaTerm is** an SFTP browser with a transfer queue and local-edit-then-upload-back workflow
-- **NyaTerm supports** SSH, Local Terminal, Telnet, Serial, RDP, and VNC sessions
-- **NyaTerm is not** a shell replacement; it connects to remote shells, local shells, Telnet endpoints, and serial devices
+- **ZzClawTerm is** an SSH client for developers, sysadmins, and DevOps engineers
+- **ZzClawTerm is** a terminal workspace with tabs, horizontal splits, and vertical splits
+- **ZzClawTerm is** an SFTP browser with a transfer queue and local-edit-then-upload-back workflow
+- **ZzClawTerm supports** SSH, Local Terminal, Telnet, Serial, RDP, and VNC sessions
+- **ZzClawTerm is not** a shell replacement; it connects to remote shells, local shells, Telnet endpoints, and serial devices
 
 ---
 
-<a name="why-nyaterm"></a>
-# Why NyaTerm
+<a name="why-zzclawterm"></a>
+# Why ZzClawTerm
 
-NyaTerm is built for people who move between servers, local commands, devices, and configuration files all day.
+ZzClawTerm is built for people who move between servers, local commands, devices, and configuration files all day.
 
 - **Workspace-first** — keep related terminals together with tabs, split panes, side panels, and child windows
 - **Remote operations in context** — browse SFTP files, follow terminal paths, run transfers, and edit remote files without leaving the session
 - **Security-aware workflows** — manage credentials, keys, known hosts, OTP, lock screen, and master-password protected storage
-- **Portable configuration** — import from existing tools, export encrypted `.nya` backups, and sync encrypted snapshots through WebDAV or S3-compatible storage
+- **Portable configuration** — import from existing tools, export encrypted `.zz` backups, and sync encrypted snapshots through WebDAV or S3-compatible storage
 - **AI where it is useful** — generate commands, inspect output, and run approved multi-step actions from the active terminal context
 
 ---
@@ -159,8 +156,8 @@ NyaTerm is built for people who move between servers, local commands, devices, a
 - Master password required before sync, backup, encrypted import/export, or scheduled encrypted backup actions
 - Startup sync checks, debounced auto-push after supported local changes, detailed status updates, and scheduled backup retention
 - Manual test / push / pull / backup actions, remote backup restore, and snapshot-level conflict resolution
-- Session import from Xshell, MobaXterm, WindTerm, and NyaTerm JSON definitions
-- Full-app encrypted `.nya` import/export for portable NyaTerm configuration
+- Session import from Xshell, MobaXterm, WindTerm, and ZzClawTerm JSON definitions
+- Full-app encrypted `.zz` import/export for portable ZzClawTerm configuration
 
 ---
 
@@ -175,7 +172,7 @@ Manage SSH, local shell, Telnet, and Serial sessions inside one tabbed and split
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/overview-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/overview-light.png">
-    <img alt="NyaTerm workspace overview" src="./docs-site/static/img/home/overview-light.png">
+    <img alt="ZzClawTerm workspace overview" src="./docs-site/static/img/home/overview-light.png">
   </picture>
 </p>
 
@@ -187,7 +184,7 @@ Use a local wallpaper behind the main window, tune `Image Sizing`, `Image Opacit
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/cover-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/cover-light.png">
-    <img alt="NyaTerm background image customization" src="./docs-site/static/img/home/cover-light.png">
+    <img alt="ZzClawTerm background image customization" src="./docs-site/static/img/home/cover-light.png">
   </picture>
 </p>
 
@@ -199,7 +196,7 @@ Use command history, search, translation, action links, timestamps, keyword high
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/terminal-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/terminal-light.png">
-    <img alt="NyaTerm terminal features" src="./docs-site/static/img/home/terminal-light.png">
+    <img alt="ZzClawTerm terminal features" src="./docs-site/static/img/home/terminal-light.png">
   </picture>
 </p>
 
@@ -211,7 +208,7 @@ Browse SFTP files beside the terminal, manage transfers, and send local editor c
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/files-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/files-light.png">
-    <img alt="NyaTerm SFTP file workflow" src="./docs-site/static/img/home/files-light.png">
+    <img alt="ZzClawTerm SFTP file workflow" src="./docs-site/static/img/home/files-light.png">
   </picture>
 </p>
 
@@ -223,7 +220,7 @@ Manage credentials, OTP, known hosts, proxies, jump hosts, and SSH tunnels from 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/security-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/security-light.png">
-    <img alt="NyaTerm security and network tools" src="./docs-site/static/img/home/security-light.png">
+    <img alt="ZzClawTerm security and network tools" src="./docs-site/static/img/home/security-light.png">
   </picture>
 </p>
 
@@ -235,7 +232,7 @@ Sync encrypted portable configuration snapshots and restore backups through WebD
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs-site/static/img/home/sync-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./docs-site/static/img/home/sync-light.png">
-    <img alt="NyaTerm sync and backup" src="./docs-site/static/img/home/sync-light.png">
+    <img alt="ZzClawTerm sync and backup" src="./docs-site/static/img/home/sync-light.png">
   </picture>
 </p>
 
@@ -250,7 +247,7 @@ Sync encrypted portable configuration snapshots and restore backups through WebD
 | **macOS** | macOS 12+, Intel / Apple Silicon |
 | **Linux** | Ubuntu 20.04+, Fedora 36+, Arch Linux, and similar distributions |
 
-Download installers from [nyaterm.app](https://nyaterm.app) or the [Releases](https://github.com/nyakang/nyaterm/releases) page.
+Download installers from [ZzClawTerm](https://github.com/jackfahdin/ZzClawTerm) or the [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) page.
 
 ---
 
@@ -271,7 +268,7 @@ Download installers from [nyaterm.app](https://nyaterm.app) or the [Releases](ht
 
 ## Download
 
-Download the latest build for your platform from [nyaterm.app](https://nyaterm.app) or [Releases](https://github.com/nyakang/nyaterm/releases).
+Download the latest build for your platform from [ZzClawTerm](https://github.com/jackfahdin/ZzClawTerm) or [Releases](https://github.com/jackfahdin/ZzClawTerm/releases).
 
 | Platform | Format |
 |----------|--------|
@@ -279,51 +276,51 @@ Download the latest build for your platform from [nyaterm.app](https://nyaterm.a
 | macOS | `.dmg` |
 | Linux | `.deb` / `.AppImage` / `.rpm` |
 
-For the Windows portable edition, extract the zip and run `NyaTerm.exe`. The GPUI application checks GitHub Releases and opens the release page; it does not replace files automatically. Close NyaTerm before updating the complete portable directory, and preserve `data/`.
+For the Windows portable edition, extract the zip and run `ZzClawTerm.exe`. The GPUI application checks GitHub Releases and opens the release page; it does not replace files automatically. Close ZzClawTerm before updating the complete portable directory, and preserve `data/`.
 
 Installed releases from the former Tauri application can use their signed updater once to migrate to a GPUI installer. The old Tauri portable updater cannot carry the GPUI RDP/VNC helper processes and therefore requires a manual migration: download the complete GPUI portable zip and copy the existing `data/` directory into it.
 
 ### macOS
 
-macOS users can install NyaTerm with Homebrew:
+macOS users can install ZzClawTerm with Homebrew:
 
 ```bash
-brew install nyakang/nyaterm/nyaterm
+brew install jackfahdin/zzclawterm/zzclawterm
 ```
 
-This uses the [`nyakang/homebrew-nyaterm`](https://github.com/nyakang/homebrew-nyaterm) tap and installs the `nyaterm` cask. You can also download the `.dmg` installer from [nyaterm.app](https://nyaterm.app) or [Releases](https://github.com/nyakang/nyaterm/releases), then drag NyaTerm into `/Applications`.
+This uses the [`jackfahdin/homebrew-zzclawterm`](https://github.com/jackfahdin/homebrew-zzclawterm) tap and installs the `zzclawterm` cask. You can also download the `.dmg` installer from [ZzClawTerm](https://github.com/jackfahdin/ZzClawTerm) or [Releases](https://github.com/jackfahdin/ZzClawTerm/releases), then drag ZzClawTerm into `/Applications`.
 
-NyaTerm is currently not signed with an Apple Developer certificate. If macOS reports that the app is damaged or cannot be opened after installation, remove the quarantine attribute and open it again:
+ZzClawTerm is currently not signed with an Apple Developer certificate. If macOS reports that the app is damaged or cannot be opened after installation, remove the quarantine attribute and open it again:
 
 ```bash
-sudo xattr -cr /Applications/NyaTerm.app
+sudo xattr -cr /Applications/ZzClawTerm.app
 ```
 
 ### Arch Linux / AUR
 
-Arch Linux users can install NyaTerm from the AUR:
+Arch Linux users can install ZzClawTerm from the AUR:
 
 ```bash
-yay -S nyaterm-bin
+yay -S zzclawterm-bin
 ```
 
 Or with `paru`:
 
 ```bash
-paru -S nyaterm-bin
+paru -S zzclawterm-bin
 ```
 
 You can also build it manually from the AUR repository:
 
 ```bash
-git clone https://aur.archlinux.org/nyaterm-bin.git
-cd nyaterm-bin
+git clone https://aur.archlinux.org/zzclawterm-bin.git
+cd zzclawterm-bin
 makepkg -si
 ```
 
-AUR package: [`nyaterm-bin`](https://aur.archlinux.org/packages/nyaterm-bin)
+AUR package: [`zzclawterm-bin`](https://aur.archlinux.org/packages/zzclawterm-bin)
 
-> `nyaterm-bin` is a community-maintained binary AUR package. If the AUR package has not yet caught up with the latest release, download the official package from [Releases](https://github.com/nyakang/nyaterm/releases).
+> `zzclawterm-bin` is a community-maintained binary AUR package. If the AUR package has not yet caught up with the latest release, download the official package from [Releases](https://github.com/jackfahdin/ZzClawTerm/releases).
 
 
 ## Prerequisites for Development
@@ -334,27 +331,27 @@ AUR package: [`nyaterm-bin`](https://aur.archlinux.org/packages/nyaterm-bin)
 ## Development
 
 ```bash
-git clone https://github.com/nyakang/nyaterm.git
-cd nyaterm
-cargo run -p nyaterm-app --bin nyaterm
+git clone https://github.com/jackfahdin/ZzClawTerm.git
+cd ZzClawTerm
+cargo run -p zzclawterm-app --bin zzclawterm
 ```
 
 ## Project Structure
 
 ```text
 ├── crates/
-│   ├── nyaterm-app/             # Native GPUI application entry point and assets
-│   ├── nyaterm-desktop/         # GPUI application composition and feature state
-│   ├── nyaterm-core/            # UI-independent domain models and policies
-│   ├── nyaterm-terminal/        # Terminal state machine and parsing
-│   ├── nyaterm-terminal-gpui/   # GPUI terminal layout, input, and painting
-│   ├── nyaterm-transport/       # SSH, PTY, SFTP, Telnet, Serial, and transfers
-│   ├── nyaterm-store/           # Persistence and database compatibility
-│   ├── nyaterm-ui/              # Shared GPUI controls and theme integration
-│   ├── nyaterm-remote-desktop/  # UI-independent RDP/VNC sessions and typed IPC
-│   ├── nyaterm-rdp-helper/      # Isolated IronRDP protocol helper process
-│   ├── nyaterm-vnc-helper/      # Isolated VNC protocol helper process
-│   └── nyaterm-otp/             # OTP compatibility implementation
+│   ├── zzclawterm-app/             # Native GPUI application entry point and assets
+│   ├── zzclawterm-desktop/         # GPUI application composition and feature state
+│   ├── zzclawterm-core/            # UI-independent domain models and policies
+│   ├── zzclawterm-terminal/        # Terminal state machine and parsing
+│   ├── zzclawterm-terminal-gpui/   # GPUI terminal layout, input, and painting
+│   ├── zzclawterm-transport/       # SSH, PTY, SFTP, Telnet, Serial, and transfers
+│   ├── zzclawterm-store/           # Persistence and database compatibility
+│   ├── zzclawterm-ui/              # Shared GPUI controls and theme integration
+│   ├── zzclawterm-remote-desktop/  # UI-independent RDP/VNC sessions and typed IPC
+│   ├── zzclawterm-rdp-helper/      # Isolated IronRDP protocol helper process
+│   ├── zzclawterm-vnc-helper/      # Isolated VNC protocol helper process
+│   └── zzclawterm-otp/             # OTP compatibility implementation
 ├── docs-site/                   # Docusaurus documentation site
 ├── Cargo.toml                   # Rust workspace definition
 └── Cargo.lock
@@ -364,10 +361,10 @@ cargo run -p nyaterm-app --bin nyaterm
 
 <a name="credits"></a>
 # Credits
-Thanks to the following projects and libraries that make NyaTerm possible:
-- [WindTerm](https://github.com/kingToolbox/WindTerm) - Inspired the design and features of NyaTerm
+Thanks to the following projects and libraries that make ZzClawTerm possible:
+- [WindTerm](https://github.com/kingToolbox/WindTerm) - Inspired the design and features of ZzClawTerm
 - [tabby](https://github.com/Eugeny/tabby) - An excellent cross-platform terminal that provided many design inspirations
-- [Alacritty](https://github.com/alacritty/alacritty) - Terminal emulation components used by NyaTerm
+- [Alacritty](https://github.com/alacritty/alacritty) - Terminal emulation components used by ZzClawTerm
 - [russh](https://github.com/warp-tech/russh) - An SSH client and server implementation in Rust
 
 ---
@@ -375,26 +372,24 @@ Thanks to the following projects and libraries that make NyaTerm possible:
 <a name="sponsor"></a>
 # Sponsor
 
-If NyaTerm helps your daily development, operations, or remote terminal workflow, you can support ongoing maintenance from the [Sponsor page](./docs-site/i18n/en/docusaurus-plugin-content-docs/current/sponsor.md).
+If ZzClawTerm helps your daily development, operations, or remote terminal workflow, you can support ongoing maintenance from the [Sponsor page](./docs-site/i18n/en/docusaurus-plugin-content-docs/current/sponsor.md).
 
 ---
 
 <a name="contributors"></a>
 # Contributors
 
-<a href="https://github.com/nyakang/nyaterm/graphs/contributors">
-  <img src="https://contrib-wall.coderkang.workers.dev/image?snapshot=EEZNlyhjBOrARLki-MUhXqKk&amp;sealed_token=eyJ2IjoxLCJ0eXBlIjoic25hcHNob3QiLCJzbmFwc2hvdCI6IkVFWk5seWhqQk9yQVJMa2ktTVVoWHFLayIsImV4cCI6MTgxNTAzNjQ0NH0.UwegiwfiT3KSKQ17n5ivt24EFwAtoaHZGRwx97t0ODA&amp;sealed_github_token=A6pS93BW-53hz_Cs.8rPY0yM6koNS_UowTbu8qkWzmPLRco8HJRJO2_yp5MZH9yz9o1Ob2g5MUL4aLFK24gjbDexjdErw6eR72ruRbNcsFciYuM4DghLZJgi9V5D9f1-_xFT-sGYK6ibc1A4aWz8EyvFIQo0byPAXv-d410cJmhwsH-bqc963L8J-z0kU6oIi-2zCSszxllze23WmJsWnTJBFUBrQbllg5cLwuHm6q-BMkjoVxChLdOMVwEs" alt="Contributors" />
-</a>
+[View the contributors on GitHub](https://github.com/jackfahdin/ZzClawTerm/graphs/contributors)
 
 ---
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=nyakang%2Fnyaterm&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=jackfahdin%2FZzClawTerm&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&theme=dark&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nyakang/nyaterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jackfahdin/ZzClawTerm&type=date&legend=top-left" />
  </picture>
 </a>
 
@@ -403,4 +398,4 @@ If NyaTerm helps your daily development, operations, or remote terminal workflow
 <a name="license"></a>
 # License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE).
