@@ -335,7 +335,7 @@ git push origin v0.0.1
 
 | 位置 | 名称 | 用途 |
 |------|------|------|
-| Settings → Variables | `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` | 构建期注入 Gist 同步的 OAuth Client ID |
+| Settings → Variables | `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` | 构建期注入 Gist 同步的 OAuth Client ID；**可选**，未配置时构建继续但不含 Gist 同步功能 |
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_B64` | 更新器签名私钥（base64） |
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 签名私钥口令 |
 

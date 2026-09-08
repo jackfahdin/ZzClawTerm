@@ -104,8 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${ZZCLAWTERM_GITHUB_GIST_CLIENT_ID:-}" ]]; then
-            echo 'ZZCLAWTERM_GITHUB_GIST_CLIENT_ID repository variable is required' >&2
-            exit 1
+            echo '::warning::ZZCLAWTERM_GITHUB_GIST_CLIENT_ID is not set; the build will ship without GitHub Gist sync'
           fi
 
       - name: Set up Rust
@@ -283,7 +282,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          TAURI_UPDATER_PUBLIC_KEY_B64: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK
+          TAURI_UPDATER_PUBLIC_KEY_B64: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBM0E2Mzg3MzNGOUM3MDYKUldRR3gva3poMk02eXFGbGhobkVuaFVCZ0V2bnFheFRGQVlnVS9pSmFxRGc4WXNaMmZYeUZOM1cK
         run: |
           set -euo pipefail
           printf '%s' "${TAURI_UPDATER_PUBLIC_KEY_B64}" | base64 --decode > "${RUNNER_TEMP}/zzclawterm-updater.pub"
