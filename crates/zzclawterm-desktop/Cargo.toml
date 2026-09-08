@@ -1,0 +1,61 @@
+[package]
+name = "zzclawterm-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck = "=1.25.2"
+dirs.workspace = true
+encoding_rs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+hayro.workspace = true
+hex.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+keyring.workspace = true
+md5.workspace = true
+zzclawterm-core.workspace = true
+zzclawterm-mcp-protocol.workspace = true
+zzclawterm-otp.workspace = true
+zzclawterm-remote-desktop.workspace = true
+zzclawterm-store.workspace = true
+zzclawterm-terminal.workspace = true
+zzclawterm-terminal-gpui.workspace = true
+zzclawterm-transport.workspace = true
+zzclawterm-ui.workspace = true
+regex.workspace = true
+rust-i18n.workspace = true
+rand.workspace = true
+quick-xml.workspace = true
+rqrr = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+uuid.workspace = true
+zed_reqwest.workspace = true
+zip.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

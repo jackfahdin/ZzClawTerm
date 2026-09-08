@@ -1,0 +1,18 @@
+[package]
+name = "zzclawterm-terminal-gpui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aho-corasick = "1"
+gpui.workspace = true
+zzclawterm-core.workspace = true
+zzclawterm-terminal.workspace = true
+zzclawterm-ui.workspace = true
+regex.workspace = true
+tracing.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+smallvec = "1"

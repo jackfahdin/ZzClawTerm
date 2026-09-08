@@ -1,0 +1,511 @@
+use std::io::{BufWriter, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
+
+use futures::channel::mpsc::UnboundedSender;
+use serde_json::Value;
+use zzclawterm_core::ai::{
+    CodexMcpConfig, CodexServerEvent, build_codex_agent_prompt, codex_decline_server_request,
+    codex_initialize_request, codex_initialized_notification, codex_thread_resume_request,
+    codex_thread_start_request, codex_turn_interrupt_request, codex_turn_start_request,
+    parse_codex_server_line, sanitize_codex_log_line,
+};
+use zzclawterm_core::{AiChatRequest, AiSettings, CodexThreadMode};
+
+use crate::external_process::ExternalAgentChild;
+use crate::features::mcp::McpEphemeralCredential;
+use crate::features::runtime_jobs::AiChatWorkerEvent;
+
+use super::helper_resolver::resolve_mcp_helper;
+
+#[derive(Debug)]
+pub(in crate::features) struct CodexRunResult {
+    pub text: String,
+    pub reasoning: Option<String>,
+    pub thread_id: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::features) fn run_codex_app_server(
+    settings: &AiSettings,
+    request: &AiChatRequest,
+    existing_thread_id: Option<&str>,
+    stream_tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    cancel: &Arc<AtomicBool>,
+    job_id: u64,
+    session_id: &str,
+    mcp_credential: McpEphemeralCredential,
+) -> Result<CodexRunResult, String> {
+    if !settings.codex.enabled {
+        return Err("Codex integration is disabled".to_string());
+    }
+    let mcp_environment = mcp_credential.environment();
+    let mcp_helper = resolve_mcp_helper()?;
+    let result = run_codex_app_server_with_environment(
+        settings,
+        request,
+        existing_thread_id,
+        stream_tx,
+        cancel,
+        job_id,
+        session_id,
+        mcp_environment,
+        &mcp_helper,
+    );
+    drop(mcp_credential);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_codex_app_server_with_environment(
+    settings: &AiSettings,
+    request: &AiChatRequest,
+    existing_thread_id: Option<&str>,
+    stream_tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    cancel: &Arc<AtomicBool>,
+    job_id: u64,
+    session_id: &str,
+    mcp_environment: std::collections::HashMap<String, String>,
+    mcp_helper: &std::path::Path,
+) -> Result<CodexRunResult, String> {
+    if !settings.codex.enabled {
+        return Err("Codex integration is disabled".to_string());
+    }
+    let executable = settings
+        .codex
+        .executable_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("codex");
+    let mut command = Command::new(executable);
+    command
+        .args(["app-server", "--listen", "stdio://"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_window(&mut command);
+    let mut child = ExternalAgentChild::new(
+        command
+            .spawn()
+            .map_err(|error| format!("failed to start Codex app-server: {error}"))?,
+    );
+    let stdin = child
+        .take_stdin()
+        .ok_or_else(|| "Codex app-server stdin is unavailable".to_string())?;
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| "Codex app-server stdout is unavailable".to_string())?;
+    let stderr = child
+        .take_stderr()
+        .ok_or_else(|| "Codex app-server stderr is unavailable".to_string())?;
+    let mut writer = BufWriter::new(stdin);
+    let line_rx = child
+        .capture_output("zzclawterm-codex", stdout, stderr, |line| {
+            let sanitized = sanitize_codex_log_line(&line);
+            if !sanitized.trim().is_empty() {
+                tracing::debug!(target: "codex_app_server", message = %sanitized);
+            }
+        })
+        .map_err(|error| format!("failed to read Codex app-server output: {error}"))?;
+
+    run_protocol(
+        settings,
+        request,
+        existing_thread_id,
+        stream_tx,
+        cancel,
+        job_id,
+        session_id,
+        &mcp_environment,
+        mcp_helper,
+        child.child_mut(),
+        &mut writer,
+        &line_rx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_protocol(
+    settings: &AiSettings,
+    request: &AiChatRequest,
+    existing_thread_id: Option<&str>,
+    stream_tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    cancel: &Arc<AtomicBool>,
+    job_id: u64,
+    session_id: &str,
+    mcp_environment: &std::collections::HashMap<String, String>,
+    mcp_helper: &std::path::Path,
+    child: &mut Child,
+    writer: &mut BufWriter<ChildStdin>,
+    lines: &mpsc::Receiver<Result<String, String>>,
+) -> Result<CodexRunResult, String> {
+    send(
+        writer,
+        &codex_initialize_request(1, env!("CARGO_PKG_VERSION")),
+    )?;
+    wait_response(1, writer, lines, cancel, child)?;
+    send(writer, &codex_initialized_notification())?;
+
+    let model = request
+        .model_name
+        .as_deref()
+        .or(settings.codex.default_model.as_deref());
+    let mcp = CodexMcpConfig {
+        command: mcp_helper.to_string_lossy().into_owned(),
+        env: mcp_environment.clone(),
+    };
+    let reusable = existing_thread_id.filter(|value| !value.trim().is_empty());
+    let thread_id = if let Some(thread_id) = reusable {
+        send(writer, &codex_thread_resume_request(2, thread_id))?;
+        wait_response(2, writer, lines, cancel, child)?;
+        thread_id.to_string()
+    } else {
+        send(
+            writer,
+            &codex_thread_start_request(
+                2,
+                model,
+                settings.codex.thread_mode == CodexThreadMode::Ephemeral,
+                &mcp,
+            ),
+        )?;
+        let result = wait_response(2, writer, lines, cancel, child)?;
+        result
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| result.get("id").and_then(Value::as_str))
+            .ok_or_else(|| "Codex thread/start returned no thread id".to_string())?
+            .to_string()
+    };
+
+    let prompt = build_codex_agent_prompt(request, settings);
+    send(
+        writer,
+        &codex_turn_start_request(3, &thread_id, &prompt, model),
+    )?;
+    let turn = wait_response(3, writer, lines, cancel, child)?;
+    let turn_id = turn
+        .get("turn")
+        .and_then(|turn| turn.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Codex turn/start returned no turn id".to_string())?
+        .to_string();
+
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = send(
+                writer,
+                &codex_turn_interrupt_request(4, &thread_id, &turn_id),
+            );
+            return Err("AI request cancelled".to_string());
+        }
+        let line = match lines.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => line?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                {
+                    return Err("Codex app-server exited before completing the turn".to_string());
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Codex app-server output closed".to_string());
+            }
+        };
+        match parse_codex_server_line(&line)? {
+            CodexServerEvent::ServerRequest { id, method, .. } => {
+                send(writer, &codex_decline_server_request(id, &method))?;
+            }
+            CodexServerEvent::TextDelta {
+                turn_id: event_turn,
+                delta,
+            } if event_turn == turn_id => {
+                text.push_str(&delta);
+                send_delta(stream_tx, job_id, session_id, delta, None);
+            }
+            CodexServerEvent::ReasoningDelta {
+                turn_id: event_turn,
+                delta,
+            } if event_turn == turn_id => {
+                reasoning.push_str(&delta);
+                send_delta(stream_tx, job_id, session_id, String::new(), Some(delta));
+            }
+            CodexServerEvent::TurnCompleted {
+                turn_id: event_turn,
+                status,
+                text: final_text,
+                error,
+                ..
+            } if event_turn == turn_id => {
+                if status == "failed" {
+                    return Err(error.unwrap_or_else(|| "Codex turn failed".to_string()));
+                }
+                if !final_text.is_empty() {
+                    text = final_text;
+                }
+                if looks_like_command_plan(&text) {
+                    return Err("Codex returned a command plan instead of using ZzClawTerm MCP; no command was executed".to_string());
+                }
+                return Ok(CodexRunResult {
+                    text,
+                    reasoning: (!reasoning.is_empty()).then_some(reasoning),
+                    thread_id,
+                });
+            }
+            CodexServerEvent::Error(error) => return Err(error),
+            _ => {}
+        }
+    }
+}
+
+fn wait_response(
+    expected_id: u64,
+    writer: &mut BufWriter<ChildStdin>,
+    lines: &mpsc::Receiver<Result<String, String>>,
+    cancel: &Arc<AtomicBool>,
+    child: &mut Child,
+) -> Result<Value, String> {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("AI request cancelled".to_string());
+        }
+        let line = match lines.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => line?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if child
+                    .try_wait()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+                {
+                    return Err("Codex app-server exited during a request".to_string());
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Codex app-server output closed".to_string());
+            }
+        };
+        match parse_codex_server_line(&line)? {
+            CodexServerEvent::Response { id, result } if id == expected_id => return result,
+            CodexServerEvent::ServerRequest { id, method, .. } => {
+                send(writer, &codex_decline_server_request(id, &method))?;
+            }
+            CodexServerEvent::Error(error) => return Err(error),
+            _ => {}
+        }
+    }
+}
+
+fn send(writer: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *writer, value).map_err(|error| error.to_string())?;
+    writer.write_all(b"\n").map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())
+}
+
+fn send_delta(
+    stream_tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    job_id: u64,
+    session_id: &str,
+    text_delta: String,
+    reasoning_delta: Option<String>,
+) {
+    if let Some(tx) = stream_tx {
+        let _ = tx.unbounded_send(AiChatWorkerEvent::Delta {
+            job_id,
+            session_id: session_id.to_string(),
+            text_delta,
+            reasoning_delta,
+        });
+    }
+}
+
+fn looks_like_command_plan(text: &str) -> bool {
+    let trimmed = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| value.get("commands").and_then(Value::as_array).cloned())
+        .is_some_and(|commands| !commands.is_empty())
+}
+
+#[cfg(windows)]
+fn hide_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000);
+}
+
+#[cfg(not(windows))]
+fn hide_window(_command: &mut Command) {}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use zzclawterm_core::{AiChatRequest, AiSettings};
+
+    use super::{looks_like_command_plan, run_codex_app_server_with_environment};
+
+    #[test]
+    fn rejects_command_plan_fallback() {
+        assert!(looks_like_command_plan(
+            r#"{"commands":[{"command":"uptime"}]}"#
+        ));
+        assert!(!looks_like_command_plan("system is healthy"));
+    }
+
+    #[test]
+    fn fake_app_server_streams_resumes_and_cancels() {
+        let script = fake_codex_script(false);
+        let (settings, request) = fixture_request(&script);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let first = run_codex_app_server_with_environment(
+            &settings,
+            &request,
+            None,
+            None,
+            &cancel,
+            1,
+            "chat-1",
+            fixture_mcp_environment(),
+            &script,
+        )
+        .expect("fake Codex completion");
+        assert_eq!(first.thread_id, "thread-fixture");
+        assert_eq!(first.text, "final answer");
+        assert_eq!(first.reasoning.as_deref(), Some("thinking"));
+
+        let resumed = run_codex_app_server_with_environment(
+            &settings,
+            &request,
+            Some("thread-existing"),
+            None,
+            &cancel,
+            2,
+            "chat-1",
+            fixture_mcp_environment(),
+            &script,
+        )
+        .expect("fake Codex resume");
+        assert_eq!(resumed.thread_id, "thread-existing");
+        let _ = std::fs::remove_dir_all(script.parent().unwrap());
+
+        let hanging_script = fake_codex_script(true);
+        let (settings, request) = fixture_request(&hanging_script);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_worker = cancel.clone();
+        let error = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                cancel_worker.store(true, Ordering::Relaxed);
+            });
+            run_codex_app_server_with_environment(
+                &settings,
+                &request,
+                None,
+                None,
+                &cancel,
+                3,
+                "chat-1",
+                fixture_mcp_environment(),
+                &hanging_script,
+            )
+            .unwrap_err()
+        });
+        assert!(error.contains("cancelled"));
+        let _ = std::fs::remove_dir_all(hanging_script.parent().unwrap());
+    }
+
+    fn fixture_request(path: &std::path::Path) -> (AiSettings, AiChatRequest) {
+        use zzclawterm_core::{AiAction, AiAgentKind, AiMode, AiPermissionMode};
+        let mut settings = AiSettings::default();
+        settings.codex.enabled = true;
+        settings.codex.executable_path = Some(path.to_string_lossy().into_owned());
+        let request = AiChatRequest {
+            stream_id: None,
+            session_id: Some("chat-1".into()),
+            connection_id: Some("terminal-1".into()),
+            terminal_session_id: Some("terminal-1".into()),
+            owner_scope: Default::default(),
+            targets: Vec::new(),
+            target_contexts: Vec::new(),
+            mode: AiMode::Agent,
+            agent_kind: AiAgentKind::Codex,
+            permission_mode: AiPermissionMode::Confirm,
+            model_id: None,
+            model_name: Some("gpt-5-codex".into()),
+            default_target_session_id: Some("terminal-1".into()),
+            existing_external_session_id: None,
+            attachments: Vec::new(),
+            action: AiAction::GenerateCommand,
+            user_input: "inspect fixture".into(),
+            context: Default::default(),
+            options: Default::default(),
+        };
+        (settings, request)
+    }
+
+    fn fixture_mcp_environment() -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([
+            ("ZZCLAWTERM_MCP_EPHEMERAL".into(), "1".into()),
+            ("ZZCLAWTERM_MCP_HOST".into(), "127.0.0.1".into()),
+            ("ZZCLAWTERM_MCP_PORT".into(), "1".into()),
+            ("ZZCLAWTERM_MCP_TOKEN".into(), "fixture-token".into()),
+            (
+                "ZZCLAWTERM_MCP_GENERATION".into(),
+                "fixture-generation".into(),
+            ),
+        ])
+    }
+
+    fn fake_codex_script(hang: bool) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("zzclawterm-fake-codex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        #[cfg(windows)]
+        let path = directory.join("codex.cmd");
+        #[cfg(not(windows))]
+        let path = directory.join("codex");
+        #[cfg(windows)]
+        let content = format!(
+            "@echo off\r\necho {{\"id\":1,\"result\":{{}}}}\r\necho {{\"id\":2,\"result\":{{\"thread\":{{\"id\":\"thread-fixture\"}}}}}}\r\necho {{\"id\":3,\"result\":{{\"turn\":{{\"id\":\"turn-fixture\"}}}}}}\r\necho {{\"method\":\"item/reasoning/delta\",\"params\":{{\"turnId\":\"turn-fixture\",\"delta\":\"thinking\"}}}}\r\necho {{\"method\":\"item/agentMessage/delta\",\"params\":{{\"turnId\":\"turn-fixture\",\"delta\":\"partial\"}}}}\r\n{}",
+            if hang {
+                "for /L %%i in (1,1,2147483647) do @rem\r\n"
+            } else {
+                "echo {\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"turn-fixture\",\"status\":\"completed\",\"items\":[{\"type\":\"agentMessage\",\"text\":\"final answer\"}]}}}\r\n"
+            }
+        );
+        // Keep the Unix fixture alive until each client message arrives; exiting after eager
+        // responses races the client's writes and intermittently turns them into EPIPE.
+        #[cfg(not(windows))]
+        let content = format!(
+            "#!/bin/sh\nIFS= read -r request || exit 1\necho '{{\"id\":1,\"result\":{{}}}}'\nIFS= read -r notification || exit 1\nIFS= read -r request || exit 1\necho '{{\"id\":2,\"result\":{{\"thread\":{{\"id\":\"thread-fixture\"}}}}}}'\nIFS= read -r request || exit 1\necho '{{\"id\":3,\"result\":{{\"turn\":{{\"id\":\"turn-fixture\"}}}}}}'\necho '{{\"method\":\"item/reasoning/delta\",\"params\":{{\"turnId\":\"turn-fixture\",\"delta\":\"thinking\"}}}}'\necho '{{\"method\":\"item/agentMessage/delta\",\"params\":{{\"turnId\":\"turn-fixture\",\"delta\":\"partial\"}}}}'\n{}",
+            if hang {
+                "while :; do :; done\n"
+            } else {
+                "echo '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"turn-fixture\",\"status\":\"completed\",\"items\":[{\"type\":\"agentMessage\",\"text\":\"final answer\"}]}}}'\n"
+            }
+        );
+        std::fs::write(&path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        path
+    }
+}

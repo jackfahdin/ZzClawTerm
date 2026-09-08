@@ -1,0 +1,17 @@
+[package]
+name = "zzclawterm-vnc-helper"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zzclawterm-vnc-helper"
+path = "src/main.rs"
+
+[dependencies]
+zzclawterm-remote-desktop.workspace = true
+tokio.workspace = true
+vnc.workspace = true
+zeroize.workspace = true
