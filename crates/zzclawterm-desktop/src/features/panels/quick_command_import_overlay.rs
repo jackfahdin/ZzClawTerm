@@ -3,10 +3,10 @@ use rust_i18n::t;
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb, svg};
 
 use super::connection_import_overlay::{import_docs_link, import_source_card};
-use crate::features::NyaTermApp;
+use crate::features::ZzClawTermApp;
 use crate::models::QuickCommandImportPathPromptKind;
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features) fn quick_command_import_dialog_content(
         &mut self,
         cx: &mut Context<Self>,
@@ -19,9 +19,9 @@ impl NyaTermApp {
             .to_ascii_lowercase()
             .starts_with("zh")
         {
-            "https://nyaterm.app/docs/guide/quick-commands#%E5%AF%BC%E5%85%A5%E5%BF%AB%E6%8D%B7%E5%91%BD%E4%BB%A4"
+            "https://github.com/jackfahdin/ZzClawTerm/blob/main/docs-site/docs/guide/quick-commands.md"
         } else {
-            "https://nyaterm.app/docs/guide/quick-commands#import-quick-commands"
+            "https://github.com/jackfahdin/ZzClawTerm/blob/main/docs-site/i18n/en/docusaurus-plugin-content-docs/current/guide/quick-commands.md"
         };
         div()
             .id("quick-command-import-content")
@@ -73,8 +73,8 @@ impl NyaTermApp {
                         palette,
                         "quick-command-import-json-card",
                         "icons/file/data-object.svg",
-                        t!("quickCommands.importNyaTermJson"),
-                        t!("quickCommands.importNyaTermJsonHint"),
+                        t!("quickCommands.importZzClawTermJson"),
+                        t!("quickCommands.importZzClawTermJsonHint"),
                         cx.listener(|this, _, window, cx| {
                             this.select_quick_command_import_source(
                                 QuickCommandImportPathPromptKind::NyatermJson,

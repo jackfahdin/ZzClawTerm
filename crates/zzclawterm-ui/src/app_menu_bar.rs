@@ -12,11 +12,11 @@ use gpui_component::{
     menu::PopupMenu,
 };
 
-use crate::NyaMenuItem;
-use crate::NyaScrollable;
+use crate::ZzClawMenuItem;
+use crate::ZzClawScrollable;
 use crate::menu::style_nya_popup_menu;
 
-const KEY_CONTEXT: &str = "NyaAppMenuBar";
+const KEY_CONTEXT: &str = "ZzClawAppMenuBar";
 
 /// Deferred priority for an open menu's popup layer.
 ///
@@ -35,7 +35,7 @@ const KEY_CONTEXT: &str = "NyaAppMenuBar";
 const MENU_POPUP_PRIORITY: usize = 100;
 
 type MenuLabelBuilder = Rc<dyn Fn(&App) -> SharedString>;
-type MenuItemsBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Vec<NyaMenuItem>>;
+type MenuItemsBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Vec<ZzClawMenuItem>>;
 type MenuOpenHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A top-level application menu with lazily-built menu contents.
@@ -44,7 +44,7 @@ type MenuOpenHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// when the menu is opened. This keeps translated labels and checked state in
 /// sync without publishing menu snapshots during a render pass.
 #[derive(Clone)]
-pub struct NyaAppMenu {
+pub struct ZzClawAppMenu {
     id: SharedString,
     label: MenuLabelBuilder,
     items: MenuItemsBuilder,
@@ -52,11 +52,11 @@ pub struct NyaAppMenu {
     min_width: Option<Pixels>,
 }
 
-impl NyaAppMenu {
+impl ZzClawAppMenu {
     pub fn new(
         id: impl Into<SharedString>,
         label: impl Fn(&App) -> SharedString + 'static,
-        items: impl Fn(&mut Window, &mut App) -> Vec<NyaMenuItem> + 'static,
+        items: impl Fn(&mut Window, &mut App) -> Vec<ZzClawMenuItem> + 'static,
     ) -> Self {
         Self {
             id: id.into(),
@@ -78,9 +78,9 @@ impl NyaAppMenu {
     }
 }
 
-/// Coordinated menubar behavior for NyaTerm's custom title bar.
-pub struct NyaAppMenuBar {
-    menus: Vec<Entity<NyaAppMenuEntry>>,
+/// Coordinated menubar behavior for ZzClawTerm's custom title bar.
+pub struct ZzClawAppMenuBar {
+    menus: Vec<Entity<ZzClawAppMenuEntry>>,
     selected_index: Option<usize>,
     /// Where focus was before the bar opened, restored when it closes.
     action_context: Option<FocusHandle>,
@@ -89,8 +89,8 @@ pub struct NyaAppMenuBar {
     owned_focus: Option<FocusHandle>,
 }
 
-impl NyaAppMenuBar {
-    pub fn new(menus: impl IntoIterator<Item = NyaAppMenu>, cx: &mut App) -> Entity<Self> {
+impl ZzClawAppMenuBar {
+    pub fn new(menus: impl IntoIterator<Item = ZzClawAppMenu>, cx: &mut App) -> Entity<Self> {
         let bar = cx.new(|_| Self {
             menus: Vec::new(),
             selected_index: None,
@@ -102,7 +102,7 @@ impl NyaAppMenuBar {
             .enumerate()
             .map(|(index, menu)| {
                 let bar = bar.clone();
-                cx.new(|_| NyaAppMenuEntry::new(index, menu, bar))
+                cx.new(|_| ZzClawAppMenuEntry::new(index, menu, bar))
             })
             .collect();
         bar.update(cx, |bar, cx| {
@@ -231,7 +231,7 @@ impl NyaAppMenuBar {
     }
 }
 
-impl Render for NyaAppMenuBar {
+impl Render for ZzClawAppMenuBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("nya-app-menu-bar")
@@ -250,17 +250,17 @@ impl Render for NyaAppMenuBar {
     }
 }
 
-struct NyaAppMenuEntry {
-    bar: Entity<NyaAppMenuBar>,
+struct ZzClawAppMenuEntry {
+    bar: Entity<ZzClawAppMenuBar>,
     index: usize,
-    menu: NyaAppMenu,
-    items: Vec<NyaMenuItem>,
+    menu: ZzClawAppMenu,
+    items: Vec<ZzClawMenuItem>,
     popup_menu: Option<Entity<PopupMenu>>,
     subscription: Option<Subscription>,
 }
 
-impl NyaAppMenuEntry {
-    fn new(index: usize, menu: NyaAppMenu, bar: Entity<NyaAppMenuBar>) -> Self {
+impl ZzClawAppMenuEntry {
+    fn new(index: usize, menu: ZzClawAppMenu, bar: Entity<ZzClawAppMenuBar>) -> Self {
         Self {
             bar,
             index,
@@ -313,7 +313,7 @@ impl NyaAppMenuEntry {
     }
 
     fn handle_hover(&mut self, hovered: &bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !*hovered || !self.bar.read(cx).selected_index.is_some() {
+        if !*hovered || self.bar.read(cx).selected_index.is_none() {
             return;
         }
         if !self.is_selected(cx) {
@@ -362,7 +362,7 @@ impl NyaAppMenuEntry {
     }
 }
 
-impl Render for NyaAppMenuEntry {
+impl Render for ZzClawAppMenuEntry {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_selected = self.is_selected(cx);
         let label = (self.menu.label)(cx);
@@ -416,11 +416,11 @@ mod tests {
         deferred, div, point, px,
     };
 
-    use super::{NyaAppMenu, NyaAppMenuBar};
-    use crate::{NyaDialogWindowExt as _, NyaMenuItem};
+    use super::{ZzClawAppMenu, ZzClawAppMenuBar};
+    use crate::{ZzClawDialogWindowExt as _, ZzClawMenuItem};
 
     struct MenuBarFixture {
-        bar: Entity<NyaAppMenuBar>,
+        bar: Entity<ZzClawAppMenuBar>,
         original_focus: FocusHandle,
     }
 
@@ -437,7 +437,7 @@ mod tests {
     /// default priority, spanning the window the way a panel divider spans the
     /// workspace height.
     struct DividerFixture {
-        bar: Entity<NyaAppMenuBar>,
+        bar: Entity<ZzClawAppMenuBar>,
         divider_hovered: Rc<Cell<bool>>,
         original_focus: FocusHandle,
     }
@@ -474,19 +474,19 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn menu(id: &'static str, items_built: Rc<Cell<usize>>, with_submenu: bool) -> NyaAppMenu {
-        NyaAppMenu::new(
+    fn menu(id: &'static str, items_built: Rc<Cell<usize>>, with_submenu: bool) -> ZzClawAppMenu {
+        ZzClawAppMenu::new(
             id,
             move |_| id.into(),
             move |_, _| {
                 items_built.set(items_built.get() + 1);
                 if with_submenu {
-                    vec![NyaMenuItem::submenu(
+                    vec![ZzClawMenuItem::submenu(
                         "Nested",
-                        vec![NyaMenuItem::action("Child")],
+                        vec![ZzClawMenuItem::action("Child")],
                     )]
                 } else {
-                    vec![NyaMenuItem::action("Action")]
+                    vec![ZzClawMenuItem::action("Action")]
                 }
             },
         )
@@ -504,7 +504,7 @@ mod tests {
                 let original_focus = cx.focus_handle();
                 original_focus.focus(window, cx);
                 MenuBarFixture {
-                    bar: NyaAppMenuBar::new(
+                    bar: ZzClawAppMenuBar::new(
                         [
                             menu("file", first_builds, false),
                             menu("view", second_builds, false),
@@ -547,7 +547,7 @@ mod tests {
             let original_focus = cx.focus_handle();
             original_focus.focus(window, cx);
             MenuBarFixture {
-                bar: NyaAppMenuBar::new(
+                bar: ZzClawAppMenuBar::new(
                     [
                         menu("file", Rc::new(Cell::new(0)), true),
                         menu("view", Rc::new(Cell::new(0)), false),
@@ -598,12 +598,12 @@ mod tests {
                 let label_for_render = label.clone();
                 let item_label_for_open = item_label.clone();
                 MenuBarFixture {
-                    bar: NyaAppMenuBar::new(
-                        [NyaAppMenu::new(
+                    bar: ZzClawAppMenuBar::new(
+                        [ZzClawAppMenu::new(
                             "file",
                             move |_| (*label_for_render.borrow()).into(),
                             move |_, _| {
-                                vec![NyaMenuItem::action(
+                                vec![ZzClawMenuItem::action(
                                     (*item_label_for_open.borrow()).to_string(),
                                 )]
                             },
@@ -641,14 +641,14 @@ mod tests {
                 original_focus.focus(window, cx);
                 let enabled = enabled.clone();
                 MenuBarFixture {
-                    bar: NyaAppMenuBar::new(
-                        [NyaAppMenu::new(
+                    bar: ZzClawAppMenuBar::new(
+                        [ZzClawAppMenu::new(
                             "view",
                             |_| "View".into(),
                             move |_, _| {
                                 let enabled = enabled.get();
                                 vec![
-                                    NyaMenuItem::action(if enabled { "On" } else { "Off" })
+                                    ZzClawMenuItem::action(if enabled { "On" } else { "Off" })
                                         .icon(if enabled {
                                             "icons/check.svg"
                                         } else {
@@ -709,13 +709,13 @@ mod tests {
                 original_focus.focus(window, cx);
                 let invoked = invoked.clone();
                 MenuBarFixture {
-                    bar: NyaAppMenuBar::new(
-                        [NyaAppMenu::new(
+                    bar: ZzClawAppMenuBar::new(
+                        [ZzClawAppMenu::new(
                             "file",
                             |_| "File".into(),
                             move |_, _| {
                                 let invoked = invoked.clone();
-                                vec![NyaMenuItem::action("Run").on_click(move |_, _, _| {
+                                vec![ZzClawMenuItem::action("Run").on_click(move |_, _, _| {
                                     invoked.set(true);
                                 })]
                             },
@@ -763,13 +763,13 @@ mod tests {
                 let original_focus = cx.focus_handle();
                 original_focus.focus(window, cx);
                 DividerFixture {
-                    bar: NyaAppMenuBar::new(
-                        [NyaAppMenu::new(
+                    bar: ZzClawAppMenuBar::new(
+                        [ZzClawAppMenu::new(
                             "file",
                             |_| "File".into(),
                             |_, _| {
                                 (0..8)
-                                    .map(|index| NyaMenuItem::action(format!("Item {index}")))
+                                    .map(|index| ZzClawMenuItem::action(format!("Item {index}")))
                                     .collect()
                             },
                         )
@@ -841,12 +841,12 @@ mod tests {
                 let original_focus = cx.focus_handle();
                 original_focus.focus(window, cx);
                 MenuBarFixture {
-                    bar: NyaAppMenuBar::new(
-                        [NyaAppMenu::new(
+                    bar: ZzClawAppMenuBar::new(
+                        [ZzClawAppMenu::new(
                             "help",
                             |_| "Help".into(),
                             move |_, _| {
-                                vec![NyaMenuItem::action("About").on_click(|_, window, cx| {
+                                vec![ZzClawMenuItem::action("About").on_click(|_, window, cx| {
                                     window.open_nya_dialog(cx, |dialog, _, _| {
                                         dialog.title("About").content(
                                             div().debug_selector(|| "about-body".to_string()),
@@ -861,7 +861,7 @@ mod tests {
                 }
             });
             *capture.borrow_mut() = Some(content.clone());
-            crate::nya_root(content, window, cx)
+            crate::zzclaw_root(content, window, cx)
         });
 
         let content = captured.borrow().clone().expect("fixture should be built");

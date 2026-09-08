@@ -4,11 +4,11 @@ use std::borrow::Cow;
 
 use gpui::{ClipboardItem, Context, Window};
 
-use crate::features::NyaTermApp;
+use crate::features::ZzClawTermApp;
 use crate::features::formatting::{session_kind_label, short_id};
 use crate::models::{NavItem, SessionLaunchConfig};
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     fn active_session_info_line(&self) -> Option<String> {
         let session_id = self.session.active_id()?;
         let name = self.session.display_name(session_id)?;
@@ -377,10 +377,10 @@ impl NyaTermApp {
     ) {
         let tab_root = self.tab_root_for_session(&session_id);
         self.select_session(tab_root.clone(), cx);
-        if !self
+        if self
             .session
             .active_id()
-            .is_some_and(|active| self.tab_root_for_session(active) == tab_root)
+            .is_none_or(|active| self.tab_root_for_session(active) != tab_root)
         {
             return;
         }

@@ -6,12 +6,13 @@ use gpui::{
 };
 
 use crate::features::{
-    NyaTermApp, view_widgets::color_icon, view_widgets::mono_icon, view_widgets::nyaterm_app_icon,
+    ZzClawTermApp, view_widgets::color_icon, view_widgets::mono_icon,
+    view_widgets::zzclawterm_app_icon,
 };
 use crate::models::ConnectionImportSource;
 use crate::theme::ThemePalette;
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features) fn connection_import_dialog_content(
         &mut self,
         cx: &mut Context<Self>,
@@ -25,9 +26,9 @@ impl NyaTermApp {
             .to_ascii_lowercase()
             .starts_with("zh")
         {
-            "https://nyaterm.app/docs/guide/ssh-connection#%E5%AF%BC%E5%85%A5%E5%85%B6%E4%BB%96%E5%AE%A2%E6%88%B7%E7%AB%AF%E7%9A%84%E4%BC%9A%E8%AF%9D"
+            "https://github.com/jackfahdin/ZzClawTerm/blob/main/docs-site/docs/guide/ssh-connection.md"
         } else {
-            "https://nyaterm.app/docs/guide/ssh-connection#import-sessions-from-other-clients"
+            "https://github.com/jackfahdin/ZzClawTerm/blob/main/docs-site/i18n/en/docusaurus-plugin-content-docs/current/guide/ssh-connection.md"
         };
 
         div()
@@ -48,10 +49,10 @@ impl NyaTermApp {
                     .gap_3()
                     .child(import_source_card(
                         palette,
-                        "connection-import-nyaterm",
-                        "nyaterm",
-                        "NyaTerm",
-                        ".nya",
+                        "connection-import-zzclawterm",
+                        "zzclawterm",
+                        "ZzClawTerm",
+                        ".zz",
                         cx.listener(|this, _, window, cx| {
                             this.select_connection_import_source(
                                 ConnectionImportSource::NyatermBackup,
@@ -244,8 +245,8 @@ pub(in crate::features::panels) fn import_source_card(
         .cursor_pointer()
         .hover(move |this| this.border_color(rgb(palette.primary)).bg(hover))
         .on_click(on_click)
-        .child(if icon == "nyaterm" {
-            nyaterm_app_icon(palette, 40.).into_any_element()
+        .child(if icon == "zzclawterm" {
+            zzclawterm_app_icon(palette, 40.).into_any_element()
         } else if icon.starts_with("color/") {
             // Vendor logos are full-color rasters; they cannot go through svg().
             color_icon(icon, 40.).into_any_element()

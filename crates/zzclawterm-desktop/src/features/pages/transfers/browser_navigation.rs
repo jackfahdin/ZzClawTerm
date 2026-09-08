@@ -1,14 +1,14 @@
 use gpui::{Context, Window};
-use nyaterm_transport::{RemoteFilePath, SftpFileEntry};
+use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
 
 use std::collections::VecDeque;
 
-use crate::features::NyaTermApp;
+use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserNavigationSnapshot, TransferBrowserSessionCacheState};
 
 use super::{normalized_transfer_browser_path, remote_file_name, remote_parent_path};
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn valid_transfer_browser_child_name(
         &self,
         name: &str,
@@ -16,16 +16,16 @@ impl NyaTermApp {
         let backend = self
             .session
             .active_file_browser_backend()
-            .unwrap_or(nyaterm_transport::FileBrowserBackendKind::Remote);
-        nyaterm_transport::valid_file_browser_child_name(backend, name)
+            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
+        zzclawterm_transport::valid_file_browser_child_name(backend, name)
     }
 
     pub(in crate::features) fn cache_transfer_browser_session(&mut self, session_id: &str) {
         if session_id.trim().is_empty()
-            || !self
+            || self
                 .session
                 .file_browser_backend_support_for_session(session_id)
-                .is_some()
+                .is_none()
         {
             return;
         }
@@ -99,7 +99,7 @@ impl NyaTermApp {
         }
 
         let initial_path = match self.session.active_file_browser_backend() {
-            Some(nyaterm_transport::FileBrowserBackendKind::Local) => dirs::home_dir()
+            Some(zzclawterm_transport::FileBrowserBackendKind::Local) => dirs::home_dir()
                 .or_else(|| std::env::current_dir().ok())
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_else(|| ".".to_string()),
@@ -434,7 +434,7 @@ impl NyaTermApp {
     }
 }
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     fn prepare_transfer_browser_navigation(&mut self) -> TransferBrowserNavigationSnapshot {
         let session_key = self.session.active_id_owned().unwrap_or_default();
         let remote_path = self.transfer.remote_path().to_string();

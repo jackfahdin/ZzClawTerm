@@ -2,7 +2,7 @@
 //!
 //! The AI panel spans several independent concerns: provider settings, the
 //! chat composer and transcript, session history, model discovery, and the
-//! agent loop. They were seventy `ai_*` fields on `NyaTermApp`, which made it
+//! agent loop. They were seventy `ai_*` fields on `ZzClawTermApp`, which made it
 //! impossible to see which ones move together.
 
 mod settings;
@@ -15,7 +15,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::time::{Duration, Instant};
 
 use gpui::FocusHandle;
-use nyaterm_core::{
+use zzclawterm_core::{
     AgentCaptureProcessResult, AgentCommandExecutionMode, AgentOutputCaptureProcessor,
     AiCommandCard, AiMessage, AiMessageRole, AiMode, AiSession, AiSettings, truncate_preview, uuid,
 };
@@ -62,7 +62,7 @@ struct AiSettingsState {
     config: AiSettings,
     model_draft: String,
     base_url_draft: String,
-    secret_draft: nyaterm_core::SecretString,
+    secret_draft: zzclawterm_core::SecretString,
     model_collapsed_groups: HashSet<String>,
     model_query: String,
     manual_model_drafts: HashMap<String, String>,
@@ -97,7 +97,7 @@ pub(in crate::features) struct AiSettingsPersistenceCompletion {
 /// Composer, in-flight request and the visible transcript.
 struct AiChatState {
     tx: UnboundedSender<AiChatWorkerEvent>,
-    /// Taken once by `NyaTermApp::start_ai_chat_event_drain`, which owns
+    /// Taken once by `ZzClawTermApp::start_ai_chat_event_drain`, which owns
     /// delivery from then on. `None` afterwards, so a second start is a no-op.
     rx: Option<UnboundedReceiver<AiChatWorkerEvent>>,
     pending: bool,
@@ -137,7 +137,7 @@ struct AiHistoryState {
 /// Model discovery job and the model picker it feeds.
 struct AiDiscoveryState {
     tx: UnboundedSender<AiDiscoveryJobResult>,
-    /// Taken once by `NyaTermApp::start_ai_discovery_event_drain`, which owns
+    /// Taken once by `ZzClawTermApp::start_ai_discovery_event_drain`, which owns
     /// delivery from then on. `None` afterwards, so a second start is a no-op.
     rx: Option<UnboundedReceiver<AiDiscoveryJobResult>>,
     pending: bool,
@@ -177,7 +177,7 @@ pub(in crate::features) struct AiChatFinishEffect {
 pub(in crate::features) enum AiAgentBackgroundEffect {
     Ignored,
     MatchedStale,
-    Continue(Box<AiAgentLoopState>, nyaterm_core::CommandObservation),
+    Continue(Box<AiAgentLoopState>, zzclawterm_core::CommandObservation),
     Failed,
 }
 
@@ -226,7 +226,7 @@ impl AiFeatureState {
                 config: settings,
                 model_draft,
                 base_url_draft,
-                secret_draft: nyaterm_core::SecretString::default(),
+                secret_draft: zzclawterm_core::SecretString::default(),
                 model_collapsed_groups: HashSet::new(),
                 model_query: String::new(),
                 manual_model_drafts: HashMap::new(),
@@ -518,7 +518,7 @@ impl AiFeatureState {
             "Running AI request...".to_string()
         };
         self.chat.command_cards.clear();
-        let now = nyaterm_core::now_rfc3339();
+        let now = zzclawterm_core::now_rfc3339();
         let assistant_id = format!("assistant-{}", uuid());
         self.chat.messages.push(Arc::new(AiMessage {
             id: format!("user-{}", uuid()),
@@ -685,8 +685,8 @@ impl AiFeatureState {
         &mut self,
         job_id: u64,
         state: AiAgentLoopState,
-        result: Result<nyaterm_core::CommandObservation, String>,
-        observation_summary: impl FnOnce(&nyaterm_core::CommandObservation) -> String,
+        result: Result<zzclawterm_core::CommandObservation, String>,
+        observation_summary: impl FnOnce(&zzclawterm_core::CommandObservation) -> String,
     ) -> AiAgentBackgroundEffect {
         if job_id != self.chat.job_id {
             return AiAgentBackgroundEffect::Ignored;
@@ -1498,11 +1498,11 @@ impl AiFeatureState {
         &mut self,
         marker_id: &str,
     ) -> Option<AiAgentLoopState> {
-        if !self
+        if self
             .agent
             .loop_state
             .as_ref()
-            .is_some_and(|state| state.marker_id.as_deref() == Some(marker_id))
+            .is_none_or(|state| state.marker_id.as_deref() != Some(marker_id))
         {
             return None;
         }
@@ -1513,11 +1513,11 @@ impl AiFeatureState {
         &mut self,
         session_id: &str,
     ) -> Option<AiAgentLoopState> {
-        if !self
+        if self
             .agent
             .loop_state
             .as_ref()
-            .is_some_and(|state| state.terminal_session_id == session_id)
+            .is_none_or(|state| state.terminal_session_id != session_id)
         {
             return None;
         }
