@@ -9,10 +9,10 @@ $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimE
     [System.IO.Path]::DirectorySeparatorChar
 )
 $uuid = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-$testNamePattern = "^nyaterm-.+-(?<pid>[0-9]+)-$uuid$"
+$testNamePattern = "^zzclawterm-.+-(?<pid>[0-9]+)-$uuid$"
 $candidates = @()
 
-foreach ($directory in Get-ChildItem -LiteralPath $tempRoot -Directory -Filter "nyaterm-*") {
+foreach ($directory in Get-ChildItem -LiteralPath $tempRoot -Directory -Filter "zzclawterm-*") {
     if ($directory.Name -notmatch $testNamePattern) {
         continue
     }
@@ -36,7 +36,7 @@ foreach ($directory in Get-ChildItem -LiteralPath $tempRoot -Directory -Filter "
 
 if (-not $Apply) {
     $candidates
-    Write-Host "Found $($candidates.Count) stale NyaTerm test director$(if ($candidates.Count -eq 1) { 'y' } else { 'ies' })."
+    Write-Host "Found $($candidates.Count) stale ZzClawTerm test director$(if ($candidates.Count -eq 1) { 'y' } else { 'ies' })."
     Write-Host "Run again with -Apply to remove them."
     exit 0
 }
@@ -45,4 +45,4 @@ foreach ($candidate in $candidates) {
     Remove-Item -LiteralPath $candidate -Recurse -Force
 }
 
-Write-Host "Removed $($candidates.Count) stale NyaTerm test director$(if ($candidates.Count -eq 1) { 'y' } else { 'ies' })."
+Write-Host "Removed $($candidates.Count) stale ZzClawTerm test director$(if ($candidates.Count -eq 1) { 'y' } else { 'ies' })."

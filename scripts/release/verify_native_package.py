@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify native NyaTerm release artifacts before they are published."""
+"""Verify native ZzClawTerm release artifacts before they are published."""
 
 from __future__ import annotations
 
@@ -159,12 +159,12 @@ def read_rpm_member(path: Path, member: str) -> bytes:
 
 
 def verify_windows_portable(path: Path, target: str, version: str) -> None:
-    root = "NyaTerm-portable"
-    executables = ["NyaTerm.exe", *helper_filenames(target)]
+    root = "ZzClawTerm-portable"
+    executables = ["ZzClawTerm.exe", *helper_filenames(target)]
     required = {
         f"{root}/{name}" for name in executables
     } | {
-        f"{root}/nyaterm-portable",
+        f"{root}/{package_native.PORTABLE_MARKER}",
         f"{root}/LICENSE",
         f"{root}/VERSION",
         f"{root}/data/.keep",
@@ -213,7 +213,7 @@ def verify_windows_installer(path: Path, target: str) -> None:
             stdout=subprocess.DEVNULL,
         )
         names = {candidate.name for candidate in output.rglob("*") if candidate.is_file()}
-    required = {"NyaTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
+    required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
     required.update(helper_filenames(target))
     missing = required - names
     if missing:
@@ -221,17 +221,17 @@ def verify_windows_installer(path: Path, target: str) -> None:
 
 
 def verify_macos_archive(path: Path, target: str, version: str) -> None:
-    executable = "NyaTerm.app/Contents/MacOS/NyaTerm"
-    helpers = [f"NyaTerm.app/Contents/MacOS/{name}" for name in helper_filenames(target)]
-    info_plist = "NyaTerm.app/Contents/Info.plist"
-    version_file = "NyaTerm.app/Contents/Resources/VERSION"
+    executable = "ZzClawTerm.app/Contents/MacOS/ZzClawTerm"
+    helpers = [f"ZzClawTerm.app/Contents/MacOS/{name}" for name in helper_filenames(target)]
+    info_plist = "ZzClawTerm.app/Contents/Info.plist"
+    version_file = "ZzClawTerm.app/Contents/Resources/VERSION"
     required = {
         executable,
         *helpers,
         info_plist,
         version_file,
-        "NyaTerm.app/Contents/Resources/LICENSE",
-        "NyaTerm.app/Contents/Resources/icon.icns",
+        "ZzClawTerm.app/Contents/Resources/LICENSE",
+        "ZzClawTerm.app/Contents/Resources/icon.icns",
     }
     with tarfile.open(path, "r:gz") as archive:
         names = verify_tar_paths(archive)
@@ -282,9 +282,9 @@ def verify_dmg(path: Path) -> None:
     try:
         if not mount_point:
             raise RuntimeError(f"{path.name} did not expose a mounted volume")
-        executable = Path(mount_point) / "NyaTerm.app" / "Contents" / "MacOS" / "NyaTerm"
+        executable = Path(mount_point) / "ZzClawTerm.app" / "Contents" / "MacOS" / "ZzClawTerm"
         if not executable.is_file():
-            raise RuntimeError(f"{path.name} does not contain the NyaTerm application")
+            raise RuntimeError(f"{path.name} does not contain the ZzClawTerm application")
     finally:
         if device:
             subprocess.run(["hdiutil", "detach", device], check=True)
@@ -313,15 +313,15 @@ def verify_appimage(path: Path, target: str, version: str) -> None:
         root = Path(directory) / "squashfs-root"
         executables = [
             root / "usr" / "bin" / name
-            for name in ("nyaterm", *helper_filenames(target))
+            for name in ("zzclawterm", *helper_filenames(target))
         ]
-        version_file = root / "usr" / "share" / "doc" / "nyaterm" / "VERSION"
-        desktop_file = root / "usr" / "share" / "applications" / "nyaterm.desktop"
+        version_file = root / "usr" / "share" / "doc" / "zzclawterm" / "VERSION"
+        desktop_file = root / "usr" / "share" / "applications" / "zzclawterm.desktop"
         required = [
             root / "AppRun",
             *executables,
             desktop_file,
-            root / "usr" / "share" / "doc" / "nyaterm" / "LICENSE",
+            root / "usr" / "share" / "doc" / "zzclawterm" / "LICENSE",
             version_file,
         ]
         missing = [item for item in required if not item.exists()]
@@ -350,7 +350,7 @@ def verify_deb(path: Path, target: str, version: str) -> None:
         ["dpkg-deb", "--field", str(path), "Package", "Version", "Architecture"],
         text=True,
     )
-    if "Package: nyaterm" not in fields:
+    if "Package: zzclawterm" not in fields:
         raise RuntimeError(f"{path.name} has the wrong Debian package name")
     if f"Version: {version.replace('-', '~')}" not in fields:
         raise RuntimeError(f"{path.name} has the wrong Debian version")
@@ -358,10 +358,10 @@ def verify_deb(path: Path, target: str, version: str) -> None:
         raise RuntimeError(f"{path.name} has the wrong Debian architecture")
     contents = subprocess.check_output(["dpkg-deb", "--contents", str(path)], text=True)
     for required in (
-        "./opt/nyaterm/nyaterm",
-        "./opt/nyaterm/VERSION",
-        "./usr/share/applications/nyaterm.desktop",
-        *(f"./opt/nyaterm/{name}" for name in helper_filenames(target)),
+        "./opt/zzclawterm/zzclawterm",
+        "./opt/zzclawterm/VERSION",
+        "./usr/share/applications/zzclawterm.desktop",
+        *(f"./opt/zzclawterm/{name}" for name in helper_filenames(target)),
     ):
         if required not in contents:
             raise RuntimeError(f"{path.name} is missing {required}")
@@ -372,14 +372,14 @@ def verify_deb(path: Path, target: str, version: str) -> None:
             stdout=subprocess.DEVNULL,
         )
         desktop_content = (
-            Path(directory) / "usr" / "share" / "applications" / "nyaterm.desktop"
+            Path(directory) / "usr" / "share" / "applications" / "zzclawterm.desktop"
         ).read_text(encoding="utf-8")
-    verify_linux_desktop(desktop_content, "/opt/nyaterm/nyaterm", path.name)
+    verify_linux_desktop(desktop_content, "/opt/zzclawterm/zzclawterm", path.name)
 
 
 def verify_rpm(path: Path, target: str, version: str) -> None:
     rpm_version, rpm_release = package_native.linux_rpm_version(version)
-    expected = f"nyaterm|{rpm_version}|{rpm_release}|{package_native.linux_rpm_arch(target)}"
+    expected = f"zzclawterm|{rpm_version}|{rpm_release}|{package_native.linux_rpm_arch(target)}"
     actual = subprocess.check_output(
         ["rpm", "-qp", "--qf", "%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}", str(path)],
         text=True,
@@ -388,17 +388,17 @@ def verify_rpm(path: Path, target: str, version: str) -> None:
         raise RuntimeError(f"{path.name} has RPM metadata {actual!r}, expected {expected!r}")
     contents = subprocess.check_output(["rpm", "-qlp", str(path)], text=True)
     for required in (
-        "/opt/nyaterm/nyaterm",
-        "/opt/nyaterm/VERSION",
-        "/usr/share/applications/nyaterm.desktop",
-        *(f"/opt/nyaterm/{name}" for name in helper_filenames(target)),
+        "/opt/zzclawterm/zzclawterm",
+        "/opt/zzclawterm/VERSION",
+        "/usr/share/applications/zzclawterm.desktop",
+        *(f"/opt/zzclawterm/{name}" for name in helper_filenames(target)),
     ):
         if required not in contents.splitlines():
             raise RuntimeError(f"{path.name} is missing {required}")
     desktop_content = read_rpm_member(
-        path, "/usr/share/applications/nyaterm.desktop"
+        path, "/usr/share/applications/zzclawterm.desktop"
     ).decode("utf-8")
-    verify_linux_desktop(desktop_content, "/opt/nyaterm/nyaterm", path.name)
+    verify_linux_desktop(desktop_content, "/opt/zzclawterm/zzclawterm", path.name)
 
 
 def verify_release(

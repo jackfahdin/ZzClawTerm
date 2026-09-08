@@ -43,17 +43,17 @@ def newc_entry(name: str, content: bytes) -> bytes:
 
 def write_portable(path: Path, machine: int, *, helper_machine: int | None = None) -> None:
     """Build a portable zip whose layout matches package_native's output."""
-    root = "NyaTerm-portable"
+    root = "ZzClawTerm-portable"
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(f"{root}/NyaTerm.exe", fake_pe(machine))
+        archive.writestr(f"{root}/ZzClawTerm.exe", fake_pe(machine))
         if helper_machine is not None:
             for name in verify_native_package.helper_filenames(
                 "x86_64-pc-windows-msvc"
             ):
                 archive.writestr(f"{root}/{name}", fake_pe(helper_machine))
-        archive.writestr(f"{root}/nyaterm-portable", b"")
+        archive.writestr(f"{root}/zzclawterm-portable", b"")
         archive.writestr(f"{root}/LICENSE", b"license")
-        archive.writestr(f"{root}/VERSION", b"2.0.0\n")
+        archive.writestr(f"{root}/VERSION", b"0.0.1\n")
         archive.writestr(f"{root}/data/.keep", b"")
 
 
@@ -62,14 +62,14 @@ class VerifyNativePackageTests(unittest.TestCase):
         for path in ("../secret", "dir/../../secret", "/absolute/file"):
             with self.subTest(path=path), self.assertRaises(RuntimeError):
                 verify_native_package.require_safe_archive_path(path)
-        verify_native_package.require_safe_archive_path("NyaTerm/dir/file")
+        verify_native_package.require_safe_archive_path("ZzClawTerm/dir/file")
 
     def test_windows_portable_has_required_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"
             write_portable(path, 0x8664, helper_machine=0x8664)
             verify_native_package.verify_windows_portable(
-                path, "x86_64-pc-windows-msvc", "2.0.0"
+                path, "x86_64-pc-windows-msvc", "0.0.1"
             )
 
     def test_windows_portable_rejects_wrong_architecture(self) -> None:
@@ -78,16 +78,16 @@ class VerifyNativePackageTests(unittest.TestCase):
             write_portable(path, 0xAA64, helper_machine=0x8664)
             with self.assertRaisesRegex(RuntimeError, "PE machine"):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                    path, "x86_64-pc-windows-msvc", "0.0.1"
                 )
 
     def test_windows_portable_requires_every_helper_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"
             write_portable(path, 0x8664)
-            with self.assertRaisesRegex(RuntimeError, "nyaterm-rdp-helper.exe"):
+            with self.assertRaisesRegex(RuntimeError, "zzclawterm-rdp-helper.exe"):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                    path, "x86_64-pc-windows-msvc", "0.0.1"
                 )
 
     def test_windows_portable_rejects_helper_architecture_mismatch(self) -> None:
@@ -95,35 +95,35 @@ class VerifyNativePackageTests(unittest.TestCase):
             path = Path(directory) / "portable.zip"
             write_portable(path, 0x8664, helper_machine=0xAA64)
             with self.assertRaisesRegex(
-                RuntimeError, "PE machine 0xaa64 for nyaterm-rdp-helper.exe"
+                RuntimeError, "PE machine 0xaa64 for zzclawterm-rdp-helper.exe"
             ):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                    path, "x86_64-pc-windows-msvc", "0.0.1"
                 )
 
     def test_macos_archive_validates_bundle_metadata_and_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "NyaTerm.app.tar.gz"
+            path = Path(directory) / "ZzClawTerm.app.tar.gz"
             entries = {
-                "NyaTerm.app/Contents/MacOS/NyaTerm": fake_macho(0x0100000C),
+                "ZzClawTerm.app/Contents/MacOS/ZzClawTerm": fake_macho(0x0100000C),
                 **{
-                    f"NyaTerm.app/Contents/MacOS/{name}": fake_macho(0x0100000C)
+                    f"ZzClawTerm.app/Contents/MacOS/{name}": fake_macho(0x0100000C)
                     for name in verify_native_package.helper_filenames(
                         "aarch64-apple-darwin"
                     )
                 },
-                "NyaTerm.app/Contents/Info.plist": plistlib.dumps(
+                "ZzClawTerm.app/Contents/Info.plist": plistlib.dumps(
                     {
-                        "CFBundleIdentifier": "com.kang.nyaterm",
-                        "CFBundleShortVersionString": "2.0.0",
+                        "CFBundleIdentifier": "com.jackfahdin.zzclawterm",
+                        "CFBundleShortVersionString": "0.0.1",
                         "CFBundleURLTypes": [
-                            {"CFBundleURLSchemes": ["nyaterm"]}
+                            {"CFBundleURLSchemes": ["zzclawterm"]}
                         ],
                     }
                 ),
-                "NyaTerm.app/Contents/Resources/VERSION": b"2.0.0\n",
-                "NyaTerm.app/Contents/Resources/LICENSE": b"license",
-                "NyaTerm.app/Contents/Resources/icon.icns": b"icon",
+                "ZzClawTerm.app/Contents/Resources/VERSION": b"0.0.1\n",
+                "ZzClawTerm.app/Contents/Resources/LICENSE": b"license",
+                "ZzClawTerm.app/Contents/Resources/icon.icns": b"icon",
             }
             with tarfile.open(path, "w:gz") as archive:
                 for name, data in entries.items():
@@ -131,7 +131,7 @@ class VerifyNativePackageTests(unittest.TestCase):
                     item.size = len(data)
                     archive.addfile(item, io.BytesIO(data))
             verify_native_package.verify_macos_archive(
-                path, "aarch64-apple-darwin", "2.0.0"
+                path, "aarch64-apple-darwin", "0.0.1"
             )
 
     def test_macos_scheme_validation_rejects_extra_protocols(self) -> None:
@@ -139,46 +139,46 @@ class VerifyNativePackageTests(unittest.TestCase):
             verify_native_package.verify_macos_url_scheme(
                 {
                     "CFBundleURLTypes": [
-                        {"CFBundleURLSchemes": ["nyaterm", "ssh", "telnet"]}
+                        {"CFBundleURLSchemes": ["zzclawterm", "ssh", "telnet"]}
                     ]
                 },
                 "Info.plist",
             )
 
-    def test_linux_desktop_validation_requires_nyaterm_scheme_and_percent_u(
+    def test_linux_desktop_validation_requires_zzclawterm_scheme_and_percent_u(
         self,
     ) -> None:
         desktop = "\n".join(
             (
                 "[Desktop Entry]",
                 "Type=Application",
-                "Exec=/opt/nyaterm/nyaterm %U",
-                "MimeType=x-scheme-handler/nyaterm;",
+                "Exec=/opt/zzclawterm/zzclawterm %U",
+                "MimeType=x-scheme-handler/zzclawterm;",
             )
         )
         verify_native_package.verify_linux_desktop(
-            desktop, "/opt/nyaterm/nyaterm", "nyaterm.desktop"
+            desktop, "/opt/zzclawterm/zzclawterm", "zzclawterm.desktop"
         )
         with self.assertRaisesRegex(RuntimeError, "MimeType"):
             verify_native_package.verify_linux_desktop(
                 desktop.replace(
-                    "x-scheme-handler/nyaterm;",
-                    "x-scheme-handler/nyaterm;x-scheme-handler/ssh;",
+                    "x-scheme-handler/zzclawterm;",
+                    "x-scheme-handler/zzclawterm;x-scheme-handler/ssh;",
                 ),
-                "/opt/nyaterm/nyaterm",
-                "nyaterm.desktop",
+                "/opt/zzclawterm/zzclawterm",
+                "zzclawterm.desktop",
             )
         with self.assertRaisesRegex(RuntimeError, "Exec"):
             verify_native_package.verify_linux_desktop(
                 desktop.replace(" %U", ""),
-                "/opt/nyaterm/nyaterm",
-                "nyaterm.desktop",
+                "/opt/zzclawterm/zzclawterm",
+                "zzclawterm.desktop",
             )
 
     def test_rpm_member_reader_extracts_desktop_from_newc_payload(self) -> None:
-        desktop = b"MimeType=x-scheme-handler/nyaterm;\n"
+        desktop = b"MimeType=x-scheme-handler/zzclawterm;\n"
         payload = newc_entry(
-            "./usr/share/applications/nyaterm.desktop", desktop
+            "./usr/share/applications/zzclawterm.desktop", desktop
         ) + newc_entry("TRAILER!!!", b"")
         with (
             mock.patch.object(
@@ -191,7 +191,7 @@ class VerifyNativePackageTests(unittest.TestCase):
             ),
         ):
             actual = verify_native_package.read_rpm_member(
-                Path("nyaterm.rpm"), "/usr/share/applications/nyaterm.desktop"
+                Path("zzclawterm.rpm"), "/usr/share/applications/zzclawterm.desktop"
             )
         self.assertEqual(actual, desktop)
 
@@ -199,7 +199,7 @@ class VerifyNativePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, "missing release artifacts"):
                 verify_native_package.verify_release(
-                    Path(directory), "x86_64-unknown-linux-gnu", "2.0.0"
+                    Path(directory), "x86_64-unknown-linux-gnu", "0.0.1"
                 )
 
     def test_binary_header_helpers_reject_invalid_formats(self) -> None:

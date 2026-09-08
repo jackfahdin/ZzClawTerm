@@ -21,16 +21,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: aur-nyaterm-bin
+  group: aur-zzclawterm-bin
   cancel-in-progress: false
 
 env:
-  AUR_REPO: ssh://aur@aur.archlinux.org/nyaterm-bin.git
-  UPSTREAM_REPO: nyakang/nyaterm
+  AUR_REPO: ssh://aur@aur.archlinux.org/zzclawterm-bin.git
+  UPSTREAM_REPO: jackfahdin/ZzClawTerm
 
 jobs:
   publish:
-    name: Publish nyaterm-bin
+    name: Publish zzclawterm-bin
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -110,16 +110,16 @@ jobs:
           mkdir packages
           base="https://github.com/${UPSTREAM_REPO}/releases/download/${TAG}"
           curl -fL --retry 5 "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${TAG}/LICENSE" -o packages/LICENSE
-          curl -fL --retry 5 "${base}/NyaTerm_${VERSION}_linux_x64.deb" -o packages/x64.deb
-          curl -fL --retry 5 "${base}/NyaTerm_${VERSION}_linux_arm64.deb" -o packages/arm64.deb
-          test "$(dpkg-deb -f packages/x64.deb Package)" = nyaterm
-          test "$(dpkg-deb -f packages/arm64.deb Package)" = nyaterm
+          curl -fL --retry 5 "${base}/ZzClawTerm_${VERSION}_linux_x64.deb" -o packages/x64.deb
+          curl -fL --retry 5 "${base}/ZzClawTerm_${VERSION}_linux_arm64.deb" -o packages/arm64.deb
+          test "$(dpkg-deb -f packages/x64.deb Package)" = zzclawterm
+          test "$(dpkg-deb -f packages/arm64.deb Package)" = zzclawterm
           for package in packages/*.deb; do
             contents="$(dpkg-deb --contents "${package}")"
-            grep -q './opt/nyaterm/nyaterm' <<< "${contents}"
-            grep -q './opt/nyaterm/nyaterm-rdp-helper' <<< "${contents}"
-            grep -q './opt/nyaterm/nyaterm-vnc-helper' <<< "${contents}"
-            grep -q './opt/nyaterm/nyaterm-mcp' <<< "${contents}"
+            grep -q './opt/zzclawterm/zzclawterm' <<< "${contents}"
+            grep -q './opt/zzclawterm/zzclawterm-rdp-helper' <<< "${contents}"
+            grep -q './opt/zzclawterm/zzclawterm-vnc-helper' <<< "${contents}"
+            grep -q './opt/zzclawterm/zzclawterm-mcp' <<< "${contents}"
           done
           {
             echo "license_sha=$(sha256sum packages/LICENSE | awk '{print $1}')"
@@ -144,21 +144,21 @@ jobs:
           version = os.environ["VERSION"]
           shell_version = "${pkgver}"
           text = f'''# Maintainer: dydydd <admin@lidream.cn>
-          # Co-Maintainer: NyaKang <CoderKang@hotmail.com>
+          # Co-Maintainer: Jackfahdin <guomaojie@petalmail.com>
 
-          pkgname=nyaterm-bin
+          pkgname=zzclawterm-bin
           pkgver={version}
           pkgrel=1
           pkgdesc="Native GPUI terminal workspace with SSH, SFTP, RDP and VNC"
           arch=('x86_64' 'aarch64')
-          url="https://github.com/nyakang/nyaterm"
+          url="https://github.com/jackfahdin/ZzClawTerm"
           license=('Apache-2.0')
           options=(!debug)
           depends=('dbus' 'fontconfig' 'freetype2' 'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'openssl' 'systemd-libs' 'wayland' 'zstd')
           optdepends=('vulkan-icd-loader: Vulkan loader required by GPUI' 'vulkan-driver: hardware-specific Vulkan implementation')
           source=("LICENSE::$url/raw/v$pkgver/LICENSE")
-          source_x86_64=("$pkgname-$pkgver-x86_64.deb::$url/releases/download/v$pkgver/NyaTerm_{shell_version}_linux_x64.deb")
-          source_aarch64=("$pkgname-$pkgver-aarch64.deb::$url/releases/download/v$pkgver/NyaTerm_{shell_version}_linux_arm64.deb")
+          source_x86_64=("$pkgname-$pkgver-x86_64.deb::$url/releases/download/v$pkgver/ZzClawTerm_{shell_version}_linux_x64.deb")
+          source_aarch64=("$pkgname-$pkgver-aarch64.deb::$url/releases/download/v$pkgver/ZzClawTerm_{shell_version}_linux_arm64.deb")
           sha256sums=('{os.environ["LICENSE_SHA"]}')
           sha256sums_x86_64=('{os.environ["X64_SHA"]}')
           sha256sums_aarch64=('{os.environ["ARM64_SHA"]}')
@@ -172,12 +172,12 @@ jobs:
             ar x "$deb"
             bsdtar -xf data.tar.* -C "$pkgdir"
             install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/licenses/$pkgname"
-            ln -s /opt/nyaterm/nyaterm "$pkgdir/usr/bin/nyaterm"
+            ln -s /opt/zzclawterm/zzclawterm "$pkgdir/usr/bin/zzclawterm"
             install -m644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
           }}
           '''
           Path("aur/PKGBUILD").write_text("\n".join(line[10:] if line.startswith("          ") else line for line in text.splitlines()) + "\n")
-          Path("aur/nyaterm.sh").unlink(missing_ok=True)
+          Path("aur/zzclawterm.sh").unlink(missing_ok=True)
           PY
 
       - name: Validate and build AUR package
@@ -195,10 +195,10 @@ jobs:
           '
           sudo chown -R "${USER}:${USER}" aur
           grep -q "pkgver = ${{ steps.release.outputs.version }}" aur/.SRCINFO
-          grep -q 'opt/nyaterm/nyaterm$' < <(bsdtar -tf aur/*.pkg.tar.zst)
-          grep -q 'opt/nyaterm/nyaterm-rdp-helper$' < <(bsdtar -tf aur/*.pkg.tar.zst)
-          grep -q 'opt/nyaterm/nyaterm-vnc-helper$' < <(bsdtar -tf aur/*.pkg.tar.zst)
-          grep -q 'opt/nyaterm/nyaterm-mcp$' < <(bsdtar -tf aur/*.pkg.tar.zst)
+          grep -q 'opt/zzclawterm/zzclawterm$' < <(bsdtar -tf aur/*.pkg.tar.zst)
+          grep -q 'opt/zzclawterm/zzclawterm-rdp-helper$' < <(bsdtar -tf aur/*.pkg.tar.zst)
+          grep -q 'opt/zzclawterm/zzclawterm-vnc-helper$' < <(bsdtar -tf aur/*.pkg.tar.zst)
+          grep -q 'opt/zzclawterm/zzclawterm-mcp$' < <(bsdtar -tf aur/*.pkg.tar.zst)
 
       - name: Commit and push AUR update
         if: steps.release.outputs.publish == 'true'
@@ -208,8 +208,8 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name NyaKang
-          git config user.email CoderKang@hotmail.com
+          git config user.name Jackfahdin
+          git config user.email guomaojie@petalmail.com
           git add -A
           git diff --cached --check
           if git diff --cached --quiet; then exit 0; fi

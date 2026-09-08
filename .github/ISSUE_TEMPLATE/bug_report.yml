@@ -1,5 +1,5 @@
 name: 🐛 Report an issue
-description: Report an issue with NyaTerm
+description: Report an issue with ZzClawTerm
 title: "[Bug]: "
 labels: ["bug"]
 
@@ -15,7 +15,7 @@ body:
     attributes:
       value: |
         This issue form is for reporting bugs only!
-        If you have a feature or enhancement request, please use the [feature request](https://github.com/nyakang/nyaterm/issues/new?template=feature_request.yml).
+        If you have a feature or enhancement request, please use the [feature request](https://github.com/jackfahdin/ZzClawTerm/issues/new?template=feature_request.yml).
 
   - type: textarea
     id: bug
@@ -37,7 +37,7 @@ body:
     validations:
       required: true
     attributes:
-      label: The OS that NyaTerm is running on
+      label: The OS that ZzClawTerm is running on
       placeholder: Windows 10, Windows 11, macOS 14, Ubuntu 22.04...etc
 
   - type: input
@@ -45,7 +45,7 @@ body:
     validations:
       required: true
     attributes:
-      label: Version of NyaTerm
+      label: Version of ZzClawTerm
       placeholder: v1.0.0
 
   - type: dropdown

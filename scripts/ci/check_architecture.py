@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject new violations of NyaTerm's crate and runtime architecture rules."""
+"""Reject new violations of ZzClawTerm's crate and runtime architecture rules."""
 
 from __future__ import annotations
 
@@ -75,21 +75,21 @@ def dependency_errors() -> list[str]:
     errors: list[str] = []
     dependency = re.compile(r"(?m)^\s*(gpui|gpui_platform|gpui-component)\s*=")
     low_level = (
-        "nyaterm-core",
-        "nyaterm-transport",
-        "nyaterm-terminal",
-        "nyaterm-store",
-        "nyaterm-remote-desktop",
+        "zzclawterm-core",
+        "zzclawterm-transport",
+        "zzclawterm-terminal",
+        "zzclawterm-store",
+        "zzclawterm-remote-desktop",
     )
     for crate in low_level:
         manifest = ROOT / "crates" / crate / "Cargo.toml"
         if dependency.search(manifest.read_text(encoding="utf-8")):
             errors.append(f"crate_boundary: {crate} must remain independent of GPUI")
-    desktop_manifest = (ROOT / "crates" / "nyaterm-desktop" / "Cargo.toml").read_text(
+    desktop_manifest = (ROOT / "crates" / "zzclawterm-desktop" / "Cargo.toml").read_text(
         encoding="utf-8"
     )
     if re.search(r"(?m)^\s*(gpui-component|gpui_component)\s*=", desktop_manifest):
-        errors.append("crate_boundary: nyaterm-desktop must use nyaterm-ui wrappers")
+        errors.append("crate_boundary: zzclawterm-desktop must use zzclawterm-ui wrappers")
     return errors
 
 
@@ -111,7 +111,7 @@ def main() -> int:
     feature_files = tuple(
         path
         for path in RUST_FILES
-        if relative(path).startswith("crates/nyaterm-desktop/src/features/")
+        if relative(path).startswith("crates/zzclawterm-desktop/src/features/")
     )
     thread_spawns = matching_counts(
         re.compile(r"\b(?:std::thread|thread)::spawn\s*\("), feature_files
@@ -121,7 +121,7 @@ def main() -> int:
     desktop_files = tuple(
         path
         for path in RUST_FILES
-        if relative(path).startswith("crates/nyaterm-desktop/src/")
+        if relative(path).startswith("crates/zzclawterm-desktop/src/")
     )
     thread_builders = matching_counts(
         re.compile(r"\b(?:std::)?thread::Builder::new\s*\(\s*\)"), desktop_files

@@ -13,9 +13,11 @@ sys.path.insert(0, str(RELEASE_SCRIPTS))
 
 import generate_release_metadata  # noqa: E402
 
+BASE_URL = "https://github.com/jackfahdin/ZzClawTerm"
+
 
 class GenerateReleaseMetadataTests(unittest.TestCase):
-    def make_release(self, directory: Path, version: str = "2.0.0") -> None:
+    def make_release(self, directory: Path, version: str = "0.0.1") -> None:
         for name in generate_release_metadata.expected_artifacts(version):
             (directory / name).write_bytes(f"payload:{name}".encode())
         updater_names = {
@@ -33,9 +35,9 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
             self.make_release(directory)
             downloads, updater = generate_release_metadata.generate(
                 directory,
-                version="2.0.0",
-                tag="v2.0.0",
-                base_url="https://downloads.nyaterm.app/",
+                version="0.0.1",
+                tag="v0.0.1",
+                base_url=f"{BASE_URL}/",
                 notes="release notes",
                 pub_date="2026-08-31T00:00:00Z",
             )
@@ -45,8 +47,8 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
             self.assertNotIn("windows-x86_64-portable", updater["platforms"])
             self.assertEqual(
                 downloads["platforms"]["darwin-aarch64"]["url"],
-                "https://downloads.nyaterm.app/releases/v2.0.0/"
-                "NyaTerm_2.0.0_macos_arm64.dmg",
+                f"{BASE_URL}/releases/download/v0.0.1/"
+                "ZzClawTerm_0.0.1_macos_arm64.dmg",
             )
             self.assertEqual(
                 updater["platforms"]["windows-x86_64"],
@@ -58,7 +60,7 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
 
             checksum_lines = (directory / "SHA256SUMS").read_text().splitlines()
             self.assertEqual(checksum_lines, sorted(checksum_lines, key=lambda line: line[66:]))
-            portable = directory / "NyaTerm_2.0.0_windows_x64_portable.zip"
+            portable = directory / "ZzClawTerm_0.0.1_windows_x64_portable.zip"
             self.assertIn(
                 f"{hashlib.sha256(portable.read_bytes()).hexdigest()}  {portable.name}",
                 checksum_lines,
@@ -71,9 +73,9 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 generate_release_metadata.generate(
                     directory,
-                    version="2.0.0",
-                    tag="v2.0.1",
-                    base_url="https://downloads.nyaterm.app",
+                    version="0.0.1",
+                    tag="v0.0.2",
+                    base_url=BASE_URL,
                     notes="",
                     pub_date="2026-08-31T00:00:00Z",
                 )
@@ -81,9 +83,9 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing updater signature"):
                 generate_release_metadata.generate(
                     directory,
-                    version="2.0.0",
-                    tag="v2.0.0",
-                    base_url="https://downloads.nyaterm.app",
+                    version="0.0.1",
+                    tag="v0.0.1",
+                    base_url=BASE_URL,
                     notes="",
                     pub_date="2026-08-31T00:00:00Z",
                 )
@@ -91,7 +93,7 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
     def test_rejects_empty_signature_and_keeps_prerelease_urls_versioned(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            version = "2.1.0-beta.1"
+            version = "0.1.0-beta.1"
             self.make_release(directory, version)
             signature = next(directory.glob("*.sig"))
             signature.write_text("\n", encoding="utf-8")
@@ -100,7 +102,7 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
                     directory,
                     version=version,
                     tag=f"v{version}",
-                    base_url="https://downloads.nyaterm.app",
+                    base_url=BASE_URL,
                     notes="",
                     pub_date="2026-08-31T00:00:00Z",
                 )
@@ -110,13 +112,13 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
                 directory,
                 version=version,
                 tag=f"v{version}",
-                base_url="https://downloads.nyaterm.app",
+                base_url=BASE_URL,
                 notes="prerelease",
                 pub_date="2026-08-31T00:00:00Z",
             )
             for manifest in (downloads, updater):
                 for platform in manifest["platforms"].values():
-                    self.assertIn(f"/releases/v{version}/", platform["url"])
+                    self.assertIn(f"/releases/download/v{version}/", platform["url"])
 
 
 if __name__ == "__main__":

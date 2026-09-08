@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and package the native NyaTerm application for one Rust target."""
+"""Build and package the native ZzClawTerm application for one Rust target."""
 
 from __future__ import annotations
 
@@ -20,19 +20,21 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DIST_DIR = ROOT_DIR / "dist"
 WORK_DIR = ROOT_DIR / "target" / "native-package"
-RESOURCE_DIR = ROOT_DIR / "crates" / "nyaterm-app" / "resources"
+RESOURCE_DIR = ROOT_DIR / "crates" / "zzclawterm-app" / "resources"
 ICON_DIR = RESOURCE_DIR / "icons"
 LICENSE_PATH = ROOT_DIR / "LICENSE"
-APP_NAME = "NyaTerm"
-APP_BIN = "nyaterm"
+APP_NAME = "ZzClawTerm"
+APP_BIN = "zzclawterm"
 # Helper processes the application spawns at runtime. `resolve_helper_path()`
-# in nyaterm-remote-desktop only looks beside the running executable, so each
+# in zzclawterm-remote-desktop only looks beside the running executable, so each
 # of these must be packaged next to the application binary in every format.
-HELPER_BINS = ("nyaterm-rdp-helper", "nyaterm-vnc-helper", "nyaterm-mcp")
-MACOS_IDENTIFIER = "com.kang.nyaterm"
-LINUX_PACKAGE = "nyaterm"
-URL_SCHEME = "nyaterm"
-PORTABLE_MARKER = "nyaterm-portable"
+# The executables are branded zzclawterm-* while their Cargo packages keep the
+# zzclawterm-* names.
+HELPER_BINS = ("zzclawterm-rdp-helper", "zzclawterm-vnc-helper", "zzclawterm-mcp")
+MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
+LINUX_PACKAGE = "zzclawterm"
+URL_SCHEME = "zzclawterm"
+PORTABLE_MARKER = "zzclawterm-portable"
 
 
 @dataclass(frozen=True)
@@ -168,9 +170,10 @@ def build_binary(package: str, name: str, target: str) -> Path:
 
 
 def build_application(target: str) -> Path:
-    binary = build_binary("nyaterm-app", APP_BIN, target)
+    binary = build_binary("zzclawterm-app", APP_BIN, target)
     for name in HELPER_BINS:
-        build_binary(name, name, target)
+        package = name.replace("zzclawterm-", "zzclawterm-", 1)
+        build_binary(package, name, target)
     return binary
 
 
@@ -237,9 +240,9 @@ def find_makensis() -> str:
 def create_windows_packages(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
-    portable_root = WORK_DIR / "NyaTerm-portable"
+    portable_root = WORK_DIR / "ZzClawTerm-portable"
     portable_root.mkdir()
-    shutil.copy2(binary, portable_root / "NyaTerm.exe")
+    shutil.copy2(binary, portable_root / "ZzClawTerm.exe")
     copy_helpers(portable_root, info.target)
     (portable_root / PORTABLE_MARKER).touch()
     (portable_root / "data").mkdir()
@@ -252,7 +255,7 @@ def create_windows_packages(
 
     installer_root = WORK_DIR / "windows-installer"
     installer_root.mkdir()
-    shutil.copy2(binary, installer_root / "NyaTerm.exe")
+    shutil.copy2(binary, installer_root / "ZzClawTerm.exe")
     installer_helpers = copy_helpers(installer_root, info.target)
     copy_release_documents(installer_root, version)
     shutil.copy2(ICON_DIR / "icon.ico", installer_root / "icon.ico")
@@ -266,7 +269,7 @@ def create_windows_packages(
     )
 
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}-setup.exe"
-    script = WORK_DIR / "nyaterm-installer.nsi"
+    script = WORK_DIR / "zzclawterm-installer.nsi"
     script.write_text(
         textwrap.dedent(
             rf"""
@@ -278,15 +281,15 @@ def create_windows_packages(
             !define MUI_ICON "{nsis_path(ICON_DIR / 'icon.ico')}"
             !define MUI_UNICON "{nsis_path(ICON_DIR / 'icon.ico')}"
 
-            Name "NyaTerm"
+            Name "ZzClawTerm"
             OutFile "{nsis_path(output)}"
-            InstallDir "$LOCALAPPDATA\Programs\NyaTerm"
-            InstallDirRegKey HKCU "Software\NyaTerm" "InstallDir"
+            InstallDir "$LOCALAPPDATA\Programs\ZzClawTerm"
+            InstallDirRegKey HKCU "Software\ZzClawTerm" "InstallDir"
             VIProductVersion "{windows_numeric_version(version)}"
-            VIAddVersionKey "ProductName" "NyaTerm"
+            VIAddVersionKey "ProductName" "ZzClawTerm"
             VIAddVersionKey "ProductVersion" "{version}"
-            VIAddVersionKey "FileDescription" "NyaTerm native GPUI terminal"
-            VIAddVersionKey "LegalCopyright" "Copyright Kang"
+            VIAddVersionKey "FileDescription" "ZzClawTerm native GPUI terminal"
+            VIAddVersionKey "LegalCopyright" "Copyright Jackfahdin"
 
             !insertmacro MUI_PAGE_WELCOME
             !insertmacro MUI_PAGE_DIRECTORY
@@ -296,33 +299,33 @@ def create_windows_packages(
             !insertmacro MUI_UNPAGE_INSTFILES
             !insertmacro MUI_LANGUAGE "English"
 
-            Section "NyaTerm" SecMain
+            Section "ZzClawTerm" SecMain
               SetOutPath "$INSTDIR"
-              File "{nsis_path(installer_root / 'NyaTerm.exe')}"
+              File "{nsis_path(installer_root / 'ZzClawTerm.exe')}"
               {helper_install}
               File "{nsis_path(installer_root / 'LICENSE')}"
               File "{nsis_path(installer_root / 'VERSION')}"
               File "{nsis_path(installer_root / 'icon.ico')}"
               WriteUninstaller "$INSTDIR\Uninstall.exe"
-              WriteRegStr HKCU "Software\NyaTerm" "InstallDir" "$INSTDIR"
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}" "" "URL:NyaTerm Protocol"
+              WriteRegStr HKCU "Software\ZzClawTerm" "InstallDir" "$INSTDIR"
+              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}" "" "URL:ZzClawTerm Protocol"
               WriteRegStr HKCU "Software\Classes\{URL_SCHEME}" "URL Protocol" ""
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\DefaultIcon" "" "$INSTDIR\NyaTerm.exe,0"
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\shell\open\command" "" "$\"$INSTDIR\NyaTerm.exe$\" $\"%1$\""
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\NyaTerm" "DisplayName" "NyaTerm"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\NyaTerm" "DisplayVersion" "{version}"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\NyaTerm" "DisplayIcon" "$INSTDIR\NyaTerm.exe"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\NyaTerm" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-              CreateDirectory "$SMPROGRAMS\NyaTerm"
-              CreateShortcut "$SMPROGRAMS\NyaTerm\NyaTerm.lnk" "$INSTDIR\NyaTerm.exe" "" "$INSTDIR\icon.ico"
-              CreateShortcut "$DESKTOP\NyaTerm.lnk" "$INSTDIR\NyaTerm.exe" "" "$INSTDIR\icon.ico"
+              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\DefaultIcon" "" "$INSTDIR\ZzClawTerm.exe,0"
+              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\shell\open\command" "" "$\"$INSTDIR\ZzClawTerm.exe$\" $\"%1$\""
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayName" "ZzClawTerm"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayVersion" "{version}"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayIcon" "$INSTDIR\ZzClawTerm.exe"
+              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+              CreateDirectory "$SMPROGRAMS\ZzClawTerm"
+              CreateShortcut "$SMPROGRAMS\ZzClawTerm\ZzClawTerm.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"
+              CreateShortcut "$DESKTOP\ZzClawTerm.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"
             SectionEnd
 
             Section "Uninstall"
-              Delete "$DESKTOP\NyaTerm.lnk"
-              Delete "$SMPROGRAMS\NyaTerm\NyaTerm.lnk"
-              RMDir "$SMPROGRAMS\NyaTerm"
-              Delete "$INSTDIR\NyaTerm.exe"
+              Delete "$DESKTOP\ZzClawTerm.lnk"
+              Delete "$SMPROGRAMS\ZzClawTerm\ZzClawTerm.lnk"
+              RMDir "$SMPROGRAMS\ZzClawTerm"
+              Delete "$INSTDIR\ZzClawTerm.exe"
               {helper_uninstall}
               Delete "$INSTDIR\LICENSE"
               Delete "$INSTDIR\VERSION"
@@ -330,8 +333,8 @@ def create_windows_packages(
               Delete "$INSTDIR\Uninstall.exe"
               RMDir "$INSTDIR"
               DeleteRegKey HKCU "Software\Classes\{URL_SCHEME}"
-              DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\NyaTerm"
-              DeleteRegKey HKCU "Software\NyaTerm"
+              DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm"
+              DeleteRegKey HKCU "Software\ZzClawTerm"
             SectionEnd
             """
         ).lstrip(),
@@ -343,12 +346,12 @@ def create_windows_packages(
 def create_macos_packages(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
-    bundle = WORK_DIR / "NyaTerm.app"
+    bundle = WORK_DIR / "ZzClawTerm.app"
     macos_dir = bundle / "Contents" / "MacOS"
     resources_dir = bundle / "Contents" / "Resources"
     macos_dir.mkdir(parents=True)
     resources_dir.mkdir(parents=True)
-    app_binary = macos_dir / "NyaTerm"
+    app_binary = macos_dir / "ZzClawTerm"
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     helper_binaries = copy_helpers(macos_dir, info.target)
@@ -358,7 +361,7 @@ def create_macos_packages(
     plist = {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": APP_NAME,
-        "CFBundleExecutable": "NyaTerm",
+        "CFBundleExecutable": "ZzClawTerm",
         "CFBundleIconFile": "icon.icns",
         "CFBundleIdentifier": MACOS_IDENTIFIER,
         "CFBundleInfoDictionaryVersion": "6.0",
@@ -375,7 +378,7 @@ def create_macos_packages(
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
-        "NSHumanReadableCopyright": "Copyright Kang",
+        "NSHumanReadableCopyright": "Copyright Jackfahdin",
     }
     with (bundle / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(plist, handle, sort_keys=True)
@@ -390,11 +393,11 @@ def create_macos_packages(
 
     tar_output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.app.tar.gz"
     with tarfile.open(tar_output, "w:gz", compresslevel=9) as archive:
-        archive.add(bundle, arcname="NyaTerm.app")
+        archive.add(bundle, arcname="ZzClawTerm.app")
 
     dmg_root = WORK_DIR / "dmg"
     dmg_root.mkdir()
-    shutil.copytree(bundle, dmg_root / "NyaTerm.app", symlinks=True)
+    shutil.copytree(bundle, dmg_root / "ZzClawTerm.app", symlinks=True)
     (dmg_root / "Applications").symlink_to("/Applications")
     dmg_output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.dmg"
     run(
@@ -448,11 +451,11 @@ def write_desktop_file(path: Path, executable: str) -> None:
             f"""
             [Desktop Entry]
             Type=Application
-            Name=NyaTerm
+            Name=ZzClawTerm
             Comment=Native GPUI terminal and SSH client
             Exec={executable} %U
-            Icon=nyaterm
-            StartupWMClass=nyaterm
+            Icon=zzclawterm
+            StartupWMClass=zzclawterm
             Terminal=false
             Categories=Development;TerminalEmulator;Network;
             MimeType=x-scheme-handler/{URL_SCHEME};
@@ -473,7 +476,7 @@ def copy_linux_icons(root: Path) -> None:
     for size, source in icons.items():
         destination = root / "usr" / "share" / "icons" / "hicolor" / size / "apps"
         destination.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ICON_DIR / source, destination / "nyaterm.png")
+        shutil.copy2(ICON_DIR / source, destination / "zzclawterm.png")
 
 
 def parse_dpkg_dependencies(output: str) -> str:
@@ -489,7 +492,7 @@ def linux_deb_dependencies(binaries: list[Path]) -> str:
     debian = scratch / "debian"
     debian.mkdir(parents=True)
     (debian / "control").write_text(
-        "Source: nyaterm\nPackage: nyaterm\nArchitecture: any\nDescription: NyaTerm\n",
+        "Source: zzclawterm\nPackage: zzclawterm\nArchitecture: any\nDescription: ZzClawTerm\n",
         encoding="utf-8",
     )
     # Helpers can pull shared libraries the application itself does not need.
@@ -503,7 +506,7 @@ def linux_deb_dependencies(binaries: list[Path]) -> str:
 def create_linux_appimage(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
-    appdir = WORK_DIR / "NyaTerm.AppDir"
+    appdir = WORK_DIR / "ZzClawTerm.AppDir"
     usr_bin = appdir / "usr" / "bin"
     usr_bin.mkdir(parents=True)
     app_binary = usr_bin / APP_BIN
@@ -514,15 +517,15 @@ def create_linux_appimage(
 
     applications = appdir / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "nyaterm.desktop", APP_BIN)
-    shutil.copy2(applications / "nyaterm.desktop", appdir / "nyaterm.desktop")
-    shutil.copy2(ICON_DIR / "128x128.png", appdir / "nyaterm.png")
+    write_desktop_file(applications / "zzclawterm.desktop", APP_BIN)
+    shutil.copy2(applications / "zzclawterm.desktop", appdir / "zzclawterm.desktop")
+    shutil.copy2(ICON_DIR / "128x128.png", appdir / "zzclawterm.png")
     copy_linux_icons(appdir)
 
     apprun = appdir / "AppRun"
     apprun.write_text(
         '#!/bin/sh\nAPPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"\n'
-        'exec "$APPDIR/usr/bin/nyaterm" "$@"\n',
+        'exec "$APPDIR/usr/bin/zzclawterm" "$@"\n',
         encoding="utf-8",
     )
     make_executable(apprun)
@@ -549,7 +552,7 @@ def create_linux_deb(
 
     applications = root / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "nyaterm.desktop", "/opt/nyaterm/nyaterm")
+    write_desktop_file(applications / "zzclawterm.desktop", "/opt/zzclawterm/zzclawterm")
     copy_linux_icons(root)
 
     control_dir = root / "DEBIAN"
@@ -558,15 +561,15 @@ def create_linux_deb(
     (control_dir / "control").write_text(
         textwrap.dedent(
             f"""
-            Package: nyaterm
+            Package: zzclawterm
             Version: {version.replace('-', '~')}
             Section: utils
             Priority: optional
             Architecture: {linux_deb_arch(info.target)}
-            Maintainer: Kang <noreply@nyaterm.app>
+            Maintainer: Jackfahdin <guomaojie@petalmail.com>
             Depends: {dependencies}
             Recommends: libvulkan1 | mesa-vulkan-drivers
-            Description: NyaTerm native GPUI terminal and SSH client
+            Description: ZzClawTerm native GPUI terminal and SSH client
              Native terminal workspace with SSH, SFTP and remote operations.
             """
         ).lstrip(),
@@ -595,19 +598,19 @@ def create_linux_rpm(
     copy_release_documents(payload / "usr" / "share" / "doc" / LINUX_PACKAGE, version)
     applications = payload / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "nyaterm.desktop", "/opt/nyaterm/nyaterm")
+    write_desktop_file(applications / "zzclawterm.desktop", "/opt/zzclawterm/zzclawterm")
     copy_linux_icons(payload)
 
     rpm_version, rpm_release = linux_rpm_version(version)
     payload_path = str(payload.resolve()).replace("%", "%%")
     spec = textwrap.dedent(
         f"""
-        Name: nyaterm
+        Name: zzclawterm
         Version: {rpm_version}
         Release: {rpm_release}
-        Summary: NyaTerm native GPUI terminal and SSH client
+        Summary: ZzClawTerm native GPUI terminal and SSH client
         License: Apache-2.0
-        URL: https://nyaterm.app
+        URL: https://github.com/jackfahdin/ZzClawTerm
         BuildArch: {linux_rpm_arch(info.target)}
 
         %description
@@ -619,13 +622,13 @@ def create_linux_rpm(
         cp -a "{payload_path}/." %{{buildroot}}/
 
         %files
-        /opt/nyaterm
-        /usr/share/applications/nyaterm.desktop
-        /usr/share/icons/hicolor/*/apps/nyaterm.png
-        /usr/share/doc/nyaterm
+        /opt/zzclawterm
+        /usr/share/applications/zzclawterm.desktop
+        /usr/share/icons/hicolor/*/apps/zzclawterm.png
+        /usr/share/doc/zzclawterm
         """
     ).lstrip()
-    spec_path = top_dir / "SPECS" / "nyaterm.spec"
+    spec_path = top_dir / "SPECS" / "zzclawterm.spec"
     spec_path.write_text(spec, encoding="utf-8")
     run(
         [
@@ -662,10 +665,10 @@ def main() -> None:
     info = target_info(sys.argv[1])
     expected_version = workspace_version()
     version = validate_version(
-        os.environ.get("NYATERM_VERSION", expected_version), expected_version
+        os.environ.get("ZZCLAWTERM_VERSION", expected_version), expected_version
     )
     artifact_version = validate_artifact_version(
-        os.environ.get("NYATERM_ARTIFACT_VERSION", version)
+        os.environ.get("ZZCLAWTERM_ARTIFACT_VERSION", version)
     )
     reset_output()
     print(f"==> Packaging {APP_NAME} {version} for {info.target}", flush=True)

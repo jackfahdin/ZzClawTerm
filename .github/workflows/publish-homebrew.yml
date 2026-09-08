@@ -16,11 +16,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: homebrew-nyaterm-tap
+  group: homebrew-zzclawterm-tap
   cancel-in-progress: false
 
 env:
-  TAP_REPO: nyakang/homebrew-nyaterm
+  TAP_REPO: jackfahdin/homebrew-zzclawterm
   TAP_WORKFLOW: update-cask.yml
 
 jobs:
@@ -77,14 +77,14 @@ jobs:
           set -euo pipefail
           mkdir verified-dmgs
           gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir verified-dmgs \
-            --pattern SHA256SUMS --pattern "NyaTerm_${VERSION}_macos_*.dmg" --clobber
+            --pattern SHA256SUMS --pattern "ZzClawTerm_${VERSION}_macos_*.dmg" --clobber
           for arch in x64 arm64; do
-            test -s "verified-dmgs/NyaTerm_${VERSION}_macos_${arch}.dmg" || {
+            test -s "verified-dmgs/ZzClawTerm_${VERSION}_macos_${arch}.dmg" || {
               echo "missing Homebrew DMG for ${arch}" >&2
               exit 1
             }
           done
-          grep -E "  NyaTerm_${VERSION}_macos_(x64|arm64)\.dmg$" \
+          grep -E "  ZzClawTerm_${VERSION}_macos_(x64|arm64)\.dmg$" \
             verified-dmgs/SHA256SUMS > verified-dmgs/DMG-SHA256SUMS
           [[ "$(wc -l < verified-dmgs/DMG-SHA256SUMS)" -eq 2 ]] || {
             echo 'SHA256SUMS does not cover both Homebrew DMGs' >&2

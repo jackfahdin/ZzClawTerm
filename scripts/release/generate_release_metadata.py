@@ -13,25 +13,25 @@ import package_native
 
 
 DOWNLOAD_ARTIFACTS = {
-    "windows-x86_64": "NyaTerm_{version}_windows_x64-setup.exe",
-    "windows-aarch64": "NyaTerm_{version}_windows_arm64-setup.exe",
-    "windows-x86_64-portable": "NyaTerm_{version}_windows_x64_portable.zip",
-    "windows-aarch64-portable": "NyaTerm_{version}_windows_arm64_portable.zip",
-    "linux-x86_64": "NyaTerm_{version}_linux_x64.AppImage",
-    "linux-aarch64": "NyaTerm_{version}_linux_arm64.AppImage",
-    "darwin-x86_64": "NyaTerm_{version}_macos_x64.dmg",
-    "darwin-aarch64": "NyaTerm_{version}_macos_arm64.dmg",
+    "windows-x86_64": "ZzClawTerm_{version}_windows_x64-setup.exe",
+    "windows-aarch64": "ZzClawTerm_{version}_windows_arm64-setup.exe",
+    "windows-x86_64-portable": "ZzClawTerm_{version}_windows_x64_portable.zip",
+    "windows-aarch64-portable": "ZzClawTerm_{version}_windows_arm64_portable.zip",
+    "linux-x86_64": "ZzClawTerm_{version}_linux_x64.AppImage",
+    "linux-aarch64": "ZzClawTerm_{version}_linux_arm64.AppImage",
+    "darwin-x86_64": "ZzClawTerm_{version}_macos_x64.dmg",
+    "darwin-aarch64": "ZzClawTerm_{version}_macos_arm64.dmg",
 }
 
 UPDATER_ARTIFACTS = {
-    "darwin-x86_64": "NyaTerm_{version}_macos_x64.app.tar.gz",
-    "darwin-aarch64": "NyaTerm_{version}_macos_arm64.app.tar.gz",
-    "linux-x86_64": "NyaTerm_{version}_linux_x64.AppImage",
-    "linux-aarch64": "NyaTerm_{version}_linux_arm64.AppImage",
-    "windows-x86_64": "NyaTerm_{version}_windows_x64-setup.exe",
-    "windows-x86_64-nsis": "NyaTerm_{version}_windows_x64-setup.exe",
-    "windows-aarch64": "NyaTerm_{version}_windows_arm64-setup.exe",
-    "windows-aarch64-nsis": "NyaTerm_{version}_windows_arm64-setup.exe",
+    "darwin-x86_64": "ZzClawTerm_{version}_macos_x64.app.tar.gz",
+    "darwin-aarch64": "ZzClawTerm_{version}_macos_arm64.app.tar.gz",
+    "linux-x86_64": "ZzClawTerm_{version}_linux_x64.AppImage",
+    "linux-aarch64": "ZzClawTerm_{version}_linux_arm64.AppImage",
+    "windows-x86_64": "ZzClawTerm_{version}_windows_x64-setup.exe",
+    "windows-x86_64-nsis": "ZzClawTerm_{version}_windows_x64-setup.exe",
+    "windows-aarch64": "ZzClawTerm_{version}_windows_arm64-setup.exe",
+    "windows-aarch64-nsis": "ZzClawTerm_{version}_windows_arm64-setup.exe",
 }
 
 
@@ -51,7 +51,8 @@ def expected_artifacts(version: str) -> set[str]:
 
 
 def artifact_url(base_url: str, tag: str, filename: str) -> str:
-    return f"{base_url.rstrip('/')}/releases/{tag}/{filename}"
+    # GitHub Releases asset download URL. `base_url` is the repository URL.
+    return f"{base_url.rstrip('/')}/releases/download/{tag}/{filename}"
 
 
 def generate(

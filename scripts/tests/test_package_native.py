@@ -16,17 +16,17 @@ import package_native  # noqa: E402
 
 class PackageNativeTests(unittest.TestCase):
     def test_release_tag_is_normalized(self) -> None:
-        self.assertEqual(package_native.validate_version("v2.0.0"), "2.0.0")
+        self.assertEqual(package_native.validate_version("v0.0.1"), "0.0.1")
         self.assertEqual(
-            package_native.validate_version("2.0.0-preview.1"),
-            "2.0.0-preview.1",
+            package_native.validate_version("0.0.1-preview.1"),
+            "0.0.1-preview.1",
         )
 
     def test_invalid_or_mismatched_version_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             package_native.validate_version("release-2")
         with self.assertRaisesRegex(ValueError, "does not match"):
-            package_native.validate_version("v2.0.1", "2.0.0")
+            package_native.validate_version("v0.0.2", "0.0.1")
 
     def test_snapshot_is_only_allowed_as_an_artifact_label(self) -> None:
         self.assertEqual(
@@ -42,43 +42,43 @@ class PackageNativeTests(unittest.TestCase):
                 "x86_64-pc-windows-msvc", "main-snapshot"
             ),
             {
-                "NyaTerm_main-snapshot_windows_x64_portable.zip",
-                "NyaTerm_main-snapshot_windows_x64-setup.exe",
+                "ZzClawTerm_main-snapshot_windows_x64_portable.zip",
+                "ZzClawTerm_main-snapshot_windows_x64-setup.exe",
             },
         )
 
     def test_all_release_targets_have_expected_artifact_names(self) -> None:
         expected = {
             "aarch64-apple-darwin": {
-                "NyaTerm_2.0.0_macos_arm64.dmg",
-                "NyaTerm_2.0.0_macos_arm64.app.tar.gz",
+                "ZzClawTerm_0.0.1_macos_arm64.dmg",
+                "ZzClawTerm_0.0.1_macos_arm64.app.tar.gz",
             },
             "x86_64-apple-darwin": {
-                "NyaTerm_2.0.0_macos_x64.dmg",
-                "NyaTerm_2.0.0_macos_x64.app.tar.gz",
+                "ZzClawTerm_0.0.1_macos_x64.dmg",
+                "ZzClawTerm_0.0.1_macos_x64.app.tar.gz",
             },
             "aarch64-unknown-linux-gnu": {
-                "NyaTerm_2.0.0_linux_arm64.AppImage",
-                "NyaTerm_2.0.0_linux_arm64.deb",
-                "NyaTerm_2.0.0_linux_arm64.rpm",
+                "ZzClawTerm_0.0.1_linux_arm64.AppImage",
+                "ZzClawTerm_0.0.1_linux_arm64.deb",
+                "ZzClawTerm_0.0.1_linux_arm64.rpm",
             },
             "x86_64-unknown-linux-gnu": {
-                "NyaTerm_2.0.0_linux_x64.AppImage",
-                "NyaTerm_2.0.0_linux_x64.deb",
-                "NyaTerm_2.0.0_linux_x64.rpm",
+                "ZzClawTerm_0.0.1_linux_x64.AppImage",
+                "ZzClawTerm_0.0.1_linux_x64.deb",
+                "ZzClawTerm_0.0.1_linux_x64.rpm",
             },
             "aarch64-pc-windows-msvc": {
-                "NyaTerm_2.0.0_windows_arm64_portable.zip",
-                "NyaTerm_2.0.0_windows_arm64-setup.exe",
+                "ZzClawTerm_0.0.1_windows_arm64_portable.zip",
+                "ZzClawTerm_0.0.1_windows_arm64-setup.exe",
             },
             "x86_64-pc-windows-msvc": {
-                "NyaTerm_2.0.0_windows_x64_portable.zip",
-                "NyaTerm_2.0.0_windows_x64-setup.exe",
+                "ZzClawTerm_0.0.1_windows_x64_portable.zip",
+                "ZzClawTerm_0.0.1_windows_x64-setup.exe",
             },
         }
         for target, names in expected.items():
             with self.subTest(target=target):
-                self.assertEqual(package_native.artifact_names(target, "v2.0.0"), names)
+                self.assertEqual(package_native.artifact_names(target, "v0.0.1"), names)
 
     def test_release_binary_always_uses_explicit_target_directory(self) -> None:
         with mock.patch.dict("os.environ", {}, clear=True):
@@ -86,16 +86,16 @@ class PackageNativeTests(unittest.TestCase):
             windows = package_native.release_binary_path("aarch64-pc-windows-msvc")
         self.assertEqual(
             linux.relative_to(package_native.ROOT_DIR).as_posix(),
-            "target/x86_64-unknown-linux-gnu/release/nyaterm",
+            "target/x86_64-unknown-linux-gnu/release/zzclawterm",
         )
         self.assertEqual(
             windows.relative_to(package_native.ROOT_DIR).as_posix(),
-            "target/aarch64-pc-windows-msvc/release/nyaterm.exe",
+            "target/aarch64-pc-windows-msvc/release/zzclawterm.exe",
         )
 
     def test_helper_binaries_resolve_beside_the_application(self) -> None:
-        self.assertIn("nyaterm-rdp-helper", package_native.HELPER_BINS)
-        self.assertIn("nyaterm-mcp", package_native.HELPER_BINS)
+        self.assertIn("zzclawterm-rdp-helper", package_native.HELPER_BINS)
+        self.assertIn("zzclawterm-mcp", package_native.HELPER_BINS)
         with mock.patch.dict("os.environ", {}, clear=True):
             linux = package_native.helper_binary_paths("x86_64-unknown-linux-gnu")
             windows = package_native.helper_binary_paths("aarch64-pc-windows-msvc")
@@ -150,16 +150,16 @@ class PackageNativeTests(unittest.TestCase):
             ):
                 package_native.WORK_DIR.mkdir(parents=True)
                 package_native.DIST_DIR.mkdir(parents=True)
-                application = root / "nyaterm.exe"
+                application = root / "zzclawterm.exe"
                 application.write_bytes(b"MZ")
                 for path in package_native.helper_binary_paths(target):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(b"MZ")
                 package_native.create_windows_packages(
-                    application, info, "2.0.0", "2.0.0"
+                    application, info, "0.0.1", "0.0.1"
                 )
                 script = (
-                    package_native.WORK_DIR / "nyaterm-installer.nsi"
+                    package_native.WORK_DIR / "zzclawterm-installer.nsi"
                 ).read_text(encoding="utf-8")
         for name in package_native.HELPER_BINS:
             filename = f"{name}.exe"
@@ -167,34 +167,34 @@ class PackageNativeTests(unittest.TestCase):
                 self.assertRegex(script, rf'File ".*{filename}"')
                 self.assertIn(f'Delete "$INSTDIR\\{filename}"', script)
         self.assertIn(
-            r'WriteRegStr HKCU "Software\Classes\nyaterm" "URL Protocol" ""',
+            r'WriteRegStr HKCU "Software\Classes\zzclawterm" "URL Protocol" ""',
             script,
         )
         self.assertIn(
-            r'WriteRegStr HKCU "Software\Classes\nyaterm\shell\open\command" "" "$\"$INSTDIR\NyaTerm.exe$\" $\"%1$\""',
+            r'WriteRegStr HKCU "Software\Classes\zzclawterm\shell\open\command" "" "$\"$INSTDIR\ZzClawTerm.exe$\" $\"%1$\""',
             script,
         )
         self.assertIn(
-            r'DeleteRegKey HKCU "Software\Classes\nyaterm"',
+            r'DeleteRegKey HKCU "Software\Classes\zzclawterm"',
             script,
         )
         self.assertNotIn(r"Software\Classes\ssh", script)
         self.assertNotIn(r"Software\Classes\telnet", script)
 
-    def test_linux_desktop_registers_only_nyaterm_url_scheme(self) -> None:
+    def test_linux_desktop_registers_only_zzclawterm_url_scheme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "nyaterm.desktop"
-            package_native.write_desktop_file(path, "/opt/nyaterm/nyaterm")
+            path = Path(directory) / "zzclawterm.desktop"
+            package_native.write_desktop_file(path, "/opt/zzclawterm/zzclawterm")
             desktop = path.read_text(encoding="utf-8")
-        self.assertIn("Exec=/opt/nyaterm/nyaterm %U\n", desktop)
-        self.assertIn("MimeType=x-scheme-handler/nyaterm;\n", desktop)
+        self.assertIn("Exec=/opt/zzclawterm/zzclawterm %U\n", desktop)
+        self.assertIn("MimeType=x-scheme-handler/zzclawterm;\n", desktop)
         self.assertNotIn("x-scheme-handler/ssh", desktop)
         self.assertNotIn("x-scheme-handler/telnet", desktop)
 
     def test_deb_dependencies_cover_helper_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            binaries = [root / "nyaterm", root / "nyaterm-rdp-helper"]
+            binaries = [root / "zzclawterm", root / "zzclawterm-rdp-helper"]
             with (
                 mock.patch.object(package_native, "WORK_DIR", root / "work"),
                 mock.patch.object(
@@ -217,11 +217,11 @@ class PackageNativeTests(unittest.TestCase):
         # Build the absolute path for the running platform: Path("/cache/cargo") has
         # no drive letter, so is_absolute() is False on Windows and the assertion
         # would compare against a path joined onto the repository root instead.
-        target_dir = Path(tempfile.gettempdir(), "nyaterm-cargo-target").resolve()
+        target_dir = Path(tempfile.gettempdir(), "zzclawterm-cargo-target").resolve()
         with mock.patch.dict("os.environ", {"CARGO_TARGET_DIR": str(target_dir)}):
             path = package_native.release_binary_path("x86_64-unknown-linux-gnu")
         self.assertEqual(
-            path, target_dir / "x86_64-unknown-linux-gnu" / "release" / "nyaterm"
+            path, target_dir / "x86_64-unknown-linux-gnu" / "release" / "zzclawterm"
         )
 
     def test_platform_package_versions_are_normalized(self) -> None:

@@ -24,7 +24,7 @@ class CheckReleaseAssetsTests(unittest.TestCase):
                 "--dist",
                 str(directory),
                 "--version",
-                "2.0.0",
+                "0.0.1",
                 "--artifact-version",
                 "main-snapshot",
             ]

@@ -8,7 +8,7 @@ Expected names come from ``package_native`` itself, so adding a target does not 
 remembering to update a count here.
 
 Run from the repository root:
-    python3 scripts/ci/check_release_assets.py --dist dist-release --version 2.0.0
+    python3 scripts/ci/check_release_assets.py --dist dist-release --version 0.0.1
 """
 
 from __future__ import annotations
