@@ -1,5 +1,5 @@
 [package]
-name = "nyaterm-app"
+name = "zzclawterm-app"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,9 +13,9 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui_platform.workspace = true
-nyaterm-core.workspace = true
-nyaterm-desktop.workspace = true
-nyaterm-ui.workspace = true
+zzclawterm-core.workspace = true
+zzclawterm-desktop.workspace = true
+zzclawterm-ui.workspace = true
 rust-embed.workspace = true
 
 tracing.workspace = true
@@ -26,12 +26,15 @@ uuid.workspace = true
 [dev-dependencies]
 usvg.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [lib]
-name = "nyaterm_app"
+name = "zzclawterm_app"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nyaterm"
+name = "zzclawterm"
 path = "src/main.rs"
 
 

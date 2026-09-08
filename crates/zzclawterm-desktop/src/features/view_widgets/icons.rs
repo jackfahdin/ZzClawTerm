@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnimationExt, AnyElement, Hsla, Img, IntoElement, SharedString, Svg, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, svg,
+    AnimationExt, AnyElement, Hsla, Img, IntoElement, SharedString, Svg, div, img, prelude::*, px,
+    rgb, svg,
 };
 
 use crate::features::{icons::IconDef, icons::file_entry_icon};
@@ -78,31 +78,17 @@ pub(in crate::features) fn color_icon(path: &'static str, size_px: f32) -> Img {
     img(path).size(px(size_px)).flex_none()
 }
 
-/// Theme-colored NyaTerm application icon, matching the Tauri logo composition.
-pub(in crate::features) fn nyaterm_app_icon(
-    palette: ThemePalette,
+/// Full-color ZzClawTerm application icon. The artwork is a rounded square on
+/// transparency, so it paints directly without a badge behind it; `palette` is
+/// kept in the signature so callers do not change.
+pub(in crate::features) fn zzclawterm_app_icon(
+    _palette: ThemePalette,
     size_px: f32,
 ) -> impl IntoElement {
-    div()
+    img("color/brand/zzclawterm.png")
         .size(px(size_px))
         .flex_none()
-        .overflow_hidden()
         .rounded(px(size_px * 0.1875))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(linear_gradient(
-            135.,
-            linear_color_stop(rgb(palette.primary), 0.),
-            linear_color_stop(rgb(palette.primary_hover), 1.),
-        ))
-        .child(
-            svg()
-                .size(px(size_px))
-                .flex_none()
-                .path("icons/logo.svg")
-                .text_color(rgb(0xffffff)),
-        )
 }
 
 /// Activity-bar icon.
@@ -114,9 +100,11 @@ pub(in crate::features) fn activity_icon(
     mono_icon(path, color, size_px).into_any_element()
 }
 
-/// Faded NyaTerm logo used by empty workspace (Tauri EmptyWorkspaceState).
-pub(in crate::features) fn nyaterm_logo_mark(
-    palette: ThemePalette,
+/// Faded ZzClawTerm logo used by empty workspace. Full-color artwork cannot be
+/// tinted, so the fade comes from opacity alone; `palette` is kept in the
+/// signature so callers do not change.
+pub(in crate::features) fn zzclawterm_logo_mark(
+    _palette: ThemePalette,
     size_px: f32,
     opacity: f32,
 ) -> impl IntoElement {
@@ -127,11 +115,11 @@ pub(in crate::features) fn nyaterm_logo_mark(
         .flex()
         .items_center()
         .justify_center()
-        .child(mono_icon(
-            "icons/logo.svg",
-            rgb(palette.text_muted).into(),
-            size_px,
-        ))
+        .child(
+            img("color/brand/zzclawterm.png")
+                .size(px(size_px))
+                .flex_none(),
+        )
 }
 
 /// Paint a resolved [`IconDef`], honoring whichever element the asset needs.
