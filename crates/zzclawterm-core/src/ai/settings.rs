@@ -189,7 +189,7 @@ impl Default for AiSettings {
             active_profile_id: default_active_profile_id(),
             provider_profiles: default_provider_profiles(),
             default_mode: default_mode(),
-            default_agent_kind: AiAgentKind::Nyaterm,
+            default_agent_kind: AiAgentKind::Zzclawterm,
             external_agent_permission_mode: AiPermissionMode::Confirm,
             default_reasoning_effort: AiReasoningEffort::Auto,
             default_model_id,
@@ -224,7 +224,7 @@ pub(super) fn default_claude_runtime() -> Option<String> {
 }
 
 pub(super) fn default_tool_integration_mode() -> Option<String> {
-    Some("nyaterm_mcp".to_string())
+    Some("zzclawterm_mcp".to_string())
 }
 
 pub(super) fn default_true() -> bool {

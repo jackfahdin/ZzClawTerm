@@ -10,16 +10,17 @@ use gpui::{
     App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, Subscription, Window, div, px,
 };
-use nyaterm_core::{
+use zzclawterm_core::{
     AiAgentKind, AiPermissionMode, CodexThreadMode, ExistingFileBehavior, ExternalMcpSessionScope,
     RecordingMode, RecordingRotationPolicy, RiskLevel,
 };
-use nyaterm_transport::SftpDuplicatePolicy;
-use nyaterm_ui::{
-    NYA_FORM_CONTROL_HEIGHT_PX, NyaSelect, NyaSelectEvent, NyaSelectOption, NyaSelectState,
+use zzclawterm_transport::SftpDuplicatePolicy;
+use zzclawterm_ui::{
+    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelect, ZzClawSelectEvent, ZzClawSelectOption,
+    ZzClawSelectState,
 };
 
-use super::NyaTermApp;
+use super::ZzClawTermApp;
 use super::ai::AiFullAccessSetting;
 use crate::features::shell::TabMouseActionTarget;
 use crate::models::{ConnectionEditorSelect, HeaderStatusMode};
@@ -45,33 +46,36 @@ fn ai_permission_mode(value: &str) -> Option<AiPermissionMode> {
 
 #[derive(Default)]
 pub(in crate::features) struct SelectRegistry {
-    fields: HashMap<SharedString, Entity<NyaSelectState>>,
+    fields: HashMap<SharedString, Entity<ZzClawSelectState>>,
     subscriptions: HashMap<SharedString, Subscription>,
 }
 
 impl SelectRegistry {
-    pub(in crate::features) fn field(&self, id: &SharedString) -> Option<Entity<NyaSelectState>> {
+    pub(in crate::features) fn field(
+        &self,
+        id: &SharedString,
+    ) -> Option<Entity<ZzClawSelectState>> {
         self.fields.get(id).cloned()
     }
 
     pub(in crate::features) fn insert_field(
         &mut self,
         id: SharedString,
-        field: Entity<NyaSelectState>,
+        field: Entity<ZzClawSelectState>,
     ) {
         self.fields.insert(id, field);
     }
 }
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features) fn select_entity<I>(
         &mut self,
         id: I,
-        options: Vec<NyaSelectOption>,
+        options: Vec<ZzClawSelectOption>,
         selected_value: Option<String>,
         disabled: bool,
         cx: &mut Context<Self>,
-    ) -> Entity<NyaSelectState>
+    ) -> Entity<ZzClawSelectState>
     where
         I: Into<SharedString>,
     {
@@ -80,18 +84,18 @@ impl NyaTermApp {
             select.clone()
         } else {
             let select = cx.new(|cx| {
-                NyaSelectState::new(cx, options.clone(), selected_value.clone()).disabled(disabled)
+                ZzClawSelectState::new(cx, options.clone(), selected_value.clone())
+                    .disabled(disabled)
             });
             let subscription_id = id.clone();
-            let subscription =
-                cx.subscribe(
-                    &select,
-                    move |app: &mut NyaTermApp, _, event, cx| match event {
-                        NyaSelectEvent::Changed(value) => {
-                            app.on_select_changed(&subscription_id, value.as_deref(), cx);
-                        }
-                    },
-                );
+            let subscription = cx.subscribe(
+                &select,
+                move |app: &mut ZzClawTermApp, _, event, cx| match event {
+                    ZzClawSelectEvent::Changed(value) => {
+                        app.on_select_changed(&subscription_id, value.as_deref(), cx);
+                    }
+                },
+            );
             self.selects.fields.insert(id.clone(), select.clone());
             self.selects.subscriptions.insert(id, subscription);
             select
@@ -155,7 +159,7 @@ impl NyaTermApp {
     pub(in crate::features) fn bare_select_control<I>(
         &mut self,
         id: I,
-        options: Vec<NyaSelectOption>,
+        options: Vec<ZzClawSelectOption>,
         selected_value: Option<String>,
         disabled: bool,
         cx: &mut Context<Self>,
@@ -171,13 +175,13 @@ impl NyaTermApp {
             .w_full()
             .max_w(px(360.))
             .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
-            .child(NyaSelect::new(&select).appearance(false))
+            .child(ZzClawSelect::new(&select).appearance(false))
     }
 
     pub(in crate::features) fn form_select_control<I>(
         &mut self,
         id: I,
-        options: Vec<NyaSelectOption>,
+        options: Vec<ZzClawSelectOption>,
         selected_value: Option<String>,
         disabled: bool,
         cx: &mut Context<Self>,
@@ -192,7 +196,7 @@ impl NyaTermApp {
             .id(id)
             .w_full()
             .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
-            .child(NyaSelect::new(&select))
+            .child(ZzClawSelect::new(&select))
     }
 
     pub(in crate::features) fn on_select_changed(
@@ -392,7 +396,7 @@ impl NyaTermApp {
                 let kind = match value {
                     "codex" => AiAgentKind::Codex,
                     "claude_code" => AiAgentKind::ClaudeCode,
-                    _ => AiAgentKind::Nyaterm,
+                    _ => AiAgentKind::Zzclawterm,
                 };
                 self.set_ai_default_agent(kind, cx);
             }

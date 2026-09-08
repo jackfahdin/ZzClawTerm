@@ -6,13 +6,13 @@ use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, FontWeight, IntoElement, MouseButton,
     MouseDownEvent, Rgba, SharedString, WeakEntity, Window, div, prelude::*, px, rgb, rgba, svg,
 };
-use nyaterm_core::{
+use zzclawterm_core::{
     AgentCommandExecutionMode, AiAction, AiAgentKind, AiCommandCard, AiMessage, AiMessageRole,
     AiMode, AiModelConfigItem, AiSession, truncate_preview,
 };
-use nyaterm_ui::{NyaInputShell, NyaScrollable, NyaSearchInput};
+use zzclawterm_ui::{ZzClawInputShell, ZzClawScrollable, ZzClawSearchInput};
 
-use crate::features::NyaTermApp;
+use crate::features::ZzClawTermApp;
 use crate::features::formatting::{
     ai_agent_step_status_style, extract_think_content, group_ai_sessions_by_date, short_id,
 };
@@ -88,9 +88,9 @@ pub(in crate::features) struct AiPanelSnapshot {
     pub discovery_menu_open: bool,
     pub discovery_index: usize,
     pub prompt_draft: String,
-    pub prompt_input: Entity<nyaterm_ui::NyaInputState>,
-    pub model_search_input: Option<Entity<nyaterm_ui::NyaInputState>>,
-    pub history_search_input: Option<Entity<nyaterm_ui::NyaInputState>>,
+    pub prompt_input: Entity<zzclawterm_ui::ZzClawInputState>,
+    pub model_search_input: Option<Entity<zzclawterm_ui::ZzClawInputState>>,
+    pub history_search_input: Option<Entity<zzclawterm_ui::ZzClawInputState>>,
     pub file_action_ready: bool,
     pub messages: Arc<[Arc<AiMessage>]>,
     pub streaming_assistant_id: Option<String>,
@@ -122,7 +122,7 @@ pub(in crate::features) struct AiHeaderPresentation {
 }
 
 pub(in crate::features) struct AiPanel {
-    app: WeakEntity<NyaTermApp>,
+    app: WeakEntity<ZzClawTermApp>,
     snapshot: Option<AiPanelSnapshot>,
     #[cfg(test)]
     paint_count: usize,
@@ -131,7 +131,7 @@ pub(in crate::features) struct AiPanel {
 }
 
 impl AiPanel {
-    pub(in crate::features) fn new(app: WeakEntity<NyaTermApp>) -> Self {
+    pub(in crate::features) fn new(app: WeakEntity<ZzClawTermApp>) -> Self {
         Self {
             app,
             snapshot: None,
@@ -173,7 +173,7 @@ impl AiPanel {
     pub(in crate::features) fn with_app<R: Default>(
         &self,
         cx: &mut Context<Self>,
-        f: impl FnOnce(&mut NyaTermApp, &mut Context<NyaTermApp>) -> R,
+        f: impl FnOnce(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) -> R,
     ) -> R {
         let Some(app) = self.app.upgrade() else {
             return R::default();
@@ -202,13 +202,13 @@ impl AiPanel {
         let palette = snapshot.chrome.palette;
         let command_rows = self.ai_command_card_list(&snapshot, cx);
         let agent_step_rows = self.ai_agent_step_list(&snapshot, cx);
-        let prompt_input = NyaInputShell::new("ai.chat.prompt", &snapshot.prompt_input)
+        let prompt_input = ZzClawInputShell::new("ai.chat.prompt", &snapshot.prompt_input)
             .multi_line()
             .into_any_element();
         let model_search_input = snapshot
             .model_search_input
             .as_ref()
-            .map(|field| NyaSearchInput::new("ai-model-search", field).into_any_element());
+            .map(|field| ZzClawSearchInput::new("ai-model-search", field).into_any_element());
         let composer_disabled = snapshot.running || !snapshot.enabled;
         let send_disabled = !snapshot.running
             && (!snapshot.enabled
@@ -1944,7 +1944,7 @@ impl AiPanel {
         let filtered_count = filtered.len();
         let grouped = group_ai_sessions_by_date(&filtered);
         let mut search_input = snapshot.history_search_input.as_ref().map(|field| {
-            NyaSearchInput::new("ai-history-search", field).on_key_down(cx.listener(
+            ZzClawSearchInput::new("ai-history-search", field).on_key_down(cx.listener(
                 |panel, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         cx.stop_propagation();
@@ -2260,7 +2260,7 @@ impl gpui::Render for AiPanel {
     }
 }
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features) fn ai_header_presentation(&self) -> AiHeaderPresentation {
         let selected_model_id = self.ai_selected_model_id();
         let model_label = selected_model_id
@@ -2452,7 +2452,7 @@ impl NyaTermApp {
         let agent_mode = self.ai.settings_config().default_mode == AiMode::Agent;
         let running = self.ai.chat_or_agent_is_running();
         let agent_kind = self.ai.settings_config().default_agent_kind.clone();
-        let external_agent = agent_mode && agent_kind != AiAgentKind::Nyaterm;
+        let external_agent = agent_mode && agent_kind != AiAgentKind::Zzclawterm;
         let selected_model_id = self.ai_selected_model_id();
         let enabled_models: Arc<[AiModelConfigItem]> = self.ai_enabled_models().into();
         let selected_model_exists = selected_model_id
@@ -2620,7 +2620,7 @@ impl NyaTermApp {
 
 fn agent_kind_label(kind: &AiAgentKind) -> &'static str {
     match kind {
-        AiAgentKind::Nyaterm => "NyaTerm",
+        AiAgentKind::Zzclawterm => "ZzClawTerm",
         AiAgentKind::Codex => "Codex",
         AiAgentKind::ClaudeCode => "Claude",
     }
@@ -2659,17 +2659,17 @@ mod tests {
         AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
         TestAppContext, VisualTestContext, div, px,
     };
-    use nyaterm_core::{
+    use zzclawterm_core::{
         AgentCommandExecutionMode, AiMode, AiModelConfigItem, AiModelSource, AiProviderKind,
         AiSettings, AppRuntime, RuntimeMode,
     };
-    use nyaterm_ui::NyaInputEvent;
+    use zzclawterm_ui::ZzClawInputEvent;
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::{NyaTermApp, runtime_jobs::AiChatJobOutput};
+    use crate::features::{ZzClawTermApp, runtime_jobs::AiChatJobOutput};
     use crate::test_support::TestConfigDir;
 
-    fn app(cx: &mut TestAppContext, root: &Path) -> Entity<NyaTermApp> {
+    fn app(cx: &mut TestAppContext, root: &Path) -> Entity<ZzClawTermApp> {
         let runtime = AppRuntime::from_parts_for_test(
             RuntimeMode::Portable,
             root.to_path_buf(),
@@ -2682,11 +2682,11 @@ mod tests {
             startup_restore: cx.new(|_| StartupRestoreStore::default()),
             overlays: cx.new(|_| OverlayStore::default()),
         };
-        cx.new(|cx| NyaTermApp::new(runtime, stores, cx))
+        cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx))
     }
 
     struct AppHost {
-        app: Entity<NyaTermApp>,
+        app: Entity<ZzClawTermApp>,
     }
 
     impl Render for AppHost {
@@ -2735,7 +2735,7 @@ mod tests {
     fn hosted<'a>(
         cx: &'a mut TestAppContext,
         root: &Path,
-    ) -> (Entity<NyaTermApp>, &'a mut VisualTestContext) {
+    ) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
         let app = app(cx, root);
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
@@ -2760,7 +2760,7 @@ mod tests {
         (app, vcx)
     }
 
-    fn draw(app: &Entity<NyaTermApp>, vcx: &mut VisualTestContext) {
+    fn draw(app: &Entity<ZzClawTermApp>, vcx: &mut VisualTestContext) {
         vcx.update(|window, cx| {
             app.update(cx, |_, cx| cx.notify());
             _ = window.draw(cx);
@@ -2768,29 +2768,29 @@ mod tests {
         vcx.run_until_parked();
     }
 
-    fn ai_paints(app: &Entity<NyaTermApp>, cx: &mut gpui::App) -> usize {
+    fn ai_paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).ai_panel.read(cx).paint_count()
     }
 
-    fn ai_snapshot_sets(app: &Entity<NyaTermApp>, cx: &mut gpui::App) -> usize {
+    fn ai_snapshot_sets(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).ai_panel.read(cx).snapshot_set_count()
     }
 
-    fn connection_paints(app: &Entity<NyaTermApp>, cx: &mut gpui::App) -> usize {
+    fn connection_paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).connection_panel.read(cx).paint_count()
     }
 
-    fn transfer_paints(app: &Entity<NyaTermApp>, cx: &mut gpui::App) -> usize {
+    fn transfer_paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).transfer_panel.read(cx).paint_count()
     }
 
-    fn settings_paints(app: &Entity<NyaTermApp>, cx: &mut gpui::App) -> usize {
+    fn settings_paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).settings_panel.read(cx).paint_count()
     }
 
     #[test]
     fn detected_terminal_error_refreshes_ai_panel_only() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let before_snapshots = vcx.update(|_, cx| ai_snapshot_sets(&app, cx));
@@ -2840,7 +2840,7 @@ mod tests {
 
     #[test]
     fn repeated_ai_refresh_requests_coalesce() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let before = vcx.update(|_, cx| ai_snapshot_sets(&app, cx));
@@ -2894,7 +2894,7 @@ mod tests {
 
     #[test]
     fn ai_header_running_transition_notifies_root() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
@@ -3001,7 +3001,7 @@ mod tests {
 
     #[test]
     fn unrelated_app_notify_does_not_repaint_cached_ai_panel() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let before = vcx.update(|_, cx| ai_paints(&app, cx));
@@ -3023,7 +3023,7 @@ mod tests {
 
     #[test]
     fn streaming_delta_repaints_ai_panel_without_repainting_sibling_panels() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let (app, vcx) = hosted(&mut cx, test_dir.path());
 
@@ -3066,7 +3066,7 @@ mod tests {
 
     #[test]
     fn prompt_subscription_refreshes_snapshot_before_next_paint() {
-        let test_dir = TestConfigDir::new("nyaterm-ai-panel");
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
         let mut cx = TestAppContext::single();
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let prompt_input = vcx.update(|_, cx| {
@@ -3081,7 +3081,7 @@ mod tests {
 
         vcx.update(|_, cx| {
             prompt_input.update(cx, |_, cx| {
-                cx.emit(NyaInputEvent::Changed("explain status".to_string()));
+                cx.emit(ZzClawInputEvent::Changed("explain status".to_string()));
             });
             assert_eq!(
                 app.read(cx)

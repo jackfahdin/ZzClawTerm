@@ -1,10 +1,10 @@
 use rust_i18n::t;
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
-use nyaterm_core::{
+use zzclawterm_core::{
     AiAgentKind, AiPermissionMode, CodexThreadMode, ExternalMcpSessionScope, RiskLevel,
 };
-use nyaterm_ui::NyaSelectOption;
+use zzclawterm_ui::ZzClawSelectOption;
 
 use crate::features::ai::McpHelperStatus;
 use crate::features::mcp::McpHostStatus;
@@ -44,20 +44,20 @@ impl SettingsPanel {
             ("critical", "ai.riskCritical"),
         ]
         .into_iter()
-        .map(|(value, label)| NyaSelectOption::new(value, t!(label)))
+        .map(|(value, label)| ZzClawSelectOption::new(value, t!(label)))
         .collect();
         let settings = self.ai.settings_config().clone();
         let agent_options = vec![
-            NyaSelectOption::new("nyaterm", t!("ai.agent.nyaterm")),
-            NyaSelectOption::new("codex", t!("ai.agent.codex")),
-            NyaSelectOption::new("claude_code", t!("ai.agent.claudeCode")),
+            ZzClawSelectOption::new("zzclawterm", t!("ai.agent.zzclawterm")),
+            ZzClawSelectOption::new("codex", t!("ai.agent.codex")),
+            ZzClawSelectOption::new("claude_code", t!("ai.agent.claudeCode")),
         ];
         let permission_options = || {
             vec![
-                NyaSelectOption::new("observer", t!("ai.permission.observer")),
-                NyaSelectOption::new("confirm", t!("ai.permission.confirm")),
-                NyaSelectOption::new("auto", t!("ai.permission.auto")),
-                NyaSelectOption::new("full_access", t!("ai.permission.fullAccess")),
+                ZzClawSelectOption::new("observer", t!("ai.permission.observer")),
+                ZzClawSelectOption::new("confirm", t!("ai.permission.confirm")),
+                ZzClawSelectOption::new("auto", t!("ai.permission.auto")),
+                ZzClawSelectOption::new("full_access", t!("ai.permission.fullAccess")),
             ]
         };
         let any_full_access = [
@@ -264,7 +264,8 @@ impl SettingsPanel {
                         settings_switch(
                             palette,
                             "ai-codex-mcp-integration",
-                            settings.codex.tool_integration_mode.as_deref() == Some("nyaterm_mcp"),
+                            settings.codex.tool_integration_mode.as_deref()
+                                == Some("zzclawterm_mcp"),
                             cx.listener(|this, _, _, cx| this.toggle_ai_codex_mcp_integration(cx)),
                         ),
                     ))
@@ -308,8 +309,8 @@ impl SettingsPanel {
                         self.select_control(
                             "ai-codex-thread-mode",
                             vec![
-                                NyaSelectOption::new("persistent", t!("ai.codex.persistent")),
-                                NyaSelectOption::new("ephemeral", t!("ai.codex.ephemeral")),
+                                ZzClawSelectOption::new("persistent", t!("ai.codex.persistent")),
+                                ZzClawSelectOption::new("ephemeral", t!("ai.codex.ephemeral")),
                             ],
                             Some(
                                 match settings.codex.thread_mode {
@@ -350,7 +351,7 @@ impl SettingsPanel {
                             palette,
                             "ai-claude-mcp-integration",
                             settings.claude_code.tool_integration_mode.as_deref()
-                                == Some("nyaterm_mcp"),
+                                == Some("zzclawterm_mcp"),
                             cx.listener(|this, _, _, cx| this.toggle_ai_claude_mcp_integration(cx)),
                         ),
                     ))
@@ -451,8 +452,11 @@ impl SettingsPanel {
                         self.select_control(
                             "ai-mcp-session-scope",
                             vec![
-                                NyaSelectOption::new("current_window", t!("ai.mcp.currentWindow")),
-                                NyaSelectOption::new("all_sessions", t!("ai.mcp.allSessions")),
+                                ZzClawSelectOption::new(
+                                    "current_window",
+                                    t!("ai.mcp.currentWindow"),
+                                ),
+                                ZzClawSelectOption::new("all_sessions", t!("ai.mcp.allSessions")),
                             ],
                             Some(
                                 match settings.external_mcp.session_scope {
@@ -508,7 +512,7 @@ fn external_input_row(
 
 fn agent_kind_value(kind: &AiAgentKind) -> &'static str {
     match kind {
-        AiAgentKind::Nyaterm => "nyaterm",
+        AiAgentKind::Zzclawterm => "zzclawterm",
         AiAgentKind::Codex => "codex",
         AiAgentKind::ClaudeCode => "claude_code",
     }

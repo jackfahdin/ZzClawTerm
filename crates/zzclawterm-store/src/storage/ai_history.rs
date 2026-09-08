@@ -7,7 +7,7 @@ use super::{
     ConnectionStore, SETTINGS_AI_AUDIT, SETTINGS_AI_HISTORY, SETTINGS_TABLE, StorageError,
     merge_unknown_json,
 };
-use nyaterm_core::{
+use zzclawterm_core::{
     AiAgentKind, AiAuditFile, AiAuditLog, AiHistoryFile, AiMessage, AiMessageRole, AiSession,
     AiSessionBackendMetadata, AiSessionScope, AiSessionScopeType, AppendAiAuditRequest,
     now_rfc3339, trim_ai_audit, trim_ai_history, uuid,
@@ -36,7 +36,7 @@ impl ConnectionStore {
             session_id,
             connection_id,
             user_input,
-            AiAgentKind::Nyaterm,
+            AiAgentKind::Zzclawterm,
             AiSessionScope::default(),
         )
     }
@@ -211,7 +211,7 @@ fn ai_session_title(user_input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nyaterm_core::{
+    use zzclawterm_core::{
         AiAgentKind, AiAuditFile, AiAuditLog, AiBackendKind, AiMessage, AiMessageRole,
         AiSessionBackendMetadata, AiSessionScope, AiSessionScopeType, AppendAiAuditRequest,
     };
@@ -406,7 +406,7 @@ mod tests {
                 action: "generate_command".to_string(),
                 user_input: Some("list files".to_string()),
                 generated_command: Some("ls".to_string()),
-                risk_level: Some(nyaterm_core::RiskLevel::Low),
+                risk_level: Some(zzclawterm_core::RiskLevel::Low),
                 inserted_to_terminal: true,
                 executed: false,
                 blocked: false,
@@ -414,7 +414,7 @@ mod tests {
                 client: Some("fixture-client".to_string()),
                 capability: Some("terminal.execute".to_string()),
                 session_id: Some("session-1".to_string()),
-                permission_mode: Some(nyaterm_core::AiPermissionMode::Confirm),
+                permission_mode: Some(zzclawterm_core::AiPermissionMode::Confirm),
                 approval_decision: Some("allow_once".to_string()),
                 success: Some(true),
                 duration_ms: Some(42),
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(first.capability.as_deref(), Some("terminal.execute"));
         assert_eq!(
             first.permission_mode,
-            Some(nyaterm_core::AiPermissionMode::Confirm)
+            Some(zzclawterm_core::AiPermissionMode::Confirm)
         );
         assert_eq!(first.success, Some(true));
         assert_eq!(first.duration_ms, Some(42));
@@ -439,7 +439,7 @@ mod tests {
             action: "execute".to_string(),
             user_input: None,
             generated_command: None,
-            risk_level: Some(nyaterm_core::RiskLevel::Medium),
+            risk_level: Some(zzclawterm_core::RiskLevel::Medium),
             inserted_to_terminal: false,
             executed: true,
             blocked: false,

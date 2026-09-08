@@ -80,7 +80,7 @@ pub enum AiBackendKind {
 #[serde(rename_all = "snake_case")]
 pub enum AiAgentKind {
     #[default]
-    Nyaterm,
+    Zzclawterm,
     Codex,
     ClaudeCode,
 }

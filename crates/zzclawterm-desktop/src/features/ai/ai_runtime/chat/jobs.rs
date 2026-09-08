@@ -1,13 +1,13 @@
 use futures::StreamExt as _;
 use gpui::{Context, KeyDownEvent};
-use nyaterm_core::{
+use zzclawterm_core::{
     AiAction, AiAgentKind, AiChatRequest, AiContext, AiMode, AiSessionScope, AiSessionScopeType,
     AiTargetContext, AiTerminalTarget,
 };
-use nyaterm_transport::SessionInfo;
+use zzclawterm_transport::SessionInfo;
 
 use crate::features::{
-    NyaTermApp, formatting::compact_id, formatting::recent_terminal_output,
+    ZzClawTermApp, formatting::compact_id, formatting::recent_terminal_output,
     formatting::session_kind_label, runtime_jobs::AiChatJobResult, runtime_jobs::AiChatWorkerEvent,
 };
 use crate::models::SessionLaunchConfig;
@@ -15,7 +15,7 @@ use crate::models::SessionLaunchConfig;
 use super::super::super::ai_jobs::{observation_summary, run_ai_ask_job};
 use super::super::super::state::AiAgentBackgroundEffect;
 
-impl NyaTermApp {
+impl ZzClawTermApp {
     pub(in crate::features) fn cancel_ai_chat(&mut self, cx: &mut Context<Self>) {
         let before = self.ai_header_presentation();
         self.ai.cancel_chat_and_agent();
@@ -55,9 +55,9 @@ impl NyaTermApp {
         let agent_kind = if mode == AiMode::Agent {
             settings.default_agent_kind.clone()
         } else {
-            AiAgentKind::Nyaterm
+            AiAgentKind::Zzclawterm
         };
-        let model_id = if agent_kind == AiAgentKind::Nyaterm {
+        let model_id = if agent_kind == AiAgentKind::Zzclawterm {
             let Some(model_id) = self.ai_selected_model_id() else {
                 self.ai
                     .reject_chat_start("Enable an AI model before sending", true);
@@ -135,16 +135,16 @@ impl NyaTermApp {
         );
         let tool_integration_enabled = match request.agent_kind {
             AiAgentKind::Codex => {
-                settings.codex.tool_integration_mode.as_deref() == Some("nyaterm_mcp")
+                settings.codex.tool_integration_mode.as_deref() == Some("zzclawterm_mcp")
             }
             AiAgentKind::ClaudeCode => {
-                settings.claude_code.tool_integration_mode.as_deref() == Some("nyaterm_mcp")
+                settings.claude_code.tool_integration_mode.as_deref() == Some("zzclawterm_mcp")
             }
-            AiAgentKind::Nyaterm => true,
+            AiAgentKind::Zzclawterm => true,
         };
         if external_agent && !tool_integration_enabled {
             self.ai.reject_chat_start(
-                "External agents require strict NyaTerm MCP tool integration",
+                "External agents require strict ZzClawTerm MCP tool integration",
                 true,
             );
             self.defer_ai_panel_snapshot_flush(cx);
@@ -237,7 +237,7 @@ impl NyaTermApp {
             .map(|model| model.id.clone())
     }
 
-    pub(in crate::features) fn ai_enabled_models(&self) -> Vec<nyaterm_core::AiModelConfigItem> {
+    pub(in crate::features) fn ai_enabled_models(&self) -> Vec<zzclawterm_core::AiModelConfigItem> {
         self.ai
             .settings_config()
             .models
@@ -249,7 +249,7 @@ impl NyaTermApp {
 
     pub(in crate::features) fn ai_model_provider_label(
         &self,
-        model: &nyaterm_core::AiModelConfigItem,
+        model: &zzclawterm_core::AiModelConfigItem,
     ) -> String {
         model
             .credential_id
@@ -268,7 +268,7 @@ impl NyaTermApp {
 
     pub(in crate::features) fn ai_filtered_model_choices(
         &self,
-    ) -> Vec<(nyaterm_core::AiModelConfigItem, String)> {
+    ) -> Vec<(zzclawterm_core::AiModelConfigItem, String)> {
         let query = self.ai.discovery_query().trim().to_ascii_lowercase();
         self.ai_enabled_models()
             .into_iter()
