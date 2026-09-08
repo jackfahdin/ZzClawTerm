@@ -1,0 +1,9 @@
+# Build scripts are denied explicitly. Docusaurus builds the site without them,
+# and leaving them unresolved makes `pnpm install` fail with
+# ERR_PNPM_IGNORED_BUILDS. workerd only matters for `wrangler deploy`, which
+# runs outside this workspace install.
+allowBuilds:
+  core-js: false
+  esbuild: false
+  sharp: false
+  workerd: false

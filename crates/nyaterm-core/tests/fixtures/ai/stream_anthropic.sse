@@ -1,0 +1,11 @@
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-01","name":"execute_command","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"thought\":\"inspect\",\"command\":\"df -h\",\"riskLevel\":\"low\",\"riskReason\":\"read only\"}"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"read-only check"}}
+
+event: message_stop
+data: {"type":"message_stop"}

@@ -1,0 +1,36 @@
+{
+  "logs": [
+    {
+      "id": "audit-1",
+      "connectionId": "conn-redacted-1",
+      "action": "generate_command",
+      "userInput": "list files",
+      "generatedCommand": "ls -la",
+      "riskLevel": "low",
+      "insertedToTerminal": true,
+      "executed": false,
+      "blocked": false,
+      "createdAt": "2026-05-01T09:00:05Z"
+    },
+    {
+      "id": "audit-2",
+      "action": "execute_command",
+      "generatedCommand": "rm -rf /var/tmp/cache",
+      "riskLevel": "high",
+      "insertedToTerminal": true,
+      "executed": true,
+      "blocked": false,
+      "createdAt": "2026-05-01T09:10:00Z"
+    },
+    {
+      "id": "audit-3",
+      "action": "execute_command",
+      "generatedCommand": "rm -rf /",
+      "riskLevel": "critical",
+      "insertedToTerminal": false,
+      "executed": false,
+      "blocked": true,
+      "createdAt": "2026-05-01T09:11:00Z"
+    }
+  ]
+}

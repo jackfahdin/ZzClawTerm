@@ -1,0 +1,5 @@
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"planning read-only check"}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"execute_command","args":{"thought":"inspect","command":"df -h","riskLevel":"low","riskReason":"read only"}}}]}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Here is "},{"text":"the disk usage."}]}}]}

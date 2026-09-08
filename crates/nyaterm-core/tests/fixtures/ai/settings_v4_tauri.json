@@ -1,0 +1,74 @@
+{
+  "schema_version": 4,
+  "enabled": true,
+  "context_line_limit": 150,
+  "redaction_enabled": true,
+  "allow_save_command": true,
+  "record_history": true,
+  "timeout_ms": 60000,
+  "request_user_agent": "codex-tui/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.125.0)",
+  "active_profile_id": "openai",
+  "provider_profiles": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "provider_kind": "openai",
+      "model": "gpt-4o-mini",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    }
+  ],
+  "default_mode": "agent",
+  "default_agent_kind": "codex",
+  "default_model_id": "openai:gpt-4o-mini",
+  "models": [
+    {
+      "id": "openai:gpt-4o-mini",
+      "name": "gpt-4o-mini",
+      "backend": "genai",
+      "provider_kind": "openai",
+      "credential_id": "openai",
+      "enabled": true,
+      "source": "rust-genai",
+      "last_seen_at": null
+    },
+    {
+      "id": "codex:gpt-5-codex",
+      "name": "gpt-5-codex",
+      "backend": "codex",
+      "provider_kind": null,
+      "credential_id": null,
+      "enabled": false,
+      "source": "manual",
+      "last_seen_at": null
+    }
+  ],
+  "provider_credentials": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "provider_kind": "openai",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    }
+  ],
+  "terminal_ai_actions": [],
+  "file_ai_actions": [],
+  "max_ai_file_size_bytes": 1048576,
+  "max_agent_steps": 10,
+  "agent_step_timeout_ms": 30000,
+  "terminal_output_lines": 12,
+  "agent_background_execution_enabled": false,
+  "agent_command_execution_mode": "smart",
+  "agent_smart_auto_execute_max_risk": "medium",
+  "codex": {
+    "enabled": false,
+    "runtime": "app_server",
+    "permission_mode": "confirm",
+    "tool_integration_mode": "nyaterm_mcp",
+    "thread_mode": "persistent",
+    "remote_terminal_agent_enabled": false
+  }
+}

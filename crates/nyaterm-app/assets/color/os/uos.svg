@@ -1,0 +1,53 @@
+<svg width="32" height="32"
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 64 64"
+  role="img"
+  aria-label="UOS"
+><defs><linearGradient id="uos-bg" x1="8" y1="6" x2="56" y2="58"><stop offset="0%" stop-color="#3B8CFF" /><stop offset="100%" stop-color="#1357D8" /></linearGradient><linearGradient id="uos-line" x1="16" y1="0" x2="48" y2="0"><stop offset="0%" stop-color="#73E6FF" /><stop offset="100%" stop-color="#9BFFD1" /></linearGradient><filter
+      id="uos-shadow"
+      x="-20%"
+      y="-20%"
+      width="140%"
+      height="140%"
+    ><feDropShadow
+        dx="0"
+        dy="1.5"
+        stdDeviation="1.5"
+        flood-color="#07347F"
+        flood-opacity="0.28"
+      /></filter></defs><rect
+    x="4"
+    y="4"
+    width="56"
+    height="56"
+    rx="14"
+    fill="url(#uos-bg)"
+  /><rect
+    x="7"
+    y="7"
+    width="50"
+    height="50"
+    rx="11"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-opacity="0.16"
+    stroke-width="1"
+  /><g filter="url(#uos-shadow)"><text
+      x="32"
+      y="39.5"
+      text-anchor="middle"
+      font-family="Arial, Helvetica, sans-serif"
+      font-size="23"
+      font-weight="800"
+      letter-spacing="0.8"
+      fill="#FFFFFF"
+    >
+      UOS
+    </text></g><rect
+    x="16"
+    y="45.5"
+    width="32"
+    height="3.2"
+    rx="1.6"
+    fill="url(#uos-line)"
+  /></svg>

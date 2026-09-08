@@ -1,0 +1,278 @@
+{
+  "安全高效的 SSH 连接": {
+    "message": "Secure & Fast SSH"
+  },
+  "基于 Rust russh 库构建，提供安全、高性能的 SSH 连接。支持密码和密钥认证、代理转发、TOFU 主机密钥验证。": {
+    "message": "Built on Rust's russh library for secure, high-performance SSH connections. Supports password and key authentication, proxy forwarding, and TOFU host key verification."
+  },
+  "集成 SFTP 文件管理": {
+    "message": "Integrated SFTP File Manager"
+  },
+  "内置文件浏览器，直接在侧边栏管理远程文件。支持上传、下载、重命名、权限修改等操作，传输进度实时可见。": {
+    "message": "Built-in file explorer to manage remote files directly from the sidebar. Supports upload, download, rename, permission changes, and real-time transfer progress."
+  },
+  "多标签终端界面": {
+    "message": "Multi-Tab Terminal"
+  },
+  "加密同步与备份": {
+    "message": "Encrypted Cloud Sync"
+  },
+  "通过 WebDAV 或 S3 兼容存储同步 NyaTerm 的可移植配置，并为连接、凭据和常用设置创建可恢复的加密备份快照。": {
+    "message": "Sync NyaTerm's portable configuration through WebDAV, S3-compatible storage, Gist, or drive providers."
+  },
+  "高度可定制": {
+    "message": "Highly Customizable"
+  },
+  "深色/浅色主题切换、可调整面板布局、快捷命令管理、多语言翻译、快捷键自定义，打造专属工作流。": {
+    "message": "Dark/light theme switching, resizable panel layouts, quick command management, multi-language translation, customizable shortcuts — build your own workflow."
+  },
+  "现代高性能 SSH 客户端": {
+    "message": "Modern, High-Performance SSH Client"
+  },
+  "快速开始": {
+    "message": "Get Started"
+  },
+  "首页": {
+    "message": "Home"
+  },
+  "下载": {
+    "message": "Download"
+  },
+  "选择下载平台": {
+    "message": "Choose download platform"
+  },
+  "Windows x86_64": {
+    "message": "Windows x86_64"
+  },
+  "Windows x86_64 便携版": {
+    "message": "Windows x86_64 Portable"
+  },
+  "Windows ARM64 便携版": {
+    "message": "Windows ARM64 Portable"
+  },
+  "Linux x86_64": {
+    "message": "Linux x86_64"
+  },
+  "macOS Intel": {
+    "message": "macOS Intel"
+  },
+  "macOS Apple Silicon": {
+    "message": "macOS Apple Silicon"
+  },
+  "NyaTerm 日间主题功能截图": {
+    "message": "NyaTerm feature screenshot in light theme"
+  },
+  "NyaTerm 夜间主题功能截图": {
+    "message": "NyaTerm feature screenshot in dark theme"
+  },
+  "产品截图预览": {
+    "message": "Product screenshot preview"
+  },
+  "NyaTerm 日间主题产品截图": {
+    "message": "NyaTerm product screenshot in light theme"
+  },
+  "NyaTerm 夜间主题产品截图": {
+    "message": "NyaTerm product screenshot in dark theme"
+  },
+  "SSH": {
+    "message": "SSH"
+  },
+  "Local Shell": {
+    "message": "Local Shell"
+  },
+  "Telnet / Serial": {
+    "message": "Telnet / Serial"
+  },
+  "SFTP": {
+    "message": "SFTP"
+  },
+  "WebDAV / S3": {
+    "message": "WebDAV / S3"
+  },
+  "用于 SSH、串口和本地命令行工作的桌面终端客户端。": {
+    "message": "A desktop terminal client for SSH, serial connections, and local command-line work."
+  },
+  "NyaTerm 将终端会话、远程文件、认证信息、端口转发和配置备份放在同一个桌面应用中，适合日常开发、服务器维护和设备调试。": {
+    "message": "NyaTerm brings terminal sessions, remote files, credentials, port forwarding, and configuration backups into one desktop app for daily development, server maintenance, and device debugging."
+  },
+  "功能展示": {
+    "message": "Feature showcase"
+  },
+  "安装并建立第一个连接": {
+    "message": "Install and create your first connection"
+  },
+  "了解安装方式、创建连接和进入工作区的基本流程。": {
+    "message": "Learn the basics of installation, connection setup, and entering the workspace."
+  },
+  "查看快速开始": {
+    "message": "View quick start"
+  },
+  "按功能查阅使用说明": {
+    "message": "Browse guides by feature"
+  },
+  "查看文档": {
+    "message": "View docs"
+  },
+  "查看版本变化": {
+    "message": "See version changes"
+  },
+  "了解各版本新增功能、行为调整和需要注意的兼容性变化。": {
+    "message": "Review new features, behavior changes, and compatibility notes across releases."
+  },
+  "查看更新记录": {
+    "message": "View changelog"
+  },
+  "继续了解 NyaTerm": {
+    "message": "Continue exploring NyaTerm"
+  },
+  "多种终端会话": {
+    "message": "Multiple session types"
+  },
+  "支持 SSH、本地 shell、Telnet 和串口会话，可在标签页和分屏中同时工作。": {
+    "message": "Supports SSH, local shell, Telnet, and serial sessions, with tabs and split layouts for simultaneous work."
+  },
+  "终端输出阅读": {
+    "message": "Terminal output readability"
+  },
+  "提供搜索、命令历史建议、时间戳、关键词高亮和大输出保护。": {
+    "message": "Provides search, command history suggestions, timestamps, keyword highlighting, and large-output protection."
+  },
+  "文件、认证与网络": {
+    "message": "Files, auth, and networking"
+  },
+  "包含 SFTP、OTP、代理、跳板机、端口转发和主机密钥校验。": {
+    "message": "Includes SFTP, OTP, proxies, jump hosts, port forwarding, and host key verification."
+  },
+  "配置同步与备份": {
+    "message": "Cloud config sync"
+  },
+  "可通过 WebDAV 或 S3 兼容存储保存加密配置快照。": {
+    "message": "Save encrypted configuration snapshots through WebDAV or S3-compatible storage."
+  },
+  "工作区": {
+    "message": "Workspace"
+  },
+  "在一个工作区中组织多种会话": {
+    "message": "Organize multiple session types in one workspace"
+  },
+  "用标签页区分不同连接、任务或环境": {
+    "message": "Use tabs to separate different connections, tasks, or environments"
+  },
+  "在单个标签页内横向或纵向拆分终端区域": {
+    "message": "Split terminal areas horizontally or vertically within a single tab"
+  },
+  "在侧边区域查看会话列表、文件和资源信息": {
+    "message": "View session lists, files, and resource information in side panels"
+  },
+  "外观": {
+    "message": "Appearance"
+  },
+  "用背景图定制主窗口氛围": {
+    "message": "Customize the workspace mood with a background image"
+  },
+  "主窗口支持本地背景图，可在保留面板可读性的同时营造更个性化的工作区视觉效果。": {
+    "message": "The main window supports a local background image so you can create a more personal workspace look without sacrificing panel readability."
+  },
+  "使用本地图片作为主窗口的 Background Image": {
+    "message": "Use a local image as the main window Background Image"
+  },
+  "通过 cover、contain、stretch 和 tile 控制图片铺法": {
+    "message": "Control the image layout with cover, contain, stretch, and tile"
+  },
+  "分别调整 Image Opacity 和 Background Content Opacity": {
+    "message": "Adjust Image Opacity and Background Content Opacity separately"
+  },
+  "终端": {
+    "message": "Terminal"
+  },
+  "改进命令输入和输出阅读": {
+    "message": "Improve command input and output reading"
+  },
+  "终端区域提供搜索、命令历史建议和输出标记，减少在长日志、重复命令和排错信息之间来回查找的成本。": {
+    "message": "The terminal area provides search, command history suggestions, and output markers to reduce the effort of navigating long logs, repeated commands, and troubleshooting output."
+  },
+  "根据历史命令提供输入建议": {
+    "message": "Suggest input based on command history"
+  },
+  "支持终端内搜索、选中文本搜索和翻译": {
+    "message": "Support in-terminal search, selected-text search, and translation"
+  },
+  "可显示时间戳、动作链接和关键词高亮": {
+    "message": "Show timestamps, action links, and keyword highlighting"
+  },
+  "文件传输": {
+    "message": "File transfer"
+  },
+  "在终端旁处理远程文件": {
+    "message": "Work with remote files beside the terminal"
+  },
+  "SFTP 文件浏览器与终端工作区并列使用，适合查看日志、上传构建产物或调整远程配置文件。": {
+    "message": "Use the SFTP file explorer alongside the terminal workspace to inspect logs, upload build artifacts, or adjust remote configuration files."
+  },
+  "支持上传、下载、重命名、移动、删除和属性查看": {
+    "message": "Supports upload, download, rename, move, delete, and property inspection"
+  },
+  "传输任务可暂停、继续、取消和失败重试": {
+    "message": "Transfer tasks can be paused, resumed, canceled, and retried after failure"
+  },
+  "本地编辑文件后可自动回传到远端路径": {
+    "message": "Automatically upload files back to the remote path after local editing"
+  },
+  "安全与网络": {
+    "message": "Security and networking"
+  },
+  "管理连接认证和网络访问方式": {
+    "message": "Manage connection auth and network access methods"
+  },
+  "围绕 SSH 连接所需的凭据、主机校验、一次性口令、代理和端口转发提供统一配置入口。": {
+    "message": "Provides a unified place to configure credentials, host verification, one-time passwords, proxies, and port forwarding for SSH connections."
+  },
+  "保存密码、私钥和 known hosts，并使用本地加密存储": {
+    "message": "Store passwords, private keys, and known hosts with local encryption"
+  },
+  "支持 TOTP / HOTP、二维码导入和 SSH 登录自动填充": {
+    "message": "Supports TOTP / HOTP, QR code import, and SSH login autofill"
+  },
+  "配置代理、跳板机、本地转发、远程转发和动态转发": {
+    "message": "Configure proxies, jump hosts, local forwarding, remote forwarding, and dynamic forwarding"
+  },
+  "同步与备份": {
+    "message": "Cloud Sync"
+  },
+  "同步和恢复可移植配置": {
+    "message": "Sync portable configuration"
+  },
+  "NyaTerm 可将连接、凭据配置和常用设置打包为加密快照，用于备份、迁移或在多台设备之间同步。": {
+    "message": "NyaTerm can package connections, credential settings, and common preferences into encrypted snapshots for sync across devices."
+  },
+  "支持 WebDAV 和 S3 兼容存储": {
+    "message": "Supports WebDAV and S3-compatible storage"
+  },
+  "使用主密码保护同步和备份数据": {
+    "message": "Protect cloud sync data with a master password"
+  },
+  "支持 `.nya` 导入导出，并处理远端与本地版本冲突": {
+    "message": "Supports `.nya` import/export and handles version conflicts between remote and local data"
+  },
+  "加载预览中": {
+    "message": "Loading preview"
+  },
+  "更新日志": {
+    "message": "Changelog"
+  },
+  "查看 NyaTerm 的版本演进与功能更新记录": {
+    "message": "View NyaTerm's release history and feature updates"
+  },
+  "项目日志与版本演进": {
+    "message": "Project changelog and release evolution"
+  },
+  "SSH、本地 shell、Telnet、串口、RDP 和 VNC 会话使用同一套标签页与分屏布局，便于同时查看不同主机、设备或任务。": {
+    "message": "SSH, local shell, Telnet, serial, RDP, and VNC sessions share the same tab and split-pane layout, making it easy to view different hosts, devices, or tasks side by side."
+  },
+  "查看 SSH、RDP/VNC、SFTP、终端操作、AI 助手、OTP、代理和云同步的具体用法。": {
+    "message": "See detailed guides for SSH, RDP/VNC, SFTP, terminal operations, the AI assistant, OTP, proxies, and cloud sync."
+  },
+  "支持 SSH、RDP、VNC、串口、本地 shell、SFTP 和加密配置同步的原生桌面终端客户端": {
+    "message": "A native desktop terminal client for SSH, RDP, VNC, serial, local shell, SFTP, and encrypted configuration sync"
+  }
+}

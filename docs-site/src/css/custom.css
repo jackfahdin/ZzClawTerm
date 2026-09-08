@@ -1,0 +1,202 @@
+:root {
+  --ifm-color-primary: #2563eb;
+  --ifm-color-primary-dark: #1d4ed8;
+  --ifm-color-primary-darker: #1e40af;
+  --ifm-color-primary-darkest: #1e3a8a;
+  --ifm-color-primary-light: #3b82f6;
+  --ifm-color-primary-lighter: #60a5fa;
+  --ifm-color-primary-lightest: #93bbfd;
+  --ifm-code-font-size: 95%;
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Noto Sans SC', 'Helvetica Neue', Arial, sans-serif;
+  --ifm-heading-font-weight: 700;
+  --ifm-footer-background-color: #f8fafc;
+  --ifm-footer-color: #64748b;
+  --ifm-footer-link-color: #334155;
+  --ifm-footer-title-color: #0f172a;
+  --docusaurus-highlighted-code-line-bg: rgba(37, 99, 235, 0.08);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #7db7ff;
+  --ifm-color-primary-dark: #5f9ff1;
+  --ifm-color-primary-darker: #4b8ee1;
+  --ifm-color-primary-darkest: #3975bd;
+  --ifm-color-primary-light: #a8ceff;
+  --ifm-color-primary-lighter: #c7ddff;
+  --ifm-color-primary-lightest: #e5f0ff;
+  --ifm-background-color: #11151c;
+  --ifm-background-surface-color: #171c24;
+  --ifm-color-emphasis-100: #1b2028;
+  --ifm-color-emphasis-200: #252b35;
+  --ifm-color-emphasis-300: #343c49;
+  --ifm-color-emphasis-700: #b7c0ce;
+  --ifm-color-emphasis-800: #d2d8e2;
+  --ifm-heading-color: #f4f7fb;
+  --ifm-toc-border-color: rgba(134, 148, 168, 0.22);
+  --ifm-footer-background-color: #0f131a;
+  --ifm-footer-color: #8d97a6;
+  --ifm-footer-link-color: #c3cad5;
+  --ifm-footer-title-color: #f1f5f9;
+  --docusaurus-highlighted-code-line-bg: rgba(125, 183, 255, 0.12);
+}
+
+/* Smooth transitions for theme switch */
+html {
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Navbar refinement */
+.navbar {
+  backdrop-filter: blur(12px);
+  box-shadow: none;
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}
+
+.navbar__inner {
+  position: relative;
+  gap: 1rem;
+}
+
+.navbar__items--left {
+  flex: 0 0 auto;
+}
+
+.navbar__center-link {
+  position: absolute;
+  top: 50%;
+  font-weight: 600;
+  transform: translate(-50%, -50%);
+}
+
+.navbar__center-link--features {
+  left: calc(50% - 4rem);
+}
+
+.navbar__center-link--docs {
+  left: 50%;
+}
+
+.navbar__center-link--changelog {
+  left: calc(50% + 4rem);
+}
+
+.navbar__items--right {
+  flex: 1;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+/* Keep each navbar item on a single line so trailing carets/icons (locale
+ * dropdown, GitHub external-link icon) never stack onto a second row. */
+.navbar__item,
+.navbar__link {
+  white-space: nowrap;
+}
+
+/*
+ * The center links stay absolutely centered on all desktop widths. To avoid the
+ * right-side cluster (locale / GitHub / theme / search) colliding with them as
+ * the window narrows, the search box itself shrinks with the viewport: full
+ * width above ~1200px, collapsing toward an icon-sized box near the 996px
+ * mobile breakpoint.
+ */
+.navbar__search {
+  position: relative;
+}
+
+.navbar__search-input {
+  width: clamp(2.5rem, calc(0.784 * 100vw - 741px), 12.5rem);
+  min-width: 0;
+}
+
+[data-theme='dark'] .navbar {
+  background: rgba(17, 21, 28, 0.88);
+}
+
+/*
+ * The navbar uses backdrop-filter, which makes it the containing block for its
+ * fixed-position descendants. The mobile drawer (.navbar-sidebar) is rendered
+ * inside the navbar, so top/bottom: 0 collapse against the ~60px navbar instead
+ * of the viewport and the menu items get clipped to zero height. Pin the drawer
+ * to the full viewport height so its items stay visible.
+ */
+.navbar-sidebar {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Hide the "Ctrl K" hint once the search box starts shrinking, otherwise the
+ * absolutely-positioned hint overflows out of the narrowed input. */
+@media (max-width: 1200px) {
+  [class*='searchHintContainer'] {
+    display: none;
+  }
+}
+
+/*
+ * In the shrink zone (between the mobile breakpoint and full width) the search
+ * box is collapsed toward an icon. On focus, float it back open as an overlay
+ * anchored to the right so it stays usable. The container keeps its collapsed
+ * width so floating the input out of flow does not shift the sibling items.
+ */
+@media (min-width: 997px) and (max-width: 1200px) {
+  .navbar__search {
+    flex: 0 0 auto;
+    width: clamp(2.5rem, calc(0.784 * 100vw - 741px), 12.5rem);
+  }
+
+  .navbar__search-input {
+    width: 100%;
+  }
+
+  /* The plugin wraps the input in a zero-width inline-block <span> carrying an
+   * inline position:relative. On focus, neutralize it (needs !important to beat
+   * the inline style) so the floated input anchors to the search container's
+   * right edge instead of the span's left edge. */
+  .navbar__search:focus-within > span {
+    position: static !important;
+  }
+
+  .navbar__search-input:focus {
+    /* The search component sets an inline `position: relative`, so !important is
+     * required to float the input as an overlay anchored to the right edge.
+     * Center it vertically so the floated box stays inside the navbar. */
+    position: absolute !important;
+    top: 50%;
+    right: 0;
+    bottom: auto;
+    left: auto;
+    transform: translateY(-50%);
+    z-index: 20;
+    width: 14rem;
+    background-color: var(--ifm-navbar-search-input-background-color);
+    box-shadow: var(--ifm-global-shadow-md);
+    /* Animate only while expanding. On blur the rule (and its transition) is
+     * removed instantly, so the box snaps back without a frame where the wide
+     * in-flow input overflows the viewport and flashes a horizontal scrollbar. */
+    transition: width 0.15s ease;
+  }
+}
+
+@media (max-width: 996px) {
+  .navbar__center-link {
+    position: static;
+    transform: none;
+  }
+
+  /* Restore the full search box in the mobile drawer where width is ample. */
+  .navbar__search-input {
+    width: 100%;
+  }
+}
+
+/* Sidebar refinement */
+.theme-doc-sidebar-container {
+  border-right-color: var(--ifm-toc-border-color) !important;
+}
+
+/* Footer refinement */
+.footer--dark {
+  --ifm-footer-background-color: #0f131a;
+}

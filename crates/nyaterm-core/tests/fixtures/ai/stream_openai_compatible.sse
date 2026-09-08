@@ -1,0 +1,8 @@
+event: message
+data: {"choices":[{"delta":{"role":"assistant","content":"Che"}}]}
+
+data: {"choices":[{"delta":{"content":"cking disk usage."}}]}
+
+data: {"choices":[{"delta":{"reasoning_content":"df -h is read-only."}}]}
+
+data: [DONE]

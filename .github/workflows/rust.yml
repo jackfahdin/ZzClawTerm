@@ -1,0 +1,142 @@
+name: Rust
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, migration/gpui]
+  pull_request:
+    branches: [main, migration/gpui]
+
+# No paths filter on purpose. A workflow filtered out by `paths` never runs, so its
+# gate job never reports either, which leaves a pull request waiting forever on a
+# required status check that will never arrive. The repository is public, so the
+# cost of building on a docs-only change is queue time, not billed minutes.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          cache-key: lint
+
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/install-linux-deps
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check architecture boundaries
+        run: python scripts/ci/check_architecture.py
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-24.04
+          - label: macos-arm64
+            os: macos-15
+          - label: windows-x64
+            os: windows-2025
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test-${{ matrix.label }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-linux-deps
+
+      # --no-fail-fast so one crate's failure stops masking every crate after it.
+      - name: Test workspace
+        run: cargo test --workspace --locked --no-fail-fast
+
+  python:
+    name: Release helpers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Deliberately its own job: these need no Rust toolchain and no native
+      # libraries, so they should not queue behind a workspace build.
+      - name: Test packaging helpers
+        run: >-
+          python -m unittest
+          scripts.tests.test_check_release_assets
+          scripts.tests.test_package_native
+          scripts.tests.test_verify_native_package
+          scripts.tests.test_generate_release_metadata
+
+  workflows:
+    name: Workflow syntax
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: >-
+          docker run --rm
+          -v "${PWD}:/repo"
+          -w /repo
+          rhysd/actionlint:1.7.7
+
+  # Single always-reporting status check for branch protection. Passes when its
+  # dependencies succeeded or were skipped, fails when any failed or was cancelled.
+  gate:
+    name: Rust gate
+    runs-on: ubuntu-24.04
+    needs: [lint, test, python, workflows]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check dependency results
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

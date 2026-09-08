@@ -1,0 +1,80 @@
+{
+  "schema_version": 5,
+  "enabled": true,
+  "context_line_limit": 200,
+  "redaction_enabled": true,
+  "allow_save_command": true,
+  "record_history": true,
+  "timeout_ms": 60000,
+  "request_user_agent": "codex-tui/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.125.0)",
+  "active_profile_id": "openai_compatible_custom",
+  "provider_profiles": [
+    {
+      "id": "openai_compatible_custom",
+      "name": "Self Hosted",
+      "provider_kind": "openai_compatible",
+      "model": "qwen2.5-coder",
+      "base_url": "https://ai.example.invalid/v1/",
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    }
+  ],
+  "default_mode": "ask",
+  "default_agent_kind": "nyaterm",
+  "default_reasoning_effort": "auto",
+  "default_model_id": "openai_compatible_custom:qwen2.5-coder",
+  "models": [
+    {
+      "id": "openai_compatible_custom:qwen2.5-coder",
+      "name": "qwen2.5-coder",
+      "backend": "genai",
+      "provider_kind": "openai_compatible",
+      "credential_id": "openai_compatible_custom",
+      "enabled": true,
+      "source": "manual",
+      "last_seen_at": "2026-05-01T12:00:00Z"
+    }
+  ],
+  "provider_credentials": [
+    {
+      "id": "openai_compatible_custom",
+      "name": "Self Hosted",
+      "provider_kind": "openai_compatible",
+      "api_format": "chat_completions",
+      "base_url": "https://ai.example.invalid/v1/",
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI Responses",
+      "provider_kind": "openai",
+      "api_format": "responses",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": false
+    }
+  ],
+  "terminal_ai_actions": [
+    {
+      "id": "explain-selected",
+      "name": "Explain Selection",
+      "prompt": "Explain the selected terminal text.",
+      "enabled": true
+    }
+  ],
+  "file_ai_actions": [],
+  "max_ai_file_size_bytes": 2097152,
+  "max_agent_steps": 15,
+  "agent_step_timeout_ms": 45000,
+  "terminal_output_lines": 20,
+  "agent_background_execution_enabled": true,
+  "agent_command_execution_mode": "auto",
+  "agent_smart_auto_execute_max_risk": "low",
+  "claude_code": {
+    "enabled": false,
+    "runtime": "stream_json_cli",
+    "permission_mode": "confirm",
+    "tool_integration_mode": "nyaterm_mcp"
+  }
+}

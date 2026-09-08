@@ -1,0 +1,20 @@
+{
+  "title": {
+    "message": "NyaTerm"
+  },
+  "logo.alt": {
+    "message": "NyaTerm Logo"
+  },
+  "item.label.功能": {
+    "message": "Features"
+  },
+  "item.label.文档": {
+    "message": "Docs"
+  },
+  "item.label.日志": {
+    "message": "Changelog"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub"
+  }
+}

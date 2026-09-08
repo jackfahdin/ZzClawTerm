@@ -1,0 +1,24 @@
+[package]
+name = "nyaterm-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "nyaterm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+dirs.workspace = true
+nyaterm-mcp-protocol.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util = { workspace = true, features = ["rt"] }
+uuid.workspace = true

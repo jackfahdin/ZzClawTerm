@@ -1,0 +1,123 @@
+name: Publish Homebrew tap
+
+on:
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version, with or without v prefix
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: homebrew-nyaterm-tap
+  cancel-in-progress: false
+
+env:
+  TAP_REPO: nyakang/homebrew-nyaterm
+  TAP_WORKFLOW: update-cask.yml
+
+jobs:
+  publish:
+    name: Update Homebrew cask
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Resolve stable release tag
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          publish='true'
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            version="${INPUT_VERSION#v}"
+          else
+            r2_success="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "Publish Cloudflare R2 mirror" and .conclusion == "success")] | length')"
+            if [[ "${r2_success}" == '1' ]]; then
+              tag="$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" 'refs/tags/v*' | awk -v sha="${HEAD_SHA}" '$1 == sha {sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2}' | sort -V | tail -n 1)"
+              version="${tag#v}"
+            else
+              version=''
+            fi
+          fi
+          if [[ -z "${version}" || "${version}" == *-* || ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            publish='false'
+          fi
+          {
+            echo "publish=${publish}"
+            echo "version=${version}"
+            echo "tag=v${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Skip non-stable release
+        if: steps.release.outputs.publish != 'true'
+        run: echo 'No stable Homebrew release to publish.'
+
+      - name: Verify macOS release assets
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir verified-dmgs
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir verified-dmgs \
+            --pattern SHA256SUMS --pattern "NyaTerm_${VERSION}_macos_*.dmg" --clobber
+          for arch in x64 arm64; do
+            test -s "verified-dmgs/NyaTerm_${VERSION}_macos_${arch}.dmg" || {
+              echo "missing Homebrew DMG for ${arch}" >&2
+              exit 1
+            }
+          done
+          grep -E "  NyaTerm_${VERSION}_macos_(x64|arm64)\.dmg$" \
+            verified-dmgs/SHA256SUMS > verified-dmgs/DMG-SHA256SUMS
+          [[ "$(wc -l < verified-dmgs/DMG-SHA256SUMS)" -eq 2 ]] || {
+            echo 'SHA256SUMS does not cover both Homebrew DMGs' >&2
+            exit 1
+          }
+          (cd verified-dmgs && sha256sum --check DMG-SHA256SUMS)
+
+      - name: Trigger tap workflow
+        if: steps.release.outputs.publish == 'true'
+        id: dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GH_TOKEN:-}" ]] || { echo 'HOMEBREW_TAP_TOKEN is required' >&2; exit 1; }
+          echo "dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+          gh workflow run "${TAP_WORKFLOW}" --repo "${TAP_REPO}" -f version="${VERSION}"
+
+      - name: Wait for tap update
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          DISPATCHED_AT: ${{ steps.dispatch.outputs.dispatched_at }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          run_id=''
+          for _ in {1..30}; do
+            run_id="$(gh run list --repo "${TAP_REPO}" --workflow "${TAP_WORKFLOW}" --event workflow_dispatch --limit 20 --json databaseId,createdAt --jq ".[] | select(.createdAt >= \"${DISPATCHED_AT}\") | .databaseId" | head -n 1)"
+            [[ -n "${run_id}" ]] && break
+            sleep 5
+          done
+          [[ -n "${run_id}" ]] || { echo 'timed out locating Homebrew tap run' >&2; exit 1; }
+          gh run watch "${run_id}" --repo "${TAP_REPO}" --exit-status

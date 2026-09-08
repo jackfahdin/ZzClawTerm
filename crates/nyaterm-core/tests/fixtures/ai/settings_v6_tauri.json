@@ -1,0 +1,96 @@
+{
+  "schema_version": 6,
+  "enabled": true,
+  "context_line_limit": 200,
+  "redaction_enabled": true,
+  "allow_save_command": true,
+  "record_history": true,
+  "timeout_ms": 60000,
+  "request_user_agent": "codex-tui/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.125.0)",
+  "active_profile_id": "ollama",
+  "provider_profiles": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "provider_kind": "ollama",
+      "model": "llama3-7b",
+      "base_url": "http://localhost:11434/v1/",
+      "api_key": null,
+      "enabled": true
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "provider_kind": "anthropic",
+      "model": "claude-3-haiku-20240307",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": false
+    }
+  ],
+  "default_mode": "agent",
+  "default_agent_kind": "claude_code",
+  "external_agent_permission_mode": "confirm",
+  "default_reasoning_effort": "high",
+  "default_model_id": "ollama:llama3-7b",
+  "models": [
+    {
+      "id": "ollama:llama3-7b",
+      "name": "llama3-7b",
+      "backend": "genai",
+      "provider_kind": "ollama",
+      "credential_id": "ollama",
+      "enabled": true,
+      "source": "rust-genai",
+      "last_seen_at": null
+    }
+  ],
+  "provider_credentials": [
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "provider_kind": "ollama",
+      "api_format": "chat_completions",
+      "base_url": "http://localhost:11434/v1/",
+      "api_key": null,
+      "enabled": true
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "provider_kind": "anthropic",
+      "api_format": "chat_completions",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": false
+    }
+  ],
+  "terminal_ai_actions": [],
+  "file_ai_actions": [],
+  "max_ai_file_size_bytes": 1048576,
+  "max_agent_steps": 10,
+  "agent_step_timeout_ms": 30000,
+  "terminal_output_lines": 10,
+  "agent_background_execution_enabled": false,
+  "agent_command_execution_mode": "confirm_each",
+  "agent_smart_auto_execute_max_risk": "low",
+  "codex": {
+    "enabled": false,
+    "runtime": "app_server",
+    "permission_mode": "confirm",
+    "thread_mode": "persistent",
+    "remote_terminal_agent_enabled": false
+  },
+  "claude_code": {
+    "enabled": true,
+    "executable_path": "/usr/local/bin/claude",
+    "runtime": "stream_json_cli",
+    "permission_mode": "auto",
+    "tool_integration_mode": "nyaterm_mcp"
+  },
+  "external_mcp": {
+    "enabled": true,
+    "permission_mode": "confirm",
+    "session_scope": "all_sessions"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "link.title.文档": {
+    "message": "Docs"
+  },
+  "link.title.开发": {
+    "message": "Development"
+  },
+  "link.title.更多": {
+    "message": "More"
+  },
+  "link.item.label.快速开始": {
+    "message": "Quick Start"
+  },
+  "link.item.label.使用指南": {
+    "message": "User Guide"
+  },
+  "link.item.label.架构说明": {
+    "message": "Architecture"
+  },
+  "link.item.label.贡献指南": {
+    "message": "Contributing"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub"
+  },
+  "link.item.label.问题反馈": {
+    "message": "Issues"
+  },
+  "copyright": {
+    "message": "Copyright © {year} NyaKang. Built with Docusaurus."
+  }
+}

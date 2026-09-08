@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    # GitHub introduced this hosted Intel label after actionlint 1.7.7's catalog.
+    - macos-15-intel
+    - gitee-release

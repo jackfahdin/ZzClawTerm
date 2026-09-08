@@ -1,0 +1,53 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+docs-site/node_modules
+docs-site/build
+docs-site/.docusaurus
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# IDE
+.vscode
+.idea
+
+# AI
+.cursor
+.claude
+.codex
+.trae
+.kiro
+
+# Also holds read-only copies of the sources that used to be vendored. Not part
+# of the build: those dependencies come from pinned fork revisions in Cargo.toml.
+temp/
+
+# Python automation
+__pycache__/
+*.py[cod]
+
+# Rust / native app
+target/
+/data/
+nyaterm-portable
+/gen/schemas
+/src-tauri

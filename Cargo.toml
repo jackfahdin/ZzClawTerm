@@ -1,0 +1,180 @@
+[workspace]
+# The application spawns three helpers at runtime and looks for them beside its own
+# executable, so a bare `cargo build` must produce all four binaries.
+default-members = [
+    "crates/nyaterm-app",
+    "crates/nyaterm-mcp",
+    "crates/nyaterm-rdp-helper",
+    "crates/nyaterm-vnc-helper",
+]
+members = [
+    "crates/nyaterm-app",
+    "crates/nyaterm-core",
+    "crates/nyaterm-desktop",
+    "crates/nyaterm-mcp",
+    "crates/nyaterm-mcp-protocol",
+    "crates/nyaterm-otp",
+    "crates/nyaterm-rdp-helper",
+    "crates/nyaterm-remote-desktop",
+    "crates/nyaterm-store",
+    "crates/nyaterm-terminal",
+    "crates/nyaterm-terminal-gpui",
+    "crates/nyaterm-transport",
+    "crates/nyaterm-ui",
+    "crates/nyaterm-vnc-helper",
+]
+resolver = "3"
+# `temp/` is untracked and holds local reference checkouts, including the
+# sources that used to be vendored here, now under `temp/vendor/`. None of it is
+# part of the build: every one of those dependencies comes from a pinned fork
+# revision below. Editing anything under `temp/` has no effect on what is
+# compiled. The exclude entry only stops cargo from claiming those manifests
+# belong to this workspace, so they can still be built on their own.
+exclude = ["temp"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+authors = ["Kang"]
+license = "Apache-2.0"
+repository = "https://github.com/nyakang/nyaterm"
+
+[workspace.dependencies]
+aes-gcm = "0.11"
+alacritty_terminal = "0.26.1-dev"
+anyhow = "1"
+async-http-proxy = { version = "1.2.5", features = ["runtime-tokio", "basic-auth"] }
+base64 = "0.22"
+bytes = "1.7"
+crypto_secretbox = "0.1"
+digest = "0.11.0-rc.5"
+dirs = "6"
+encoding_rs = "0.8"
+futures = "0.3"
+gpui = { version = "=0.2.2", git = "https://github.com/nyakang/zed", rev = "3b3066c872f29f5edacb7e68de167f7bcf550465" }
+gpui-base = { git = "https://github.com/nyakang/gpui-component", rev = "5d6f1b83418a971faa0a532fc5b41f6abcc240f7" }
+gpui-component = { git = "https://github.com/nyakang/gpui-component", rev = "5d6f1b83418a971faa0a532fc5b41f6abcc240f7" }
+gpui-component-assets = { package = "gpui-kit-assets", git = "https://github.com/nyakang/gpui-component", rev = "5d6f1b83418a971faa0a532fc5b41f6abcc240f7" }
+gpui_platform = { git = "https://github.com/nyakang/zed", rev = "3b3066c872f29f5edacb7e68de167f7bcf550465" }
+# Pure-Rust, `#![forbid(unsafe)]` PDF rasterizer (MIT OR Apache-2.0). Pinned
+# exactly: the crate is pre-1.0 and explicitly experimental, so a caret range
+# could pull in a breaking 0.8 without review. `embed-fonts` bundles the 14
+# permissively-licensed standard-font substitutes so previews of PDFs that rely
+# on non-embedded base fonts still render without custom font loading.
+hayro = { version = "=0.7.1", features = ["embed-fonts"] }
+hex = "0.4"
+hmac = "0.13"
+ironrdp-input = "0.7.0"
+keyring = { version = "3.6", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+log = "0.4.11"
+md5 = "0.8"
+nyaterm-core = { path = "crates/nyaterm-core" }
+nyaterm-mcp-protocol = { path = "crates/nyaterm-mcp-protocol" }
+nyaterm-desktop = { path = "crates/nyaterm-desktop" }
+nyaterm-otp = { path = "crates/nyaterm-otp" }
+nyaterm-remote-desktop = { path = "crates/nyaterm-remote-desktop" }
+nyaterm-store = { path = "crates/nyaterm-store" }
+nyaterm-terminal = { path = "crates/nyaterm-terminal" }
+nyaterm-terminal-gpui = { path = "crates/nyaterm-terminal-gpui" }
+nyaterm-transport = { path = "crates/nyaterm-transport" }
+nyaterm-ui = { path = "crates/nyaterm-ui" }
+percent-encoding = "=2.3.2"
+portable-pty = "0.9"
+quick-xml = "0.40"
+rand = { version = "0.10", features = ["thread_rng"] }
+redb = "4.1.0"
+regex = "1.11.1"
+rmcp = "=3.1.4"
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std"] }
+russh = { git = "https://github.com/nyakang/russh", rev = "cf257f67d88bdb1bb30f7419b494aa4b990448c7", features = ["des", "dsa"] }
+russh-sftp = { git = "https://github.com/nyakang/russh-sftp", rev = "90e4c8d19f88802bfdbd21ce5bfe46050219e0d9" }
+rusty-leveldb = "4.0"
+rust-embed = { version = "8.11", features = ["include-exclude", "debug-embed"] }
+rust-i18n = "4.2"
+schemars = "=1.2.2"
+serialport = { version = "4", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha1 = { version = "0.11", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
+signature = "3.0.0-rc.10"
+thiserror = "2"
+time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-util"] }
+tokio-util = "=0.7.19"
+tokio-socks = "0.5.2"
+tracing = "0.1"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Test-only. Feature set must mirror gpui's own usvg dependency (default-features
+# = false) so asset tests cannot pass under capabilities the app does not build.
+usvg = { version = "0.45", default-features = false }
+url = "=2.5.8"
+unicode-normalization = "0.1"
+unicode-segmentation = "1.12"
+uuid = { version = "1", features = ["v4", "serde"] }
+vnc = { package = "vnc-rs", git = "https://github.com/nyakang/vnc-rs", rev = "d855f22e301835cdf63a7aa1520877e3153ec66a" }
+vte = "0.14"
+zeroize = "1"
+zmodem2 = { git = "https://github.com/nyakang/zmodem2", rev = "b2f669a78ad0e1108115f1c4d9558e2663943a48" }
+zed_reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls-native-roots",
+] }
+zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package]
+alacritty_terminal = { opt-level = 1, debug = false }
+gpui = { opt-level = 1, debug = false }
+gpui_platform = { opt-level = 1, debug = false }
+regex = { opt-level = 1, debug = false }
+regex-automata = { opt-level = 1, debug = false }
+regex-syntax = { opt-level = 1, debug = false }
+rustybuzz = { opt-level = 1, debug = false }
+smol = { opt-level = 1, debug = false }
+sum_tree = { opt-level = 1, debug = false }
+swash = { opt-level = 1, debug = false }
+taffy = { opt-level = 1, debug = false }
+ttf-parser = { opt-level = 1, debug = false }
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = "full"
+
+[patch.crates-io]
+alacritty_terminal = { git = "https://github.com/nyakang/alacritty", rev = "1b27ea0c584898af5c86b1dc2c4781a6412ec12b" }
+ironrdp-client = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-connector = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+sspi = { git = "https://github.com/nyakang/sspi-rs", rev = "01e88b00b92e19e54791ce6a12b2d413ae375151" }
+# The published ironrdp-client and ironrdp-connector packages declare their
+# sibling crates as registry dependencies, but in the IronRDP repository those
+# are path dependencies, so patching the two above to git pulls the siblings
+# from git as well. Without these entries the graph holds both a registry and a
+# git copy of each and the SvcClientProcessor impls stop unifying. The versions
+# are identical on both sides. `ironrdp-tls` is here for the same reason:
+# `nyaterm-rdp-helper` names its certificate-validation types directly, because
+# ironrdp-client does not re-export them.
+ironrdp-cliprdr = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-core = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-error = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-input = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-pdu = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-svc = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+ironrdp-tls = { git = "https://github.com/nyakang/IronRDP", rev = "75d9a3b398e22310afbc26f6dfd27eb004e96e5c" }
+
+# gpui-component takes zed-reqwest from git while this workspace uses the
+# published crate; without this both end up in the graph.
+[patch."https://github.com/zed-industries/reqwest.git"]
+zed-reqwest = { version = "0.12.15-zed" }

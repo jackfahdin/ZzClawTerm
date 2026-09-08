@@ -1,0 +1,49 @@
+name: Set up Rust
+description: Install the Rust toolchain and restore the shared Cargo cache
+
+inputs:
+  components:
+    description: Comma or space separated rustup components, e.g. "rustfmt, clippy"
+    required: false
+    default: ''
+  targets:
+    description: Additional rustup targets to install
+    required: false
+    default: ''
+  cache-key:
+    description: Extra discriminator appended to the rust-cache key
+    required: false
+    default: ''
+  cache-on-failure:
+    description: Save the cache even when the job fails
+    required: false
+    default: 'false'
+  save-cache:
+    description: >-
+      "auto" saves only from the trunk branches, so pull requests read the cache
+      without each writing a multi-gigabyte copy. "always" saves unconditionally
+      and is what tag builds want. "never" disables saving.
+    required: false
+    default: auto
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # The workspace pins a dozen git dependencies, so ~/.cargo/git matters as much
+    # as the registry here.
+    - name: Restore Cargo cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+        save-if: >-
+          ${{ inputs.save-cache == 'always'
+          || (inputs.save-cache == 'auto'
+          && (github.ref == 'refs/heads/main'
+          || github.ref == 'refs/heads/migration/gpui')) }}

@@ -1,0 +1,1308 @@
+//! Provider wire formats: OpenAI-compatible, Anthropic and Gemini.
+//!
+//! Split out of `ai.rs` by domain. This is everything that knows what each
+//! provider's HTTP surface looks like -- endpoint URLs, request bodies, and
+//! response and SSE chunk parsing. The request and response shapes, the
+//! streaming semantics and the error mapping are unchanged; this only moves
+//! the code.
+
+use super::agent::{agent_anthropic_tools, agent_gemini_tools, agent_openai_tools};
+use super::{
+    AiChatCompletion, AiChatRequest, AiChatStreamDelta, AiCommandCard, AiMessage, AiMessageRole,
+    AiMode, AiModelDiscovery, AiModelError, AiModelOutput, AiModelSource, AiProviderCredential,
+    AiProviderKind, AiSettings, AiToolCall, AiToolCallDelta, ResolvedAiModel,
+    ai_model_id_for_credential, chat_history_for_request, extract_json_object,
+    extract_text_from_assistant, extract_think_block, genai_model_name, request_system_prompt,
+    request_user_prompt, trim_optional_to_option, trim_string_to_option,
+};
+
+pub fn openai_compatible_models_url(base_url: &str) -> Result<String, AiModelError> {
+    join_api_base_url(base_url, "models")
+}
+
+pub fn openai_compatible_chat_completions_url(base_url: &str) -> Result<String, AiModelError> {
+    join_api_base_url(base_url, "chat/completions")
+}
+
+pub fn anthropic_messages_url(base_url: &str) -> Result<String, AiModelError> {
+    join_api_base_url(base_url, "messages")
+}
+
+pub fn gemini_generate_content_url(base_url: &str, model: &str) -> Result<String, AiModelError> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AiModelError::InvalidBaseUrl {
+            base_url: base_url.to_string(),
+            message: "Gemini model name is empty".to_string(),
+        });
+    }
+    join_api_base_url(base_url, &format!("models/{model}:generateContent"))
+}
+
+pub fn gemini_stream_generate_content_url(
+    base_url: &str,
+    model: &str,
+) -> Result<String, AiModelError> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AiModelError::InvalidBaseUrl {
+            base_url: base_url.to_string(),
+            message: "Gemini model name is empty".to_string(),
+        });
+    }
+    join_api_base_url(
+        base_url,
+        &format!("models/{model}:streamGenerateContent?alt=sse"),
+    )
+}
+
+pub fn parse_openai_compatible_models_response(
+    body: &str,
+    credential: &AiProviderCredential,
+) -> Result<Vec<AiModelDiscovery>, AiModelError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| AiModelError::InvalidModelsJson(error.to_string()))?;
+    let mut models = Vec::new();
+    if let Some(items) = value.get("data").and_then(serde_json::Value::as_array) {
+        for item in items {
+            let Some(name) = item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            else {
+                continue;
+            };
+            models.push(AiModelDiscovery {
+                id: ai_model_id_for_credential(&credential.id, name),
+                name: name.to_string(),
+                provider_kind: Some(credential.provider_kind.clone()),
+                credential_id: Some(credential.id.clone()),
+                source: AiModelSource::RustGenai,
+            });
+        }
+    }
+    Ok(models)
+}
+
+pub fn build_openai_compatible_chat_request_body(
+    resolved_model: &ResolvedAiModel,
+    request: &AiChatRequest,
+    settings: &AiSettings,
+    history: &[AiMessage],
+) -> serde_json::Value {
+    build_openai_compatible_chat_request_body_with_stream(
+        resolved_model,
+        request,
+        settings,
+        history,
+        false,
+    )
+}
+
+pub fn build_openai_compatible_chat_request_body_with_stream(
+    resolved_model: &ResolvedAiModel,
+    request: &AiChatRequest,
+    settings: &AiSettings,
+    history: &[AiMessage],
+    stream: bool,
+) -> serde_json::Value {
+    let mut messages = Vec::new();
+    messages.push(serde_json::json!({
+        "role": "system",
+        "content": request_system_prompt(request),
+    }));
+
+    if let Some(session_id) = request.session_id.as_deref() {
+        let max_turns = request.options.history_turns as usize;
+        if max_turns > 0 {
+            let session_messages = history
+                .iter()
+                .filter(|message| message.session_id == session_id)
+                .collect::<Vec<_>>();
+            let skip = session_messages.len().saturating_sub(max_turns);
+            for message in session_messages.into_iter().skip(skip) {
+                match message.role {
+                    AiMessageRole::User => {
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": message.content,
+                        }));
+                    }
+                    AiMessageRole::Assistant => {
+                        let content = extract_text_from_assistant(&message.content);
+                        if !content.is_empty() {
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": content,
+                            }));
+                        }
+                    }
+                    AiMessageRole::System => {}
+                }
+            }
+        }
+    }
+
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": request_user_prompt(request, settings),
+    }));
+
+    let mut body = serde_json::json!({
+        "model": genai_model_name(&resolved_model.provider_kind, &resolved_model.model_name),
+        "messages": messages,
+        "stream": stream,
+    });
+    if matches!(
+        resolved_model.provider_kind,
+        AiProviderKind::Openai | AiProviderKind::OpenaiCompatible | AiProviderKind::Xai
+    ) && let Some(effort) =
+        super::responses::responses_reasoning_effort(&settings.default_reasoning_effort)
+    {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    }
+    if request.mode == AiMode::Agent {
+        body["tools"] = agent_openai_tools();
+        body["tool_choice"] = serde_json::json!("required");
+    }
+    body
+}
+
+pub fn build_anthropic_chat_request_body(
+    resolved_model: &ResolvedAiModel,
+    request: &AiChatRequest,
+    settings: &AiSettings,
+    history: &[AiMessage],
+) -> serde_json::Value {
+    build_anthropic_chat_request_body_with_stream(resolved_model, request, settings, history, false)
+}
+
+pub fn build_anthropic_chat_request_body_with_stream(
+    resolved_model: &ResolvedAiModel,
+    request: &AiChatRequest,
+    settings: &AiSettings,
+    history: &[AiMessage],
+    stream: bool,
+) -> serde_json::Value {
+    let messages = chat_history_for_request(request, settings, history, "assistant");
+    let mut body = serde_json::json!({
+        "model": genai_model_name(&resolved_model.provider_kind, &resolved_model.model_name),
+        "system": request_system_prompt(request),
+        "max_tokens": 4096,
+        "messages": messages,
+        "stream": stream,
+    });
+    if request.mode == AiMode::Agent {
+        body["tools"] = agent_anthropic_tools();
+        body["tool_choice"] = serde_json::json!({ "type": "any" });
+    }
+    body
+}
+
+pub fn build_gemini_chat_request_body(
+    request: &AiChatRequest,
+    settings: &AiSettings,
+    history: &[AiMessage],
+) -> serde_json::Value {
+    let contents = chat_history_for_request(request, settings, history, "model")
+        .into_iter()
+        .map(|message| {
+            serde_json::json!({
+                "role": message["role"].clone(),
+                "parts": [{
+                    "text": message["content"].clone(),
+                }],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut body = serde_json::json!({
+        "systemInstruction": {
+                "parts": [{
+                    "text": request_system_prompt(request),
+                }],
+            },
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0,
+        },
+    });
+    if request.mode == AiMode::Agent {
+        body["tools"] = agent_gemini_tools();
+        body["toolConfig"] = serde_json::json!({
+            "functionCallingConfig": {
+                "mode": "ANY",
+                "allowedFunctionNames": ["execute_command", "final_answer"],
+            }
+        });
+    }
+    body
+}
+
+pub fn parse_openai_compatible_chat_response(body: &str) -> Result<AiChatCompletion, AiModelError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+    let Some(message) = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+    else {
+        return Err(AiModelError::MissingChatContent);
+    };
+    let tool_calls = extract_openai_compatible_tool_calls(message)?;
+    let text = extract_openai_compatible_message_content(message).unwrap_or_default();
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(AiModelError::MissingChatContent);
+    }
+    let reasoning_content = ["reasoning_content", "reasoningContent", "reasoning"]
+        .iter()
+        .find_map(|key| {
+            message
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| trim_string_to_option(value.to_string()))
+        });
+    Ok(AiChatCompletion {
+        text,
+        reasoning_content,
+        tool_calls,
+    })
+}
+
+pub fn parse_openai_compatible_stream_chunk(
+    chunk: &str,
+) -> Result<Vec<AiChatStreamDelta>, AiModelError> {
+    let mut deltas = Vec::new();
+    for data in sse_data_payloads(chunk) {
+        if data.trim() == "[DONE]" {
+            deltas.push(AiChatStreamDelta {
+                done: true,
+                ..Default::default()
+            });
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+        let Some(delta) = value
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"))
+        else {
+            continue;
+        };
+        let text_delta = extract_openai_compatible_stream_content(delta);
+        let tool_call_deltas = extract_openai_compatible_stream_tool_call_deltas(delta);
+        let reasoning_delta = ["reasoning_content", "reasoningContent", "reasoning"]
+            .iter()
+            .find_map(|key| {
+                delta
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .filter(|value| !value.is_empty());
+        if !text_delta.is_empty() || reasoning_delta.is_some() || !tool_call_deltas.is_empty() {
+            deltas.push(AiChatStreamDelta {
+                text_delta,
+                reasoning_delta,
+                tool_call_deltas,
+                done: false,
+            });
+        }
+    }
+    Ok(deltas)
+}
+
+pub fn parse_anthropic_stream_chunk(chunk: &str) -> Result<Vec<AiChatStreamDelta>, AiModelError> {
+    let mut deltas = Vec::new();
+    for data in sse_data_payloads(chunk) {
+        let value: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+        if value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|event_type| event_type == "message_stop")
+        {
+            deltas.push(AiChatStreamDelta {
+                done: true,
+                ..Default::default()
+            });
+            continue;
+        }
+
+        let delta = value.get("delta");
+        let content_block = value.get("content_block");
+        let tool_call_deltas = extract_anthropic_stream_tool_call_deltas(&value);
+        let text_delta = delta
+            .and_then(|delta| delta.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                content_block
+                    .and_then(|block| block.get("text"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or_default()
+            .to_string();
+        let reasoning_delta = delta
+            .and_then(|delta| delta.get("thinking"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                content_block
+                    .and_then(|block| block.get("thinking"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(ToOwned::to_owned)
+            .filter(|value| !value.is_empty());
+        if !text_delta.is_empty() || reasoning_delta.is_some() || !tool_call_deltas.is_empty() {
+            deltas.push(AiChatStreamDelta {
+                text_delta,
+                reasoning_delta,
+                tool_call_deltas,
+                done: false,
+            });
+        }
+    }
+    Ok(deltas)
+}
+
+pub fn parse_gemini_stream_chunk(chunk: &str) -> Result<Vec<AiChatStreamDelta>, AiModelError> {
+    let mut deltas = Vec::new();
+    for data in sse_data_payloads(chunk) {
+        if data.trim() == "[DONE]" {
+            deltas.push(AiChatStreamDelta {
+                done: true,
+                ..Default::default()
+            });
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+        let Some(parts) = value
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        let mut text_delta = String::new();
+        let mut reasoning_delta = String::new();
+        let mut tool_call_deltas = Vec::new();
+        for part in parts {
+            if let Some(function_call) = part.get("functionCall") {
+                let name_delta = function_call
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .filter(|value| !value.is_empty());
+                let arguments_delta = function_call
+                    .get("args")
+                    .map(serde_json::Value::to_string)
+                    .unwrap_or_default();
+                if name_delta.is_some() || !arguments_delta.is_empty() {
+                    tool_call_deltas.push(AiToolCallDelta {
+                        index: tool_call_deltas.len(),
+                        id_delta: None,
+                        name_delta,
+                        arguments_delta,
+                    });
+                }
+                continue;
+            }
+            let Some(text) = part.get("text").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if part
+                .get("thought")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default()
+            {
+                reasoning_delta.push_str(text);
+            } else {
+                text_delta.push_str(text);
+            }
+        }
+        if !text_delta.is_empty() || !reasoning_delta.is_empty() || !tool_call_deltas.is_empty() {
+            deltas.push(AiChatStreamDelta {
+                text_delta,
+                reasoning_delta: trim_string_to_option(reasoning_delta),
+                tool_call_deltas,
+                done: false,
+            });
+        }
+    }
+    Ok(deltas)
+}
+
+pub fn parse_anthropic_chat_response(body: &str) -> Result<AiChatCompletion, AiModelError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+    let Some(parts) = value.get("content").and_then(serde_json::Value::as_array) else {
+        return Err(AiModelError::MissingChatContent);
+    };
+
+    let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    for part in parts {
+        let part_type = part
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match part_type {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                    text_parts.push(text);
+                }
+            }
+            "thinking" | "redacted_thinking" => {
+                if let Some(reasoning) = part
+                    .get("thinking")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| part.get("text").and_then(serde_json::Value::as_str))
+                {
+                    reasoning_parts.push(reasoning);
+                }
+            }
+            "tool_use" => {
+                let name = part
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        AiModelError::InvalidChatJson(
+                            "Anthropic tool_use is missing name".to_string(),
+                        )
+                    })?
+                    .to_string();
+                tool_calls.push(AiToolCall {
+                    id: part
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    name,
+                    arguments: part
+                        .get("input")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let text = trim_string_to_option(text_parts.join("")).unwrap_or_default();
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(AiModelError::MissingChatContent);
+    }
+    Ok(AiChatCompletion {
+        text,
+        reasoning_content: trim_string_to_option(reasoning_parts.join("\n\n")),
+        tool_calls,
+    })
+}
+
+pub fn parse_gemini_chat_response(body: &str) -> Result<AiChatCompletion, AiModelError> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?;
+    let Some(parts) = value
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err(AiModelError::MissingChatContent);
+    };
+
+    let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    for part in parts {
+        if let Some(function_call) = part.get("functionCall") {
+            let name = function_call
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AiModelError::InvalidChatJson("Gemini functionCall is missing name".to_string())
+                })?
+                .to_string();
+            tool_calls.push(AiToolCall {
+                id: None,
+                name,
+                arguments: function_call
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+            });
+            continue;
+        }
+        if part
+            .get("thought")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_default()
+        {
+            if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                reasoning_parts.push(text);
+            }
+            continue;
+        }
+        if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+            text_parts.push(text);
+        }
+    }
+
+    let text = trim_string_to_option(text_parts.join("")).unwrap_or_default();
+    if text.is_empty() && tool_calls.is_empty() {
+        return Err(AiModelError::MissingChatContent);
+    }
+    Ok(AiChatCompletion {
+        text,
+        reasoning_content: trim_string_to_option(reasoning_parts.join("\n\n")),
+        tool_calls,
+    })
+}
+
+pub(super) fn join_api_base_url(base_url: &str, path: &str) -> Result<String, AiModelError> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(AiModelError::InvalidBaseUrl {
+            base_url: base_url.to_string(),
+            message: "base URL is empty".to_string(),
+        });
+    }
+    let (base_without_query, query) = match trimmed.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (trimmed, None),
+    };
+    let base = base_without_query.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(AiModelError::InvalidBaseUrl {
+            base_url: base_url.to_string(),
+            message: "base URL path is empty".to_string(),
+        });
+    }
+    let path = path.trim_start_matches('/');
+    let joined = format!("{base}/{path}");
+    Ok(match query {
+        Some(query) if !query.is_empty() => format!("{joined}?{query}"),
+        _ => joined,
+    })
+}
+
+fn sse_data_payloads(chunk: &str) -> Vec<String> {
+    let normalized_chunk = chunk.replace("\r\n", "\n");
+    normalized_chunk
+        .split("\n\n")
+        .filter_map(|event| {
+            let data_lines = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .collect::<Vec<_>>();
+            (!data_lines.is_empty()).then(|| data_lines.join("\n"))
+        })
+        .collect()
+}
+
+fn extract_openai_compatible_message_content(message: &serde_json::Value) -> Option<String> {
+    if let Some(content) = message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| trim_string_to_option(value.to_string()))
+    {
+        return Some(content);
+    }
+
+    let parts = message.get("content")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| part.get("content").and_then(serde_json::Value::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    trim_string_to_option(text)
+}
+
+fn extract_openai_compatible_tool_calls(
+    message: &serde_json::Value,
+) -> Result<Vec<AiToolCall>, AiModelError> {
+    let Some(calls) = message
+        .get("tool_calls")
+        .or_else(|| message.get("toolCalls"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    calls
+        .iter()
+        .filter(|call| call.get("function").is_some() || call.get("name").is_some())
+        .map(|call| {
+            let function = call.get("function").unwrap_or(call);
+            let name = function
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    AiModelError::InvalidChatJson("tool call is missing function name".to_string())
+                })?
+                .to_string();
+            let arguments = match function.get("arguments") {
+                Some(serde_json::Value::String(raw)) => {
+                    if raw.trim().is_empty() {
+                        serde_json::Value::Object(Default::default())
+                    } else {
+                        serde_json::from_str(raw)
+                            .map_err(|error| AiModelError::InvalidChatJson(error.to_string()))?
+                    }
+                }
+                Some(value) => value.clone(),
+                None => serde_json::Value::Object(Default::default()),
+            };
+            Ok(AiToolCall {
+                id: call
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                name,
+                arguments,
+            })
+        })
+        .collect()
+}
+
+fn extract_openai_compatible_stream_content(delta: &serde_json::Value) -> String {
+    if let Some(content) = delta.get("content").and_then(serde_json::Value::as_str) {
+        return content.to_string();
+    }
+
+    delta
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| part.get("content").and_then(serde_json::Value::as_str))
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+fn extract_openai_compatible_stream_tool_call_deltas(
+    delta: &serde_json::Value,
+) -> Vec<AiToolCallDelta> {
+    let Some(calls) = delta
+        .get("tool_calls")
+        .or_else(|| delta.get("toolCalls"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    calls
+        .iter()
+        .enumerate()
+        .filter_map(|(fallback_index, call)| {
+            let function = call.get("function").unwrap_or(call);
+            let id_delta = call
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|value| !value.is_empty());
+            let name_delta = function
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|value| !value.is_empty());
+            let arguments_delta = function
+                .get("arguments")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| value.to_string())
+                })
+                .unwrap_or_default();
+            if id_delta.is_none() && name_delta.is_none() && arguments_delta.is_empty() {
+                return None;
+            }
+            Some(AiToolCallDelta {
+                index: call
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(fallback_index),
+                id_delta,
+                name_delta,
+                arguments_delta,
+            })
+        })
+        .collect()
+}
+
+fn extract_anthropic_stream_tool_call_deltas(value: &serde_json::Value) -> Vec<AiToolCallDelta> {
+    let event_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let index = value
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_default();
+
+    match event_type {
+        "content_block_start" => {
+            let Some(block) = value.get("content_block") else {
+                return Vec::new();
+            };
+            if block
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|block_type| block_type != "tool_use")
+            {
+                return Vec::new();
+            }
+            let id_delta = block
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|value| !value.is_empty());
+            let name_delta = block
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|value| !value.is_empty());
+            let arguments_delta = block
+                .get("input")
+                .filter(|input| !input.as_object().is_some_and(serde_json::Map::is_empty))
+                .map(serde_json::Value::to_string)
+                .unwrap_or_default();
+            if id_delta.is_none() && name_delta.is_none() && arguments_delta.is_empty() {
+                return Vec::new();
+            }
+            vec![AiToolCallDelta {
+                index,
+                id_delta,
+                name_delta,
+                arguments_delta,
+            }]
+        }
+        "content_block_delta" => {
+            let Some(delta) = value.get("delta") else {
+                return Vec::new();
+            };
+            if delta
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|delta_type| delta_type != "input_json_delta")
+            {
+                return Vec::new();
+            }
+            let arguments_delta = delta
+                .get("partial_json")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_default();
+            if arguments_delta.is_empty() {
+                return Vec::new();
+            }
+            vec![AiToolCallDelta {
+                index,
+                id_delta: None,
+                name_delta: None,
+                arguments_delta,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub(super) fn promote_reasoning_to_text(
+    (text, reasoning, cards): (String, Option<String>, Vec<AiCommandCard>),
+) -> (String, Option<String>, Vec<AiCommandCard>) {
+    if !text.is_empty() {
+        return (text, reasoning, cards);
+    }
+    let reasoning_str = match reasoning.as_deref() {
+        Some(reasoning) if !reasoning.trim().is_empty() => reasoning,
+        _ => return (text, reasoning, cards),
+    };
+
+    if let Some(json_str) = extract_json_object(reasoning_str)
+        && let Ok(output) = serde_json::from_str::<AiModelOutput>(&json_str)
+    {
+        let promoted_text = if output.text.trim().is_empty() {
+            json_str.clone()
+        } else {
+            output.text
+        };
+        let inner_reasoning = trim_optional_to_option(output.reasoning);
+        return (promoted_text, inner_reasoning, output.command_cards);
+    }
+
+    let (visible, inner_reasoning) = extract_think_block(reasoning_str);
+    if !visible.is_empty() {
+        return (visible, inner_reasoning, cards);
+    }
+
+    (reasoning.unwrap_or_default(), None, cards)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AiMessage, AiMessageRole, AiMode, AiModelError, AiProviderCredential, AiSettings,
+        ResolvedAiModel, anthropic_messages_url, build_anthropic_chat_request_body,
+        build_anthropic_chat_request_body_with_stream, build_gemini_chat_request_body,
+        build_openai_compatible_chat_request_body,
+        build_openai_compatible_chat_request_body_with_stream, gemini_generate_content_url,
+        gemini_stream_generate_content_url, openai_compatible_chat_completions_url,
+        openai_compatible_models_url, parse_anthropic_chat_response, parse_anthropic_stream_chunk,
+        parse_gemini_chat_response, parse_gemini_stream_chunk,
+        parse_openai_compatible_chat_response, parse_openai_compatible_models_response,
+        parse_openai_compatible_stream_chunk,
+    };
+    use crate::ai::tests::{sample_ai_history, sample_ai_request};
+    use crate::{
+        AiProviderKind, RiskLevel, agent_response_action, merge_model_discoveries,
+        parse_agent_tool_call, system_prompt,
+    };
+
+    #[test]
+    fn openai_compatible_models_url_matches_legacy_joining() {
+        assert_eq!(
+            openai_compatible_models_url("https://api.example.com/v1").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            openai_compatible_models_url("https://api.example.com/v1/").unwrap(),
+            "https://api.example.com/v1/models"
+        );
+        assert_eq!(
+            openai_compatible_models_url("https://api.example.com/v1?api-version=1").unwrap(),
+            "https://api.example.com/v1/models?api-version=1"
+        );
+        assert_eq!(
+            openai_compatible_chat_completions_url("https://api.example.com/v1/").unwrap(),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn parses_and_deduplicates_openai_compatible_model_discovery() {
+        let credential = AiProviderCredential {
+            api_format: Default::default(),
+            id: "custom".to_string(),
+            name: "Custom".to_string(),
+            provider_kind: AiProviderKind::OpenaiCompatible,
+            base_url: Some("https://api.example.com/v1".to_string()),
+            api_key: None,
+            enabled: true,
+        };
+        let raw = r#"{"data":[{"id":"llama3"},{"id":" "},{"id":"qwen3"}]}"#;
+
+        let models =
+            parse_openai_compatible_models_response(raw, &credential).expect("parse models");
+        let merged = merge_model_discoveries(vec![
+            models[0].clone(),
+            models[0].clone(),
+            models[1].clone(),
+        ]);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "custom:llama3");
+        assert_eq!(models[0].credential_id.as_deref(), Some("custom"));
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn builds_openai_compatible_chat_body_with_history() {
+        let settings = AiSettings {
+            context_line_limit: 10,
+            ..AiSettings::default()
+        };
+        let request = sample_ai_request("en");
+        let resolved = ResolvedAiModel {
+            backend: Default::default(),
+            api_format: Default::default(),
+            model_name: "deepseek-chat-none".to_string(),
+            provider_kind: AiProviderKind::Deepseek,
+            credential: Some(AiProviderCredential {
+                api_format: Default::default(),
+                id: "deepseek".to_string(),
+                name: "DeepSeek".to_string(),
+                provider_kind: AiProviderKind::Deepseek,
+                base_url: Some("https://api.deepseek.com/v1".to_string()),
+                api_key: Some("key".to_string().into()),
+                enabled: true,
+            }),
+        };
+        let history = vec![
+            AiMessage {
+                id: "m1".to_string(),
+                session_id: "session-1".to_string(),
+                role: AiMessageRole::User,
+                content: "previous question".to_string(),
+                created_at: "2026-04-28T00:00:00Z".to_string(),
+                reasoning_content: None,
+                command_cards: vec![],
+            },
+            AiMessage {
+                id: "m2".to_string(),
+                session_id: "session-1".to_string(),
+                role: AiMessageRole::Assistant,
+                content: r#"{"text":"previous answer","commandCards":[]}"#.to_string(),
+                created_at: "2026-04-28T00:00:01Z".to_string(),
+                reasoning_content: None,
+                command_cards: vec![],
+            },
+        ];
+
+        let body =
+            build_openai_compatible_chat_request_body(&resolved, &request, &settings, &history);
+        let stream_body = build_openai_compatible_chat_request_body_with_stream(
+            &resolved, &request, &settings, &history, true,
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+
+        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(body["stream"], false);
+        assert_eq!(stream_body["stream"], true);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "previous question");
+        assert_eq!(messages[2]["content"], "previous answer");
+        assert!(
+            messages[3]["content"]
+                .as_str()
+                .unwrap()
+                .contains("show disk usage")
+        );
+    }
+
+    #[test]
+    fn agent_openai_compatible_body_requires_tools() {
+        let settings = AiSettings {
+            context_line_limit: 10,
+            ..AiSettings::default()
+        };
+        let mut request = sample_ai_request("en");
+        request.mode = AiMode::Agent;
+        let resolved = ResolvedAiModel {
+            backend: Default::default(),
+            api_format: Default::default(),
+            model_name: "gpt-4o-mini".to_string(),
+            provider_kind: AiProviderKind::Openai,
+            credential: None,
+        };
+
+        let body = build_openai_compatible_chat_request_body(&resolved, &request, &settings, &[]);
+        let tools = body["tools"].as_array().expect("tools");
+
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "execute_command");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["required"],
+            serde_json::json!(["thought", "command", "riskLevel", "riskReason"])
+        );
+        assert_eq!(tools[1]["function"]["name"], "final_answer");
+    }
+
+    #[test]
+    fn parses_openai_compatible_stream_deltas_and_done() {
+        let raw = concat!(
+            "event: message\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"text\":\"lo\"}],\"reasoning_content\":\"think\"}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"execute_command\",\"arguments\":\"{\\\"thought\\\":\\\"inspect\\\",\"}}]}}]}\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"command\\\":\\\"pwd\\\",\\\"riskLevel\\\":\\\"low\\\",\\\"riskReason\\\":\\\"read only\\\"}\"}}]}}]}\r\n\r\n",
+            "data: [DONE]\r\n\r\n",
+        );
+
+        let deltas = parse_openai_compatible_stream_chunk(raw).expect("parse stream");
+
+        assert_eq!(deltas.len(), 5);
+        assert_eq!(deltas[0].text_delta, "hel");
+        assert_eq!(deltas[1].text_delta, "lo");
+        assert_eq!(deltas[1].reasoning_delta.as_deref(), Some("think"));
+        assert_eq!(deltas[2].tool_call_deltas[0].index, 0);
+        assert_eq!(
+            deltas[2].tool_call_deltas[0].name_delta.as_deref(),
+            Some("execute_command")
+        );
+        assert_eq!(
+            deltas[3].tool_call_deltas[0].arguments_delta,
+            "\"command\":\"pwd\",\"riskLevel\":\"low\",\"riskReason\":\"read only\"}"
+        );
+        assert!(deltas[4].done);
+    }
+
+    #[test]
+    fn parses_openai_compatible_chat_response_content_and_reasoning() {
+        let raw = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type":"text","text":"hello"},{"type":"text","text":" world"}],
+                    "reasoning_content": "thought"
+                }
+            }]
+        }"#;
+
+        let completion = parse_openai_compatible_chat_response(raw).expect("parse chat response");
+
+        assert_eq!(completion.text, "hello world");
+        assert_eq!(completion.reasoning_content.as_deref(), Some("thought"));
+        assert_eq!(
+            parse_openai_compatible_chat_response(r#"{"choices":[{"message":{}}]}"#).unwrap_err(),
+            AiModelError::MissingChatContent
+        );
+    }
+
+    #[test]
+    fn parses_openai_compatible_agent_tool_calls() {
+        let raw = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "execute_command",
+                            "arguments": "{\"thought\":\"Need files\",\"command\":\"ls -la\",\"riskLevel\":\"LOW\",\"riskReason\":\"read only\"}"
+                        }
+                    }]
+                }
+            }]
+        }"#;
+
+        let completion = parse_openai_compatible_chat_response(raw).expect("parse tool call");
+        let parsed = parse_agent_tool_call(&completion.tool_calls).expect("parse agent tool");
+
+        assert_eq!(completion.text, "");
+        assert_eq!(completion.tool_calls[0].id.as_deref(), Some("call-1"));
+        assert_eq!(agent_response_action(&parsed), "execute_command");
+        assert_eq!(parsed.command.as_deref(), Some("ls -la"));
+        assert_eq!(parsed.risk_level, Some(RiskLevel::Low));
+    }
+
+    #[test]
+    fn builds_and_parses_anthropic_chat_payloads() {
+        let settings = AiSettings {
+            context_line_limit: 10,
+            ..AiSettings::default()
+        };
+        let request = sample_ai_request("en");
+        let resolved = ResolvedAiModel {
+            backend: Default::default(),
+            api_format: Default::default(),
+            model_name: "claude-3-haiku-20240307".to_string(),
+            provider_kind: AiProviderKind::Anthropic,
+            credential: Some(AiProviderCredential {
+                api_format: Default::default(),
+                id: "anthropic".to_string(),
+                name: "Anthropic".to_string(),
+                provider_kind: AiProviderKind::Anthropic,
+                base_url: None,
+                api_key: Some("key".to_string().into()),
+                enabled: true,
+            }),
+        };
+        let history = sample_ai_history();
+
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1/").unwrap(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        let body = build_anthropic_chat_request_body(&resolved, &request, &settings, &history);
+        let stream_body = build_anthropic_chat_request_body_with_stream(
+            &resolved, &request, &settings, &history, true,
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+
+        assert_eq!(body["model"], "claude-3-haiku-20240307");
+        assert_eq!(body["stream"], false);
+        assert_eq!(stream_body["stream"], true);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["system"], system_prompt("en"));
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "previous answer");
+        assert!(
+            messages[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("show disk usage")
+        );
+
+        let completion = parse_anthropic_chat_response(
+            r#"{"content":[{"type":"thinking","thinking":"plan"},{"type":"text","text":"hello"},{"type":"text","text":" world"}]}"#,
+        )
+        .expect("parse anthropic response");
+        assert_eq!(completion.text, "hello world");
+        assert_eq!(completion.reasoning_content.as_deref(), Some("plan"));
+        assert_eq!(
+            parse_anthropic_chat_response(r#"{"content":[]}"#).unwrap_err(),
+            AiModelError::MissingChatContent
+        );
+        let mut agent_request = request.clone();
+        agent_request.mode = AiMode::Agent;
+        let agent_body =
+            build_anthropic_chat_request_body(&resolved, &agent_request, &settings, &history);
+        assert_eq!(agent_body["tool_choice"]["type"], "any");
+        assert_eq!(agent_body["tools"][0]["name"], "execute_command");
+        let tool_completion = parse_anthropic_chat_response(
+            r#"{"content":[{"type":"tool_use","id":"tool-1","name":"final_answer","input":{"thought":"done","answer":"ok"}}]}"#,
+        )
+        .expect("parse anthropic tool use");
+        let parsed_tool =
+            parse_agent_tool_call(&tool_completion.tool_calls).expect("parse agent tool");
+        assert_eq!(agent_response_action(&parsed_tool), "final_answer");
+        assert_eq!(parsed_tool.answer.as_deref(), Some("ok"));
+
+        let deltas = parse_anthropic_stream_chunk(concat!(
+            "event: content_block_start\r\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"execute_command\",\"input\":{}}}\r\n\r\n",
+            "event: content_block_delta\r\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"thought\\\":\\\"inspect\\\",\\\"command\\\":\\\"pwd\\\",\\\"riskLevel\\\":\\\"low\\\",\\\"riskReason\\\":\\\"read only\\\"}\"}}\r\n\r\n",
+            "event: content_block_delta\r\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\r\n\r\n",
+            "event: content_block_delta\r\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\r\n\r\n",
+            "event: message_stop\r\n",
+            "data: {\"type\":\"message_stop\"}\r\n\r\n",
+        ))
+        .expect("parse anthropic stream");
+        assert_eq!(deltas.len(), 5);
+        assert_eq!(
+            deltas[0].tool_call_deltas[0].id_delta.as_deref(),
+            Some("tool-1")
+        );
+        assert_eq!(
+            deltas[0].tool_call_deltas[0].name_delta.as_deref(),
+            Some("execute_command")
+        );
+        assert!(
+            deltas[1].tool_call_deltas[0]
+                .arguments_delta
+                .contains("\"command\":\"pwd\"")
+        );
+        assert_eq!(deltas[2].reasoning_delta.as_deref(), Some("plan"));
+        assert_eq!(deltas[3].text_delta, "hello");
+        assert!(deltas[4].done);
+    }
+
+    #[test]
+    fn builds_and_parses_gemini_chat_payloads() {
+        let settings = AiSettings {
+            context_line_limit: 10,
+            ..AiSettings::default()
+        };
+        let request = sample_ai_request("en");
+        let history = sample_ai_history();
+
+        assert_eq!(
+            gemini_generate_content_url(
+                "https://generativelanguage.googleapis.com/v1beta/",
+                "gemini-1.5-flash"
+            )
+            .unwrap(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        );
+        assert_eq!(
+            gemini_stream_generate_content_url(
+                "https://generativelanguage.googleapis.com/v1beta/",
+                "gemini-1.5-flash"
+            )
+            .unwrap(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse"
+        );
+        let body = build_gemini_chat_request_body(&request, &settings, &history);
+        let contents = body["contents"].as_array().expect("contents array");
+
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            system_prompt("en")
+        );
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(contents[1]["parts"][0]["text"], "previous answer");
+        assert!(
+            contents[2]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("show disk usage")
+        );
+
+        let completion = parse_gemini_chat_response(
+            r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"plan"},{"text":"hello"},{"text":" world"}]}}]}"#,
+        )
+        .expect("parse gemini response");
+        assert_eq!(completion.text, "hello world");
+        assert_eq!(completion.reasoning_content.as_deref(), Some("plan"));
+        assert_eq!(
+            parse_gemini_chat_response(r#"{"candidates":[]}"#).unwrap_err(),
+            AiModelError::MissingChatContent
+        );
+        let mut agent_request = request.clone();
+        agent_request.mode = AiMode::Agent;
+        let agent_body = build_gemini_chat_request_body(&agent_request, &settings, &history);
+        assert_eq!(
+            agent_body["toolConfig"]["functionCallingConfig"]["mode"],
+            "ANY"
+        );
+        assert_eq!(
+            agent_body["tools"][0]["functionDeclarations"][0]["name"],
+            "execute_command"
+        );
+        let tool_completion = parse_gemini_chat_response(
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"execute_command","args":{"thought":"inspect","command":"pwd","riskLevel":"low","riskReason":"read only"}}}]}}]}"#,
+        )
+        .expect("parse gemini function call");
+        let parsed_tool =
+            parse_agent_tool_call(&tool_completion.tool_calls).expect("parse agent tool");
+        assert_eq!(agent_response_action(&parsed_tool), "execute_command");
+        assert_eq!(parsed_tool.command.as_deref(), Some("pwd"));
+
+        let deltas = parse_gemini_stream_chunk(concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"plan\"}]}}]}\r\n\r\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"execute_command\",\"args\":{\"thought\":\"inspect\",\"command\":\"pwd\",\"riskLevel\":\"low\",\"riskReason\":\"read only\"}}}]}}]}\r\n\r\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"},{\"text\":\" world\"}]}}]}\r\n\r\n",
+        ))
+        .expect("parse gemini stream");
+        assert_eq!(deltas.len(), 3);
+        assert_eq!(deltas[0].reasoning_delta.as_deref(), Some("plan"));
+        assert_eq!(
+            deltas[1].tool_call_deltas[0].name_delta.as_deref(),
+            Some("execute_command")
+        );
+        assert!(
+            deltas[1].tool_call_deltas[0]
+                .arguments_delta
+                .contains("\"command\":\"pwd\"")
+        );
+        assert_eq!(deltas[2].text_delta, "hello world");
+    }
+}

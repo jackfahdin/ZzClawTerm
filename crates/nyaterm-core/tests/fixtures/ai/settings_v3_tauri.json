@@ -1,0 +1,62 @@
+{
+  "schema_version": 3,
+  "enabled": true,
+  "context_line_limit": 200,
+  "redaction_enabled": true,
+  "allow_save_command": true,
+  "record_history": true,
+  "timeout_ms": 60000,
+  "request_user_agent": "codex-tui/0.125.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.125.0)",
+  "active_profile_id": "deepseek",
+  "provider_profiles": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "provider_kind": "openai",
+      "model": "gpt-4o-mini",
+      "base_url": null,
+      "api_key": null,
+      "enabled": false
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "provider_kind": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    }
+  ],
+  "default_mode": "ask",
+  "default_model_id": "deepseek:deepseek-chat",
+  "models": [
+    {
+      "id": "deepseek:deepseek-chat",
+      "name": "deepseek-chat",
+      "provider_kind": "deepseek",
+      "enabled": true,
+      "source": "rust-genai",
+      "last_seen_at": null
+    }
+  ],
+  "provider_credentials": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "provider_kind": "deepseek",
+      "base_url": null,
+      "api_key": "__REDACTED_FIXTURE_SECRET__",
+      "enabled": true
+    }
+  ],
+  "terminal_ai_actions": [],
+  "file_ai_actions": [],
+  "max_ai_file_size_bytes": 1048576,
+  "max_agent_steps": 10,
+  "agent_step_timeout_ms": 30000,
+  "terminal_output_lines": 10,
+  "agent_background_execution_enabled": false,
+  "agent_command_execution_mode": "confirm_each",
+  "agent_smart_auto_execute_max_risk": "low"
+}

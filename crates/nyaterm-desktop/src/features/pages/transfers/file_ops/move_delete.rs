@@ -1,0 +1,441 @@
+use rust_i18n::t;
+
+use crate::features::NyaTermApp;
+use crate::models::{
+    TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
+    TransferJobStatus, TransferMoveEntry, TransferMoveState,
+};
+use gpui::{Context, Window};
+use nyaterm_core::truncate_preview;
+use nyaterm_transport::RemoteFilePath;
+
+use super::super::helpers::{remote_child_path, remote_file_name, remote_parent_path};
+
+impl NyaTermApp {
+    pub(in crate::features) fn open_transfer_move_dialog(
+        &mut self,
+        identity: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forget_text_inputs("transfer.move.");
+        let entry = self
+            .transfer
+            .browser_view()
+            .entries
+            .iter()
+            .find(|entry| entry.matches_identity(&identity))
+            .cloned();
+        let old_path = entry
+            .as_ref()
+            .map(|entry| entry.path.clone())
+            .unwrap_or(identity);
+        let name = remote_file_name(&old_path);
+        if old_path.trim().is_empty() || old_path == "/" || name == "." || name == ".." {
+            self.shell
+                .set_status(t!("fileTransfer.statusCannotMove", path = old_path).to_string());
+            cx.notify();
+            return;
+        }
+        self.transfer.open_move_dialog(TransferMoveState {
+            old_path: old_path.clone(),
+            raw_path_token: entry.and_then(|entry| entry.raw_path_token),
+            name: name.clone(),
+            value: old_path,
+            additional_entries: Vec::new(),
+        });
+        self.shell
+            .set_status(t!("fileTransfer.statusMoveOpened").to_string());
+        self.open_form_dialog(
+            (
+                t!("fileExplorer.moveTo", name = truncate_preview(&name, 48)).to_string(),
+                384.,
+                t!("common.save").to_string(),
+                |app, _, cx| app.transfer_move_dialog_content(cx),
+                |app, window, cx| app.submit_transfer_move(window, cx),
+                |app, cx| app.close_transfer_move_dialog(cx),
+            ),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Open the move dialog for the current selection set (Tauri
+    /// `openMoveDialog(getContextMenuEntries)`).
+    ///
+    /// A single selected item keeps the rename-style behavior (the dialog edits
+    /// the full destination path). More than one item switches to a batch move:
+    /// the dialog edits a destination *directory* and every entry is moved into
+    /// it under its own name.
+    pub(in crate::features) fn open_transfer_move_dialog_for_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = self
+            .selected_transfer_entries()
+            .into_iter()
+            .filter(|entry| {
+                let name = remote_file_name(&entry.path);
+                !entry.path.trim().is_empty() && entry.path != "/" && name != "." && name != ".."
+            })
+            .collect::<Vec<_>>();
+
+        let Some(first) = entries.first().cloned() else {
+            self.shell
+                .set_status(t!("fileTransfer.statusMarkBeforeMoving").to_string());
+            cx.notify();
+            return;
+        };
+
+        if entries.len() == 1 {
+            self.open_transfer_move_dialog(first.path.clone(), window, cx);
+            return;
+        }
+
+        self.forget_text_inputs("transfer.move.");
+        let additional_entries = entries
+            .iter()
+            .skip(1)
+            .map(|entry| TransferMoveEntry {
+                old_path: entry.path.clone(),
+                raw_path_token: entry.raw_path_token.clone(),
+                name: remote_file_name(&entry.path),
+            })
+            .collect::<Vec<_>>();
+        // The default destination directory is the parent the selection lives in.
+        let default_dir = remote_parent_path(&first.path);
+        self.transfer.open_move_dialog(TransferMoveState {
+            old_path: first.path.clone(),
+            raw_path_token: first.raw_path_token.clone(),
+            name: remote_file_name(&first.path),
+            value: default_dir,
+            additional_entries,
+        });
+        self.shell
+            .set_status(t!("fileTransfer.statusBatchMoveOpened").to_string());
+        self.open_form_dialog(
+            (
+                t!("fileExplorer.moveMultipleTo", count = entries.len()).to_string(),
+                384.,
+                t!("common.save").to_string(),
+                |app, _, cx| app.transfer_move_dialog_content(cx),
+                |app, window, cx| app.submit_transfer_move(window, cx),
+                |app, cx| app.close_transfer_move_dialog(cx),
+            ),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(in crate::features) fn close_transfer_move_dialog(&mut self, cx: &mut Context<Self>) {
+        self.forget_text_inputs("transfer.move.");
+        self.transfer.close_move_dialog();
+        self.shell
+            .set_status(t!("fileTransfer.statusMoveCancelled").to_string());
+        cx.notify();
+    }
+
+    pub(in crate::features) fn submit_transfer_move(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.transfer.move_dialog().cloned() else {
+            self.shell
+                .set_status(t!("fileTransfer.statusMoveInactive").to_string());
+            cx.notify();
+            return true;
+        };
+        let new_path = state.value.trim().to_string();
+        if new_path.is_empty() {
+            self.shell
+                .set_status(t!("fileTransfer.statusMovePathRequired").to_string());
+            cx.notify();
+            return false;
+        }
+
+        // Batch move: `value` is a destination directory and each selected entry
+        // is moved into it under its own name.
+        if !state.additional_entries.is_empty() {
+            let target_dir = new_path.trim_end_matches('/').to_string();
+            let target_dir = if target_dir.is_empty() {
+                "/".to_string()
+            } else {
+                target_dir
+            };
+            self.transfer.close_move_dialog();
+            let mut started = 0;
+            let all_entries = std::iter::once(TransferMoveEntry {
+                old_path: state.old_path.clone(),
+                raw_path_token: state.raw_path_token.clone(),
+                name: state.name.clone(),
+            })
+            .chain(state.additional_entries)
+            .collect::<Vec<_>>();
+            for entry in all_entries {
+                let destination = remote_child_path(&target_dir, &entry.name);
+                if destination == entry.old_path {
+                    continue;
+                }
+                self.start_sftp_move_job(
+                    RemoteFilePath {
+                        display_path: entry.old_path,
+                        raw_path_token: entry.raw_path_token,
+                    },
+                    destination,
+                    window,
+                    cx,
+                );
+                started += 1;
+            }
+            self.shell
+                .set_status(t!("fileTransfer.statusMoveJobsStarted", count = started).to_string());
+            cx.notify();
+            return true;
+        }
+
+        if new_path == state.old_path {
+            self.transfer.close_move_dialog();
+            self.shell
+                .set_status(t!("fileTransfer.statusMoveUnchanged").to_string());
+            cx.notify();
+            return true;
+        }
+        self.transfer.close_move_dialog();
+        self.start_sftp_move_job(
+            RemoteFilePath {
+                display_path: state.old_path,
+                raw_path_token: state.raw_path_token,
+            },
+            new_path,
+            window,
+            cx,
+        );
+        true
+    }
+
+    /// Apply an edit from the move dialog's path box.
+    pub(in crate::features) fn apply_transfer_move_path(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transfer.set_move_value(text) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn start_sftp_move_job(
+        &mut self,
+        old_path: RemoteFilePath,
+        new_path: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = match self.active_file_browser_service() {
+            Ok(service) => service,
+            Err(error) => {
+                self.shell.set_status(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let old_display_path = old_path.display_path.clone();
+        let parent_path = remote_parent_path(&old_display_path);
+        let id = self.transfer.next_transfer_job_id("sftp-move");
+        self.transfer.enqueue_transfer_job(TransferJobState {
+            id: id.clone(),
+            session_id: self.session.active_id_owned(),
+            kind: TransferJobKind::Move {
+                old_path: old_display_path.clone(),
+                new_path: new_path.clone(),
+                parent_path: parent_path.clone(),
+            },
+            status: TransferJobStatus::Running,
+            detail: t!("fileTransfer.detailMoving", path = old_display_path.clone()).to_string(),
+            created_at_ms: TransferJobState::now_ms(),
+            display_name: String::new(),
+            entries: Vec::new(),
+            summary: None,
+            progress: None,
+            control: None,
+        });
+        self.shell.set_status(
+            t!(
+                "fileTransfer.statusMoveStarted",
+                from = old_display_path.clone(),
+                to = new_path.clone()
+            )
+            .to_string(),
+        );
+        let transfer_tx = self.transfer.transfer_event_sender();
+        self.submit_transfer_blocking_job(
+            "sftp-move",
+            id.clone(),
+            transfer_tx.clone(),
+            move || {
+                let result = service
+                    .rename_remote_paths(&old_path, &RemoteFilePath::new(&new_path))
+                    .and_then(|_| service.list_dir(&parent_path))
+                    .map(|entries| TransferJobOutput::Moved {
+                        old_path: old_display_path,
+                        new_path,
+                        parent_path,
+                        entries,
+                    })
+                    .map_err(|error| error.to_string());
+                let _ = transfer_tx.unbounded_send(TransferJobResult {
+                    id,
+                    event: TransferJobEvent::Finished(result),
+                });
+            },
+        );
+        cx.notify();
+    }
+
+    pub(in crate::features) fn open_selected_transfer_delete_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = self
+            .selected_transfer_entries()
+            .into_iter()
+            .map(|entry| entry.remote_path())
+            .filter(|path| {
+                let name = remote_file_name(&path.display_path);
+                !path.display_path.trim().is_empty()
+                    && path.display_path != "/"
+                    && name != "."
+                    && name != ".."
+            })
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            self.shell
+                .set_status(t!("fileTransfer.statusMarkBeforeDeleting").to_string());
+            cx.notify();
+            return;
+        }
+        let delete_count = paths.len();
+        let title = if delete_count == 1 {
+            t!(
+                "fileExplorer.sureDelete",
+                name = remote_file_name(&paths[0].display_path)
+            )
+            .to_string()
+        } else {
+            t!("fileExplorer.sureDeleteMultiple", count = delete_count).to_string()
+        };
+        let preview = paths
+            .iter()
+            .take(6)
+            .map(|path| truncate_preview(&remote_file_name(&path.display_path), 72))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let remaining = delete_count.saturating_sub(6);
+        let mut detail = t!("fileExplorer.deleteConfirmHint").to_string();
+        if delete_count > 1 {
+            detail.push_str("\n\n");
+            detail.push_str(&preview);
+            if remaining > 0 {
+                detail.push('\n');
+                detail.push_str(&t!("fileExplorer.moreItems", count = remaining));
+            }
+        }
+        self.shell
+            .set_status(t!("fileTransfer.statusDeleteConfirmOpened").to_string());
+        self.open_confirm_dialog(
+            (
+                title,
+                detail,
+                t!("fileExplorer.delete").to_string(),
+                true,
+                move |app, window, cx| {
+                    for remote_path in &paths {
+                        app.start_sftp_delete_job(remote_path.clone(), window, cx);
+                    }
+                    app.shell.set_status(
+                        t!("fileTransfer.statusDeleteJobsStarted", count = delete_count)
+                            .to_string(),
+                    );
+                    cx.notify();
+                    true
+                },
+            ),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(in crate::features) fn start_sftp_delete_job(
+        &mut self,
+        remote_path: RemoteFilePath,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = match self.active_file_browser_service() {
+            Ok(service) => service,
+            Err(error) => {
+                self.shell.set_status(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let remote_display_path = remote_path.display_path.clone();
+        let parent_path = remote_parent_path(&remote_display_path);
+        let id = self.transfer.next_transfer_job_id("sftp-delete");
+        self.transfer.enqueue_transfer_job(TransferJobState {
+            id: id.clone(),
+            session_id: self.session.active_id_owned(),
+            kind: TransferJobKind::Delete {
+                remote_path: remote_display_path.clone(),
+                parent_path: parent_path.clone(),
+            },
+            status: TransferJobStatus::Running,
+            detail: t!(
+                "fileTransfer.detailDeleting",
+                path = remote_display_path.clone()
+            )
+            .to_string(),
+            created_at_ms: TransferJobState::now_ms(),
+            display_name: String::new(),
+            entries: Vec::new(),
+            summary: None,
+            progress: None,
+            control: None,
+        });
+        self.shell.set_status(
+            t!(
+                "fileTransfer.statusDeleteStarted",
+                path = remote_display_path.clone()
+            )
+            .to_string(),
+        );
+        let transfer_tx = self.transfer.transfer_event_sender();
+        self.submit_transfer_blocking_job(
+            "sftp-delete",
+            id.clone(),
+            transfer_tx.clone(),
+            move || {
+                let result = service
+                    .delete_remote_path(&remote_path)
+                    .and_then(|_| service.list_dir(&parent_path))
+                    .map(|entries| TransferJobOutput::Deleted {
+                        remote_path: remote_display_path,
+                        parent_path,
+                        entries,
+                    })
+                    .map_err(|error| error.to_string());
+                let _ = transfer_tx.unbounded_send(TransferJobResult {
+                    id,
+                    event: TransferJobEvent::Finished(result),
+                });
+            },
+        );
+        cx.notify();
+    }
+}

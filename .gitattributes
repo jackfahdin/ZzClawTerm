@@ -1,0 +1,3 @@
+# `scripts/*.sh` would not match nested paths: in a pattern containing a slash, `*`
+# does not cross a `/`, so the CI scripts under scripts/ci/ need the `**` form.
+scripts/**/*.sh text eol=lf

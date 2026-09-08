@@ -1,0 +1,52 @@
+{
+  "name": "nyaterm-docs",
+  "version": "0.3.5",
+  "private": true,
+  "packageManager": "pnpm@11.15.1",
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus serve --build",
+    "start:zh": "docusaurus start --locale zh-CN",
+    "start:en": "docusaurus start --locale en",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "pnpm run build && wrangler deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "preview": "pnpm run build && wrangler dev"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.10.0",
+    "@docusaurus/preset-classic": "^3.10.0",
+    "@docusaurus/utils-validation": "^3.10.1",
+    "@easyops-cn/docusaurus-search-local": "^0.55.2",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "^3.10.0",
+    "@docusaurus/types": "^3.10.0",
+    "typescript": "~5.6.0",
+    "wrangler": "^4.100.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 3 chrome version",
+      "last 3 firefox version",
+      "last 5 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=18.0"
+  }
+}

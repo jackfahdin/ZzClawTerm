@@ -1,0 +1,451 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional version; must match the Cargo workspace version
+        required: false
+        type: string
+      upload_release:
+        description: Publish GitHub and downstream release channels
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve and validate release metadata
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_UPLOAD: ${{ inputs.upload_release }}
+        run: |
+          set -euo pipefail
+          workspace_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          publish='false'
+          if [[ "${GITHUB_REF_TYPE}" == 'tag' ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+            publish='true'
+          else
+            version="${INPUT_VERSION#v}"
+            version="${version:-${workspace_version}}"
+            tag="v${version}"
+            if [[ "${INPUT_UPLOAD:-false}" == 'true' ]]; then
+              [[ -n "${INPUT_VERSION:-}" ]] || {
+                echo 'manual release publishing requires the version input' >&2
+                exit 1
+              }
+              publish='true'
+            fi
+          fi
+          python3 - "${version}" "${workspace_version}" <<'PY'
+          import re
+          import sys
+          version, workspace = sys.argv[1:]
+          semver = r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+          if not re.fullmatch(semver, version):
+              raise SystemExit(f"invalid release version: {version}")
+          if version != workspace:
+              raise SystemExit(f"release version {version} does not match Cargo workspace version {workspace}")
+          PY
+          prerelease='false'
+          [[ "${version}" == *-* ]] && prerelease='true'
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "publish=${publish}"
+            echo "prerelease=${prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify build configuration
+        shell: bash
+        env:
+          NYATERM_GITHUB_GIST_CLIENT_ID: ${{ vars.NYATERM_GITHUB_GIST_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NYATERM_GITHUB_GIST_CLIENT_ID:-}" ]]; then
+            echo 'NYATERM_GITHUB_GIST_CLIENT_ID repository variable is required' >&2
+            exit 1
+          fi
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: release-preflight
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/install-linux-deps
+      - name: Test workspace
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: Test packaging and release helpers
+        run: >-
+          python -m unittest
+          scripts.tests.test_check_release_assets
+          scripts.tests.test_package_native
+          scripts.tests.test_verify_native_package
+          scripts.tests.test_generate_release_metadata
+      - name: Check workflow syntax
+        run: >-
+          docker run --rm
+          -v "${PWD}:/repo"
+          -w /repo
+          rhysd/actionlint:1.7.7
+
+  package:
+    name: Package ${{ matrix.label }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
+          - { label: macos-x64, os: macos-15-intel, target: x86_64-apple-darwin }
+          # Keep the x64 glibc floor at 2.35 while ubuntu-22.04 is supported.
+          - { label: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { label: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { label: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { label: windows-arm64, os: windows-2025, target: aarch64-pc-windows-msvc }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+          cache-key: release-${{ matrix.target }}
+          cache-on-failure: 'true'
+          save-cache: always
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-linux-deps
+        with:
+          extra_packages: curl file patchelf desktop-file-utils dpkg-dev rpm
+      - name: Install AppImage tooling
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/install-nsis.ps1
+      - name: Package native application
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          NYATERM_ARTIFACT_VERSION: ${{ needs.preflight.outputs.version }}
+          NYATERM_GITHUB_GIST_CLIENT_ID: ${{ vars.NYATERM_GITHUB_GIST_CLIENT_ID }}
+          NYATERM_VERSION: ${{ needs.preflight.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: python scripts/release/package_native.py "${TARGET}"
+      - name: Verify native package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: >-
+          python scripts/release/verify_native_package.py
+          --target "${TARGET}" --version "${VERSION}"
+          --artifact-version "${VERSION}" --dist dist
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyaTerm-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: [preflight, package]
+    if: needs.preflight.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ needs.preflight.outputs.version }}
+      tag: ${{ needs.preflight.outputs.tag }}
+      prerelease: ${{ needs.preflight.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install signature verification tool
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: NyaTerm-*
+          path: dist-release
+          merge-multiple: true
+      - name: Validate release assets
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: >-
+          python3 scripts/ci/check_release_assets.py --dist dist-release
+          --version "${VERSION}" --artifact-version "${VERSION}"
+      - name: Prepare release notes
+        id: metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' > release-notes.md
+            published_at="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json publishedAt --jq '.publishedAt')"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" -f target_commitish="${GITHUB_SHA}" --jq '.body // ""' > release-notes.md
+            published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "published_at=${published_at}" >> "${GITHUB_OUTPUT}"
+      - name: Prepare updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_B64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_B64:-}" || -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
+            echo 'Tauri updater signing key and password are required' >&2
+            exit 1
+          fi
+          key_text="$(printf '%s' "${TAURI_SIGNING_PRIVATE_KEY_B64}" | base64 --decode)"
+          delimiter="TAURI_KEY_$(openssl rand -hex 12)"
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<${delimiter}"
+            printf '%s\n' "${key_text}"
+            echo "${delimiter}"
+          } >> "${GITHUB_ENV}"
+      - name: Sign and verify legacy updater artifacts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAURI_UPDATER_PUBLIC_KEY_B64: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK
+        run: |
+          set -euo pipefail
+          printf '%s' "${TAURI_UPDATER_PUBLIC_KEY_B64}" | base64 --decode > "${RUNNER_TEMP}/nyaterm-updater.pub"
+          files=(
+            "dist-release/NyaTerm_${VERSION}_macos_arm64.app.tar.gz"
+            "dist-release/NyaTerm_${VERSION}_macos_x64.app.tar.gz"
+            "dist-release/NyaTerm_${VERSION}_linux_arm64.AppImage"
+            "dist-release/NyaTerm_${VERSION}_linux_x64.AppImage"
+            "dist-release/NyaTerm_${VERSION}_windows_arm64-setup.exe"
+            "dist-release/NyaTerm_${VERSION}_windows_x64-setup.exe"
+          )
+          for file in "${files[@]}"; do
+            npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "${file}"
+            minisign -Vm "${file}" -p "${RUNNER_TEMP}/nyaterm-updater.pub" -x "${file}.sig"
+          done
+      - name: Generate checksums and manifests
+        shell: bash
+        env:
+          BASE_URL: ${{ env.DOWNLOAD_BASE_URL }}
+          PUB_DATE: ${{ steps.metadata.outputs.published_at }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ -n "${BASE_URL:-}" ]] || { echo 'R2_PUBLIC_BASE_URL repository variable is required' >&2; exit 1; }
+          python3 scripts/release/generate_release_metadata.py \
+            --dist dist-release --version "${VERSION}" --tag "${TAG}" \
+            --base-url "${BASE_URL}" --notes-file release-notes.md --pub-date "${PUB_DATE}"
+          rm -- dist-release/*.sig
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            release_id="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq '.databaseId')"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              -f name="NyaTerm ${TAG}" -F prerelease="${PRERELEASE}" >/dev/null
+          else
+            args=(release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "NyaTerm ${TAG}" --notes-file release-notes.md)
+            [[ "${PRERELEASE}" == 'true' ]] && args+=(--prerelease)
+            gh "${args[@]}"
+          fi
+          gh release upload "${TAG}" dist-release/* \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+
+  r2:
+    name: Publish Cloudflare R2 mirror
+    needs: [preflight, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      R2_BUCKET: nyaterm
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      TAG: ${{ needs.release.outputs.tag }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - name: Validate R2 configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY BASE_URL R2_ENDPOINT; do
+            if [[ -z "${!name:-}" || "${!name}" == 'https://.r2.cloudflarestorage.com' ]]; then
+              echo "${name} is required for R2 publishing" >&2
+              exit 1
+            fi
+          done
+          aws --version
+      - name: Download GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir release-assets --clobber
+          (cd release-assets && sha256sum --check SHA256SUMS)
+      - name: Upload immutable release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in release-assets/*; do
+            file="$(basename "${path}")"
+            content_type='application/octet-stream'
+            case "${file}" in
+              *.json) content_type='application/json; charset=utf-8' ;;
+              SHA256SUMS) content_type='text/plain; charset=utf-8' ;;
+              *.dmg) content_type='application/x-apple-diskimage' ;;
+              *.exe) content_type='application/vnd.microsoft.portable-executable' ;;
+              *.deb) content_type='application/vnd.debian.binary-package' ;;
+              *.rpm) content_type='application/x-rpm' ;;
+              *.tar.gz) content_type='application/gzip' ;;
+              *.zip) content_type='application/zip' ;;
+            esac
+            aws s3 cp "${path}" "s3://${R2_BUCKET}/releases/${TAG}/${file}" \
+              --endpoint-url "${R2_ENDPOINT}" --content-type "${content_type}" \
+              --cache-control 'public, max-age=31536000, immutable' --no-progress
+          done
+      - name: Verify versioned release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          verified="${RUNNER_TEMP}/verified-release-assets"
+          mkdir "${verified}"
+          aws s3 sync "s3://${R2_BUCKET}/releases/${TAG}/" "${verified}/" \
+            --endpoint-url "${R2_ENDPOINT}" --no-progress
+          diff --recursive --brief release-assets "${verified}"
+          (cd "${verified}" && sha256sum --check SHA256SUMS)
+          for manifest in latest.json downloads.json; do
+            python3 - "${verified}/${manifest}" "${VERSION}" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          if manifest.get("version") != sys.argv[2] or not manifest.get("platforms"):
+              raise SystemExit(f"invalid release manifest: {sys.argv[1]}")
+          PY
+          done
+      - name: Update stable channel manifests
+        if: needs.release.outputs.prerelease == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in latest.json downloads.json; do
+            aws s3 cp "release-assets/${manifest}" "s3://${R2_BUCKET}/${manifest}" \
+              --endpoint-url "${R2_ENDPOINT}" --content-type 'application/json; charset=utf-8' \
+              --cache-control 'public, max-age=60, must-revalidate' --no-progress
+          done
+      - name: Verify public stable manifests
+        if: needs.release.outputs.prerelease == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in latest.json downloads.json; do
+            verified='false'
+            for attempt in {1..12}; do
+              if curl --fail --location --silent --show-error \
+                --header 'Cache-Control: no-cache' \
+                "${BASE_URL%/}/${manifest}?release=${VERSION}&attempt=${attempt}" \
+                -o "${RUNNER_TEMP}/public-${manifest}" && \
+                python3 - "${RUNNER_TEMP}/public-${manifest}" "${VERSION}" <<'PY'
+          import json
+          import sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          if manifest.get("version") != sys.argv[2] or not manifest.get("platforms"):
+              raise SystemExit(f"stale or invalid stable manifest: {sys.argv[1]}")
+          PY
+              then
+                verified='true'
+                break
+              fi
+              sleep 5
+            done
+            [[ "${verified}" == 'true' ]] || {
+              echo "public stable manifest did not update: ${manifest}" >&2
+              exit 1
+            }
+          done

@@ -1,0 +1,61 @@
+{
+  "sessions": [
+    {
+      "id": "session-legacy-1",
+      "connectionId": "conn-redacted-1",
+      "title": "check disk usage on host",
+      "createdAt": "2026-05-01T09:00:00Z",
+      "updatedAt": "2026-05-01T09:05:00Z"
+    },
+    {
+      "id": "session-legacy-2",
+      "title": "explain nginx error",
+      "createdAt": "2026-05-02T10:00:00Z",
+      "updatedAt": "2026-05-02T10:02:00Z"
+    }
+  ],
+  "messages": [
+    {
+      "id": "msg-1",
+      "sessionId": "session-legacy-1",
+      "role": "user",
+      "content": "how much disk is free",
+      "createdAt": "2026-05-01T09:00:00Z"
+    },
+    {
+      "id": "msg-2",
+      "sessionId": "session-legacy-1",
+      "role": "assistant",
+      "content": "{\"text\":\"Run df -h to inspect disk usage.\",\"commandCards\":[{\"id\":\"card-1\",\"title\":\"Disk usage\",\"command\":\"df -h\",\"explanation\":\"List filesystem usage\",\"riskLevel\":\"low\",\"riskReason\":\"read only\",\"expectedEffect\":\"prints usage table\",\"rollback\":\"none\"}]}",
+      "createdAt": "2026-05-01T09:00:05Z",
+      "reasoningContent": "The user wants free disk space; df -h is read-only.",
+      "commandCards": [
+        {
+          "id": "card-1",
+          "title": "Disk usage",
+          "command": "df -h",
+          "explanation": "List filesystem usage",
+          "riskLevel": "low",
+          "riskReason": "read only",
+          "expectedEffect": "prints usage table",
+          "rollback": "none",
+          "references": []
+        }
+      ]
+    },
+    {
+      "id": "msg-3",
+      "sessionId": "session-legacy-2",
+      "role": "user",
+      "content": "why does nginx return 502",
+      "createdAt": "2026-05-02T10:00:00Z"
+    },
+    {
+      "id": "msg-4",
+      "sessionId": "session-legacy-2",
+      "role": "assistant",
+      "content": "A 502 usually means the upstream is unreachable.",
+      "createdAt": "2026-05-02T10:00:10Z"
+    }
+  ]
+}

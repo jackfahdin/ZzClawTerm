@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ✋ I have a question or need support
+    url: https://github.com/nyakang/nyaterm/discussions/new?category=q-a
+    about: Please use our GitHub Discussion for asking questions and getting support.
+  - name: 💬 I just want to chat
+    url: https://github.com/nyakang/nyaterm/discussions/new?category=general
+    about: Please use our GitHub Discussion for general discussions.
+  - name: 📖 Documentation
+    url: https://nyaterm.app/docs/
+    about: Please visit our documentation site for more information.

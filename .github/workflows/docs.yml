@@ -1,0 +1,71 @@
+name: Docs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, migration/gpui]
+  pull_request:
+    branches: [main, migration/gpui]
+
+# No paths filter, for the same reason as rust.yml: a filtered-out workflow never
+# reports its gate, which blocks any pull request that requires it.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs:
+    # This job name is quoted in docs-site/docs/development/setup.md and its English
+    # mirror. Keep the two in step if it ever changes.
+    name: Documentation site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check translation parity and authoring leftovers
+        run: python3 scripts/ci/check_docs_translations.py
+
+      # pnpm 11 requires Node.js >= 22.13 (it imports node:sqlite), and Node 20
+      # reached end of life in April 2026. pnpm is pinned exactly rather than to
+      # the 11 range so a future 11.x cannot raise the Node floor again without
+      # this file changing.
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+          run_install: false
+
+      - name: Install documentation dependencies
+        run: pnpm --dir docs-site install --frozen-lockfile
+
+      - name: Build all locales
+        run: pnpm --dir docs-site build
+
+  gate:
+    name: Docs gate
+    runs-on: ubuntu-24.04
+    needs: [docs]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check dependency results
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
