@@ -1,6 +1,6 @@
 # SSH Connection Management
 
-SSH is still NyaTerm's most complete session type. Beyond a basic login, an SSH connection can also be tied to:
+SSH is still ZzClawTerm's most complete session type. Beyond a basic login, an SSH connection can also be tied to:
 
 - SFTP file explorer
 - Remote resource, GPU, process, and Docker monitoring
@@ -10,7 +10,7 @@ SSH is still NyaTerm's most complete session type. Beyond a basic login, an SSH 
 - Port tunnels
 - SSH algorithm preferences
 
-If you are new to NyaTerm, it usually makes sense to configure SSH first, then expand into file workflows, terminal enhancements, and network features.
+If you are new to ZzClawTerm, it usually makes sense to configure SSH first, then expand into file workflows, terminal enhancements, and network features.
 
 ## Create an SSH connection
 
@@ -30,7 +30,7 @@ In the **New Session** window, switch to the **SSH** tab and fill in these field
 
 ### Authentication methods
 
-NyaTerm supports four SSH authentication methods:
+ZzClawTerm supports four SSH authentication methods:
 
 - **Password**
 - **Private key**
@@ -47,15 +47,15 @@ Both passwords and keys are managed centrally in **Security/Auth**.
 
 #### SSH Agent authentication
 
-SSH Agent mode only uses signing provided by the local Agent; private keys and hardware-key material are never imported into NyaTerm. The authentication section selects one Agent endpoint. Endpoint options are filtered for the current device: macOS/Linux provide automatic discovery, an environment variable, and a Unix domain socket, while Windows provides automatic discovery, Pageant, and the Windows OpenSSH Agent. `Auto` uses the platform default Agent. Connections fail with a clear error when the Agent is unavailable or has no usable identity.
+SSH Agent mode only uses signing provided by the local Agent; private keys and hardware-key material are never imported into ZzClawTerm. The authentication section selects one Agent endpoint. Endpoint options are filtered for the current device: macOS/Linux provide automatic discovery, an environment variable, and a Unix domain socket, while Windows provides automatic discovery, Pageant, and the Windows OpenSSH Agent. `Auto` uses the platform default Agent. Connections fail with a clear error when the Agent is unavailable or has no usable identity.
 
 The Agent endpoint and forwarding switch are device-local connection settings. Cross-device sync does not overwrite these values on the destination device, so a macOS Unix socket path is never applied to Windows.
 
-When the Agent is waiting for a hardware touch, PIN, or desktop approval, NyaTerm shows a confirmation dialog. If the Agent times out or authentication fails, **Retry** discards the current attempt and rebuilds the complete SSH/jump-host chain. **Cancel** terminates the connection attempt.
+When the Agent is waiting for a hardware touch, PIN, or desktop approval, ZzClawTerm shows a confirmation dialog. If the Agent times out or authentication fails, **Retry** discards the current attempt and rebuilds the complete SSH/jump-host chain. **Cancel** terminates the connection attempt.
 
 ### Interactive authentication requests
 
-When a server asks for additional keyboard-interactive input, OTP, or a restarted authentication step, NyaTerm collects the information through a dedicated SSH authentication request window instead of mixing every prompt into terminal output. The window distinguishes:
+When a server asks for additional keyboard-interactive input, OTP, or a restarted authentication step, ZzClawTerm collects the information through a dedicated SSH authentication request window instead of mixing every prompt into terminal output. The window distinguishes:
 
 - Normal password / private-key authentication
 - Keyboard-interactive authentication
@@ -70,7 +70,7 @@ The SSH form includes **Profile** and **Terminal Type** settings.
 
 **Standard server** is for regular Linux / Unix shells. It keeps SFTP browsing, directory tracking, shell detection, shell integration, remote stats, and automatic icon detection available.
 
-**Network device** is for switches, routers, and other device CLIs that are not Linux shells. At runtime, NyaTerm disables SFTP browsing, directory tracking, shell detection, shell integration, remote stats, and automatic icon detection so the device CLI is not probed like a full shell. This does not rewrite your saved SFTP choices.
+**Network device** is for switches, routers, and other device CLIs that are not Linux shells. At runtime, ZzClawTerm disables SFTP browsing, directory tracking, shell detection, shell integration, remote stats, and automatic icon detection so the device CLI is not probed like a full shell. This does not rewrite your saved SFTP choices.
 
 Terminal Type controls the `$TERM` value declared to the remote SSH session. You can choose `xterm-256color`, `xterm`, `vt100`, `vt220`, `ansi`, or `linux`. If an older device renders strangely, try a more conservative terminal type.
 
@@ -98,16 +98,16 @@ A proxy record can store:
 
 ### SSH Agent forwarding
 
-The **SSH Agent** tab in advanced configuration controls forwarding independently. When it is disabled, NyaTerm does not create a local Agent connection for forwarding and does not send an agent-forwarding request to the server. An SSH Agent authentication connection, when selected as the authentication method, still uses the Agent for authentication. When forwarding is enabled, only interactive terminal sessions request it; SFTP, tunnels, and jump-host transport connections do not implicitly enable local Agent forwarding.
+The **SSH Agent** tab in advanced configuration controls forwarding independently. When it is disabled, ZzClawTerm does not create a local Agent connection for forwarding and does not send an agent-forwarding request to the server. An SSH Agent authentication connection, when selected as the authentication method, still uses the Agent for authentication. When forwarding is enabled, only interactive terminal sessions request it; SFTP, tunnels, and jump-host transport connections do not implicitly enable local Agent forwarding.
 
-Forwarding endpoints are independent from the login authentication endpoint. You can add multiple external SSH Agent endpoints in order, for example a primary SSH Agent and a gpg-agent SSH-compatible socket. The login authentication endpoint is never added to forwarding automatically. Forwarding sources are controlled only by the external SSH Agent list and the NyaTerm stored-key switch, and both source types use the same fingerprint allowlist or AllowAll policy.
+Forwarding endpoints are independent from the login authentication endpoint. You can add multiple external SSH Agent endpoints in order, for example a primary SSH Agent and a gpg-agent SSH-compatible socket. The login authentication endpoint is never added to forwarding automatically. Forwarding sources are controlled only by the external SSH Agent list and the ZzClawTerm stored-key switch, and both source types use the same fingerprint allowlist or AllowAll policy.
 
 The default policy is a fingerprint allowlist; an empty allowlist exposes no identities. Switching to AllowAll requires an explicit risk confirmation and exposes current and future identities from the enabled sources. If one endpoint is unavailable, the identity picker reports a local endpoint error while preserving successful results from other endpoints. Identities are merged in endpoint order and bounded by the SSH Agent protocol response limits of 1,024 identities and 256 KiB; when a limit is reached, the picker explicitly reports that only the deterministic prefix is shown and forwarded.
 
 Established stored-key forwarding channels are invalidated after a saved key is successfully added, replaced, or deleted; a new channel reads the current key set. Broker and legacy raw-relay channels share a bounded local channel quota, and Broker channels have first-frame and idle timeouts. When a Backup is restored across operating systems, unsupported device-specific Agent endpoints are removed while malformed values still fail validation.
 
 :::warning
-Agent forwarding allows remote processes to use the signing capability of selected external Agents or NyaTerm stored keys through SSH. Enable it only for trusted servers and keep it disabled when it is not needed. The Agent endpoint and forwarding policy are device-local connection settings; external hardware keys are never imported, while NyaTerm stored-key synchronization continues to follow the application's existing encrypted snapshot/sync policy.
+Agent forwarding allows remote processes to use the signing capability of selected external Agents or ZzClawTerm stored keys through SSH. Enable it only for trusted servers and keep it disabled when it is not needed. The Agent endpoint and forwarding policy are device-local connection settings; external hardware keys are never imported, while ZzClawTerm stored-key synchronization continues to follow the application's existing encrypted snapshot/sync policy.
 :::
 
 ### Jump host
@@ -120,11 +120,11 @@ Typical cases include:
 - Reaching internal production hosts
 - Multi-hop SSH login chains
 
-NyaTerm validates jump-host chains and rejects missing or cyclic references, so a saved connection cannot recurse forever through its own proxy path.
+ZzClawTerm validates jump-host chains and rejects missing or cyclic references, so a saved connection cannot recurse forever through its own proxy path.
 
 ### Post-login command
 
-You can configure a command that NyaTerm runs automatically once the SSH session is established and the shell is ready.
+You can configure a command that ZzClawTerm runs automatically once the SSH session is established and the shell is ready.
 
 Common uses:
 
@@ -138,7 +138,7 @@ The command is sent as terminal input after login, so it behaves exactly like ty
 
 X11 Forwarding allows remote graphical applications to display on your local machine through SSH.
 
-NyaTerm does not include an X server. You need to install and start one:
+ZzClawTerm does not include an X server. You need to install and start one:
 
 - Windows: VcXsrv or Xming
 - macOS: XQuartz
@@ -165,11 +165,11 @@ Each algorithm carries a risk label:
 - **Legacy** (amber, e.g. `ssh-rsa`, `*-cbc`)
 - **Insecure** (red, e.g. `3des-cbc`, `hmac-sha1`, `ssh-dss`)
 
-When you save a custom configuration, NyaTerm validates that each category is non-empty and rejects unknown algorithm names. If you are unsure what to pick, keep **Compatible** mode; for security-sensitive environments, use **Secure** or a custom, tightened list.
+When you save a custom configuration, ZzClawTerm validates that each category is non-empty and rejects unknown algorithm names. If you are unsure what to pick, keep **Compatible** mode; for security-sensitive environments, use **Secure** or a custom, tightened list.
 
 ### Multiplexed SSH sessions
 
-NyaTerm can multiplex multiple terminal sessions over a single SSH connection. Opening additional terminals to the same host reuses the existing authenticated connection instead of re-authenticating each time.
+ZzClawTerm can multiplex multiple terminal sessions over a single SSH connection. Opening additional terminals to the same host reuses the existing authenticated connection instead of re-authenticating each time.
 
 Benefits:
 
@@ -217,29 +217,29 @@ Conventions and limits:
 - Uses password authentication, with no proxy, jump host, post-login command, or X11
 - For safety, inline passwords (`user:pass@host`) are rejected in every URL and command form; unsupported options such as `-J`, `-L/-R/-D`, `-i`, and `-o ProxyJump/ProxyCommand` are also rejected
 
-A temporary session never becomes a saved connection: NyaTerm strips the connection ID, proxy, jump host, post-login command, X11, and algorithm preferences, so it stays a one-off session.
+A temporary session never becomes a saved connection: ZzClawTerm strips the connection ID, proxy, jump host, post-login command, X11, and algorithm preferences, so it stays a one-off session.
 
 ## External and protocol invocation
 
-NyaTerm can also open connection links from browsers, scripts, launchers, or other tools. External invocation sends the link to the current NyaTerm main window; if the app is not running yet, links passed as startup arguments are handled after the main window is ready.
+ZzClawTerm can also open connection links from browsers, scripts, launchers, or other tools. External invocation sends the link to the current ZzClawTerm main window; if the app is not running yet, links passed as startup arguments are handled after the main window is ready.
 
 Supported entry points:
 
-- Program invocation: pass a link as a NyaTerm startup argument, for example `NyaTerm.exe ssh://root@example.com:22`
-- Protocol invocation: installed packages register the `nyaterm://` operating-system URL scheme. NyaTerm does not claim the generic `ssh://` or `telnet://` handlers, but those links can still be passed as startup arguments
+- Program invocation: pass a link as a ZzClawTerm startup argument, for example `ZzClawTerm.exe ssh://root@example.com:22`
+- Protocol invocation: installed packages register the `zzclawterm://` operating-system URL scheme. ZzClawTerm does not claim the generic `ssh://` or `telnet://` handlers, but those links can still be passed as startup arguments
 
 Supported link formats:
 
 - `ssh://user@host:port`
 - `telnet://host:port`
-- `nyaterm://connect/ssh?host=host&port=22&username=user`
-- `nyaterm://connect/telnet?host=host&port=23`
+- `zzclawterm://connect/ssh?host=host&port=22&username=user`
+- `zzclawterm://connect/telnet?host=host&port=23`
 
 Handling rules:
 
 - SSH defaults to username `root` and port `22`; Telnet defaults to port `23`
-- NyaTerm first looks for saved connections with the same protocol, host, and port; when an SSH link includes a username, the username must match exactly
-- If multiple saved connections match, NyaTerm refuses to choose one arbitrarily; add an explicit SSH username to disambiguate. If none match, it opens a temporary connection
+- ZzClawTerm first looks for saved connections with the same protocol, host, and port; when an SSH link includes a username, the username must match exactly
+- If multiple saved connections match, ZzClawTerm refuses to choose one arbitrarily; add an explicit SSH username to disambiguate. If none match, it opens a temporary connection
 - Every external link rejects passwords, post-login commands, proxies, jump hosts, port forwarding, and private-key parameters; save a connection first if you need those capabilities
 
 ## Session input synchronization
@@ -250,7 +250,7 @@ Configuration, filtering, broadcast control, and the send command panel are docu
 
 ## Import sessions from other clients
 
-NyaTerm can import session definitions from other terminal clients. Current supported imports are:
+ZzClawTerm can import session definitions from other terminal clients. Current supported imports are:
 
 - **Xshell** (`.xts`)
 - **MobaXterm** (`.mxtsessions`)
@@ -258,7 +258,7 @@ NyaTerm can import session definitions from other terminal clients. Current supp
 - **SecureCRT** (`.xml`)
 - **FinalShell** (`conn` directory)
 - **Termius** (local IndexedDB)
-- **NyaTerm JSON** (`.json`)
+- **ZzClawTerm JSON** (`.json`)
 
 ### Import from Termius
 
@@ -268,9 +268,9 @@ The importer can bring over SSH hosts, groups, usernames, passwords, and SSH pri
 
 If the default path is not found, select the Termius `file__0.indexeddb.leveldb` directory manually.
 
-### Import from NyaTerm JSON
+### Import from ZzClawTerm JSON
 
-Choose **NyaTerm JSON** to import a `.json` file, for session data generated from scripts, asset inventories, or other systems.
+Choose **ZzClawTerm JSON** to import a `.json` file, for session data generated from scripts, asset inventories, or other systems.
 
 Sample file: [session-import-sample.json](/examples/session-import-sample.json)
 
@@ -298,7 +298,7 @@ Supported SSH authentication forms:
 - SSH Agent: `"auth": { "mode": "agent" }`
 - No authentication: `"auth": { "mode": "none" }`
 
-Use either `password` or `password_ref`, but not both. `key` mode must provide `key_ref`. `agent` mode does not import private keys; it uses the current device's available SSH Agent when connecting. A `ref` is only valid inside the current JSON file; after import, NyaTerm generates real local IDs.
+Use either `password` or `password_ref`, but not both. `key` mode must provide `key_ref`. `agent` mode does not import private keys; it uses the current device's available SSH Agent when connecting. A `ref` is only valid inside the current JSON file; after import, ZzClawTerm generates real local IDs.
 
 :::warning
 Passwords and private keys in the JSON file are plaintext. Delete the file after importing, or at least treat it as a sensitive file.
@@ -313,7 +313,7 @@ After importing, it is a good idea to verify:
 
 ## Host key policy
 
-NyaTerm maintains known-host records and offers three SSH host key policies:
+ZzClawTerm maintains known-host records and offers three SSH host key policies:
 
 | Policy | Behavior |
 |------|------|
@@ -321,7 +321,7 @@ NyaTerm maintains known-host records and offers three SSH host key policies:
 | Accept | Automatically accept and record new host keys |
 | Strict | Reject all unknown host keys |
 
-Known host records are stored in the local redb `known_hosts` document. Legacy `known_hosts` content from the old redb text-document path can be imported through the compatibility reader; NyaTerm does not promise to scan arbitrary filesystem locations for an old file.
+Known host records are stored in the local redb `known_hosts` document. Legacy `known_hosts` content from the old redb text-document path can be imported through the compatibility reader; ZzClawTerm does not promise to scan arbitrary filesystem locations for an old file.
 
 If you operate in a stricter environment, verify the host key source before accepting it.
 

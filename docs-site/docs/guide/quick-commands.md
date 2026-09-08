@@ -80,7 +80,7 @@ docker exec -it {{容器名}} bash
 
 ## 导出快捷命令
 
-在快捷命令面板右上角点击 **导出快捷命令**，把当前快捷命令和分类导出为 NyaTerm JSON 文件。导出文件可用于：
+在快捷命令面板右上角点击 **导出快捷命令**，把当前快捷命令和分类导出为 ZzClawTerm JSON 文件。导出文件可用于：
 
 - 在另一台设备上通过 **导入快捷命令** 合并
 - 作为团队模板分发
@@ -106,11 +106,11 @@ WindTerm 的快捷命令文件通常位于：
 C:\Users\<用户名>\.wind\profiles\default.v10\terminal\quickbar.config
 ```
 
-选择 **WindTerm Quickbar** 后，选中这个 `quickbar.config` 文件即可导入。NyaTerm 会读取 `quick.label`、`quick.text`、`quick.group` 和 `quick.uuid` 等字段，并把 WindTerm 的 `Send Text` 类型导入为 **追加到输入行**，避免点击后立即执行脚本。
+选择 **WindTerm Quickbar** 后，选中这个 `quickbar.config` 文件即可导入。ZzClawTerm 会读取 `quick.label`、`quick.text`、`quick.group` 和 `quick.uuid` 等字段，并把 WindTerm 的 `Send Text` 类型导入为 **追加到输入行**，避免点击后立即执行脚本。
 
 ### 从 JSON 文件导入
 
-选择 **NyaTerm JSON** 后，可以导入下面这种 JSON 文件：
+选择 **ZzClawTerm JSON** 后，可以导入下面这种 JSON 文件：
 
 ```json
 {

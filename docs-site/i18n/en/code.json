@@ -17,8 +17,8 @@
   "加密同步与备份": {
     "message": "Encrypted Cloud Sync"
   },
-  "通过 WebDAV 或 S3 兼容存储同步 NyaTerm 的可移植配置，并为连接、凭据和常用设置创建可恢复的加密备份快照。": {
-    "message": "Sync NyaTerm's portable configuration through WebDAV, S3-compatible storage, Gist, or drive providers."
+  "通过 WebDAV 或 S3 兼容存储同步 ZzClawTerm 的可移植配置，并为连接、凭据和常用设置创建可恢复的加密备份快照。": {
+    "message": "Sync ZzClawTerm's portable configuration through WebDAV, S3-compatible storage, Gist, or drive providers."
   },
   "高度可定制": {
     "message": "Highly Customizable"
@@ -59,20 +59,20 @@
   "macOS Apple Silicon": {
     "message": "macOS Apple Silicon"
   },
-  "NyaTerm 日间主题功能截图": {
-    "message": "NyaTerm feature screenshot in light theme"
+  "ZzClawTerm 日间主题功能截图": {
+    "message": "ZzClawTerm feature screenshot in light theme"
   },
-  "NyaTerm 夜间主题功能截图": {
-    "message": "NyaTerm feature screenshot in dark theme"
+  "ZzClawTerm 夜间主题功能截图": {
+    "message": "ZzClawTerm feature screenshot in dark theme"
   },
   "产品截图预览": {
     "message": "Product screenshot preview"
   },
-  "NyaTerm 日间主题产品截图": {
-    "message": "NyaTerm product screenshot in light theme"
+  "ZzClawTerm 日间主题产品截图": {
+    "message": "ZzClawTerm product screenshot in light theme"
   },
-  "NyaTerm 夜间主题产品截图": {
-    "message": "NyaTerm product screenshot in dark theme"
+  "ZzClawTerm 夜间主题产品截图": {
+    "message": "ZzClawTerm product screenshot in dark theme"
   },
   "SSH": {
     "message": "SSH"
@@ -92,8 +92,8 @@
   "用于 SSH、串口和本地命令行工作的桌面终端客户端。": {
     "message": "A desktop terminal client for SSH, serial connections, and local command-line work."
   },
-  "NyaTerm 将终端会话、远程文件、认证信息、端口转发和配置备份放在同一个桌面应用中，适合日常开发、服务器维护和设备调试。": {
-    "message": "NyaTerm brings terminal sessions, remote files, credentials, port forwarding, and configuration backups into one desktop app for daily development, server maintenance, and device debugging."
+  "ZzClawTerm 将终端会话、远程文件、认证信息、端口转发和配置备份放在同一个桌面应用中，适合日常开发、服务器维护和设备调试。": {
+    "message": "ZzClawTerm brings terminal sessions, remote files, credentials, port forwarding, and configuration backups into one desktop app for daily development, server maintenance, and device debugging."
   },
   "功能展示": {
     "message": "Feature showcase"
@@ -122,8 +122,8 @@
   "查看更新记录": {
     "message": "View changelog"
   },
-  "继续了解 NyaTerm": {
-    "message": "Continue exploring NyaTerm"
+  "继续了解 ZzClawTerm": {
+    "message": "Continue exploring ZzClawTerm"
   },
   "多种终端会话": {
     "message": "Multiple session types"
@@ -242,8 +242,8 @@
   "同步和恢复可移植配置": {
     "message": "Sync portable configuration"
   },
-  "NyaTerm 可将连接、凭据配置和常用设置打包为加密快照，用于备份、迁移或在多台设备之间同步。": {
-    "message": "NyaTerm can package connections, credential settings, and common preferences into encrypted snapshots for sync across devices."
+  "ZzClawTerm 可将连接、凭据配置和常用设置打包为加密快照，用于备份、迁移或在多台设备之间同步。": {
+    "message": "ZzClawTerm can package connections, credential settings, and common preferences into encrypted snapshots for sync across devices."
   },
   "支持 WebDAV 和 S3 兼容存储": {
     "message": "Supports WebDAV and S3-compatible storage"
@@ -251,8 +251,8 @@
   "使用主密码保护同步和备份数据": {
     "message": "Protect cloud sync data with a master password"
   },
-  "支持 `.nya` 导入导出，并处理远端与本地版本冲突": {
-    "message": "Supports `.nya` import/export and handles version conflicts between remote and local data"
+  "支持 `.zz` 导入导出，并处理远端与本地版本冲突": {
+    "message": "Supports `.zz` import/export and handles version conflicts between remote and local data"
   },
   "加载预览中": {
     "message": "Loading preview"
@@ -260,8 +260,8 @@
   "更新日志": {
     "message": "Changelog"
   },
-  "查看 NyaTerm 的版本演进与功能更新记录": {
-    "message": "View NyaTerm's release history and feature updates"
+  "查看 ZzClawTerm 的版本演进与功能更新记录": {
+    "message": "View ZzClawTerm's release history and feature updates"
   },
   "项目日志与版本演进": {
     "message": "Project changelog and release evolution"

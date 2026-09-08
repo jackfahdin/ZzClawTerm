@@ -4,22 +4,22 @@ slug: /
 
 # Introduction
 
-**NyaTerm** is a native desktop client built with GPUI around remote terminal workflows. Its Rust workspace combines the desktop interface, terminal rendering, SSH, SFTP, session lifecycle, tunnels, authentication, AI features, Cloud Sync, and configuration persistence, so you can work with remote servers, local shells, serial devices, and network helpers inside one workspace.
+**ZzClawTerm** is a native desktop client built with GPUI around remote terminal workflows. Its Rust workspace combines the desktop interface, terminal rendering, SSH, SFTP, session lifecycle, tunnels, authentication, AI features, Cloud Sync, and configuration persistence, so you can work with remote servers, local shells, serial devices, and network helpers inside one workspace.
 
-## Where NyaTerm fits best
+## Where ZzClawTerm fits best
 
 - Managing multiple SSH hosts at the same time
 - Switching between local terminals, Telnet sessions, and serial devices during troubleshooting
 - Working with remote files while watching terminal output
 - Standardizing common operations with reusable commands, jump-host chains, and saved connection metadata
 - Using OTP, recording, resource monitoring, auto-upload, AI assistance, cross-device config sync, and local encrypted backup in the same desktop app
-- Migrating existing configuration from Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, or NyaTerm backup files
+- Migrating existing configuration from Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, or ZzClawTerm backup files
 
 ## Core capabilities
 
 ### Multiple session types
 
-NyaTerm currently supports six session types:
+ZzClawTerm currently supports six session types:
 
 - **SSH** — remote login, file transfer, resource monitoring, tunnels, OTP, and related workflows
 - **Local Terminal** — open a local shell inside the same workspace
@@ -76,8 +76,8 @@ NyaTerm currently supports six session types:
 - OTP management with TOTP/HOTP, QR import, and SSH auto-fill support
 - SOCKS5, HTTP, ProxyCommand, validated jump-host chains, local / remote / dynamic tunnels, and SSH X11 forwarding
 - Screen lock, master password, and idle app lock support
-- Import **Xshell / MobaXterm / WindTerm / SecureCRT / FinalShell / Termius** sessions, plus NyaTerm/Electerm JSON
-- Encrypted `.nya` import / export for NyaTerm configuration backups
+- Import **Xshell / MobaXterm / WindTerm / SecureCRT / FinalShell / Termius** sessions, plus ZzClawTerm/Electerm JSON
+- Encrypted `.zz` import / export for ZzClawTerm configuration backups
 - Open log folders and export diagnostic bundles for troubleshooting and support
 
 ### Cloud Sync
@@ -89,7 +89,7 @@ NyaTerm currently supports six session types:
 
 ## Suggested reading order
 
-If you are new to NyaTerm, this order works well:
+If you are new to ZzClawTerm, this order works well:
 
 1. [Quick Start](./getting-started/quick-start)
 2. [Session Types](./guide/session-types)

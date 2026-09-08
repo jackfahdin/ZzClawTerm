@@ -1,6 +1,6 @@
 # Remote Host Monitoring
 
-NyaTerm provides five right-side monitoring panels for SSH sessions: **Resource Monitor**, **NVIDIA GPU Monitor**, **Ascend NPU Monitor**, **Process Manager**, and **Docker Manager**. They share some behavior:
+ZzClawTerm provides five right-side monitoring panels for SSH sessions: **Resource Monitor**, **NVIDIA GPU Monitor**, **Ascend NPU Monitor**, **Process Manager**, and **Docker Manager**. They share some behavior:
 
 - They only make sense for an **SSH session**, and bind only to a genuinely active SSH session
 - Each is shown or hidden by its own toggle in **Settings → Terminal**; turning a toggle off also hides its activity-bar icon

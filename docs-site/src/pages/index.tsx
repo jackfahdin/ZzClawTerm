@@ -46,8 +46,8 @@ type LatestDownloadManifest = {
 
 // downloads.json is intentionally separate from latest.json. The latter remains a
 // signed Tauri updater bridge for installed pre-GPUI releases.
-const latestDownloadManifestUrl = 'https://downloads.nyaterm.app/downloads.json';
-const downloadBaseUrl = 'https://downloads.nyaterm.app';
+const latestDownloadManifestUrl = 'https://downloads.zzclawterm.app/downloads.json';
+const downloadBaseUrl = 'https://downloads.zzclawterm.app';
 
 // Fallback for the initial render and older manifests that predate portable targets.
 // The application updater itself never uses this unsigned URL derivation.
@@ -64,16 +64,16 @@ function buildPortableHref(key: DownloadPlatformKey, version: string): string | 
     return undefined;
   }
 
-  return `${downloadBaseUrl}/releases/v${version}/NyaTerm_${version}_windows_${arch}_portable.zip`;
+  return `${downloadBaseUrl}/releases/v${version}/ZzClawTerm_${version}_windows_${arch}_portable.zip`;
 }
 const downloadPlatforms: DownloadPlatform[] = [
   {
     key: 'windows-x86_64',
-    href: 'https://nyaterm.app/download/windows-x86_64',
+    href: 'https://zzclawterm.app/download/windows-x86_64',
   },
   {
     key: 'windows-aarch64',
-    href: 'https://nyaterm.app/download/windows-aarch64',
+    href: 'https://zzclawterm.app/download/windows-aarch64',
   },
   {
     key: 'windows-x86_64-portable',
@@ -85,23 +85,23 @@ const downloadPlatforms: DownloadPlatform[] = [
   },
   {
     key: 'linux-x86_64',
-    href: 'https://nyaterm.app/download/linux-x86_64',
+    href: 'https://zzclawterm.app/download/linux-x86_64',
   },
   {
     key: 'linux-aarch64',
-    href: 'https://nyaterm.app/download/linux-aarch64',
+    href: 'https://zzclawterm.app/download/linux-aarch64',
   },
   {
     key: 'darwin-x86_64',
-    href: 'https://nyaterm.app/download/darwin-x86_64',
+    href: 'https://zzclawterm.app/download/darwin-x86_64',
   },
   {
     key: 'darwin-aarch64',
-    href: 'https://nyaterm.app/download/darwin-aarch64',
+    href: 'https://zzclawterm.app/download/darwin-aarch64',
   },
 ];
 
-const featureAutoplayStoppedKey = 'nyaterm-home-feature-tabs-autoplay-stopped';
+const featureAutoplayStoppedKey = 'zzclawterm-home-feature-tabs-autoplay-stopped';
 const featureAutoplayIntervalMs = 4200;
 const featurePreviewImageCache = new Map<string, 'loaded' | Promise<boolean>>();
 
@@ -415,8 +415,8 @@ function FeaturePreview({
             src={displayedImageUrl}
             alt={
               themeMode === 'dark'
-                ? translate({message: 'NyaTerm 夜间主题功能截图'})
-                : translate({message: 'NyaTerm 日间主题功能截图'})
+                ? translate({message: 'ZzClawTerm 夜间主题功能截图'})
+                : translate({message: 'ZzClawTerm 日间主题功能截图'})
             }
           />
         ) : (
@@ -456,14 +456,14 @@ function HeroPreview({
           <img
             className={styles.heroScreenshotImage}
             src={lightImageUrl}
-            alt={translate({message: 'NyaTerm 日间主题产品截图'})}
+            alt={translate({message: 'ZzClawTerm 日间主题产品截图'})}
           />
         </div>
         <div className={clsx(styles.heroScreenshotSlot, styles.heroScreenshotDark)}>
           <img
             className={styles.heroScreenshotImage}
             src={darkImageUrl}
-            alt={translate({message: 'NyaTerm 夜间主题产品截图'})}
+            alt={translate({message: 'ZzClawTerm 夜间主题产品截图'})}
           />
         </div>
       </div>
@@ -489,7 +489,7 @@ function HomepageHeader() {
         <div className={styles.heroInner}>
           <div className={styles.heroCopy}>
             <div className={styles.heroBrandRow}>
-              <img src={logoUrl} alt="NyaTerm Logo" className={styles.heroLogo} />
+              <img src={logoUrl} alt="ZzClawTerm Logo" className={styles.heroLogo} />
               <div className={styles.heroBrandText}>
                 <Heading as="h1" className={styles.heroTitle}>
                   {siteConfig.title}
@@ -502,7 +502,7 @@ function HomepageHeader() {
             </p>
             <p className={styles.heroDescription}>
               <Translate>
-                NyaTerm 将终端会话、远程文件、认证信息、端口转发和配置备份放在同一个桌面应用中，适合日常开发、服务器维护和设备调试。
+                ZzClawTerm 将终端会话、远程文件、认证信息、端口转发和配置备份放在同一个桌面应用中，适合日常开发、服务器维护和设备调试。
               </Translate>
             </p>
 
@@ -757,7 +757,7 @@ function JourneySection() {
       <div className="container">
         <div className={styles.sectionHeading}>
           <Heading as="h2" className={styles.sectionTitle}>
-            <Translate>继续了解 NyaTerm</Translate>
+            <Translate>继续了解 ZzClawTerm</Translate>
           </Heading>
         </div>
 
@@ -850,11 +850,11 @@ export default function Home(): React.ReactElement {
       value: 'sync',
       label: translate({message: '同步与备份'}),
       title: translate({message: '同步和恢复可移植配置'}),
-      description: translate({message: 'NyaTerm 可将连接、凭据配置和常用设置打包为加密快照，用于备份、迁移或在多台设备之间同步。'}),
+      description: translate({message: 'ZzClawTerm 可将连接、凭据配置和常用设置打包为加密快照，用于备份、迁移或在多台设备之间同步。'}),
       bullets: [
         translate({message: '支持 WebDAV 和 S3 兼容存储'}),
         translate({message: '使用主密码保护同步和备份数据'}),
-        translate({message: '支持 `.nya` 导入导出，并处理远端与本地版本冲突'}),
+        translate({message: '支持 `.zz` 导入导出，并处理远端与本地版本冲突'}),
       ],
       lightImage: '/img/home/sync-light.png',
       darkImage: '/img/home/sync-dark.png',

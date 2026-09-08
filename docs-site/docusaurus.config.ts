@@ -3,15 +3,15 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'NyaTerm',
+  title: 'ZzClawTerm',
   tagline: 'A desktop client for SSH-centric operations and mixed terminal workflows.',
   favicon: 'img/logo.svg',
 
-  url: 'https://nyaterm.app',
+  url: 'https://github.com/jackfahdin/ZzClawTerm',
   baseUrl: '/',
 
-  organizationName: 'NyaKang',
-  projectName: 'nyaterm',
+  organizationName: 'Jackfahdin',
+  projectName: 'ZzClawTerm',
 
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'ignore',
@@ -43,7 +43,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/nyakang/nyaterm/edit/main/docs-site/',
+          editUrl: 'https://github.com/jackfahdin/ZzClawTerm/edit/main/docs-site/',
         },
         blog: false,
         theme: {
@@ -84,9 +84,9 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'NyaTerm',
+      title: 'ZzClawTerm',
       logo: {
-        alt: 'NyaTerm Logo',
+        alt: 'ZzClawTerm Logo',
         src: 'img/logo.svg',
       },
       items: [
@@ -114,7 +114,7 @@ const config: Config = {
           position: 'right',
         },
         {
-          href: 'https://github.com/nyakang/nyaterm',
+          href: 'https://github.com/jackfahdin/ZzClawTerm',
           label: 'GitHub',
           position: 'right',
         },
@@ -154,16 +154,16 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/nyakang/nyaterm',
+              href: 'https://github.com/jackfahdin/ZzClawTerm',
             },
             {
               label: '问题反馈',
-              href: 'https://github.com/nyakang/nyaterm/issues',
+              href: 'https://github.com/jackfahdin/ZzClawTerm/issues',
             },
           ],
         },
       ],
-      copyright: `Copyright &copy; ${new Date().getFullYear()} NyaKang. Built with Docusaurus.`,
+      copyright: `Copyright &copy; ${new Date().getFullYear()} Jackfahdin. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,

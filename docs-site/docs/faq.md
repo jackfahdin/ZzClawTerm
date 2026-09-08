@@ -4,7 +4,7 @@
 
 ### SSH 能连，本地终端 / Telnet / 串口 / RDP / VNC 为什么行为不一样？
 
-因为 NyaTerm 支持多种会话类型，但能力并不完全相同：
+因为 ZzClawTerm 支持多种会话类型，但能力并不完全相同：
 
 - **SSH**：功能最完整，支持 SFTP、OTP、资源监控、代理、跳板机、隧道
 - **本地终端**：只负责本地 shell 工作流
@@ -44,7 +44,7 @@
 - 当前系统已经识别该串口
 - 串口未被其他工具独占
 
-切换到串口标签并重新展开端口下拉时，NyaTerm 会重新加载可用串口列表。
+切换到串口标签并重新展开端口下拉时，ZzClawTerm 会重新加载可用串口列表。
 
 ## 终端体验
 
@@ -88,10 +88,10 @@
 自动上传提示只会在下面这种流程里出现：
 
 1. 你从 SSH 文件浏览器中对远程文件执行 **打开**
-2. NyaTerm 下载该文件到本地临时目录并启动监听
+2. ZzClawTerm 下载该文件到本地临时目录并启动监听
 3. 你在本地编辑器里保存这个文件
 
-自己另外复制一份文件再编辑时，NyaTerm 无法知道它和远端文件的对应关系。
+自己另外复制一份文件再编辑时，ZzClawTerm 无法知道它和远端文件的对应关系。
 
 ### 文件浏览器为什么没有跟着 `cd` 自动切换目录？
 
@@ -125,9 +125,9 @@
 
 - 锁屏后的解锁
 - 云同步相关操作
-- `.nya` 配置导入 / 导出
+- `.zz` 配置导入 / 导出
 
-在手动处理前，建议先备份当前运行模式的数据目录：安装模式通常是 `~/.nyaterm/`，portable 模式是程序旁的 `data/`，再决定如何重建本地配置。
+在手动处理前，建议先备份当前运行模式的数据目录：安装模式通常是 `~/.zzclawterm/`，portable 模式是程序旁的 `data/`，再决定如何重建本地配置。
 
 ### OTP 应该在哪里管理？
 
@@ -137,12 +137,12 @@
 
 ### 可以从哪些客户端导入会话？
 
-Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 和 NyaTerm / Electerm JSON。各自的文件格式和注意事项见 [导入其他客户端的会话](./guide/ssh-connection#导入其他客户端的会话)。
+Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 和 ZzClawTerm / Electerm JSON。各自的文件格式和注意事项见 [导入其他客户端的会话](./guide/ssh-connection#导入其他客户端的会话)。
 
 导入后检查用户名、端口、认证方式，以及是否需要补充代理 / 跳板机 / OTP 绑定。
 
-### NyaTerm 的配置文件存放在哪里？
+### ZzClawTerm 的配置文件存放在哪里？
 
-安装模式下主要用户数据默认保存在 `~/.nyaterm/nyaterm.redb`；portable 模式使用程序旁 `data/config/` 下的配置数据。数据包括设置、连接、密钥、密码、OTP、隧道、代理、历史、AI 历史等本地内容。
+安装模式下主要用户数据默认保存在 `~/.zzclawterm/zzclawterm.redb`；portable 模式使用程序旁 `data/config/` 下的配置数据。数据包括设置、连接、密钥、密码、OTP、隧道、代理、历史、AI 历史等本地内容。
 
 旧 Dragonfly 数据只按当前兼容读取路径处理：应用保留旧加密前缀和旧存储文档的 fallback，不会承诺首次启动自动复制整个 `~/.dragonfly/` 目录或创建回滚副本。

@@ -4,7 +4,7 @@ slug: /
 
 # 项目介绍
 
-**NyaTerm** 是一个围绕远程终端工作流设计、基于 GPUI 构建的原生桌面客户端。它通过 Rust workspace 统一实现桌面界面、终端渲染、SSH、SFTP、会话管理、隧道、认证、AI 能力、云同步与配置持久化，让你在同一个工作区中处理远程服务器、本地 shell、串口设备和网络辅助能力。
+**ZzClawTerm** 是一个围绕远程终端工作流设计、基于 GPUI 构建的原生桌面客户端。它通过 Rust workspace 统一实现桌面界面、终端渲染、SSH、SFTP、会话管理、隧道、认证、AI 能力、云同步与配置持久化，让你在同一个工作区中处理远程服务器、本地 shell、串口设备和网络辅助能力。
 
 ## 使用场景
 
@@ -13,13 +13,13 @@ slug: /
 - 边看终端输出边操作远程文件
 - 为常用运维命令、登录流程和跳板机链路做标准化配置
 - 需要 OTP、录制、资源监控、自动上传、AI 辅助、跨设备配置同步或本地加密备份等增强能力
-- 想从 Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 或 NyaTerm 备份文件快速迁移现有配置
+- 想从 Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 或 ZzClawTerm 备份文件快速迁移现有配置
 
 ## 核心能力
 
 ### 多种会话类型
 
-NyaTerm 当前支持六类会话：
+ZzClawTerm 当前支持六类会话：
 
 - **SSH** — 远程登录、文件传输、资源监控、隧道、OTP 等完整能力
 - **本地终端** — 在同一套 UI 中打开本地 shell
@@ -83,8 +83,8 @@ NyaTerm 当前支持六类会话：
 - OTP 管理（TOTP / HOTP）、二维码导入、SSH 自动填充
 - 支持 SOCKS5、HTTP、ProxyCommand、跳板机链路校验、本地 / 远程 / 动态隧道和 SSH X11 转发
 - 锁屏、主密码与空闲应用锁定能力
-- 支持导入 **Xshell / MobaXterm / WindTerm / SecureCRT / FinalShell / Termius** 会话，以及 NyaTerm/Electerm JSON
-- 支持导入 / 导出 NyaTerm 自身的加密 `.nya` 配置备份
+- 支持导入 **Xshell / MobaXterm / WindTerm / SecureCRT / FinalShell / Termius** 会话，以及 ZzClawTerm/Electerm JSON
+- 支持导入 / 导出 ZzClawTerm 自身的加密 `.zz` 配置备份
 - 可打开日志目录并导出诊断包，便于问题排查与支持协作
 
 ### 云同步

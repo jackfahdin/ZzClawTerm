@@ -1,6 +1,6 @@
 # Translation
 
-NyaTerm includes multi-provider text translation for logs, errors, and command descriptions in the terminal.
+ZzClawTerm includes multi-provider text translation for logs, errors, and command descriptions in the terminal.
 
 ## How to use it
 

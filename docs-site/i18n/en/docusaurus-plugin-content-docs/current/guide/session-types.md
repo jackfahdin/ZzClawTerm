@@ -1,6 +1,6 @@
 # Session Types
 
-NyaTerm is not just an SSH client. It is a desktop app that puts multiple terminal and remote-desktop workflows into one workspace. It currently supports six session types:
+ZzClawTerm is not just an SSH client. It is a desktop app that puts multiple terminal and remote-desktop workflows into one workspace. It currently supports six session types:
 
 - **SSH**
 - **Local Terminal**
@@ -24,7 +24,7 @@ Understanding the differences helps explain why some panels or enhancements only
 
 ## SSH
 
-SSH is the most capable session type in NyaTerm. It is the best fit when you need to:
+SSH is the most capable session type in ZzClawTerm. It is the best fit when you need to:
 
 - Log in to remote Linux / Unix hosts
 - Browse and transfer remote files
@@ -42,7 +42,7 @@ If you need any of these, use **SSH** first:
 
 ## Local Terminal
 
-Local Terminal puts your local shell workflow inside the same NyaTerm workspace, for example:
+Local Terminal puts your local shell workflow inside the same ZzClawTerm workspace, for example:
 
 - Running frontend or Rust builds locally
 - Running scripts, reading logs, or using Git
@@ -69,7 +69,7 @@ Telnet sessions are for:
 - Lab environments
 - Compatibility scenarios where SSH is not available
 
-You still get NyaTerm's terminal workspace model, but not SSH-specific security or file features. In practice, that usually means no:
+You still get ZzClawTerm's terminal workspace model, but not SSH-specific security or file features. In practice, that usually means no:
 
 - SFTP file explorer
 - OTP binding
@@ -97,7 +97,7 @@ When creating a serial session, you can configure:
 - Stop bits
 - `Backspace Mode`
 
-Serial sessions still live inside NyaTerm's tabbed and split workspace, so you can watch serial output in one pane while running commands in an SSH or local terminal pane.
+Serial sessions still live inside ZzClawTerm's tabbed and split workspace, so you can watch serial output in one pane while running commands in an SSH or local terminal pane.
 
 ## RDP
 
@@ -124,7 +124,7 @@ A simple rule of thumb:
 
 ## Mix them in one workspace
 
-One of NyaTerm's strengths is that you can mix these session types in the same workspace, for example:
+One of ZzClawTerm's strengths is that you can mix these session types in the same workspace, for example:
 
 - SSH on the left to watch remote logs
 - Local Terminal on the right to run packaging or Git commands

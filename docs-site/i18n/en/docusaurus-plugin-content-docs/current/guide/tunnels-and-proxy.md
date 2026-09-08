@@ -1,6 +1,6 @@
 # Tunnels, Proxy, and Jump Hosts
 
-NyaTerm separates network-related features into three layers:
+ZzClawTerm separates network-related features into three layers:
 
 1. **Proxy** — how the app reaches the network
 2. **Jump host** — which SSH host acts as the intermediate hop
@@ -10,7 +10,7 @@ These features often appear together in real environments, but they solve differ
 
 ## Proxy
 
-A proxy helps NyaTerm establish outbound connectivity to the remote side.
+A proxy helps ZzClawTerm establish outbound connectivity to the remote side.
 
 Currently supported:
 
@@ -29,7 +29,7 @@ Each proxy configuration can store:
 
 ### ProxyCommand
 
-ProxyCommand reuses an existing command-line proxy, gateway, or corporate network helper. NyaTerm replaces OpenSSH-style placeholders in the command template:
+ProxyCommand reuses an existing command-line proxy, gateway, or corporate network helper. ZzClawTerm replaces OpenSSH-style placeholders in the command template:
 
 | Placeholder | Meaning |
 |-------------|---------|
@@ -64,7 +64,7 @@ Typical use cases:
 - Internal hosts that are not directly reachable
 - Multi-layer SSH network isolation
 
-In the SSH connection advanced section, you can pick an existing saved SSH connection as the jump host. NyaTerm validates the jump-host chain:
+In the SSH connection advanced section, you can pick an existing saved SSH connection as the jump host. ZzClawTerm validates the jump-host chain:
 
 - Missing referenced jump hosts are blocked or surfaced for correction
 - Recursive relationships are rejected so connections cannot loop forever
@@ -72,7 +72,7 @@ In the SSH connection advanced section, you can pick an existing saved SSH conne
 
 ## Tunnels
 
-NyaTerm provides a dedicated tunnel management area in the Network panel, so port mappings can be saved and reused instead of retyped as one-off commands.
+ZzClawTerm provides a dedicated tunnel management area in the Network panel, so port mappings can be saved and reused instead of retyped as one-off commands.
 
 ### Tunnel types
 

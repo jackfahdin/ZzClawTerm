@@ -1,6 +1,6 @@
 # SFTP File Transfer
 
-NyaTerm's remote file workflow is built on top of SSH sessions. That means the **file explorer, SFTP transfers, and local-edit-then-upload-back workflow** are only available in SSH sessions. Local Terminal, Telnet, and Serial do not expose this set of features.
+ZzClawTerm's remote file workflow is built on top of SSH sessions. That means the **file explorer, SFTP transfers, and local-edit-then-upload-back workflow** are only available in SSH sessions. Local Terminal, Telnet, and Serial do not expose this set of features.
 
 ## File explorer
 
@@ -56,19 +56,19 @@ Use the toolbar, context menu, or drag and drop to upload local content into the
 
 ### External drag-and-drop upload
 
-The file explorer supports dragging **files or folders from your system file manager directly into the NyaTerm file browser** for upload.
+The file explorer supports dragging **files or folders from your system file manager directly into the ZzClawTerm file browser** for upload.
 
 Typical flow:
 
 1. Open an SSH session and switch to the file explorer
 2. Drag a local file or folder into the file list area
 3. Release when the drag overlay appears
-4. NyaTerm adds the dropped items to the upload flow automatically
+4. ZzClawTerm adds the dropped items to the upload flow automatically
 
 Notes:
 
 - Upload is only triggered when you drop onto the file browser list area
-- Some drag sources do not expose a real local file path. In that case, NyaTerm cannot resolve the dropped item directly and will prompt you to use **Upload File** or **Upload Folder** instead
+- Some drag sources do not expose a real local file path. In that case, ZzClawTerm cannot resolve the dropped item directly and will prompt you to use **Upload File** or **Upload Folder** instead
 
 ### Download
 
@@ -81,7 +81,7 @@ Both file downloads and directory downloads are supported.
 
 ## Transfer panel and transfer settings
 
-NyaTerm puts uploads and downloads into a shared transfer queue so you can inspect:
+ZzClawTerm puts uploads and downloads into a shared transfer queue so you can inspect:
 
 - Current progress
 - Real-time transfer speed
@@ -131,14 +131,14 @@ If you often sync the same directories in batches, tune the default conflict str
 
 The newer SFTP backend improves directory handling, symlinks, known-size downloads, and large uploads. You usually do not need to think about the implementation details; the visible result is clearer speed feedback, more specific errors, and directory/symlink behavior that is closer to OpenSSH.
 
-NyaTerm also limits how many SFTP channels run concurrently on a single SSH connection, and automatically retries with backoff when a channel open hits a transient failure. This keeps multiple file operations on the same host more stable, so a momentary shortage of channel resources is less likely to surface as an error. These are backend behaviors with no settings to configure.
+ZzClawTerm also limits how many SFTP channels run concurrently on a single SSH connection, and automatically retries with backoff when a channel open hits a transient failure. This keeps multiple file operations on the same host more stable, so a momentary shortage of channel resources is less likely to surface as an error. These are backend behaviors with no settings to configure.
 
 ## Zmodem transfers (rz / sz)
 
-Besides SFTP, NyaTerm supports the Zmodem transfers common in the terminal — the ones triggered when you run `rz` (upload to the remote) or `sz` (download from the remote) on the host.
+Besides SFTP, ZzClawTerm supports the Zmodem transfers common in the terminal — the ones triggered when you run `rz` (upload to the remote) or `sz` (download from the remote) on the host.
 
-- When `rz` is detected, NyaTerm prompts you to pick the local files to upload; before uploading it probes the remote directory for name conflicts and resolves them
-- When `sz` is detected, NyaTerm prompts you for a local save directory
+- When `rz` is detected, ZzClawTerm prompts you to pick the local files to upload; before uploading it probes the remote directory for name conflicts and resolves them
+- When `sz` is detected, ZzClawTerm prompts you for a local save directory
 - Zmodem transfers appear as items in the transfer queue with live progress
 
 Note that the controls available for Zmodem transfers differ from regular SFTP transfers:
@@ -147,11 +147,11 @@ Note that the controls available for Zmodem transfers differ from regular SFTP t
 - Once a transfer finishes, you can only remove it from the list
 - The panel's **Pause all / Resume all / Retry all** actions skip Zmodem items automatically
 
-This is because the Zmodem protocol is driven directly by both ends of the terminal; NyaTerm only handles progress display and file selection, and does not intervene in the protocol's own pause/resume behavior.
+This is because the Zmodem protocol is driven directly by both ends of the terminal; ZzClawTerm only handles progress display and file selection, and does not intervene in the protocol's own pause/resume behavior.
 
 ## trzsz transfer (`trz` / `tsz`)
 
-NyaTerm also supports in-terminal trzsz transfers. Run `tsz` on the remote side to download files, or `trz` to upload files; directory uploads open a local directory picker. These transfers appear in the queue with progress information.
+ZzClawTerm also supports in-terminal trzsz transfers. Run `tsz` on the remote side to download files, or `trz` to upload files; directory uploads open a local directory picker. These transfers appear in the queue with progress information.
 
 trzsz, like Zmodem, is driven by the terminal protocol and is not a replacement for SFTP file operations. Use it when SFTP is unavailable but the remote host provides the trzsz commands. Pause, resume, and retry behavior follows the active protocol session and should not be treated like an SFTP queue job.
 
@@ -166,16 +166,16 @@ After you `cd` into a deploy or log directory in the terminal, the file explorer
 
 ## Edit locally and upload back automatically
 
-This is one of NyaTerm's most practical workflows for real operations work.
+This is one of ZzClawTerm's most practical workflows for real operations work.
 
 ### How it works
 
 1. In the SSH file explorer, choose **Open** on a remote file
-2. NyaTerm downloads it into a local temp directory
+2. ZzClawTerm downloads it into a local temp directory
 3. A file watcher is started
-4. After you save in your local editor, NyaTerm opens an upload prompt
+4. After you save in your local editor, ZzClawTerm opens an upload prompt
 
-NyaTerm fingerprints the watched file by content (it hashes the content for smaller files and falls back to size and modification time for larger ones). The upload prompt only fires when the file's **content** actually changes; saves that only touch the timestamp or that write identical content will not trigger a spurious upload. This also handles atomic saves (write a temp file, then rename) correctly.
+ZzClawTerm fingerprints the watched file by content (it hashes the content for smaller files and falls back to size and modification time for larger ones). The upload prompt only fires when the file's **content** actually changes; saves that only touch the timestamp or that write identical content will not trigger a spurious upload. This also handles atomic saves (write a temp file, then rename) correctly.
 
 ### Upload prompt window
 

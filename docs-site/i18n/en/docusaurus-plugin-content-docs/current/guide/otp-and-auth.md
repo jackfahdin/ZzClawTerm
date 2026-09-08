@@ -1,10 +1,10 @@
 # OTP & Authentication
 
-NyaTerm ties OTP management into the SSH authentication flow. You can manage OTP entries as reusable credentials, then bind them directly to SSH connections to reduce repeated input.
+ZzClawTerm ties OTP management into the SSH authentication flow. You can manage OTP entries as reusable credentials, then bind them directly to SSH connections to reduce repeated input.
 
 ## Supported OTP types
 
-NyaTerm currently supports:
+ZzClawTerm currently supports:
 
 - **TOTP**
 - **HOTP**
@@ -39,7 +39,7 @@ Typical flow:
 
 1. Click the QR import action in the OTP panel
 2. Choose a local image file
-3. NyaTerm parses and fills fields such as issuer, username, and secret
+3. ZzClawTerm parses and fills fields such as issuer, username, and secret
 4. Confirm and save the OTP entry
 
 This is usually more convenient than manually retyping the secret.
@@ -57,7 +57,7 @@ This covers environments that require a password or private key plus a second fa
 
 ## OTP interaction during authentication
 
-When the SSH server enters a keyboard-interactive or OTP flow, NyaTerm shows an OTP dialog.
+When the SSH server enters a keyboard-interactive or OTP flow, ZzClawTerm shows an OTP dialog.
 
 The dialog includes:
 

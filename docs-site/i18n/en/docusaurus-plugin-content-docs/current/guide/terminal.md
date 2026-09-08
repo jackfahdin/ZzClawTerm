@@ -37,11 +37,11 @@ In **Settings → Interaction**, you can also adjust:
 - **Allow OSC 52 clipboard writes** controls whether remote applications can write to your local clipboard through terminal output. It lets remote tmux or vim copy straight to your machine, at the cost of giving remote processes the ability to write your local clipboard
 - On macOS, enable the IME compatibility option in **Settings → Interaction** if composition text, candidate windows, or special key behavior feels wrong
 - On macOS, enable **Treat Option as Meta/Alt** in **Settings → Interaction** if you want `Option+f` to send `ESC` plus the key instead of typing `ƒ`
-- In interactive programs such as vim, less, or top, NyaTerm suppresses command suggestions so history completions do not interfere with the program's own input handling
+- In interactive programs such as vim, less, or top, ZzClawTerm suppresses command suggestions so history completions do not interfere with the program's own input handling
 
 ## Command history and suggestions
 
-NyaTerm provides two related helpers for session workflows.
+ZzClawTerm provides two related helpers for session workflows.
 
 ### Command history
 
@@ -61,7 +61,7 @@ NyaTerm provides two related helpers for session workflows.
 
 ### Input suggestions
 
-While typing, NyaTerm suggests commands based on history.
+While typing, ZzClawTerm suggests commands based on history.
 
 ## Invoking AI from the terminal
 
@@ -98,7 +98,7 @@ When enabled, a gutter appears on the left side of terminal output, which helps 
 
 ### Action links
 
-Action links are off by default. When enabled, NyaTerm can detect and open patterns such as:
+Action links are off by default. When enabled, ZzClawTerm can detect and open patterns such as:
 
 - IPv4 addresses like `192.168.1.10`
 - `host:port` pairs like `db.internal:5432`
@@ -120,7 +120,7 @@ Notes:
 
 ### Keyword highlighting
 
-Keyword highlighting is also off by default. After enabling it, NyaTerm applies built-in rules and then overlays your custom rules.
+Keyword highlighting is also off by default. After enabling it, ZzClawTerm applies built-in rules and then overlays your custom rules.
 
 The built-in rules cover more than error keywords. They also include:
 
@@ -166,7 +166,7 @@ The recommended JSON shape is below. A top-level rules array is also supported.
 
 ### Large-output protection
 
-When a session produces too much output too quickly, NyaTerm can enter a temporary protection mode so the terminal remains responsive.
+When a session produces too much output too quickly, ZzClawTerm can enter a temporary protection mode so the terminal remains responsive.
 
 During that period, the app temporarily suppresses some expensive decorations and reports how many queued characters were skipped. Once pressure drops, normal rendering resumes. This is mainly intended for log storms or constantly streaming output.
 

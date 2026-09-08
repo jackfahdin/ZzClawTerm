@@ -1,22 +1,22 @@
 # 贡献指南
 
-感谢你有兴趣为 NyaTerm 做出贡献。
+感谢你有兴趣为 ZzClawTerm 做出贡献。
 
 ## 开始之前
 
 1. 阅读仓库根目录的 `AGENTS.md` 和 `CONTRIBUTING.md`。
 2. 按照 [开发环境搭建](./setup) 配置 Rust 和平台依赖。
-3. 查看 [Issues](https://github.com/nyakang/nyaterm/issues)，确认问题和预期行为。
+3. 查看 [Issues](https://github.com/jackfahdin/ZzClawTerm/issues)，确认问题和预期行为。
 
 ## 选择正确的 crate
 
-- 纯模型、解析、兼容格式和策略放在 `nyaterm-core`。
-- 数据库执行和兼容性读取放在 `nyaterm-store`。
-- PTY、SSH、SFTP、Telnet、串口、隧道和传输运行时放在 `nyaterm-transport`。
-- 终端状态机与快照放在 `nyaterm-terminal`；GPUI 终端绘制放在 `nyaterm-terminal-gpui`。
-- GPUI 状态、视图和后台任务协调放在 `nyaterm-desktop`。
-- 共享 GPUI 控件和主题集成放在 `nyaterm-ui`。
-- RDP/VNC 会话管理、输入模型和 IPC 合约放在 `nyaterm-remote-desktop`；协议解码器只放在 `nyaterm-rdp-helper` 和 `nyaterm-vnc-helper`。
+- 纯模型、解析、兼容格式和策略放在 `zzclawterm-core`。
+- 数据库执行和兼容性读取放在 `zzclawterm-store`。
+- PTY、SSH、SFTP、Telnet、串口、隧道和传输运行时放在 `zzclawterm-transport`。
+- 终端状态机与快照放在 `zzclawterm-terminal`；GPUI 终端绘制放在 `zzclawterm-terminal-gpui`。
+- GPUI 状态、视图和后台任务协调放在 `zzclawterm-desktop`。
+- 共享 GPUI 控件和主题集成放在 `zzclawterm-ui`。
+- RDP/VNC 会话管理、输入模型和 IPC 合约放在 `zzclawterm-remote-desktop`；协议解码器只放在 `zzclawterm-rdp-helper` 和 `zzclawterm-vnc-helper`。
 
 跨 crate 修改应保持 adapter 小而明确，并确保每份状态只有一个权威 owner。
 
@@ -71,8 +71,8 @@ cargo clippy --workspace --all-targets
 
 新增或修改应用 UI 文本时同步更新：
 
-- `crates/nyaterm-desktop/src/i18n/locales/zh-CN.json`
-- `crates/nyaterm-desktop/src/i18n/locales/en.json`
+- `crates/zzclawterm-desktop/src/i18n/locales/zh-CN.json`
+- `crates/zzclawterm-desktop/src/i18n/locales/en.json`
 
 修改 docs-site 时同步维护 `docs-site/docs/` 中文源文档和 `docs-site/i18n/en/docusaurus-plugin-content-docs/current/` 英文页面，新增页面还要加入 `docs-site/sidebars.ts`，并运行：
 
@@ -83,7 +83,7 @@ pnpm --dir docs-site build
 
 ## 修改第三方依赖
 
-打了补丁的第三方依赖不在仓库里，而是 [github.com/nyakang](https://github.com/nyakang) 下 fork 的 `nyaterm` 分支上的补丁序列。改动流程见 [开发环境搭建 → 修改第三方依赖](./setup#修改第三方依赖)。
+打了补丁的第三方依赖不在仓库里，而是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `nyaterm` 分支上的补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），并镜像到 [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport)，Cargo 从 gitcode 拉取。改动流程见 [开发环境搭建 → 修改第三方依赖](./setup#修改第三方依赖)。
 
 要点：提交到 fork 分支并推送，再在根 `Cargo.toml` 里 bump revision；补丁按关注点拆分；在提交信息和该分支的 `NYATERM.md` 里记录原因和验证方式。PR 描述中需注明改动的 fork 分支和 revision。
 
@@ -95,4 +95,4 @@ pnpm --dir docs-site build
 
 ## 许可证
 
-贡献代码遵循项目的 [Apache License 2.0](https://github.com/nyakang/nyaterm/blob/main/LICENSE)。
+贡献代码遵循项目的 [Apache License 2.0](https://github.com/jackfahdin/ZzClawTerm/blob/main/LICENSE)。

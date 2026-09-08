@@ -56,7 +56,7 @@ Command scripts support `{{variableName}}` placeholders for dynamic parameters, 
 docker exec -it {{container_name}} bash
 ```
 
-When you run the command, NyaTerm opens a variable input dialog so the template can be completed before sending it.
+When you run the command, ZzClawTerm opens a variable input dialog so the template can be completed before sending it.
 
 ## Categories, search, sorting, and view modes
 
@@ -80,7 +80,7 @@ Common ways to categorize:
 
 ## Export quick commands
 
-Click **Export Commands** in the upper-right corner of the Quick Commands panel to export the current commands and categories as a NyaTerm JSON file. The exported file can be used to:
+Click **Export Commands** in the upper-right corner of the Quick Commands panel to export the current commands and categories as a ZzClawTerm JSON file. The exported file can be used to:
 
 - Merging into another device with **Import Quick Commands**
 - Sharing a team template
@@ -106,11 +106,11 @@ On Windows, look under your user directory:
 C:\Users\<username>\.wind\profiles\default.v10\terminal\quickbar.config
 ```
 
-Choose **WindTerm Quickbar**, then select this `quickbar.config` file. NyaTerm reads fields such as `quick.label`, `quick.text`, `quick.group`, and `quick.uuid`. WindTerm commands with `quick.type` set to `Send Text` are imported as **Append to prompt** so imported scripts are not executed immediately when clicked.
+Choose **WindTerm Quickbar**, then select this `quickbar.config` file. ZzClawTerm reads fields such as `quick.label`, `quick.text`, `quick.group`, and `quick.uuid`. WindTerm commands with `quick.type` set to `Send Text` are imported as **Append to prompt** so imported scripts are not executed immediately when clicked.
 
 ### Import from a JSON file
 
-Choose **NyaTerm JSON** to import a file like this:
+Choose **ZzClawTerm JSON** to import a file like this:
 
 ```json
 {

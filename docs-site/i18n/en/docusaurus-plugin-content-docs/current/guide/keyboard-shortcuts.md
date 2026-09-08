@@ -1,8 +1,8 @@
 # Keyboard Shortcuts
 
-The easiest way to understand NyaTerm shortcuts is to split them into two groups:
+The easiest way to understand ZzClawTerm shortcuts is to split them into two groups:
 
-1. **App-level shortcuts** — toggle panels, create sessions, copy terminal content; handled by NyaTerm
+1. **App-level shortcuts** — toggle panels, create sessions, copy terminal content; handled by ZzClawTerm
 2. **Shell-level keys** — keys sent to the remote or local shell, such as `Ctrl+C`
 
 Copying terminal text needs an app-level shortcut; `Ctrl+C` in the shell will not become a copy action.

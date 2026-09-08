@@ -1,6 +1,6 @@
 # AI Assistant
 
-NyaTerm includes an AI Assistant panel that can start from terminal context, selected text, file operations, or a manual prompt. It supports two working modes: **Ask** and **Agent**.
+ZzClawTerm includes an AI Assistant panel that can start from terminal context, selected text, file operations, or a manual prompt. It supports two working modes: **Ask** and **Agent**.
 
 ## Working modes
 
@@ -62,7 +62,7 @@ AI commands are displayed as structured cards with:
 
 ### How the risk level is decided
 
-The risk level is not the model's call alone. NyaTerm takes the **higher** of the model's self-reported level and the **local rule verdict** as the effective level, so a model that underestimates risk still gets stopped by local rules. The command card lists both sources.
+The risk level is not the model's call alone. ZzClawTerm takes the **higher** of the model's self-reported level and the **local rule verdict** as the effective level, so a model that underestimates risk still gets stopped by local rules. The command card lists both sources.
 
 Local rules use four tiers, and they classify by command *shape* rather than command name:
 

@@ -1,6 +1,6 @@
 # Development Setup
 
-The NyaTerm application is a Cargo workspace. Node.js and pnpm are only required for the Docusaurus documentation site in this repository.
+The ZzClawTerm application is a Cargo workspace. Node.js and pnpm are only required for the Docusaurus documentation site in this repository.
 
 ## Application prerequisites
 
@@ -51,8 +51,8 @@ Running the desktop application also requires a working Vulkan driver and an X11
 ## Clone the repository
 
 ```bash
-git clone https://github.com/nyakang/nyaterm.git
-cd nyaterm
+git clone https://github.com/jackfahdin/ZzClawTerm.git
+cd ZzClawTerm
 ```
 
 Cargo manages all application dependencies. The Node.js dependencies in this repository belong to `docs-site` only.
@@ -60,7 +60,7 @@ Cargo manages all application dependencies. The Node.js dependencies in this rep
 ## Run the application
 
 ```bash
-cargo run -p nyaterm-app --bin nyaterm
+cargo run -p zzclawterm-app --bin zzclawterm
 ```
 
 The first build compiles GPUI and every dependency, so it takes noticeably longer than subsequent incremental builds.
@@ -70,12 +70,12 @@ The first build compiles GPUI and every dependency, so it takes noticeably longe
 RDP and VNC each run in a separate helper process that the application resolves beside its own executable. The command above **only builds the application**, so both protocols fail with `HelperMissing`. Build the helpers first:
 
 ```bash
-cargo build -p nyaterm-rdp-helper -p nyaterm-vnc-helper
+cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper
 ```
 
 A bare `cargo build` builds the application and both helpers because they are the workspace `default-members`. `cargo check` checks all three too, but does not produce helper executables that the application can launch. If you use a custom `CARGO_TARGET_DIR`, `--target`, or profile, keep the helpers in the same directory as the application.
 
-`NYATERM_RDP_HELPER` and `NYATERM_VNC_HELPER` override the lookup with an explicit path, which is handy for pointing at binaries in another target directory.
+`ZZCLAWTERM_RDP_HELPER` and `ZZCLAWTERM_VNC_HELPER` override the lookup with an explicit path, which is handy for pointing at binaries in another target directory.
 
 ## Common checks
 
@@ -103,8 +103,8 @@ python -m unittest scripts.tests.test_check_release_assets scripts.tests.test_pa
 The non-ignored RDP/VNC helper lifecycle integration tests are covered automatically by workspace tests, including handshake, normal exit, and crash/hang reaping. They can also be run directly:
 
 ```bash
-cargo test -p nyaterm-rdp-helper --test lifecycle --locked
-cargo test -p nyaterm-vnc-helper --test lifecycle --locked
+cargo test -p zzclawterm-rdp-helper --test lifecycle --locked
+cargo test -p zzclawterm-vnc-helper --test lifecycle --locked
 ```
 
 These lifecycle tests launch real helper executables but do not connect to real RDP/VNC servers, so they do not replace manual protocol interoperability, framebuffer, clipboard, or input-path acceptance. `cargo fmt --all` writes formatting changes; use it only when you intend to apply them.
@@ -112,10 +112,10 @@ These lifecycle tests launch real helper executables but do not connect to real 
 ## Release-profile build
 
 ```bash
-cargo build -p nyaterm-app --bin nyaterm --release --locked
+cargo build -p zzclawterm-app --bin zzclawterm --release --locked
 ```
 
-The native binary is written to `target/release/nyaterm`, or `target/release/nyaterm.exe` on Windows. This command builds only the application binary — neither the helpers nor any installer.
+The native binary is written to `target/release/zzclawterm`, or `target/release/zzclawterm.exe` on Windows. This command builds only the application binary — neither the helpers nor any installer.
 
 Release packages come from `scripts/release/package_native.py`. It builds the application and both helpers with locked dependencies, puts the helpers next to the application, and produces native installers and portable packages. When you add a helper, its `HELPER_BINS` list must be updated too.
 
@@ -139,13 +139,13 @@ python scripts/release/verify_native_package.py --target "${TARGET}" --version "
 
 Before publication, `scripts/ci/check_release_assets.py` also rejects missing or extra artifacts in the combined six-target asset set.
 
-`NYATERM_ARTIFACT_VERSION` changes only the version segment in artifact names;
+`ZZCLAWTERM_ARTIFACT_VERSION` changes only the version segment in artifact names;
 package metadata still uses the workspace SemVer. This interface is reserved
 for manual snapshot builds, and packaging and verification must receive the
 same value:
 
 ```bash
-NYATERM_ARTIFACT_VERSION=main-snapshot \
+ZZCLAWTERM_ARTIFACT_VERSION=main-snapshot \
   python scripts/release/package_native.py "${TARGET}"
 python scripts/release/verify_native_package.py \
   --target "${TARGET}" --version "${VERSION}" \
@@ -154,13 +154,13 @@ python scripts/release/verify_native_package.py \
 
 After validation, a version tag publishes GitHub Release and versioned R2 assets, then triggers Gitee, AUR, and Homebrew. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. Only stable releases replace the root R2 manifests, while prereleases retain versioned manifests. A manual `Main Snapshot` run overwrites the `main-snapshot` prerelease without publishing to downstream channels.
 
-The Release workflow requires `NYATERM_GITHUB_GIST_CLIENT_ID`, the Gitee/R2 repository variables, and the updater, R2, Gitee, AUR, and Homebrew secrets named in the workflows. Missing configuration fails the relevant release step instead of producing an incomplete official release.
+The Release workflow requires `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID`, the Gitee/R2 repository variables, and the updater, R2, Gitee, AUR, and Homebrew secrets named in the workflows. Missing configuration fails the relevant release step instead of producing an incomplete official release.
 
 ### Native tools and the manual-acceptance boundary
 
 Native packaging depends on target-platform tools: Windows uses NSIS and package verification also needs 7-Zip; macOS uses `codesign` and `hdiutil`; Linux uses tools such as `appimagetool`, `dpkg-shlibdeps`, `dpkg-deb`, `rpmbuild`, and `rpm`/`rpm2cpio`. Running only the Python packaging unit tests on a machine without those tools is therefore not a native package build.
 
-Automated verification checks the artifact set, archive paths, application and helper presence, binary architecture, version, and package metadata. It does not prove that the GUI launches, and does not cover real install/upgrade/uninstall flows, shortcuts or `nyaterm:` URL-handler invocation, signing/notarization and Gatekeeper/SmartScreen trust, real RDP/VNC sessions, or GPU, IME, PTY, clipboard, and window lifecycle behavior. Release candidates must be accepted manually on the corresponding target OS, with the actual platform and results recorded truthfully.
+Automated verification checks the artifact set, archive paths, application and helper presence, binary architecture, version, and package metadata. It does not prove that the GUI launches, and does not cover real install/upgrade/uninstall flows, shortcuts or `zzclawterm:` URL-handler invocation, signing/notarization and Gatekeeper/SmartScreen trust, real RDP/VNC sessions, or GPU, IME, PTY, clipboard, and window lifecycle behavior. Release candidates must be accepted manually on the corresponding target OS, with the actual platform and results recorded truthfully.
 
 ## Documentation development
 
@@ -191,7 +191,7 @@ Note that the script compares heading counts, not translated wording.
 
 ## Changing third-party dependencies
 
-The third-party dependencies NyaTerm patches are **not vendored into this repository**. Each is a patch series on a fork under [github.com/nyakang](https://github.com/nyakang) on branch `nyaterm`, consumed from a revision pinned in the root `Cargo.toml`: `alacritty`, `gpui-component`, `IronRDP`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`.
+The third-party dependencies ZzClawTerm patches are **not vendored into this repository**. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) for faster access in mainland China and consumed from there at a revision pinned in the root `Cargo.toml`: `alacritty`, `gpui-component`, `IronRDP`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`.
 
 The workflow is: commit to the fork branch, push, then bump the pinned revision in the root `Cargo.toml`. Keep the patch series split by concern rather than squashed, and record the reason and the validation performed on the patch commit and in that branch's `NYATERM.md`. Prefer rebasing an existing series onto a newer upstream revision over accumulating snapshots.
 
@@ -200,7 +200,7 @@ The workflow is: commit to the fork branch, push, then bump the pinned revision 
 ## Development conventions
 
 - Read the root `AGENTS.md` and `CONTRIBUTING.md` first.
-- UI state and views live in `nyaterm-desktop`; shared controls live in `nyaterm-ui`.
+- UI state and views live in `zzclawterm-desktop`; shared controls live in `zzclawterm-ui`.
 - Transport, terminal, and core crates stay independent of GPUI.
-- New UI text updates both locale files under `crates/nyaterm-desktop/src/i18n/locales/`.
+- New UI text updates both locale files under `crates/zzclawterm-desktop/src/i18n/locales/`.
 - Never use real credentials in tests, logs, or diagnostic data.

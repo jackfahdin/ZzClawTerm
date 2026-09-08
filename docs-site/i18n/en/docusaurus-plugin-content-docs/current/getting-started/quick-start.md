@@ -1,19 +1,19 @@
 # Quick Start
 
-This chapter helps you experience NyaTerm's core workflow as quickly as possible: create a connection, open sessions, split the workspace, browse files, turn on terminal enhancements, and find the migration, AI assistance, and backup entry points.
+This chapter helps you experience ZzClawTerm's core workflow as quickly as possible: create a connection, open sessions, split the workspace, browse files, turn on terminal enhancements, and find the migration, AI assistance, and backup entry points.
 
 ## Step 1: Pick a session type
 
-When you click **New Connection**, NyaTerm offers six session types:
+When you click **New Connection**, ZzClawTerm offers six session types:
 
 - **SSH** — the most complete remote-operations workflow
-- **Local Terminal** — open a local shell inside NyaTerm
+- **Local Terminal** — open a local shell inside ZzClawTerm
 - **Telnet** — legacy systems or lab environments
 - **Serial** — serial debugging devices
 - **RDP** — Windows Remote Desktop
 - **VNC** — VNC services or VM consoles; real-server interoperability is still being validated
 
-If this is your first time using NyaTerm, start with one **SSH** session and then add one **Local Terminal** to compare the mixed-workspace experience.
+If this is your first time using ZzClawTerm, start with one **SSH** session and then add one **Local Terminal** to compare the mixed-workspace experience.
 
 ## Step 2: Create your first SSH connection
 
@@ -35,12 +35,12 @@ After saving, the connection appears in the saved-connections list.
 
 ## Step 3: Import existing configuration if you have it
 
-If you already maintain many hosts in another client, you do not need to rebuild them manually. NyaTerm can import from Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, and NyaTerm / Electerm JSON — the format list and caveats are in [Importing sessions from other clients](../guide/ssh-connection#import-sessions-from-other-clients).
+If you already maintain many hosts in another client, you do not need to rebuild them manually. ZzClawTerm can import from Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, and ZzClawTerm / Electerm JSON — the format list and caveats are in [Importing sessions from other clients](../guide/ssh-connection#import-sessions-from-other-clients).
 
 The two paths serve different goals:
 
 - Migrating a **connection inventory**: start from the import entry in the **Saved Connections** panel
-- Restoring a **complete NyaTerm environment**: use a `.nya` encrypted backup, which requires a master password first
+- Restoring a **complete ZzClawTerm environment**: use a `.zz` encrypted backup, which requires a master password first
 
 ## Step 4: Understand the workspace
 
@@ -139,7 +139,7 @@ If you want cross-device configuration sync, continue with:
 4. Fill in the connection details and run **Test Connection** first
 5. Then decide whether to enable startup checks and auto-push
 
-If you are just evaluating NyaTerm for the first time, this step is optional. For the full workflow, see [Cloud Sync](../guide/sync-and-backup).
+If you are just evaluating ZzClawTerm for the first time, this step is optional. For the full workflow, see [Cloud Sync](../guide/sync-and-backup).
 
 ## Step 7: Keep exploring by use case
 

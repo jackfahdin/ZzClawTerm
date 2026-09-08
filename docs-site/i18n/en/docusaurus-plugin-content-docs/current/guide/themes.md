@@ -1,6 +1,6 @@
 # Themes & Appearance
 
-NyaTerm lets you tune the workspace appearance in fairly fine detail, including UI theme, terminal theme, fonts, and cursor behavior.
+ZzClawTerm lets you tune the workspace appearance in fairly fine detail, including UI theme, terminal theme, fonts, and cursor behavior.
 
 ## UI theme and terminal theme
 
@@ -53,7 +53,7 @@ In **Settings → Appearance**, you can adjust:
 
 The default font family is `JetBrains Mono, Noto Sans SC Variable, Inter`: the terminal falls back to `JetBrains Mono` and the UI falls back to `Inter`.
 
-These are **font names, not font files shipped with the app**. NyaTerm resolves them from your system-installed fonts, so on a machine without `JetBrains Mono` the terminal falls back to the platform's default monospace font. If you want this exact stack, install the fonts yourself.
+These are **font names, not font files shipped with the app**. ZzClawTerm resolves them from your system-installed fonts, so on a machine without `JetBrains Mono` the terminal falls back to the platform's default monospace font. If you want this exact stack, install the fonts yourself.
 
 The font picker lists system-installed fonts so you can build a fallback chain, and the terminal font dropdown only offers families that measure as monospace. System font discovery runs asynchronously, so you may briefly see `Loading system fonts...` when opening the picker; you can still type a font name in the meantime.
 
@@ -68,7 +68,7 @@ If you switch between dark and light themes often, it is worth checking the term
 
 ## Language switching
 
-NyaTerm currently provides:
+ZzClawTerm currently provides:
 
 - Simplified Chinese
 - English
@@ -90,7 +90,7 @@ These layout states are saved with app settings, which makes it practical to kee
 
 ## Zoom and quick adjustments
 
-NyaTerm provides these common shortcuts:
+ZzClawTerm provides these common shortcuts:
 
 - **Zoom In** — `Ctrl / Cmd + =`
 - **Zoom Out** — `Ctrl / Cmd + -`

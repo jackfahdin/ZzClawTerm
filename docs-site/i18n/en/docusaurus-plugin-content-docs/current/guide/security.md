@@ -1,6 +1,6 @@
 # Security
 
-NyaTerm's security features mainly focus on three areas:
+ZzClawTerm's security features mainly focus on three areas:
 
 1. Safely storing local credentials and authentication materials
 2. Managing host verification and second-factor flows during SSH login
@@ -8,7 +8,7 @@ NyaTerm's security features mainly focus on three areas:
 
 ## How sensitive local data is stored
 
-NyaTerm stores connection-related configuration locally, but sensitive values are encrypted before being written to disk. Typical sensitive data includes:
+ZzClawTerm stores connection-related configuration locally, but sensitive values are encrypted before being written to disk. Typical sensitive data includes:
 
 - Saved passwords
 - SSH private keys and key passphrases
@@ -53,7 +53,7 @@ In the SSH connection form, password authentication can reference these saved pa
 Credential management is separate from SSH password authentication and can respond to password prompts in an interactive terminal.
 
 1. Create an entry with a name, prompt-matching regular expression, value to send, and enabled/disabled state.
-2. When terminal output matches the prompt expression, NyaTerm shows an autofill prompt.
+2. When terminal output matches the prompt expression, ZzClawTerm shows an autofill prompt.
 3. You can approve the fill or ignore it.
 
 Values remain encrypted locally, viewing saved passwords requires unlocking sensitive data, and autofill only triggers after a prompt match rather than sending values unconditionally.
@@ -72,7 +72,7 @@ For details, see [OTP & Authentication](./otp-and-auth).
 
 ## Master password
 
-The master password is NyaTerm's most important local desktop protection feature.
+The master password is ZzClawTerm's most important local desktop protection feature.
 
 You can configure it in **Settings → Security**. After it is set:
 
@@ -91,13 +91,13 @@ In the current implementation:
 
 - Cloud Sync actions cannot be enabled without a master password
 - Cloud-provider credentials are treated as protected local secrets
-- NyaTerm uploads **encrypted portable snapshots**, not plain-text config files
+- ZzClawTerm uploads **encrypted portable snapshots**, not plain-text config files
 - Pulling from cloud overwrites the portable local data included in the snapshot, but it does not blindly roam every piece of device-local UI state to another machine
 
 That makes this feature best understood as:
 
 - **Cross-device sync for portable configuration**
-- **Local `.nya` export for backup and migration**
+- **Local `.zz` export for backup and migration**
 
 not as a collaborative merge tool.
 
@@ -121,13 +121,13 @@ In **Settings → Security**, once screen lock is enabled, you can also configur
 - **With a master password** — entering the correct master password is required
 - **Without a master password** — unlocking can happen directly
 
-The app lock state is shared across the main workspace, modal child windows, and idle detection. When locked, terminal content and sensitive panels are covered; treat it as protection for the local NyaTerm workspace and local sensitive-operation entry points, not as remote-system access control.
+The app lock state is shared across the main workspace, modal child windows, and idle detection. When locked, terminal content and sensitive panels are covered; treat it as protection for the local ZzClawTerm workspace and local sensitive-operation entry points, not as remote-system access control.
 
-If you plan to use NyaTerm on a shared machine or during demos, enabling **master password**, **screen lock**, and **idle auto-lock** together is the safer setup.
+If you plan to use ZzClawTerm on a shared machine or during demos, enabling **master password**, **screen lock**, and **idle auto-lock** together is the safer setup.
 
 ## SSH host key policies
 
-When SSH first connects to an unknown host, NyaTerm supports three policies:
+When SSH first connects to an unknown host, ZzClawTerm supports three policies:
 
 | Policy | Behavior |
 |------|------|
@@ -135,15 +135,15 @@ When SSH first connects to an unknown host, NyaTerm supports three policies:
 | Accept | Automatically accept new host keys |
 | Strict | Reject all unknown host keys |
 
-Known host records are stored in the local redb `known_hosts` document. Legacy `known_hosts` content from the old redb text-document path can be imported through the compatibility reader; NyaTerm does not promise to scan arbitrary filesystem locations for an old `known_hosts` file.
+Known host records are stored in the local redb `known_hosts` document. Legacy `known_hosts` content from the old redb text-document path can be imported through the compatibility reader; ZzClawTerm does not promise to scan arbitrary filesystem locations for an old `known_hosts` file.
 
 If host identity validation matters in your environment, prefer **Prompt** or **Strict** over unconditional acceptance.
 
 ## Local persistence model
 
-In installed mode, the main local data file is normally `~/.nyaterm/nyaterm.redb`. Portable mode stores configuration under the adjacent `data/config/` directory. Legacy Dragonfly data is handled through compatibility fallbacks for old encryption prefixes and storage documents; NyaTerm does not promise to copy the entire `~/.dragonfly/` directory or create an automatic rollback copy.
+In installed mode, the main local data file is normally `~/.zzclawterm/zzclawterm.redb`. Portable mode stores configuration under the adjacent `data/config/` directory. Legacy Dragonfly data is handled through compatibility fallbacks for old encryption prefixes and storage documents; ZzClawTerm does not promise to copy the entire `~/.dragonfly/` directory or create an automatic rollback copy.
 
-The **Export Configuration** action creates an encrypted `.nya` backup for migration or offline storage. The **Export Diagnostics** action is intended for troubleshooting and packages recent logs and runtime summaries; review diagnostic contents before sharing them.
+The **Export Configuration** action creates an encrypted `.zz` backup for migration or offline storage. The **Export Diagnostics** action is intended for troubleshooting and packages recent logs and runtime summaries; review diagnostic contents before sharing them.
 
 ## Practical security advice
 

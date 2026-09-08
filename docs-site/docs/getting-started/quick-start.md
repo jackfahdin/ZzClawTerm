@@ -1,13 +1,13 @@
 # 快速开始
 
-本章帮助你在最短路径内体验 NyaTerm 的核心工作流：创建连接、打开会话、使用分屏、查看文件、启用终端增强功能，并了解迁移、AI 辅助与备份入口。
+本章帮助你在最短路径内体验 ZzClawTerm 的核心工作流：创建连接、打开会话、使用分屏、查看文件、启用终端增强功能，并了解迁移、AI 辅助与备份入口。
 
 ## 第一步：选择会话类型
 
 点击 **新建连接**，你会看到六类可选会话：
 
 - **SSH** — 最完整的远程运维场景
-- **本地终端** — 直接在 NyaTerm 中打开本地 shell
+- **本地终端** — 直接在 ZzClawTerm 中打开本地 shell
 - **Telnet** — 旧系统或实验环境
 - **串口** — 串口调试设备
 - **RDP** — Windows 远程桌面
@@ -36,12 +36,12 @@
 
 ## 第三步：导入已有配置
 
-已经在别的客户端维护了大量主机时不必手动重建。NyaTerm 可以导入 Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 和 NyaTerm / Electerm JSON——格式清单和注意事项见 [导入其他客户端的会话](../guide/ssh-connection#导入其他客户端的会话)。
+已经在别的客户端维护了大量主机时不必手动重建。ZzClawTerm 可以导入 Xshell、MobaXterm、WindTerm、SecureCRT、FinalShell、Termius 和 ZzClawTerm / Electerm JSON——格式清单和注意事项见 [导入其他客户端的会话](../guide/ssh-connection#导入其他客户端的会话)。
 
 两条路径的用途不同：
 
 - 迁移**连接清单**：从 **已保存连接** 面板的导入入口开始最快
-- 恢复**完整 NyaTerm 环境**：用 `.nya` 加密备份，需要先设置主密码
+- 恢复**完整 ZzClawTerm 环境**：用 `.zz` 加密备份，需要先设置主密码
 
 ## 第四步：启动并理解工作区
 
@@ -131,7 +131,7 @@ Windows 上还可以把本地文件或文件夹直接拖进文件浏览器上传
 
 ### 8. 试一次录制
 
-NyaTerm 支持把当前会话输出录制为日志文件。
+ZzClawTerm 支持把当前会话输出录制为日志文件。
 
 要把录制文件集中保存到固定目录，先在 **设置 → 传输** 里设置 **录制保存路径**。
 

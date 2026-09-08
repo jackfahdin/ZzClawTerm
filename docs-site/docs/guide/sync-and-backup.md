@@ -1,6 +1,6 @@
 # 云同步
 
-NyaTerm 的 **云同步** 能力，解决的不是“远程文件传输”，而是把应用里的可移植配置数据同步到一份加密的远端核心快照。
+ZzClawTerm 的 **云同步** 能力，解决的不是“远程文件传输”，而是把应用里的可移植配置数据同步到一份加密的远端核心快照。
 
 远端始终以当前快照为准：
 
@@ -8,7 +8,7 @@ NyaTerm 的 **云同步** 能力，解决的不是“远程文件传输”，而
 - `sync/latest.redb` 保存当前快照的 revision、设备、时间和 hash 元数据
 - 旧版 `sync/snapshots/` 只用于兼容读取和清理
 
-`.nya` 本地导出 / 导入仍然是配置备份和迁移入口；云同步不再创建远端多版本备份，也不会自动删除用户云端已有的旧 `backups/` 数据。
+`.zz` 本地导出 / 导入仍然是配置备份和迁移入口；云同步不再创建远端多版本备份，也不会自动删除用户云端已有的旧 `backups/` 数据。
 
 当前支持这些远程存储提供方：
 
@@ -70,7 +70,7 @@ NyaTerm 的 **云同步** 能力，解决的不是“远程文件传输”，而
 其中：
 
 - **设备名称** 会写入快照元数据，方便你识别是哪台设备上传的内容
-- **远程命名空间** 是 NyaTerm 在远端保存云同步快照时使用的顶层路径前缀
+- **远程命名空间** 是 ZzClawTerm 在远端保存云同步快照时使用的顶层路径前缀
 
 ### WebDAV
 
@@ -81,7 +81,7 @@ NyaTerm 的 **云同步** 能力，解决的不是“远程文件传输”，而
 - **用户名**
 - **密码**
 
-WebDAV 认证同时支持 **Basic** 和 **Digest** 两种方式。当服务端要求 Digest 时，NyaTerm 会自动改用 Digest，以提升对 NAS / 网关的兼容性。
+WebDAV 认证同时支持 **Basic** 和 **Digest** 两种方式。当服务端要求 Digest 时，ZzClawTerm 会自动改用 Digest，以提升对 NAS / 网关的兼容性。
 
 ### S3 兼容存储
 
@@ -98,7 +98,7 @@ WebDAV 认证同时支持 **Basic** 和 **Digest** 两种方式。当服务端�
 
 ### Gitee 代码片段（Snippet）
 
-如果 provider 选的是 **Gitee 代码片段**，NyaTerm 会把加密后的云同步对象保存到一个 Gitee 代码片段中。
+如果 provider 选的是 **Gitee 代码片段**，ZzClawTerm 会把加密后的云同步对象保存到一个 Gitee 代码片段中。
 
 通常需要填写：
 
@@ -107,7 +107,7 @@ WebDAV 认证同时支持 **Basic** 和 **Digest** 两种方式。当服务端�
 
 ### GitHub Gist
 
-如果 provider 选的是 **GitHub Gist**，NyaTerm 会通过 GitHub device flow 授权，并把加密后的云同步对象保存到一个私有 Gist 中。
+如果 provider 选的是 **GitHub Gist**，ZzClawTerm 会通过 GitHub device flow 授权，并把加密后的云同步对象保存到一个私有 Gist 中。
 
 通常需要：
 
@@ -115,11 +115,11 @@ WebDAV 认证同时支持 **Basic** 和 **Digest** 两种方式。当服务端�
 - 在浏览器打开的 GitHub 授权页面输入设备码
 - 授权 `gist` scope
 
-在 GitHub device-flow 授权流程中，如果没有填写 Gist ID，NyaTerm 会在授权成功后自动创建并回填一个私有 Gist；已有 Gist ID 时，会先验证并复用该 Gist。
+在 GitHub device-flow 授权流程中，如果没有填写 Gist ID，ZzClawTerm 会在授权成功后自动创建并回填一个私有 Gist；已有 Gist ID 时，会先验证并复用该 Gist。
 
 ### Google Drive / OneDrive / AliyunDrive
 
-如果 provider 选的是 **Google Drive**、**OneDrive** 或 **AliyunDrive**，NyaTerm 会通过桌面端原生 HTTP adapter 访问对应网盘服务。
+如果 provider 选的是 **Google Drive**、**OneDrive** 或 **AliyunDrive**，ZzClawTerm 会通过桌面端原生 HTTP adapter 访问对应网盘服务。
 
 当前需要手动填写 OAuth 信息：
 
@@ -147,7 +147,7 @@ AliyunDrive 还需要填写 **Drive Type**，通常为 `resource`。
 
 ### 启动时检查
 
-开启后，NyaTerm 会在启动时检查远端是否已经有新的同步快照。
+开启后，ZzClawTerm 会在启动时检查远端是否已经有新的同步快照。
 
 常见结果包括：
 
@@ -160,13 +160,13 @@ AliyunDrive 还需要填写 **Drive Type**，通常为 `resource`。
 
 ### 自动拉取远端变更
 
-开启 **自动拉取远端变更** 后，如果启动检查或同步检查发现“只有远端发生变化”，NyaTerm 会自动拉取并应用当前云端快照。
+开启 **自动拉取远端变更** 后，如果启动检查或同步检查发现“只有远端发生变化”，ZzClawTerm 会自动拉取并应用当前云端快照。
 
 它只处理本地没有未同步变更的情况。本地和云端都变了时仍然进入冲突状态，不会自动选一边覆盖另一边。
 
 ### 本地变更后的自动推送
 
-开启后，当受支持的本地配置数据发生变化并保存完成时，NyaTerm 会在一个防抖窗口后自动推送快照。
+开启后，当受支持的本地配置数据发生变化并保存完成时，ZzClawTerm 会在一个防抖窗口后自动推送快照。
 
 你可以设置：
 
@@ -224,11 +224,11 @@ AliyunDrive 还需要填写 **Drive Type**，通常为 `resource`。
 - 也不是多人协作式冲突解决
 - 本质上是“本地快照”和“远程快照”二选一
 
-NyaTerm 会保留当前云端快照的元数据，用来辅助判断应该下载远端版本还是上传本地版本。旧版 `sync/snapshots/` 对象只作为兼容读取和清理来源，不再作为常规多版本备份入口。
+ZzClawTerm 会保留当前云端快照的元数据，用来辅助判断应该下载远端版本还是上传本地版本。旧版 `sync/snapshots/` 对象只作为兼容读取和清理来源，不再作为常规多版本备份入口。
 
 ## 会同步哪些内容？
 
-当前实现基于 **portable snapshot**，覆盖的是 NyaTerm 的可移植配置数据，例如：
+当前实现基于 **portable snapshot**，覆盖的是 ZzClawTerm 的可移植配置数据，例如：
 
 - 已保存连接 / 分组
 - 密钥、密码、OTP 配置
@@ -237,7 +237,7 @@ NyaTerm 会保留当前云端快照的元数据，用来辅助判断应该下载
 - 大部分应用设置
 - known_hosts 与主密钥 token
 
-命令历史不会进入云同步核心快照；如需离线留档或迁移，使用本地 `.nya` 导出 / 导入。
+命令历史不会进入云同步核心快照；如需离线留档或迁移，使用本地 `.zz` 导出 / 导入。
 
 当前实现会保留一部分设备本地 UI 状态，例如：
 
@@ -274,6 +274,6 @@ NyaTerm 会保留当前云端快照的元数据，用来辅助判断应该下载
 
 :::tip 使用建议
 - 首次接入新 provider 时，先“测试连接”，再启用自动策略。
-- 做较大范围的连接、OTP、快捷命令调整前，如果需要可回退点，请先使用本地 `.nya` 导出。
+- 做较大范围的连接、OTP、快捷命令调整前，如果需要可回退点，请先使用本地 `.zz` 导出。
 - 在多台设备之间切换时，统一远程命名空间规则，并给每台设备设置可区分的设备名称。
 :::

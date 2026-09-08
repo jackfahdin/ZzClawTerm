@@ -1,26 +1,26 @@
 # 运行时、传输与存储开发
 
-NyaTerm 没有独立的 Web 后端。原生应用的领域逻辑、协议运行时和持久化按职责拆分在多个 Rust crate 中，并通过有类型的接口与 GPUI 桌面层协作。
+ZzClawTerm 没有独立的 Web 后端。原生应用的领域逻辑、协议运行时和持久化按职责拆分在多个 Rust crate 中，并通过有类型的接口与 GPUI 桌面层协作。
 
 ## Crate 边界
 
 | Crate | 放置的行为 |
 |------|------------|
-| `nyaterm-core` | 纯模型、解析、策略、兼容格式和 schema-neutral 序列化 |
-| `nyaterm-transport` | PTY、SSH、SFTP、Telnet、串口、隧道、远程操作和传输运行时 |
-| `nyaterm-store` | redb、事务、存储 worker、加密适配和兼容性读取 |
-| `nyaterm-terminal` | 终端状态机、快照、控制序列、编码和图形协议 |
-| `nyaterm-remote-desktop` | RDP/VNC 会话管理、framebuffer 与输入模型、证书策略、剪贴板状态和 helper IPC 合约 |
-| `nyaterm-rdp-helper` / `nyaterm-vnc-helper` | 隔离的 helper 进程，持有各自的协议解码器 |
-| `nyaterm-otp` | HOTP/TOTP 兼容实现 |
+| `zzclawterm-core` | 纯模型、解析、策略、兼容格式和 schema-neutral 序列化 |
+| `zzclawterm-transport` | PTY、SSH、SFTP、Telnet、串口、隧道、远程操作和传输运行时 |
+| `zzclawterm-store` | redb、事务、存储 worker、加密适配和兼容性读取 |
+| `zzclawterm-terminal` | 终端状态机、快照、控制序列、编码和图形协议 |
+| `zzclawterm-remote-desktop` | RDP/VNC 会话管理、framebuffer 与输入模型、证书策略、剪贴板状态和 helper IPC 合约 |
+| `zzclawterm-rdp-helper` / `zzclawterm-vnc-helper` | 隔离的 helper 进程，持有各自的协议解码器 |
+| `zzclawterm-otp` | HOTP/TOTP 兼容实现 |
 
 低层 crate 不导入 GPUI 或桌面呈现类型。需要跨边界时定义小型 typed adapter，不把 application-wide model 下沉到 transport 或 store。
 
-解析服务器控制字节的协议解码器只放在 helper crate 里。`nyaterm-remote-desktop` 自己不含解码器，两个 helper 必须把解码器 panic 转换成致命 IPC 错误上报。详见 [架构说明 → RDP / VNC 的进程隔离](./architecture#rdp--vnc-的进程隔离)。
+解析服务器控制字节的协议解码器只放在 helper crate 里。`zzclawterm-remote-desktop` 自己不含解码器，两个 helper 必须把解码器 panic 转换成致命 IPC 错误上报。详见 [架构说明 → RDP / VNC 的进程隔离](./architecture#rdp--vnc-的进程隔离)。
 
 ## 会话与传输运行时
 
-`nyaterm-transport` 的 `SessionManager` 管理活动会话，并为本地 PTY、SSH、Telnet、raw TCP、串口、RDP 和 VNC 提供统一生命周期入口。
+`zzclawterm-transport` 的 `SessionManager` 管理活动会话，并为本地 PTY、SSH、Telnet、raw TCP、串口、RDP 和 VNC 提供统一生命周期入口。
 
 会话输出通过 `SessionEvent` 返回：
 
@@ -38,27 +38,27 @@ SSH、SFTP、隧道、远程进程和 Docker 等操作也应保持异步或运�
 
 ## 终端运行时
 
-wire bytes 由 transport 送入 `nyaterm-terminal`。该 crate 维护网格、scrollback、模式、OSC 标记、搜索结果和图形协议状态，并生成 UI-neutral snapshot。
+wire bytes 由 transport 送入 `zzclawterm-terminal`。该 crate 维护网格、scrollback、模式、OSC 标记、搜索结果和图形协议状态，并生成 UI-neutral snapshot。
 
-键盘和鼠标的协议编码中，与终端语义相关的部分留在 terminal/core 边界；像素尺寸、GPUI key event 和绘制逻辑留在 `nyaterm-terminal-gpui`。
+键盘和鼠标的协议编码中，与终端语义相关的部分留在 terminal/core 边界；像素尺寸、GPUI key event 和绘制逻辑留在 `zzclawterm-terminal-gpui`。
 
 ## StoreRuntime 与持久化
 
-`nyaterm-store::StoreRuntime` 拥有数据库 worker。桌面层通过 `StoreUiClient` 或 `StoreBlockingClient` 提交实现 `StoreRequest` 的 typed request，再以 task result 更新 UI。
+`zzclawterm-store::StoreRuntime` 拥有数据库 worker。桌面层通过 `StoreUiClient` 或 `StoreBlockingClient` 提交实现 `StoreRequest` 的 typed request，再以 task result 更新 UI。
 
-数据库实现集中在 `nyaterm-store/src/storage/`。修改存储时必须保持：
+数据库实现集中在 `zzclawterm-store/src/storage/`。修改存储时必须保持：
 
 - 现有 redb table 名、key 和文档 key
 - 序列化字段名及未知字段处理
 - 主密钥 wrapping、加密前缀和 fallback 解密
-- `.nya` 备份、portable snapshot 和 Dragonfly 兼容读取
+- `.zz` 备份、portable snapshot 和 Dragonfly 兼容读取
 - 验证成功前不覆盖用户现有数据
 
-纯兼容模型和策略属于 `nyaterm-core`；数据库 transaction、文件 I/O 和兼容 reader 属于 `nyaterm-store`。
+纯兼容模型和策略属于 `zzclawterm-core`；数据库 transaction、文件 I/O 和兼容 reader 属于 `zzclawterm-store`。
 
 ## AI、同步与原生 HTTP
 
-AI provider、翻译、云同步和更新检查通过原生 HTTP adapter 运行。请求构造、风险策略和 schema-neutral provider 设置尽量保持在 `nyaterm-core`，桌面层负责凭据遮罩、交互状态和任务协调。
+AI provider、翻译、云同步和更新检查通过原生 HTTP adapter 运行。请求构造、风险策略和 schema-neutral provider 设置尽量保持在 `zzclawterm-core`，桌面层负责凭据遮罩、交互状态和任务协调。
 
 云同步以 portable snapshot 为兼容合约。拉取数据必须先解密、解析和验证，再提交应用；冲突、重试和错误通过 typed result 返回 UI。
 
@@ -70,9 +70,9 @@ AI provider、翻译、云同步和更新检查通过原生 HTTP adapter 运行�
 
 ## 测试
 
-- pure parsing、策略和兼容格式测试放在 `nyaterm-core`。
-- PTY、SSH、SFTP、Telnet、串口、隧道和事件队列测试放在 `nyaterm-transport`。
-- 终端解析、快照、graphics 和 encoding 测试放在 `nyaterm-terminal`。
+- pure parsing、策略和兼容格式测试放在 `zzclawterm-core`。
+- PTY、SSH、SFTP、Telnet、串口、隧道和事件队列测试放在 `zzclawterm-transport`。
+- 终端解析、快照、graphics 和 encoding 测试放在 `zzclawterm-terminal`。
 - 存储修改需要新数据 round trip、代表性旧数据、错误密码和损坏数据测试。
-- RDP/VNC 的协议、framebuffer、输入映射、IPC、证书、剪贴板和重连测试放在 `nyaterm-remote-desktop`、`nyaterm-rdp-helper` 或 `nyaterm-vnc-helper`。两个 helper crate 的 `tests/lifecycle.rs` 覆盖握手、正常断开和崩溃 / 挂起回收，IPC 合约变更时同步更新两边。
+- RDP/VNC 的协议、framebuffer、输入映射、IPC、证书、剪贴板和重连测试放在 `zzclawterm-remote-desktop`、`zzclawterm-rdp-helper` 或 `zzclawterm-vnc-helper`。两个 helper crate 的 `tests/lifecycle.rs` 覆盖握手、正常断开和崩溃 / 挂起回收，IPC 合约变更时同步更新两边。
 - 跨 crate 行为优先测试小型 adapter，不依赖真实凭据或生产服务。

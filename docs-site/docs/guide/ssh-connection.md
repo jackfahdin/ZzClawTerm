@@ -1,6 +1,6 @@
 # SSH 连接管理
 
-SSH 仍然是 NyaTerm 最完整的一类会话。除了基础登录外，SSH 连接还可以进一步挂接：
+SSH 仍然是 ZzClawTerm 最完整的一类会话。除了基础登录外，SSH 连接还可以进一步挂接：
 
 - SFTP 文件浏览器
 - 远程资源监控、GPU 监控、进程管理、Docker 管理
@@ -30,7 +30,7 @@ SSH 仍然是 NyaTerm 最完整的一类会话。除了基础登录外，SSH 连
 
 ### 认证方式
 
-NyaTerm 支持四种 SSH 认证方式：
+ZzClawTerm 支持四种 SSH 认证方式：
 
 - **密码**
 - **私钥**
@@ -47,15 +47,15 @@ NyaTerm 支持四种 SSH 认证方式：
 
 #### SSH Agent 认证
 
-SSH Agent 模式只使用本机 Agent 提供的签名能力，私钥和硬件密钥不会导入 NyaTerm。基础认证区域只能选择一个 Agent endpoint；可根据当前设备选择自动发现、环境变量、Unix 域套接字、Pageant 或 Windows OpenSSH Agent。`Auto` 会使用当前平台的默认 Agent。Agent 不可用或没有匹配身份时，连接会失败并显示原因。
+SSH Agent 模式只使用本机 Agent 提供的签名能力，私钥和硬件密钥不会导入 ZzClawTerm。基础认证区域只能选择一个 Agent endpoint；可根据当前设备选择自动发现、环境变量、Unix 域套接字、Pageant 或 Windows OpenSSH Agent。`Auto` 会使用当前平台的默认 Agent。Agent 不可用或没有匹配身份时，连接会失败并显示原因。
 
 Agent endpoint 和 forwarding 开关属于设备本地连接配置。跨设备同步时不会覆盖目标设备的这些值，因此 macOS 的 Unix socket 配置不会被同步到 Windows。
 
-当 Agent 正在等待硬件触摸、PIN 或桌面确认时，NyaTerm 会显示确认弹窗。Agent 超时或认证失败后可以选择“重试”；重试会丢弃当前连接并重新建立完整的 SSH/跳板机链路。选择“取消”会终止本次连接。
+当 Agent 正在等待硬件触摸、PIN 或桌面确认时，ZzClawTerm 会显示确认弹窗。Agent 超时或认证失败后可以选择“重试”；重试会丢弃当前连接并重新建立完整的 SSH/跳板机链路。选择“取消”会终止本次连接。
 
 ### 交互式认证请求
 
-当服务器要求额外的键盘交互输入、OTP 或重新认证时，NyaTerm 用专用的 SSH 认证请求窗口收集信息，而不把提示混在终端输出里。窗口会区分这几种情况：
+当服务器要求额外的键盘交互输入、OTP 或重新认证时，ZzClawTerm 用专用的 SSH 认证请求窗口收集信息，而不把提示混在终端输出里。窗口会区分这几种情况：
 
 - 普通密码 / 私钥认证
 - 键盘交互认证
@@ -70,7 +70,7 @@ SSH 表单提供 **连接类型** 和 **终端类型** 设置。
 
 **标准服务器** 用于普通 Linux / Unix shell，保留 SFTP 浏览、目录跟随、Shell 检测、Shell Integration、远程资源统计和自动图标识别。
 
-**网络设备** 用于交换机、路由器等非 Linux shell 的设备 CLI。选择后，NyaTerm 会在运行时关闭 SFTP 浏览、目录跟随、Shell 检测、Shell Integration、远程资源统计和自动图标识别，避免把设备 CLI 当作完整 shell 探测；这个选择不会改写已保存的 SFTP 选项。
+**网络设备** 用于交换机、路由器等非 Linux shell 的设备 CLI。选择后，ZzClawTerm 会在运行时关闭 SFTP 浏览、目录跟随、Shell 检测、Shell Integration、远程资源统计和自动图标识别，避免把设备 CLI 当作完整 shell 探测；这个选择不会改写已保存的 SFTP 选项。
 
 终端类型会影响 SSH 会话向远端声明的 `$TERM`，可在 `xterm-256color`、`xterm`、`vt100`、`vt220`、`ansi`、`linux` 之间选择。连接老旧设备或字符界面异常时，可以尝试更保守的终端类型。
 
@@ -98,16 +98,16 @@ SSH 表单提供 **连接类型** 和 **终端类型** 设置。
 
 ### SSH Agent 转发
 
-在高级配置的 **SSH Agent** 页签中可以单独启用 Agent 转发。未勾选时，NyaTerm 不会因为转发而建立本地 Agent 连接，也不会向服务器发送转发请求；如果认证方式本身选择了 SSH Agent，认证仍会使用 Agent。勾选后仅交互式终端会请求转发，SFTP、隧道和跳板机连接不会隐式开启本地 Agent 转发。
+在高级配置的 **SSH Agent** 页签中可以单独启用 Agent 转发。未勾选时，ZzClawTerm 不会因为转发而建立本地 Agent 连接，也不会向服务器发送转发请求；如果认证方式本身选择了 SSH Agent，认证仍会使用 Agent。勾选后仅交互式终端会请求转发，SFTP、隧道和跳板机连接不会隐式开启本地 Agent 转发。
 
-转发端点与登录认证端点相互独立。转发可以按顺序添加多个外部 SSH Agent，例如主 SSH Agent 和 gpg-agent 的 SSH-compatible socket。登录认证端点不会自动加入 forwarding；转发来源只由外部 SSH Agent 列表和 NyaTerm 已保存密钥开关决定，两类来源使用同一套 fingerprint 白名单或全量策略。
+转发端点与登录认证端点相互独立。转发可以按顺序添加多个外部 SSH Agent，例如主 SSH Agent 和 gpg-agent 的 SSH-compatible socket。登录认证端点不会自动加入 forwarding；转发来源只由外部 SSH Agent 列表和 ZzClawTerm 已保存密钥开关决定，两类来源使用同一套 fingerprint 白名单或全量策略。
 
 默认使用 fingerprint 白名单，空白名单表示远端看不到任何身份。切换为全量策略前会显示风险确认；它会暴露已启用来源当前及未来出现的身份。单个转发端点不可用时，身份选择器会显示局部错误，并保留其他端点的结果。身份按端点顺序合并，并受 SSH Agent 协议的 1,024 项和 256 KiB 响应上限约束；达到上限时，选择器会明确提示仅显示并转发确定性的前缀。
 
 已建立的保存密钥 forwarding channel 会在保存密钥成功新增、替换或删除后失效，重新建立的 channel 才会读取当前密钥集合。Broker 和 legacy raw relay 共用有界的本地 channel 配额，Broker channel 具有首帧和空闲超时。Backup 跨操作系统恢复时会移除目标平台不支持的设备专属 Agent 端点，但损坏的值仍会拒绝校验。
 
 :::warning
-Agent 转发会让远端进程能够通过 SSH 使用所选外部 Agent 或 NyaTerm 保存密钥的签名能力。仅对可信服务器启用，并在不需要时保持关闭。Agent endpoint 和 forwarding 策略属于设备本地连接配置；外部硬件密钥不会被导入，NyaTerm 保存密钥是否进入现有加密 snapshot/sync 继续遵循应用已有策略。
+Agent 转发会让远端进程能够通过 SSH 使用所选外部 Agent 或 ZzClawTerm 保存密钥的签名能力。仅对可信服务器启用，并在不需要时保持关闭。Agent endpoint 和 forwarding 策略属于设备本地连接配置；外部硬件密钥不会被导入，ZzClawTerm 保存密钥是否进入现有加密 snapshot/sync 继续遵循应用已有策略。
 :::
 
 ### 跳板机
@@ -120,11 +120,11 @@ Agent 转发会让远端进程能够通过 SSH 使用所选外部 Agent 或 NyaT
 - 分环境隔离的生产网络
 - 多层 SSH 登录链路
 
-NyaTerm 会校验跳板机链路，阻止缺失引用和环路引用，避免连接时出现无限递归或难以排查的代理链路。
+ZzClawTerm 会校验跳板机链路，阻止缺失引用和环路引用，避免连接时出现无限递归或难以排查的代理链路。
 
 ### 登录后命令
 
-可以为当前 SSH 连接配置一条在登录后自动执行的命令。会话建立、shell 就绪后，NyaTerm 会自动运行它。
+可以为当前 SSH 连接配置一条在登录后自动执行的命令。会话建立、shell 就绪后，ZzClawTerm 会自动运行它。
 
 常见用途：
 
@@ -138,7 +138,7 @@ NyaTerm 会校验跳板机链路，阻止缺失引用和环路引用，避免连
 
 X11 转发允许远端 Linux 图形程序通过 SSH 显示到本机。
 
-NyaTerm 不内置 X server，用户需要自行安装并启动：
+ZzClawTerm 不内置 X server，用户需要自行安装并启动：
 
 - Windows: VcXsrv / Xming
 - macOS: XQuartz
@@ -165,11 +165,11 @@ NyaTerm 不内置 X server，用户需要自行安装并启动：
 - **旧版**（黄色，例如 `ssh-rsa`、`*-cbc`）
 - **不安全**（红色，例如 `3des-cbc`、`hmac-sha1`、`ssh-dss`）
 
-保存自定义配置时，NyaTerm 会校验每一类都不能为空，并拒绝无法识别的算法名。如果不确定该选什么，保留 **兼容** 模式即可；对安全性要求较高的环境建议使用 **安全** 或自定义收紧算法列表。
+保存自定义配置时，ZzClawTerm 会校验每一类都不能为空，并拒绝无法识别的算法名。如果不确定该选什么，保留 **兼容** 模式即可；对安全性要求较高的环境建议使用 **安全** 或自定义收紧算法列表。
 
 ### 多路复用 SSH 会话
 
-NyaTerm 可以在同一条 SSH 连接上多路复用多个终端会话。向同一主机打开新的终端时，会复用已有的已认证连接，而不必每次重新认证。
+ZzClawTerm 可以在同一条 SSH 连接上多路复用多个终端会话。向同一主机打开新的终端时，会复用已有的已认证连接，而不必每次重新认证。
 
 带来的好处：
 
@@ -215,29 +215,29 @@ NyaTerm 可以在同一条 SSH 连接上多路复用多个终端会话。向同�
 - 使用密码认证，不带代理、跳板机、登录后命令或 X11
 - 出于安全考虑，所有 URL 和命令形式的内联密码（`user:pass@host`）都会被拒绝；`-J`、`-L/-R/-D`、`-i`、`-o ProxyJump/ProxyCommand` 等不支持的选项同样会被拒绝
 
-临时会话不会写入已保存连接：NyaTerm 会剥离连接 ID、代理、跳板机、登录后命令、X11 与算法偏好，因此它始终只是一次性会话。
+临时会话不会写入已保存连接：ZzClawTerm 会剥离连接 ID、代理、跳板机、登录后命令、X11 与算法偏好，因此它始终只是一次性会话。
 
 ## 外部调用与协议调用
 
-NyaTerm 也可以从浏览器、脚本、启动器或其他工具中打开连接链接。外部调用会把链接交给当前 NyaTerm 主窗口；如果应用尚未启动，启动参数中的链接也会在主窗口就绪后处理。
+ZzClawTerm 也可以从浏览器、脚本、启动器或其他工具中打开连接链接。外部调用会把链接交给当前 ZzClawTerm 主窗口；如果应用尚未启动，启动参数中的链接也会在主窗口就绪后处理。
 
 支持的入口：
 
-- 程序调用：把链接作为启动参数传给 NyaTerm，例如 `NyaTerm.exe ssh://root@example.com:22`
-- 协议调用：安装版通过系统 URL Scheme 处理 `nyaterm://` 链接；通用 `ssh://` 和 `telnet://` 不会被 NyaTerm 抢占，但仍可作为程序启动参数传入
+- 程序调用：把链接作为启动参数传给 ZzClawTerm，例如 `ZzClawTerm.exe ssh://root@example.com:22`
+- 协议调用：安装版通过系统 URL Scheme 处理 `zzclawterm://` 链接；通用 `ssh://` 和 `telnet://` 不会被 ZzClawTerm 抢占，但仍可作为程序启动参数传入
 
 支持的链接格式：
 
 - `ssh://user@host:port`
 - `telnet://host:port`
-- `nyaterm://connect/ssh?host=host&port=22&username=user`
-- `nyaterm://connect/telnet?host=host&port=23`
+- `zzclawterm://connect/ssh?host=host&port=22&username=user`
+- `zzclawterm://connect/telnet?host=host&port=23`
 
 处理规则：
 
 - SSH 默认用户名为 `root`，默认端口为 `22`；Telnet 默认端口为 `23`
-- NyaTerm 会优先匹配同协议、同主机、同端口的已保存连接；SSH 链接显式写了用户名时，还会按用户名精确匹配
-- 如果匹配到多个已保存连接，NyaTerm 会拒绝任意选择；SSH 链接可显式提供用户名来消除歧义。如果没有匹配项，会按临时连接打开
+- ZzClawTerm 会优先匹配同协议、同主机、同端口的已保存连接；SSH 链接显式写了用户名时，还会按用户名精确匹配
+- 如果匹配到多个已保存连接，ZzClawTerm 会拒绝任意选择；SSH 链接可显式提供用户名来消除歧义。如果没有匹配项，会按临时连接打开
 - 所有外部链接都拒绝密码、登录后命令、代理、跳板机、端口转发或私钥参数；需要这些能力时，请先保存连接后再打开
 
 ## 会话输入同步
@@ -248,7 +248,7 @@ NyaTerm 也可以从浏览器、脚本、启动器或其他工具中打开连接
 
 ## 导入其他客户端的会话
 
-NyaTerm 支持导入其他客户端的会话配置，目前可导入：
+ZzClawTerm 支持导入其他客户端的会话配置，目前可导入：
 
 - **Xshell**（`.xts`）
 - **MobaXterm**（`.mxtsessions`）
@@ -256,19 +256,19 @@ NyaTerm 支持导入其他客户端的会话配置，目前可导入：
 - **SecureCRT**（`.xml`）
 - **FinalShell**（`conn` 目录）
 - **Termius**（本机 IndexedDB）
-- **NyaTerm JSON**（`.json`）
+- **ZzClawTerm JSON**（`.json`）
 
 ### 从 Termius 导入
 
-选择 **Termius** 后，NyaTerm 会读取本机 Termius 的 IndexedDB，并通过系统凭据管理器 / Keychain / Secret Service 中的 `Termius/localKey` 解密会话数据。
+选择 **Termius** 后，ZzClawTerm 会读取本机 Termius 的 IndexedDB，并通过系统凭据管理器 / Keychain / Secret Service 中的 `Termius/localKey` 解密会话数据。
 
 可导入内容包括 SSH 主机、分组、用户名、密码和 SSH 私钥。为了避免产生半可信配置，只要任何 Termius 加密字段无法解密，本次导入会整体失败且不会写入连接。
 
 如果默认路径未找到，可以手动选择 Termius 的 `file__0.indexeddb.leveldb` 目录。
 
-### 从 NyaTerm JSON 导入
+### 从 ZzClawTerm JSON 导入
 
-选择 **NyaTerm JSON** 可以导入一个 `.json` 文件，用于从脚本、资产清单或其他系统批量生成会话数据。
+选择 **ZzClawTerm JSON** 可以导入一个 `.json` 文件，用于从脚本、资产清单或其他系统批量生成会话数据。
 
 示例文件：[session-import-sample.json](/examples/session-import-sample.json)
 
@@ -296,7 +296,7 @@ SSH 认证支持：
 - SSH Agent：`"auth": { "mode": "agent" }`
 - 无认证：`"auth": { "mode": "none" }`
 
-`password` 与 `password_ref` 二选一；`key` 模式必须提供 `key_ref`。`agent` 模式不会导入私钥，只会在连接时使用当前设备可用的 SSH Agent。`ref` 只在当前 JSON 文件内有效，导入后 NyaTerm 会生成真实的本地 ID。
+`password` 与 `password_ref` 二选一；`key` 模式必须提供 `key_ref`。`agent` 模式不会导入私钥，只会在连接时使用当前设备可用的 SSH Agent。`ref` 只在当前 JSON 文件内有效，导入后 ZzClawTerm 会生成真实的本地 ID。
 
 :::warning
 JSON 文件中的密码和私钥是明文。导入后请删除该文件，或至少按敏感文件方式保存。
@@ -311,7 +311,7 @@ JSON 文件中的密码和私钥是明文。导入后请删除该文件，或至
 
 ## 主机密钥策略
 
-NyaTerm 会为 SSH 主机维护已知主机记录，并提供三种主机密钥策略：
+ZzClawTerm 会为 SSH 主机维护已知主机记录，并提供三种主机密钥策略：
 
 | 策略 | 行为 |
 |------|------|

@@ -4,7 +4,7 @@
 
 ### SSH works, so why do Local Terminal, Telnet, Serial, RDP, and VNC behave differently?
 
-Because NyaTerm supports multiple session types, and their capabilities are not identical:
+Because ZzClawTerm supports multiple session types, and their capabilities are not identical:
 
 - **SSH** — the most complete workflow, including SFTP, OTP, resource monitoring, proxy, jump host, and tunnels
 - **Local Terminal** — local shell workflow only
@@ -44,7 +44,7 @@ Check that:
 - The operating system recognizes the serial port
 - Another tool is not already holding the port open
 
-When you reopen the port dropdown on the Serial tab, NyaTerm reloads the available ports.
+When you reopen the port dropdown on the Serial tab, ZzClawTerm reloads the available ports.
 
 ## Terminal experience
 
@@ -88,10 +88,10 @@ When it is on, closing the main window moves the app to the tray instead of quit
 The auto-upload prompt only appears in this workflow:
 
 1. You choose **Open** on a remote file from the SSH file explorer
-2. NyaTerm downloads it into a local temporary directory and starts watching it
+2. ZzClawTerm downloads it into a local temporary directory and starts watching it
 3. You save that watched file in your local editor
 
-If you copied the file elsewhere and edited that copy manually, NyaTerm no longer knows it maps back to the remote file.
+If you copied the file elsewhere and edited that copy manually, ZzClawTerm no longer knows it maps back to the remote file.
 
 ### Why didn’t the file explorer follow my `cd` command automatically?
 
@@ -101,7 +101,7 @@ Auto-follow depends on terminal path tracking support for the session. If the cu
 
 That depends on your transfer settings:
 
-- If **ask every time** is enabled, NyaTerm prompts for a destination on each download
+- If **ask every time** is enabled, ZzClawTerm prompts for a destination on each download
 - Otherwise it uses the default download directory
 
 You can also change the default download path and the default editor in settings.
@@ -121,7 +121,7 @@ In the current behavior:
 
 There is currently no built-in recovery flow for the master password. If your local data is protected by it and you can no longer provide the correct password, those protected sensitive settings cannot continue to be used in the original way.
 
-Before making manual changes, back up the data directory for the current mode: usually `~/.nyaterm/` for an installed build, or the adjacent `data/` directory for portable mode.
+Before making manual changes, back up the data directory for the current mode: usually `~/.zzclawterm/` for an installed build, or the adjacent `data/` directory for portable mode.
 
 ### Where should OTP entries be managed?
 
@@ -129,14 +129,14 @@ Manage them centrally in the **OTP** tab of the **Security/Auth** panel, then bi
 
 ## Import and migration
 
-### Which clients can NyaTerm import sessions from?
+### Which clients can ZzClawTerm import sessions from?
 
-Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, and NyaTerm / Electerm JSON. Each format and its caveats are documented in [Importing sessions from other clients](./guide/ssh-connection#import-sessions-from-other-clients).
+Xshell, MobaXterm, WindTerm, SecureCRT, FinalShell, Termius, and ZzClawTerm / Electerm JSON. Each format and its caveats are documented in [Importing sessions from other clients](./guide/ssh-connection#import-sessions-from-other-clients).
 
 After import, review the username, port, authentication method, and whether proxy / jump host / OTP binding still needs to be configured.
 
-### Where are NyaTerm’s config files stored?
+### Where are ZzClawTerm’s config files stored?
 
-In installed mode, the main data file is normally `~/.nyaterm/nyaterm.redb`; portable mode uses configuration data under the adjacent `data/config/` directory. This data includes settings, connections, keys, OTP data, tunnels, proxies, history, and other local state.
+In installed mode, the main data file is normally `~/.zzclawterm/zzclawterm.redb`; portable mode uses configuration data under the adjacent `data/config/` directory. This data includes settings, connections, keys, OTP data, tunnels, proxies, history, and other local state.
 
-Legacy Dragonfly data is handled through compatibility fallbacks for old encryption prefixes and storage documents. NyaTerm does not promise to copy the entire `~/.dragonfly/` directory or create a rollback copy on first launch.
+Legacy Dragonfly data is handled through compatibility fallbacks for old encryption prefixes and storage documents. ZzClawTerm does not promise to copy the entire `~/.dragonfly/` directory or create a rollback copy on first launch.

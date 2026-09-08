@@ -44,7 +44,7 @@ export default function ChangelogPage(): React.ReactElement {
   return (
     <Layout
       title={translate({message: '更新日志'})}
-      description={translate({message: '查看 NyaTerm 的版本演进与功能更新记录'})}>
+      description={translate({message: '查看 ZzClawTerm 的版本演进与功能更新记录'})}>
       <main className={styles.page}>
         <section className={styles.hero}>
           <div className="container">

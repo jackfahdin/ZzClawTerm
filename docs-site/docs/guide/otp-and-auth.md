@@ -1,6 +1,6 @@
 # OTP 与认证
 
-NyaTerm 把 OTP 管理和 SSH 认证流程结合在了一起：你既可以把 OTP 当作一个独立的验证码仓库来管理，也可以把它直接绑定到 SSH 连接中，减少重复输入。
+ZzClawTerm 把 OTP 管理和 SSH 认证流程结合在了一起：你既可以把 OTP 当作一个独立的验证码仓库来管理，也可以把它直接绑定到 SSH 连接中，减少重复输入。
 
 ## 支持的 OTP 类型
 
@@ -39,7 +39,7 @@ NyaTerm 把 OTP 管理和 SSH 认证流程结合在了一起：你既可以把 O
 
 1. 在 OTP 面板中点击二维码导入
 2. 选择本地图片文件
-3. NyaTerm 解析后自动填充 issuer、username、secret 等信息
+3. ZzClawTerm 解析后自动填充 issuer、username、secret 等信息
 4. 确认后保存为一个 OTP 条目
 
 这样不必手动抄写 secret，也便于批量整理认证资料。
@@ -57,7 +57,7 @@ NyaTerm 把 OTP 管理和 SSH 认证流程结合在了一起：你既可以把 O
 
 ## 认证弹窗中的 OTP 交互
 
-当 SSH 服务器进入 keyboard-interactive / OTP 流程时，NyaTerm 会弹出 OTP 对话框。
+当 SSH 服务器进入 keyboard-interactive / OTP 流程时，ZzClawTerm 会弹出 OTP 对话框。
 
 对话框中会显示：
 

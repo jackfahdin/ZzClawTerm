@@ -1,22 +1,22 @@
 # Contributing
 
-Thank you for your interest in contributing to NyaTerm.
+Thank you for your interest in contributing to ZzClawTerm.
 
 ## Before you start
 
 1. Read `AGENTS.md` and `CONTRIBUTING.md` at the repository root.
 2. Follow [Development Setup](./setup) to configure Rust and platform dependencies.
-3. Check [Issues](https://github.com/nyakang/nyaterm/issues) for the expected behavior and current work.
+3. Check [Issues](https://github.com/jackfahdin/ZzClawTerm/issues) for the expected behavior and current work.
 
 ## Choose the owning crate
 
-- Pure models, parsing, compatibility formats, and policies belong in `nyaterm-core`.
-- Database execution and compatibility readers belong in `nyaterm-store`.
-- PTY, SSH, SFTP, Telnet, Serial, tunnel, and transfer runtimes belong in `nyaterm-transport`.
-- Terminal state and snapshots belong in `nyaterm-terminal`; GPUI terminal painting belongs in `nyaterm-terminal-gpui`.
-- GPUI state, views, and background coordination belong in `nyaterm-desktop`.
-- Shared GPUI controls and theme integration belong in `nyaterm-ui`.
-- RDP/VNC session management, input models, and IPC contracts belong in `nyaterm-remote-desktop`; protocol decoders belong only in `nyaterm-rdp-helper` and `nyaterm-vnc-helper`.
+- Pure models, parsing, compatibility formats, and policies belong in `zzclawterm-core`.
+- Database execution and compatibility readers belong in `zzclawterm-store`.
+- PTY, SSH, SFTP, Telnet, Serial, tunnel, and transfer runtimes belong in `zzclawterm-transport`.
+- Terminal state and snapshots belong in `zzclawterm-terminal`; GPUI terminal painting belongs in `zzclawterm-terminal-gpui`.
+- GPUI state, views, and background coordination belong in `zzclawterm-desktop`.
+- Shared GPUI controls and theme integration belong in `zzclawterm-ui`.
+- RDP/VNC session management, input models, and IPC contracts belong in `zzclawterm-remote-desktop`; protocol decoders belong only in `zzclawterm-rdp-helper` and `zzclawterm-vnc-helper`.
 
 Cross-crate changes keep adapters small and explicit, with one authoritative owner for each value.
 
@@ -71,8 +71,8 @@ cargo clippy --workspace --all-targets
 
 When adding or changing application UI text, update both:
 
-- `crates/nyaterm-desktop/src/i18n/locales/zh-CN.json`
-- `crates/nyaterm-desktop/src/i18n/locales/en.json`
+- `crates/zzclawterm-desktop/src/i18n/locales/zh-CN.json`
+- `crates/zzclawterm-desktop/src/i18n/locales/en.json`
 
 For docs-site changes, keep the Chinese source under `docs-site/docs/` and the English pages under `docs-site/i18n/en/docusaurus-plugin-content-docs/current/` in sync, add any new page to `docs-site/sidebars.ts`, then run:
 
@@ -83,7 +83,7 @@ pnpm --dir docs-site build
 
 ## Changing third-party dependencies
 
-The third-party dependencies NyaTerm patches are not in this repository. Each is a patch series on a fork under [github.com/nyakang](https://github.com/nyakang) on branch `nyaterm`. The workflow is documented in [Development Setup → Changing third-party dependencies](./setup#changing-third-party-dependencies).
+The third-party dependencies ZzClawTerm patches are not in this repository. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport). The workflow is documented in [Development Setup → Changing third-party dependencies](./setup#changing-third-party-dependencies).
 
 In short: commit to the fork branch and push, then bump the pinned revision in the root `Cargo.toml`; keep the patch series split by concern; record the reason and the validation performed on the patch commit and in that branch's `NYATERM.md`. Note the fork branch and revision in your PR description.
 
@@ -95,4 +95,4 @@ Never commit or log passwords, private keys, OTP values, API secrets, or unredac
 
 ## License
 
-Contributions are licensed under the project's [Apache License 2.0](https://github.com/nyakang/nyaterm/blob/main/LICENSE).
+Contributions are licensed under the project's [Apache License 2.0](https://github.com/jackfahdin/ZzClawTerm/blob/main/LICENSE).
