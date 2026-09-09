@@ -140,6 +140,13 @@ pub struct AppSettingsSummary {
     #[serde(default = "default_terminal_font_weight_bold")]
     pub terminal_font_weight_bold: u16,
     pub x11_display: String,
+    /// Automatically ensure an X Server (VcXsrv) is running on app startup.
+    #[serde(default = "default_true")]
+    pub x11_server_autostart: bool,
+    /// Explicit X Server executable path; empty means auto-discover
+    /// (environment variables, then a `vcxsrv` directory next to the exe).
+    #[serde(default)]
+    pub x11_server_path: String,
     pub terminal_scrollback_lines: u32,
     #[serde(default = "default_terminal_keep_alive_mode")]
     pub terminal_keep_alive_mode: String,
@@ -402,6 +409,8 @@ impl Default for AppSettingsSummary {
             terminal_font_weight: default_terminal_font_weight(),
             terminal_font_weight_bold: default_terminal_font_weight_bold(),
             x11_display: String::new(),
+            x11_server_autostart: true,
+            x11_server_path: String::new(),
             terminal_scrollback_lines: 5000,
             terminal_keep_alive_mode: default_terminal_keep_alive_mode(),
             terminal_keep_alive_interval: 30,
@@ -790,6 +799,24 @@ mod tests {
         assert!(summary.ui_asset_sort_direction.is_none());
         assert!(!summary.terminal_reconnect_restore_cwd);
         assert_eq!(summary.transfer_internal_editor_font_size, 13);
+        // Legacy documents lack the X Server management keys; they must fall
+        // back to autostart-on and empty (auto-discover) path.
+        assert!(summary.x11_server_autostart);
+        assert!(summary.x11_server_path.is_empty());
+    }
+
+    #[test]
+    fn summary_roundtrips_x11_server_settings() {
+        let summary = AppSettingsSummary {
+            x11_server_autostart: false,
+            x11_server_path: "D:\\tools\\vcxsrv\\vcxsrv.exe".to_string(),
+            ..AppSettingsSummary::default()
+        };
+
+        let encoded = serde_json::to_string(&summary).expect("serializes");
+        let decoded: AppSettingsSummary = serde_json::from_str(&encoded).expect("round-trips");
+        assert!(!decoded.x11_server_autostart);
+        assert_eq!(decoded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
     }
 
     #[test]

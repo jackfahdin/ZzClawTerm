@@ -116,6 +116,8 @@ impl ConnectionStore {
                 }
             },
             x11_display: json_string(&value, &["terminal", "x11_display"], ""),
+            x11_server_autostart: json_bool(&value, &["terminal", "x11_server_autostart"], true),
+            x11_server_path: json_string(&value, &["terminal", "x11_server_path"], ""),
             terminal_scrollback_lines: json_u32(&value, &["terminal", "scrollback_lines"], 5000)
                 .clamp(100, 100_000),
             terminal_keep_alive_mode: normalize_keep_alive_mode(&json_string(
@@ -1076,6 +1078,16 @@ impl ConnectionStore {
             &mut value,
             &["terminal", "x11_display"],
             settings.x11_display.clone(),
+        );
+        set_nested_json_bool(
+            &mut value,
+            &["terminal", "x11_server_autostart"],
+            settings.x11_server_autostart,
+        );
+        set_nested_json_string(
+            &mut value,
+            &["terminal", "x11_server_path"],
+            settings.x11_server_path.trim().to_string(),
         );
         set_nested_json_value(
             &mut value,

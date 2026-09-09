@@ -1481,6 +1481,42 @@ fn save_empty_search_engine_list_roundtrip() {
 }
 
 #[test]
+fn x11_server_settings_default_for_legacy_document_and_roundtrip() {
+    let dir = unique_temp_dir("settings-x11-server");
+    let store = ConnectionStore::open(&dir).expect("store");
+
+    // A legacy settings document has no `x11_server_autostart` /
+    // `x11_server_path` keys under `terminal`; they must fall back to
+    // autostart-on and an empty (auto-discover) path.
+    let legacy = store.load_app_settings_summary().expect("load legacy");
+    assert!(legacy.x11_server_autostart);
+    assert!(legacy.x11_server_path.is_empty());
+
+    let mut summary = legacy;
+    summary.x11_server_autostart = false;
+    summary.x11_server_path = "D:\\tools\\vcxsrv\\vcxsrv.exe".to_string();
+    let saved = store.save_terminal_settings(&summary).expect("save");
+    assert!(!saved.x11_server_autostart);
+    assert_eq!(saved.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
+
+    let raw = store.load_settings_value().expect("raw");
+    assert_eq!(
+        raw["terminal"]["x11_server_autostart"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(
+        raw["terminal"]["x11_server_path"],
+        "D:\\tools\\vcxsrv\\vcxsrv.exe"
+    );
+
+    let reloaded = store.load_app_settings_summary().expect("reload");
+    assert!(!reloaded.x11_server_autostart);
+    assert_eq!(reloaded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn save_general_and_diagnostics_settings_roundtrip() {
     let dir = unique_temp_dir("settings-general-diag");
     let store = ConnectionStore::open(&dir).expect("store");
