@@ -32,3 +32,10 @@ tokio-socks.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 zmodem2.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+] }

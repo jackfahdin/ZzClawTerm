@@ -76,6 +76,11 @@ pub struct ManagedX11Info {
 #[cfg(windows)]
 struct ManagedX11Server {
     child: Child,
+    /// Kept open for the rest of the process lifetime. The kernel kills the
+    /// job's processes when its last handle closes, which happens on every
+    /// process exit path — including crash and Task Manager kills where
+    /// `shutdown_managed_x11_server` never runs.
+    _kill_on_close_job: Option<kill_on_close_job::KillOnCloseJob>,
     display: u16,
     cookie_hex: String,
     xauthority_path: PathBuf,
@@ -234,6 +239,21 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
             let path = resolve_x_server_path(configured_path).ok_or(X11ServerError::NotFound)?;
             let (xauthority_path, cookie_hex) = write_xauthority_file(display)?;
             let child = spawn_x_server(&path, display, &xauthority_path)?;
+            // Arm kill-on-close right after spawn so even a crash during the
+            // readiness wait cannot orphan VcXsrv.
+            let job = match kill_on_close_job::assign(&child) {
+                Ok(job) => Some(job),
+                Err(error) => {
+                    // A restrictive parent job (some launchers and CI runners
+                    // use one) can reject assignment; graceful shutdown still
+                    // kills the server, only crash-path cleanup is lost.
+                    tracing::warn!(
+                        %error,
+                        "could not arm kill-on-close for the managed X server"
+                    );
+                    None
+                }
+            };
             match wait_for_x_server(child, &path, display) {
                 Ok(child) => {
                     let info = ManagedX11Info {
@@ -244,6 +264,7 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
                     };
                     *guard = Some(ManagedX11Server {
                         child,
+                        _kill_on_close_job: job,
                         display,
                         cookie_hex,
                         xauthority_path,
@@ -318,6 +339,68 @@ fn spawn_exit_watchdog() {
             }
         }
     });
+}
+
+/// Windows job object armed with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The
+/// kernel closes our last handle to it on any process exit — graceful quit,
+/// crash, or Task Manager kill alike — and kills every assigned process, so a
+/// managed VcXsrv can never outlive ZzClawTerm. The handle must stay open for
+/// the whole process: closing it early destroys the job and kills the child.
+#[cfg(windows)]
+mod kill_on_close_job {
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    pub struct KillOnCloseJob(HANDLE);
+
+    // A job object is a kernel handle; the exit watchdog may drop the state
+    // holding it from its own thread.
+    unsafe impl Send for KillOnCloseJob {}
+    unsafe impl Sync for KillOnCloseJob {}
+
+    impl Drop for KillOnCloseJob {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    pub fn assign(child: &Child) -> io::Result<KillOnCloseJob> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                let error = io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(error);
+            }
+            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                let error = io::Error::last_os_error();
+                CloseHandle(job);
+                return Err(error);
+            }
+            Ok(KillOnCloseJob(job))
+        }
+    }
 }
 
 /// Kill and reap the managed server. A no-op off Windows.
@@ -469,5 +552,41 @@ mod tests {
             super::ensure_x11_server(None),
             Err(super::X11ServerError::Unsupported)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_on_close_job_kills_child_when_handle_drops() {
+        // A sleeper that would run ~29s without the job. The job's kill
+        // delivers a zero exit code, so "killed" is proven by timing: the
+        // child must exit shortly after the job handle drops.
+        let started = std::time::Instant::now();
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper");
+        let job = match super::kill_on_close_job::assign(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                // CI runners may execute tests inside a job object that
+                // rejects nesting; the graceful shutdown path is unaffected.
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("skipping: job assignment unavailable: {error}");
+                return;
+            }
+        };
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "sleeper exited before the job was dropped"
+        );
+        drop(job);
+        let _ = child.wait().expect("wait for killed child");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "child survived the job handle close"
+        );
     }
 }
