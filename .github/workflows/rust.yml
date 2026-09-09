@@ -22,6 +22,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
+  # GitCode 的 HTTP 重定向会让 cargo 内置的 git2 传输在 Windows runner 上失败，
+  # 改用系统 git 命令拉取 git 依赖。
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   RUST_BACKTRACE: '1'
 
 jobs:

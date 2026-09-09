@@ -25,6 +25,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
+  # GitCode 的 HTTP 重定向会让 cargo 内置的 git2 传输在 Windows runner 上失败
+  # (too many redirects or authentication replays)，改用系统 git 命令拉取 git 依赖。
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   # Download links in the generated manifests point at GitHub Releases assets.
   # TODO: a dedicated download mirror (previously Cloudflare R2) is planned but
   # not set up yet; restore it together with the site analytics work.
