@@ -850,6 +850,11 @@ fn ensure_managed_x11_for_session(
     let configured_path = (!configured_path.as_os_str().is_empty()).then_some(configured_path);
     match zzclawterm_transport::ensure_x11_server(configured_path.as_deref()) {
         Ok(info) => {
+            tracing::info!(
+                display = info.display,
+                started_by_us = info.started_by_us,
+                "managed X server is ready for session"
+            );
             config.x11_display = format!("localhost:{}", info.display);
             None
         }
