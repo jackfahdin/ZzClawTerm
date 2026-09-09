@@ -1,3 +1,8 @@
+// Release builds are a pure GUI app: without this the console subsystem makes
+// Windows attach a cmd window that mirrors the log output on every launch.
+// Debug builds keep the console so `cargo run` still shows tracing output.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod single_instance;
 
 use anyhow::Context as _;
