@@ -67,36 +67,51 @@ jobs:
         if: steps.release.outputs.publish != 'true'
         run: echo 'The completed Release run did not publish a version tag.'
 
-      - name: Validate mirror configuration
+      - name: Check mirror configuration
         if: steps.release.outputs.publish == 'true'
+        id: config
         shell: bash
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
           set -euo pipefail
+          configured='true'
           for name in GITCODE_OWNER GITCODE_REPO GITCODE_API_BASE GITCODE_TOKEN; do
-            [[ -n "${!name:-}" ]] || { echo "${name} is required" >&2; exit 1; }
+            if [[ -z "${!name:-}" ]]; then
+              echo "::notice::${name} is not configured; skipping the GitCode mirror."
+              configured='false'
+            fi
           done
-          [[ "${MAX_GITCODE_ASSET_MB}" =~ ^[0-9]+$ ]] || { echo 'MAX_GITCODE_ASSET_MB must be an integer' >&2; exit 1; }
+          if [[ "${configured}" == 'true' && ! "${MAX_GITCODE_ASSET_MB}" =~ ^[0-9]+$ ]]; then
+            echo 'MAX_GITCODE_ASSET_MB must be an integer' >&2
+            exit 1
+          fi
+          echo "configured=${configured}" >> "${GITHUB_OUTPUT}"
 
-      - name: Wait for mirrored tag
-        if: steps.release.outputs.publish == 'true'
+      - name: Ensure the tag exists on GitCode
+        if: steps.release.outputs.publish == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
         env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          for _ in {1..30}; do
-            if git ls-remote --exit-code "https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git" "refs/tags/${TAG}" >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "GitCode mirror tag did not appear: ${TAG}" >&2
-          exit 1
+          public_remote="https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git"
+          if git ls-remote --exit-code "${public_remote}" "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} already exists on GitCode"
+            exit 0
+          fi
+          # No checkout in this job: build a minimal repo holding just the tag
+          # and push it ourselves instead of waiting on an external mirror sync.
+          work="${RUNNER_TEMP}/gitcode-tag"
+          git init -q "${work}"
+          git -C "${work}" fetch -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          git -C "${work}" push -q "https://${GITCODE_OWNER}:${GITCODE_TOKEN}@gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          rm -rf "${work}"
+          echo "pushed tag ${TAG} to GitCode"
 
       - name: Download and verify GitHub assets
-        if: steps.release.outputs.publish == 'true'
+        if: steps.release.outputs.publish == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,7 +131,7 @@ jobs:
           (cd release-assets && sha256sum --check SHA256SUMS)
 
       - name: Install Python dependencies
-        if: steps.release.outputs.publish == 'true'
+        if: steps.release.outputs.publish == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +139,7 @@ jobs:
           "${RUNNER_TEMP}/gitcode-release-venv/bin/pip" install --disable-pip-version-check 'requests==2.32.5'
 
       - name: Create or update GitCode release
-        if: steps.release.outputs.publish == 'true'
+        if: steps.release.outputs.publish == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

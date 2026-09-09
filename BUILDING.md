@@ -356,8 +356,22 @@ git push origin v0.0.1
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_B64` | 更新器签名私钥（base64） |
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 签名私钥口令 |
 
-另有 `publish-gitcode-release.yml` 可把发布同步到 GitCode，需要额外配置
-变量 `GITCODE_OWNER`、`GITCODE_REPO` 和密钥 `GITCODE_TOKEN`。
+另有 `publish-gitcode-release.yml` 可把发布同步到 GitCode。Release 工作流
+成功后会自动触发，也可在 Actions 页面手动运行并指定 tag。未配置时整个
+任务跳过（结果为成功并附 notice），不会报错。启用需要：
+
+| 位置 | 名称 | 用途 |
+|------|------|------|
+| Settings → Variables | `GITCODE_OWNER` | GitCode 上的用户名或组织名，如 `JackfahdinImport` |
+| Settings → Variables | `GITCODE_REPO` | GitCode 上的仓库名 |
+| Settings → Secrets | `GITCODE_TOKEN` | GitCode 私人令牌，需具备仓库推送与 Release 读写权限 |
+
+可选变量：`GITCODE_API_BASE`（默认 `https://gitcode.com/api/v5`）、
+`MAX_GITCODE_ASSET_MB`（默认 `99`，超过该大小的附件不上传到 GitCode，
+改在 Release 说明中放 GitHub 备用链接）。
+
+发布 tag 不存在于 GitCode 时，工作流会用令牌自行推送该 tag，不依赖
+GitCode 的镜像同步功能。
 
 ---
 
