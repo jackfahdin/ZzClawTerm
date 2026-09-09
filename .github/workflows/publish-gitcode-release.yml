@@ -34,7 +34,7 @@ jobs:
   publish:
     name: Mirror GitHub release to GitCode
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, linux, x64, gitcode-release]
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Resolve release tag
