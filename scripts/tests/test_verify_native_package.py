@@ -41,7 +41,13 @@ def newc_entry(name: str, content: bytes) -> bytes:
     return entry + bytes((-len(entry)) % 4)
 
 
-def write_portable(path: Path, machine: int, *, helper_machine: int | None = None) -> None:
+def write_portable(
+    path: Path,
+    machine: int,
+    *,
+    helper_machine: int | None = None,
+    vcxsrv: bool = False,
+) -> None:
     """Build a portable zip whose layout matches package_native's output."""
     root = "ZzClawTerm-portable"
     with zipfile.ZipFile(path, "w") as archive:
@@ -55,6 +61,10 @@ def write_portable(path: Path, machine: int, *, helper_machine: int | None = Non
         archive.writestr(f"{root}/LICENSE", b"license")
         archive.writestr(f"{root}/VERSION", b"0.0.1\n")
         archive.writestr(f"{root}/data/.keep", b"")
+        if vcxsrv:
+            archive.writestr(f"{root}/vcxsrv/vcxsrv.exe", fake_pe(machine))
+            archive.writestr(f"{root}/vcxsrv/NOTICE.txt", b"notice")
+            archive.writestr(f"{root}/vcxsrv/fonts/fonts.dir", b"1\n")
 
 
 class VerifyNativePackageTests(unittest.TestCase):
@@ -97,6 +107,34 @@ class VerifyNativePackageTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, "PE machine 0xaa64 for zzclawterm-rdp-helper.exe"
             ):
+                verify_native_package.verify_windows_portable(
+                    path, "x86_64-pc-windows-msvc", "0.0.1"
+                )
+
+    def test_windows_portable_accepts_a_complete_vcxsrv_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(path, 0x8664, helper_machine=0x8664, vcxsrv=True)
+            verify_native_package.verify_windows_portable(
+                path, "x86_64-pc-windows-msvc", "0.0.1"
+            )
+
+    def test_windows_portable_rejects_a_vcxsrv_tree_without_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            root = "ZzClawTerm-portable"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(f"{root}/ZzClawTerm.exe", fake_pe(0x8664))
+                for name in verify_native_package.helper_filenames(
+                    "x86_64-pc-windows-msvc"
+                ):
+                    archive.writestr(f"{root}/{name}", fake_pe(0x8664))
+                archive.writestr(f"{root}/zzclawterm-portable", b"")
+                archive.writestr(f"{root}/LICENSE", b"license")
+                archive.writestr(f"{root}/VERSION", b"0.0.1\n")
+                archive.writestr(f"{root}/data/.keep", b"")
+                archive.writestr(f"{root}/vcxsrv/NOTICE.txt", b"notice")
+            with self.assertRaisesRegex(RuntimeError, "vcxsrv/vcxsrv.exe"):
                 verify_native_package.verify_windows_portable(
                     path, "x86_64-pc-windows-msvc", "0.0.1"
                 )

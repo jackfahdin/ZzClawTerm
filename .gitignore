@@ -41,6 +41,10 @@ dist-ssr
 # of the build: those dependencies come from pinned fork revisions in Cargo.toml.
 temp/
 
+# VcXsrv (GPLv3) binaries are supplied locally for Windows packaging only and
+# must never be committed.
+vendor/vcxsrv/
+
 # Python automation
 __pycache__/
 *.py[cod]

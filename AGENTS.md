@@ -241,7 +241,10 @@ A bare `cargo build` or `cargo check` covers all three: they are the workspace
 `default-members`. `ZZCLAWTERM_RDP_HELPER` and `ZZCLAWTERM_VNC_HELPER` override the
 lookup with an explicit path. `scripts/release/package_native.py` is what puts the
 helpers next to the application in release packages; its `HELPER_BINS` list must
-name every helper.
+name every helper. Windows packages may additionally bundle the VcXsrv X server
+(GPLv3, resolved from `ZZCLAWTERM_VCXSRV_DIST` or `vendor/vcxsrv/`, never
+committed) as a `vcxsrv/` directory beside the executable, with a `NOTICE.txt`
+recording its license and source.
 
 Before review, run the relevant broader checks:
 

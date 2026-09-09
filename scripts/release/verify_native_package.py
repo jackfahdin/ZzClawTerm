@@ -174,6 +174,15 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing: {', '.join(sorted(missing))}")
+        # The bundled VcXsrv tree is optional, but when present it must be
+        # complete enough to launch and to satisfy the GPLv3 notice.
+        vcxsrv_prefix = f"{root}/{package_native.VCXSRV_DIRNAME}/"
+        if any(name.startswith(vcxsrv_prefix) for name in names):
+            for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
+                if f"{vcxsrv_prefix}{member}" not in names:
+                    raise RuntimeError(
+                        f"{path.name} is missing: {vcxsrv_prefix}{member}"
+                    )
         packaged_version = archive.read(f"{root}/VERSION").decode("utf-8").strip()
         if packaged_version != version:
             raise RuntimeError(f"{path.name} contains version {packaged_version}, expected {version}")
@@ -212,12 +221,30 @@ def verify_windows_installer(path: Path, target: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
         )
-        names = {candidate.name for candidate in output.rglob("*") if candidate.is_file()}
+        installed = [
+            candidate for candidate in output.rglob("*") if candidate.is_file()
+        ]
+    names = {candidate.name for candidate in installed}
     required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
     required.update(helper_filenames(target))
     missing = required - names
     if missing:
         raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
+    # The VcXsrv directory is optional; when present it must ship vcxsrv.exe
+    # and the GPLv3 NOTICE.txt next to it.
+    vcxsrv_entries = [
+        candidate
+        for candidate in installed
+        if package_native.VCXSRV_DIRNAME
+        in candidate.relative_to(output).parts
+    ]
+    if vcxsrv_entries:
+        vcxsrv_names = {candidate.name for candidate in vcxsrv_entries}
+        for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
+            if member not in vcxsrv_names:
+                raise RuntimeError(
+                    f"{path.name} contains a vcxsrv directory without {member}"
+                )
 
 
 def verify_macos_archive(path: Path, target: str, version: str) -> None:

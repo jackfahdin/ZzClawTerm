@@ -266,6 +266,23 @@ python scripts/release/package_native.py x86_64-pc-windows-msvc
 `..._windows_x64-portable.zip`（便携版，内含应用、helper、LICENSE 等）。
 ARM64 换用 `aarch64-pc-windows-msvc`。
 
+#### 随包附带 VcXsrv（X Server，可选）
+
+Windows 包可以附带 VcXsrv，供 SSH X11 转发时以独立进程方式自动拉起。
+打包脚本按以下顺序解析 VcXsrv 编译产物目录（目录根下必须有
+`vcxsrv.exe`，并包含 `fonts/`、`locale/` 等数据目录）：
+
+1. 环境变量 `ZZCLAWTERM_VCXSRV_DIST` 指向的目录；
+2. 仓库内的 `vendor/vcxsrv/`（已被 `.gitignore` 排除，不会入库）。
+
+两者都不存在时脚本会打印醒目 warning 并继续打出不含 X Server 的包。
+来源可以是自行编译的 VcXsrv（`msbuild` Release x64 产物目录），也可以是
+官方发布的安装目录解压结果。找到后整个目录会复制到包内的 `vcxsrv/`
+子目录，并自动写入一份 `NOTICE.txt`。
+
+注意：VcXsrv 采用 GPLv3，随包分发时必须附带源码出处说明——包内的
+`vcxsrv/NOTICE.txt` 即为此用途，不要删除。
+
 ### macOS
 
 前置：无额外工具（`hdiutil` 系统自带）。需在对应架构的 macOS 上构建。

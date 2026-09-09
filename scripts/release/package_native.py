@@ -31,6 +31,28 @@ APP_BIN = "zzclawterm"
 # The executables are branded zzclawterm-* while their Cargo packages keep the
 # zzclawterm-* names.
 HELPER_BINS = ("zzclawterm-rdp-helper", "zzclawterm-vnc-helper", "zzclawterm-mcp")
+# VcXsrv (GPLv3 X server) is bundled with Windows packages as a whole directory
+# tree beside the application so SSH X11 forwarding can spawn it as a separate
+# process. It is not a helper binary: it is not built by Cargo and it carries
+# fonts/, locale/ and other data directories vcxsrv.exe needs at runtime.
+VCXSRV_ENV_VAR = "ZZCLAWTERM_VCXSRV_DIST"
+VCXSRV_DIRNAME = "vcxsrv"
+VCXSRV_EXE = "vcxsrv.exe"
+VCXSRV_NOTICE = textwrap.dedent(
+    """
+    VcXsrv Windows X Server
+    =======================
+
+    This directory contains VcXsrv, an X server for Windows licensed under the
+    GNU General Public License version 3 (GPLv3). ZzClawTerm launches
+    vcxsrv.exe as a separate, standalone process to display remote X11
+    applications for SSH sessions with X11 forwarding; the ZzClawTerm
+    executable does not link against or derive from VcXsrv.
+
+    VcXsrv source code and license:
+      https://sourceforge.net/projects/vcxsrv/
+    """
+).lstrip()
 MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
 LINUX_PACKAGE = "zzclawterm"
 URL_SCHEME = "zzclawterm"
@@ -193,6 +215,55 @@ def copy_helpers(destination: Path, target: str) -> list[Path]:
     return copied
 
 
+def resolve_vcxsrv_source() -> Path | None:
+    """Locate the VcXsrv distribution tree to bundle with Windows packages.
+
+    The ZZCLAWTERM_VCXSRV_DIST environment variable wins over the in-repo
+    vendor/vcxsrv directory. A candidate that exists without vcxsrv.exe is a
+    configuration error; no candidate at all means the package ships without
+    an X server.
+    """
+    candidates: list[tuple[str, Path]] = []
+    configured = os.environ.get(VCXSRV_ENV_VAR)
+    if configured:
+        candidates.append((f"${VCXSRV_ENV_VAR}", Path(configured)))
+    candidates.append(("vendor directory", ROOT_DIR / "vendor" / VCXSRV_DIRNAME))
+    for origin, candidate in candidates:
+        if not candidate.is_dir():
+            if origin.startswith("$"):
+                raise RuntimeError(
+                    f"{VCXSRV_ENV_VAR} does not point at a directory: {candidate}"
+                )
+            continue
+        if not (candidate / VCXSRV_EXE).is_file():
+            raise RuntimeError(
+                f"VcXsrv source from {origin} is missing {VCXSRV_EXE}: {candidate}"
+            )
+        return candidate
+    return None
+
+
+def stage_vcxsrv(destination: Path) -> Path | None:
+    """Copy the VcXsrv tree into destination/vcxsrv with a GPL NOTICE.txt.
+
+    Returns the staged directory, or None (with a prominent warning) when no
+    VcXsrv source is available, since packages without an X server are valid.
+    """
+    source = resolve_vcxsrv_source()
+    if source is None:
+        print(
+            f"WARNING: no VcXsrv distribution found (set {VCXSRV_ENV_VAR} or "
+            f"populate vendor/{VCXSRV_DIRNAME}/); packaging without an X server",
+            flush=True,
+        )
+        return None
+    staged = destination / VCXSRV_DIRNAME
+    shutil.copytree(source, staged)
+    (staged / "NOTICE.txt").write_text(VCXSRV_NOTICE, encoding="utf-8")
+    print(f"==> Bundled VcXsrv from {source}", flush=True)
+    return staged
+
+
 def copy_release_documents(destination: Path, version: str) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LICENSE_PATH, destination / "LICENSE")
@@ -244,6 +315,7 @@ def create_windows_packages(
     portable_root.mkdir()
     shutil.copy2(binary, portable_root / "ZzClawTerm.exe")
     copy_helpers(portable_root, info.target)
+    stage_vcxsrv(portable_root)
     (portable_root / PORTABLE_MARKER).touch()
     (portable_root / "data").mkdir()
     (portable_root / "data" / ".keep").touch()
@@ -257,6 +329,7 @@ def create_windows_packages(
     installer_root.mkdir()
     shutil.copy2(binary, installer_root / "ZzClawTerm.exe")
     installer_helpers = copy_helpers(installer_root, info.target)
+    installer_vcxsrv = stage_vcxsrv(installer_root)
     copy_release_documents(installer_root, version)
     shutil.copy2(ICON_DIR / "icon.ico", installer_root / "icon.ico")
 
@@ -267,6 +340,11 @@ def create_windows_packages(
     helper_uninstall = nsis_indent.join(
         f'Delete "$INSTDIR\\{path.name}"' for path in installer_helpers
     )
+    vcxsrv_install = ""
+    vcxsrv_uninstall = ""
+    if installer_vcxsrv is not None:
+        vcxsrv_install = f'{nsis_indent}File /r "{nsis_path(installer_vcxsrv)}"'
+        vcxsrv_uninstall = f'{nsis_indent}RMDir /r "$INSTDIR\\{VCXSRV_DIRNAME}"'
 
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}-setup.exe"
     script = WORK_DIR / "zzclawterm-installer.nsi"
@@ -302,7 +380,7 @@ def create_windows_packages(
             Section "ZzClawTerm" SecMain
               SetOutPath "$INSTDIR"
               File "{nsis_path(installer_root / 'ZzClawTerm.exe')}"
-              {helper_install}
+              {helper_install}{vcxsrv_install}
               File "{nsis_path(installer_root / 'LICENSE')}"
               File "{nsis_path(installer_root / 'VERSION')}"
               File "{nsis_path(installer_root / 'icon.ico')}"
@@ -326,7 +404,7 @@ def create_windows_packages(
               Delete "$SMPROGRAMS\ZzClawTerm\ZzClawTerm.lnk"
               RMDir "$SMPROGRAMS\ZzClawTerm"
               Delete "$INSTDIR\ZzClawTerm.exe"
-              {helper_uninstall}
+              {helper_uninstall}{vcxsrv_uninstall}
               Delete "$INSTDIR\LICENSE"
               Delete "$INSTDIR\VERSION"
               Delete "$INSTDIR\icon.ico"

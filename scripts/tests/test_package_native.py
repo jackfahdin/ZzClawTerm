@@ -4,6 +4,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -180,6 +181,144 @@ class PackageNativeTests(unittest.TestCase):
         )
         self.assertNotIn(r"Software\Classes\ssh", script)
         self.assertNotIn(r"Software\Classes\telnet", script)
+
+    def test_vcxsrv_source_prefers_environment_over_vendor_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_dist = root / "vcxsrv-env"
+            vendor_dist = root / "vendor" / "vcxsrv"
+            for dist in (env_dist, vendor_dist):
+                dist.mkdir(parents=True)
+                (dist / package_native.VCXSRV_EXE).write_bytes(b"MZ")
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {package_native.VCXSRV_ENV_VAR: str(env_dist)},
+                ),
+                mock.patch.object(package_native, "ROOT_DIR", root),
+            ):
+                self.assertEqual(package_native.resolve_vcxsrv_source(), env_dist)
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                mock.patch.object(package_native, "ROOT_DIR", root),
+            ):
+                self.assertEqual(package_native.resolve_vcxsrv_source(), vendor_dist)
+
+    def test_vcxsrv_source_requires_the_executable_and_allows_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_dist = root / "vcxsrv-env"
+            env_dist.mkdir()
+            with mock.patch.dict(
+                "os.environ", {package_native.VCXSRV_ENV_VAR: str(env_dist)}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "vcxsrv.exe"):
+                    package_native.resolve_vcxsrv_source()
+            with mock.patch.dict(
+                "os.environ",
+                {package_native.VCXSRV_ENV_VAR: str(root / "missing")},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "does not point"):
+                    package_native.resolve_vcxsrv_source()
+            vendor_dist = root / "vendor" / "vcxsrv"
+            vendor_dist.mkdir(parents=True)
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                mock.patch.object(package_native, "ROOT_DIR", root),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "vcxsrv.exe"):
+                    package_native.resolve_vcxsrv_source()
+                vendor_dist.rmdir()
+                self.assertIsNone(package_native.resolve_vcxsrv_source())
+
+    def test_stage_vcxsrv_copies_the_tree_and_writes_a_gpl_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "vcxsrv-dist"
+            (source / "fonts").mkdir(parents=True)
+            (source / package_native.VCXSRV_EXE).write_bytes(b"MZ")
+            (source / "fonts" / "fonts.dir").write_text("1\n", encoding="utf-8")
+            destination = root / "package"
+            destination.mkdir()
+            with mock.patch.dict(
+                "os.environ", {package_native.VCXSRV_ENV_VAR: str(source)}
+            ):
+                staged = package_native.stage_vcxsrv(destination)
+            self.assertEqual(staged, destination / package_native.VCXSRV_DIRNAME)
+            self.assertTrue((staged / package_native.VCXSRV_EXE).is_file())
+            self.assertTrue((staged / "fonts" / "fonts.dir").is_file())
+            notice = (staged / "NOTICE.txt").read_text(encoding="utf-8")
+            self.assertIn("GPLv3", notice)
+            self.assertIn("sourceforge.net/projects/vcxsrv", notice)
+
+    def test_stage_vcxsrv_warns_and_skips_without_a_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "package"
+            destination.mkdir()
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                mock.patch.object(package_native, "ROOT_DIR", root),
+                mock.patch("builtins.print") as printed,
+            ):
+                self.assertIsNone(package_native.stage_vcxsrv(destination))
+            warning = " ".join(
+                " ".join(str(argument) for argument in call.args)
+                for call in printed.call_args_list
+            )
+            self.assertIn("WARNING", warning)
+            self.assertIn(package_native.VCXSRV_ENV_VAR, warning)
+            self.assertFalse(
+                (destination / package_native.VCXSRV_DIRNAME).exists()
+            )
+
+    def test_windows_packages_bundle_vcxsrv_in_zip_and_installer(self) -> None:
+        target = "x86_64-pc-windows-msvc"
+        info = package_native.target_info(target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vcxsrv = root / "vcxsrv-dist"
+            (vcxsrv / "fonts").mkdir(parents=True)
+            (vcxsrv / package_native.VCXSRV_EXE).write_bytes(b"MZ")
+            (vcxsrv / "fonts" / "fonts.dir").write_text("1\n", encoding="utf-8")
+            helpers = []
+            for name in package_native.HELPER_BINS:
+                fake = root / "build" / f"{name}.exe"
+                fake.parent.mkdir(parents=True, exist_ok=True)
+                fake.write_bytes(b"MZ")
+                helpers.append(fake)
+            with (
+                mock.patch.object(package_native, "WORK_DIR", root / "work"),
+                mock.patch.object(package_native, "DIST_DIR", root / "dist"),
+                mock.patch.object(package_native, "run"),
+                mock.patch.object(
+                    package_native, "find_makensis", return_value="makensis"
+                ),
+                mock.patch.object(
+                    package_native, "helper_binary_paths", return_value=helpers
+                ),
+                mock.patch.dict(
+                    "os.environ", {package_native.VCXSRV_ENV_VAR: str(vcxsrv)}
+                ),
+            ):
+                package_native.WORK_DIR.mkdir(parents=True)
+                package_native.DIST_DIR.mkdir(parents=True)
+                application = root / "zzclawterm.exe"
+                application.write_bytes(b"MZ")
+                package_native.create_windows_packages(
+                    application, info, "0.0.1", "0.0.1"
+                )
+                script = (
+                    package_native.WORK_DIR / "zzclawterm-installer.nsi"
+                ).read_text(encoding="utf-8")
+                portable = next(package_native.DIST_DIR.glob("*_portable.zip"))
+                with zipfile.ZipFile(portable) as archive:
+                    names = set(archive.namelist())
+        self.assertRegex(script, r'File /r ".*\\vcxsrv"')
+        self.assertIn(r'RMDir /r "$INSTDIR\vcxsrv"', script)
+        self.assertIn("ZzClawTerm-portable/vcxsrv/vcxsrv.exe", names)
+        self.assertIn("ZzClawTerm-portable/vcxsrv/NOTICE.txt", names)
+        self.assertIn("ZzClawTerm-portable/vcxsrv/fonts/fonts.dir", names)
 
     def test_linux_desktop_registers_only_zzclawterm_url_scheme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
