@@ -2430,7 +2430,12 @@
     "wordSeparatorsDesc": "Characters that split words on double-click.",
     "x11Display": "Local X11 DISPLAY",
     "x11DisplayDesc": "Requires a local X server. Windows can use VcXsrv/Xming, macOS can use XQuartz, and Linux usually uses Xorg/Xwayland.",
-    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0"
+    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0",
+    "x11ServerAutostart": "Run X server automatically at startup",
+    "x11ServerAutostartDesc": "On Windows, start or reuse VcXsrv in the background at launch. SSH sessions with X11 forwarding also ensure it on demand.",
+    "x11ServerPath": "X Server Path",
+    "x11ServerPathDesc": "Path to vcxsrv.exe. Leave empty to auto-detect: the ZZCLAWTERM_XSERVER environment variable, then the bundled vcxsrv folder beside the application.",
+    "x11ServerPathPlaceholder": "Leave empty to auto-discover VcXsrv"
   },
   "sshAuth": {
     "agentWaitingTitle": "Waiting for SSH Agent approval",

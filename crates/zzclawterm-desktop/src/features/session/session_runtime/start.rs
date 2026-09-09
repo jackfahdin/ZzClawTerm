@@ -37,6 +37,7 @@ pub(in crate::features) struct SshSessionConfigBuildContext {
     pub(in crate::features) store: StoreBlockingClient,
     pub(in crate::features) host_key_policy: String,
     pub(in crate::features) x11_display: String,
+    pub(in crate::features) x11_server_path: String,
     pub(in crate::features) default_encoding: String,
     pub(in crate::features) keep_alive_interval_secs: u32,
     pub(in crate::features) terminal_shell_integration: bool,
@@ -673,6 +674,10 @@ impl ZzClawTermApp {
                     config.pixel_width = geometry.pixel_width;
                     config.pixel_height = geometry.pixel_height;
                 }
+                let start_warnings =
+                    ensure_managed_x11_for_session(&mut config, &build_context.x11_server_path)
+                        .into_iter()
+                        .collect();
                 let multiplex =
                     open_ssh_multiplex_handle(config.clone()).map_err(|error| error.to_string())?;
                 let session_info = match session_manager
@@ -693,6 +698,7 @@ impl ZzClawTermApp {
                     session_info,
                     multiplex_handle: Some(multiplex),
                     launch_config: Some(SessionLaunchConfig::Ssh(Box::new(config))),
+                    start_warnings,
                 })
             },
         );
@@ -711,6 +717,7 @@ impl ZzClawTermApp {
             store: self.store_blocking_client(),
             host_key_policy: self.settings.summary().host_key_policy.clone(),
             x11_display: self.settings.summary().x11_display.clone(),
+            x11_server_path: self.settings.summary().x11_server_path.clone(),
             default_encoding: self.settings.summary().interaction_default_encoding.clone(),
             keep_alive_interval_secs,
             terminal_shell_integration: self.settings.summary().terminal_zebra_stripes_enabled,
@@ -821,6 +828,48 @@ impl ZzClawTermApp {
             config.pixel_height = geometry.pixel_height;
         }
     }
+}
+
+/// Ensure a local X server exists for a session that requested X11 forwarding,
+/// returning a terminal warning when that failed.
+///
+/// Runs inside the session-start blocking job: `ensure_x11_server` spawns and
+/// polls a process for up to ~10s. On success the runtime display is overridden
+/// with the managed display so the cookie rewriter in transport's `x11.rs`
+/// finds the managed cookie. A failure never blocks the session — the warning
+/// text follows the `[X11]` style of transport's own forwarding messages.
+#[cfg(windows)]
+fn ensure_managed_x11_for_session(
+    config: &mut SshSessionConfig,
+    configured_path: &str,
+) -> Option<String> {
+    if !config.x11_forwarding {
+        return None;
+    }
+    let configured_path = std::path::PathBuf::from(configured_path.trim());
+    let configured_path = (!configured_path.as_os_str().is_empty()).then_some(configured_path);
+    match zzclawterm_transport::ensure_x11_server(configured_path.as_deref()) {
+        Ok(info) => {
+            config.x11_display = format!("localhost:{}", info.display);
+            None
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to ensure a managed X server");
+            Some(format!(
+                "[X11] Could not start or find a local X server: {error}\r\n[X11] The session continues without it; X11 forwarding fails until an X server is available.\r\n"
+            ))
+        }
+    }
+}
+
+/// Off Windows there is no managed X server; the system X server is used as
+/// before, so nothing changes and no warning is ever produced.
+#[cfg(not(windows))]
+fn ensure_managed_x11_for_session(
+    _config: &mut SshSessionConfig,
+    _configured_path: &str,
+) -> Option<String> {
+    None
 }
 
 pub(in crate::features) fn build_ssh_session_config_with_context(
@@ -1242,6 +1291,7 @@ mod tests {
             store: store.clone(),
             host_key_policy: "accept".to_string(),
             x11_display: String::new(),
+            x11_server_path: String::new(),
             default_encoding: "UTF-8".to_string(),
             terminal_shell_integration: true,
             keep_alive_interval_secs: 30,

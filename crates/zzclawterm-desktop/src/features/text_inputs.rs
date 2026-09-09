@@ -562,6 +562,8 @@ impl ZzClawTermApp {
             self.apply_interaction_word_separators(text, cx);
         } else if id.as_ref() == "settings.terminal.x11-display" {
             self.apply_terminal_x11_display(text, cx);
+        } else if id.as_ref() == "settings.terminal.x11-server-path" {
+            self.apply_terminal_x11_server_path(text, cx);
         } else if id.as_ref() == "settings.terminal.timestamp-format" {
             self.apply_terminal_timestamp_format(text, cx);
         } else if id.as_ref() == "settings.security.master-password" {

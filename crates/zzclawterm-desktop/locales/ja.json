@@ -2390,7 +2390,12 @@
     "wordSeparatorsDesc": "ダブルクリック時に単語を分割する文字。",
     "x11Display": "ローカル X11 DISPLAY",
     "x11DisplayDesc": "ローカルの X サーバーが必要です。Windows は VcXsrv/Xming、macOS は XQuartz、Linux は通常 Xorg/Xwayland を使用できます。",
-    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0"
+    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0",
+    "x11ServerAutostart": "Run X server automatically at startup",
+    "x11ServerAutostartDesc": "On Windows, start or reuse VcXsrv in the background at launch. SSH sessions with X11 forwarding also ensure it on demand.",
+    "x11ServerPath": "X Server Path",
+    "x11ServerPathDesc": "Path to vcxsrv.exe. Leave empty to auto-detect: the ZZCLAWTERM_XSERVER environment variable, then the bundled vcxsrv folder beside the application.",
+    "x11ServerPathPlaceholder": "Leave empty to auto-discover VcXsrv"
   },
 
   "sshAuth": {

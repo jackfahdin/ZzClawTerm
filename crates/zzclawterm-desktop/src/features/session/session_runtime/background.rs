@@ -324,6 +324,7 @@ impl ZzClawTermApp {
                         session_info: info,
                         multiplex_handle: Some(multiplex),
                         launch_config: Some(SessionLaunchConfig::Ssh(Box::new(config))),
+                        start_warnings: Vec::new(),
                     }),
                     Err(error) => {
                         if let Err(disconnect_error) = multiplex.disconnect() {
@@ -431,6 +432,7 @@ impl ZzClawTermApp {
                         session_info: info,
                         multiplex_handle: Some(multiplex),
                         launch_config: Some(SessionLaunchConfig::Ssh(Box::new(config))),
+                        start_warnings: Vec::new(),
                     }),
                     Err(error) => {
                         if !reused_multiplex && let Err(disconnect_error) = multiplex.disconnect() {
@@ -551,11 +553,12 @@ impl ZzClawTermApp {
         let worker_to_ui_duration =
             Instant::now().saturating_duration_since(event.worker_finished_at);
         match event.result {
-            Ok(success) => {
+            Ok(mut success) => {
                 let ui_register_started_at = Instant::now();
                 self.shell.clear_last_connect_failure();
                 let session_info = success.session_info;
                 let session_id = session_info.id.clone();
+                let start_warnings = std::mem::take(&mut success.start_warnings);
                 let reconnect_session_id = pending
                     .as_ref()
                     .and_then(|pending| pending.reconnect_session_id.clone());
@@ -658,6 +661,9 @@ impl ZzClawTermApp {
                     self.seed_terminal_frame_session(&session_id, seed_output.clone(), &encoding);
                     self.terminal
                         .seed_session_view(session_id.clone(), seed_output, &encoding);
+                }
+                for warning in start_warnings {
+                    self.append_terminal_log_for_session(Some(&session_id), &warning, true);
                 }
                 if tab_placement.is_none()
                     && fallback_insert_index.is_none()
@@ -820,6 +826,7 @@ fn create_session_from_launch_config(
                 session_info,
                 multiplex_handle: None,
                 launch_config: None,
+                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Ssh(config) => {
@@ -831,6 +838,7 @@ fn create_session_from_launch_config(
                     session_info,
                     multiplex_handle: Some(multiplex),
                     launch_config: None,
+                    start_warnings: Vec::new(),
                 }),
                 Err(error) => {
                     if let Err(disconnect_error) = multiplex.disconnect() {
@@ -849,6 +857,7 @@ fn create_session_from_launch_config(
                 session_info,
                 multiplex_handle: None,
                 launch_config: None,
+                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Serial(config) => session_manager
@@ -857,6 +866,7 @@ fn create_session_from_launch_config(
                 session_info,
                 multiplex_handle: None,
                 launch_config: None,
+                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Rdp(_) | SessionLaunchConfig::Vnc(_) => {

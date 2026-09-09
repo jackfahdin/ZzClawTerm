@@ -24,6 +24,9 @@ impl SettingsPanel {
         let x11_display_input = self
             .existing_text_input_box("settings.terminal.x11-display", false)
             .into_any_element();
+        let x11_server_path_input = self
+            .existing_text_input_box("settings.terminal.x11-server-path", false)
+            .into_any_element();
         let timestamp_format_input = self
             .existing_text_input_box("settings.terminal.timestamp-format", false)
             .into_any_element();
@@ -93,6 +96,31 @@ impl SettingsPanel {
                                 t!("settings.x11DisplayDesc"),
                             ))
                             .child(div().w_full().max_w(px(520.)).child(x11_display_input)),
+                    )
+                    .child(settings_form_row(
+                        palette,
+                        t!("settings.x11ServerAutostart"),
+                        Some(SharedString::from(t!("settings.x11ServerAutostartDesc"))),
+                        settings_switch(
+                            palette,
+                            "terminal-x11-server-autostart",
+                            self.settings.summary().x11_server_autostart,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_x11_server_autostart(cx);
+                            }),
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(terminal_settings_field_meta(
+                                palette,
+                                t!("settings.x11ServerPath"),
+                                t!("settings.x11ServerPathDesc"),
+                            ))
+                            .child(div().w_full().max_w(px(520.)).child(x11_server_path_input)),
                     )
                     .child(settings_form_row(
                         palette,

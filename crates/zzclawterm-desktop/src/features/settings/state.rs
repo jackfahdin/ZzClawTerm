@@ -476,6 +476,14 @@ impl SettingsFeatureState {
         self.summary.x11_display = text;
     }
 
+    pub(in crate::features) fn set_terminal_x11_server_path(&mut self, text: String) {
+        self.summary.x11_server_path = text;
+    }
+
+    pub(in crate::features) fn toggle_x11_server_autostart(&mut self) {
+        self.summary.x11_server_autostart = !self.summary.x11_server_autostart;
+    }
+
     pub(in crate::features) fn toggle_terminal_hardware_acceleration(&mut self) {
         self.summary.terminal_hardware_acceleration = !self.summary.terminal_hardware_acceleration;
     }

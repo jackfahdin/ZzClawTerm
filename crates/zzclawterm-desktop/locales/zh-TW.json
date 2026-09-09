@@ -2383,7 +2383,12 @@
     "wordSeparatorsDesc": "雙擊選取文字時分隔字詞的字元。",
     "x11Display": "本機 X11 DISPLAY",
     "x11DisplayDesc": "需要本機已安裝並啟動 X server。Windows 可使用 VcXsrv/Xming，macOS 可使用 XQuartz，Linux 通常使用 Xorg/Xwayland。",
-    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0"
+    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0",
+    "x11ServerAutostart": "啟動時自動執行 X Server",
+    "x11ServerAutostartDesc": "在 Windows 上啟動應用程式時於背景自動啟動或重用 VcXsrv；勾選 X11 轉發的 SSH 工作階段也會按需確保其執行。",
+    "x11ServerPath": "X Server 路徑",
+    "x11ServerPathDesc": "vcxsrv.exe 的路徑。留空則自動偵測：先讀 ZZCLAWTERM_XSERVER 環境變數，再尋找應用程式旁的 vcxsrv 目錄。",
+    "x11ServerPathPlaceholder": "留空自動探索 VcXsrv"
   },
   "sshAuth": {
     "agentWaitingTitle": "等待 SSH Agent 授權",

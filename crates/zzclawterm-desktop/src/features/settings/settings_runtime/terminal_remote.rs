@@ -15,6 +15,53 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
+    /// Apply an edit from the X server path box.
+    pub(in crate::features) fn apply_terminal_x11_server_path(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.set_terminal_x11_server_path(text);
+        cx.notify();
+    }
+
+    pub(in crate::features) fn toggle_x11_server_autostart(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_x11_server_autostart();
+        self.save_terminal_settings(cx);
+    }
+
+    /// Warm up the managed X server once after startup when the user opted in.
+    ///
+    /// The spawn/poll in `ensure_x11_server` blocks for up to ~10s, so it runs
+    /// on the blocking-job scheduler; a failure is logged, never surfaced.
+    pub(in crate::features) fn maybe_autostart_x11_server(&self) {
+        if !cfg!(windows) {
+            return;
+        }
+        let summary = self.settings.summary();
+        if !summary.x11_server_autostart {
+            return;
+        }
+        let configured_path = summary.x11_server_path.trim().to_string();
+        if let Err(error) = self
+            .blocking_jobs
+            .submit_detached("x11-server-autostart", move |_| {
+                let path = std::path::PathBuf::from(&configured_path);
+                let path = (!path.as_os_str().is_empty()).then_some(path);
+                match zzclawterm_transport::ensure_x11_server(path.as_deref()) {
+                    Ok(info) => tracing::info!(
+                        display = info.display,
+                        started_by_us = info.started_by_us,
+                        "managed X server is ready"
+                    ),
+                    Err(error) => tracing::warn!(%error, "managed X server autostart failed"),
+                }
+            })
+        {
+            tracing::warn!(%error, "failed to queue the X server autostart job");
+        }
+    }
+
     pub(in crate::features) fn toggle_terminal_hardware_acceleration(
         &mut self,
         cx: &mut Context<Self>,

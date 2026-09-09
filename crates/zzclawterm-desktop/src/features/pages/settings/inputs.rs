@@ -276,6 +276,12 @@ impl ZzClawTermApp {
             cx,
         );
         self.ensure_text_input(
+            "settings.terminal.x11-server-path",
+            &summary.x11_server_path,
+            TextInputSetup::placeholder(t!("settings.x11ServerPathPlaceholder")),
+            cx,
+        );
+        self.ensure_text_input(
             "settings.terminal.timestamp-format",
             &summary.terminal_timestamp_format,
             TextInputSetup::placeholder("[HH:mm:ss]"),

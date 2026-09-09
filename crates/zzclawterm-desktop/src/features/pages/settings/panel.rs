@@ -2006,6 +2006,7 @@ forward_app_action!(
     toggle_transfer_ask_save_location,
     toggle_transfer_preserve_timestamps,
     toggle_transfer_resume_broken,
+    toggle_x11_server_autostart,
 );
 
 #[cfg(test)]

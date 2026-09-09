@@ -45,6 +45,9 @@ pub(in crate::features) struct SessionStartSuccess {
     pub(in crate::features) session_info: SessionInfo,
     pub(in crate::features) multiplex_handle: Option<SshMultiplexHandle>,
     pub(in crate::features) launch_config: Option<SessionLaunchConfig>,
+    /// Non-fatal worker warnings (for example a failed managed X server start)
+    /// to append to the session terminal once it is registered.
+    pub(in crate::features) start_warnings: Vec<String>,
 }
 
 pub(in crate::features) fn submit_session_start_job(

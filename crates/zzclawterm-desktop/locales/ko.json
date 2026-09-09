@@ -2383,7 +2383,12 @@
     "wordSeparatorsDesc": "더블 클릭 시 단어를 구분하는 문자입니다.",
     "x11Display": "로컬 X11 DISPLAY",
     "x11DisplayDesc": "로컬 X 서버가 필요합니다. Windows는 VcXsrv/Xming, macOS는 XQuartz, Linux는 보통 Xorg/Xwayland를 사용할 수 있습니다.",
-    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0"
+    "x11DisplayPlaceholder": "Windows: localhost:0 / Linux/macOS: :0",
+    "x11ServerAutostart": "Run X server automatically at startup",
+    "x11ServerAutostartDesc": "On Windows, start or reuse VcXsrv in the background at launch. SSH sessions with X11 forwarding also ensure it on demand.",
+    "x11ServerPath": "X Server Path",
+    "x11ServerPathDesc": "Path to vcxsrv.exe. Leave empty to auto-detect: the ZZCLAWTERM_XSERVER environment variable, then the bundled vcxsrv folder beside the application.",
+    "x11ServerPathPlaceholder": "Leave empty to auto-discover VcXsrv"
   },
   "sshAuth": {
     "agentWaitingTitle": "SSH Agent 승인 대기 중",

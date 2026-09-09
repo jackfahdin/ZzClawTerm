@@ -27,6 +27,9 @@ struct ShutdownSessionSnapshot {
 
 impl ZzClawTermApp {
     pub(crate) fn shutdown_blocking_jobs(&mut self) {
+        // Kill the VcXsrv we spawned before the sessions it serves disappear;
+        // a no-op off Windows or when the server was reused, never spawned.
+        zzclawterm_transport::shutdown_managed_x11_server();
         self.shutdown_remote_desktop_workers();
         self.session.shutdown_workers();
         self.terminal.shutdown_workers();
