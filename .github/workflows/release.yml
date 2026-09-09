@@ -299,7 +299,11 @@ jobs:
           )
           for file in "${files[@]}"; do
             npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "${file}"
-            minisign -Vm "${file}" -p "${RUNNER_TEMP}/zzclawterm-updater.pub" -x "${file}.sig"
+            # tauri signer 2.10 的 .sig 输出是 base64 包裹的整体 blob（直接供
+            # latest.json 的 signature 字段使用），minisign 无法直接读；
+            # 解码出标准 minisign 格式副本用于校验，原 .sig 保持不动。
+            base64 --decode "${file}.sig" > "${RUNNER_TEMP}/verify.sig"
+            minisign -Vm "${file}" -p "${RUNNER_TEMP}/zzclawterm-updater.pub" -x "${RUNNER_TEMP}/verify.sig"
           done
       - name: Generate checksums and manifests
         shell: bash
