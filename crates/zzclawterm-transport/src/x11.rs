@@ -76,7 +76,18 @@ pub async fn prepare_x11_forwarding(configured_display: &str) -> X11ForwardingCo
     let (target, fallback_target) = resolve_x11_display_targets(&display);
     let fake_cookie = uuid::Uuid::new_v4().as_bytes().to_vec();
     let fake_cookie_hex = encode_hex(&fake_cookie);
-    let real_cookie = read_local_x11_auth_cookie(&display).await;
+    // A VcXsrv instance managed by `x11_server` carries its cookie in process;
+    // only fall back to the system xauth lookup for servers we did not start.
+    let real_cookie = match display_number(&display)
+        .and_then(crate::x11_server::managed_x11_cookie_for_display)
+    {
+        Some(hex) => decode_hex(&hex),
+        None => None,
+    };
+    let real_cookie = match real_cookie {
+        Some(cookie) => Some(cookie),
+        None => read_local_x11_auth_cookie(&display).await,
+    };
 
     X11ForwardingConfig {
         target,
@@ -586,7 +597,7 @@ async fn handle_x11_channel(
     Ok(())
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -596,7 +607,7 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return None;
     }

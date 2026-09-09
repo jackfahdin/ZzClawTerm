@@ -62,6 +62,7 @@ use telnet_prompts::{has_password_prompt, has_username_prompt};
 mod ssh_shell_integration;
 mod tunnel;
 mod x11;
+pub mod x11_server;
 
 pub use tunnel::{SshTunnelConfig, SshTunnelInfo, SshTunnelManager, SshTunnelMode};
 pub use x11::{
@@ -70,6 +71,10 @@ pub use x11::{
     rewrite_x11_auth_setup_packet,
 };
 use x11::{X11ChannelOpen, X11Forwarder, enable_x11_failed_message, spawn_x11_forwarder};
+pub use x11_server::{
+    ManagedX11Info, X11ServerError, ensure_x11_server, managed_x11_cookie_for_display,
+    resolve_x_server_path, shutdown_managed_x11_server,
+};
 mod sftp_transfer_types;
 mod trzsz;
 mod zmodem;
