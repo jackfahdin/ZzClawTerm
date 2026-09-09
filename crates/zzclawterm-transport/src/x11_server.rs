@@ -7,7 +7,7 @@
 //! returns [`X11ServerError::Unsupported`] there.
 
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Child;
@@ -25,7 +25,6 @@ use super::MIT_MAGIC_COOKIE;
 pub const X_SERVER_ENV_VAR: &str = "ZZCLAWTERM_XSERVER";
 
 const X_SERVER_PORT_BASE: u16 = 6000;
-const X_SERVER_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 #[cfg(windows)]
 const X_SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
@@ -155,14 +154,28 @@ pub fn write_xauthority_file(display: u16) -> Result<(PathBuf, String), X11Serve
     Ok((path, cookie_hex))
 }
 
-/// Whether anything is listening on `127.0.0.1:{6000 + display}`.
+/// Whether anything occupies `{6000 + display}`.
+///
+/// Probing must not open a TCP connection to the listener: a connect+close
+/// pair counts as an X client that immediately disconnects, and when that
+/// phantom client is the only one (typical right after server startup), the
+/// server resets — a reset during VcXsrv's multiwindow WM startup races its
+/// `WM_S0` selection and the server terminates itself
+/// ("another window manager is running").
+///
+/// A bind attempt answers "occupied?" without touching the listener: an
+/// exact same-tuple bind always conflicts, so probe both the wildcard and
+/// the loopback tuple — X servers bind the wildcard, and either failure means
+/// something is there. (On Windows a wildcard bind succeeds despite an
+/// existing loopback-only bind, so one probe alone is not enough.) The probe
+/// socket is dropped immediately.
 pub fn x_server_port_listening(display: u16) -> bool {
-    loopback_port_listening(X_SERVER_PORT_BASE + display)
+    port_occupied(X_SERVER_PORT_BASE + display)
 }
 
-fn loopback_port_listening(port: u16) -> bool {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&address, X_SERVER_PROBE_TIMEOUT).is_ok()
+fn port_occupied(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_err()
+        || TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
 }
 
 /// Ensure a local X server is available, starting VcXsrv when needed.
@@ -235,6 +248,8 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
                         cookie_hex,
                         xauthority_path,
                     });
+                    drop(guard);
+                    spawn_exit_watchdog();
                     return Ok(info);
                 }
                 // The port can be grabbed between our probe and VcXsrv's bind;
@@ -274,6 +289,37 @@ pub fn shutdown_managed_x11_server() {
     }
 }
 
+/// Watch the managed child and clear the state when it exits on its own, so a
+/// later `ensure_x11_server` starts a fresh server instead of trusting a dead
+/// one. Exits silently once the state is gone (normal shutdown path).
+#[cfg(windows)]
+fn spawn_exit_watchdog() {
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let mut guard = MANAGED_X11.write().unwrap_or_else(|e| e.into_inner());
+            let Some(server) = guard.as_mut() else { break };
+            match server.child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) => {
+                    tracing::warn!(
+                        display = server.display,
+                        %status,
+                        "managed X server exited unexpectedly"
+                    );
+                    *guard = None;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "managed X server state query failed");
+                    *guard = None;
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Kill and reap the managed server. A no-op off Windows.
 #[cfg(not(windows))]
 pub fn shutdown_managed_x11_server() {}
@@ -291,6 +337,10 @@ fn spawn_x_server(
         .arg(format!(":{display}"))
         .arg("-multiwindow")
         .arg("-clipboard")
+        // Without -noreset the server resets when its last client disconnects;
+        // a reset during the multiwindow WM's startup races the WM_S0
+        // selection and VcXsrv terminates itself.
+        .arg("-noreset")
         .arg("-auth")
         .arg(xauthority_path)
         .stdin(Stdio::null())
@@ -407,9 +457,9 @@ mod tests {
     fn port_probe_distinguishes_listening_from_closed() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        assert!(super::loopback_port_listening(port));
+        assert!(super::port_occupied(port));
         drop(listener);
-        assert!(!super::loopback_port_listening(port));
+        assert!(!super::port_occupied(port));
     }
 
     #[cfg(not(windows))]
