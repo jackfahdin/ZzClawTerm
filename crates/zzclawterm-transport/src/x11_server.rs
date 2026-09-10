@@ -15,6 +15,7 @@ use std::process::Child;
 use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::sync::RwLock;
+#[cfg(windows)]
 use std::time::Duration;
 #[cfg(windows)]
 use std::time::Instant;
