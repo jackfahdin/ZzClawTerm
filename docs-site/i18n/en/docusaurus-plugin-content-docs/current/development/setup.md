@@ -152,7 +152,7 @@ python scripts/release/verify_native_package.py \
   --artifact-version main-snapshot --dist dist
 ```
 
-After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. A manual `Main Snapshot` run overwrites the `main-snapshot` prerelease without publishing to downstream channels.
+After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. `Main Snapshot` checks master daily at 00:00 (UTC+8) and rebuilds the rolling `main-snapshot` prerelease only when there are new commits (it can also be dispatched manually), without publishing to downstream channels.
 
 The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` and the `GITCODE_*` mirror configuration are optional, and the corresponding features are skipped when unset. See the release section of `BUILDING.md` for details.
 

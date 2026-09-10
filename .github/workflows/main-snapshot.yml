@@ -2,6 +2,10 @@ name: Main Snapshot
 
 on:
   workflow_dispatch:
+  schedule:
+    # 每天东八区 0:00（UTC 16:00）构建主分支快照。GitHub 定时任务在高峰
+    # 时段可能延迟几分钟到半小时，不保证准点。
+    - cron: '0 16 * * *'
 
 permissions:
   contents: read
@@ -26,15 +30,29 @@ jobs:
     outputs:
       main_sha: ${{ steps.metadata.outputs.main_sha }}
       version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.metadata.outputs.changed }}
     steps:
       - name: Resolve main commit
         id: metadata
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          main_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | awk '{print $1}')"
-          [[ -n "${main_sha}" ]] || { echo 'failed to resolve main' >&2; exit 1; }
+          main_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/master | awk '{print $1}')"
+          [[ -n "${main_sha}" ]] || { echo 'failed to resolve master' >&2; exit 1; }
+          # 定时触发时，若 master 相对上次快照没有新提交则跳过整个构建，
+          # 避免每天烧六平台 runner 产出内容完全相同的包。
+          changed='true'
+          if [[ "${GITHUB_EVENT_NAME}" == 'schedule' ]]; then
+            snapshot_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${SNAPSHOT_TAG}" --jq '.object.sha' 2>/dev/null || true)"
+            if [[ "${snapshot_sha}" == "${main_sha}" ]]; then
+              changed='false'
+              echo "master is unchanged since the last snapshot (${main_sha}); skipping."
+            fi
+          fi
           echo "main_sha=${main_sha}" >> "${GITHUB_OUTPUT}"
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout main commit
         uses: actions/checkout@v4
@@ -53,16 +71,6 @@ jobs:
         run: |
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-
-      - name: Verify build configuration
-        env:
-          ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
-        shell: bash
-        run: |
-          if [[ -z "${ZZCLAWTERM_GITHUB_GIST_CLIENT_ID:-}" ]]; then
-            echo 'ZZCLAWTERM_GITHUB_GIST_CLIENT_ID repository variable is required' >&2
-            exit 1
-          fi
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -89,6 +97,7 @@ jobs:
   package:
     name: Package ${{ matrix.label }}
     needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -162,6 +171,7 @@ jobs:
   publish:
     name: Publish main snapshot
     needs: [prepare, package]
+    if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -208,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > release-notes.md <<EOF
-          Manually triggered snapshot of the main branch.
+          Rolling snapshot of the master branch, rebuilt daily at 00:00 (UTC+8) when master has new commits, or on manual dispatch.
 
           Source commit: ${MAIN_SHA}
 

@@ -149,7 +149,7 @@ python scripts/release/verify_native_package.py \
   --artifact-version main-snapshot --dist dist
 ```
 
-正式标签在验包后发布 GitHub Release（产物内含 `downloads.json` 与签名的 `latest.json`），随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 只用于让已安装的旧 Tauri 版本迁移到 GPUI。手动运行 `Main Snapshot` 会覆盖 `main-snapshot` prerelease，不发布到外部分发渠道。
+正式标签在验包后发布 GitHub Release（产物内含 `downloads.json` 与签名的 `latest.json`），随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 只用于让已安装的旧 Tauri 版本迁移到 GPUI。`Main Snapshot` 每天东八区 0:00 自动检查 master，有新提交才重建并覆盖 `main-snapshot` prerelease（也可手动触发），不发布到外部分发渠道。
 
 Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` 与 GitCode 同步的 `GITCODE_*` 配置均为可选，未配置时对应功能跳过。详见根目录 `BUILDING.md` 的发布一节。
 

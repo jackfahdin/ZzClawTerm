@@ -150,8 +150,10 @@ python scripts/release/verify_native_package.py \
 Tag releases publish the verified assets to GitHub and can then trigger the
 GitCode mirror workflow. `downloads.json` is the website
 download catalog; the signed `latest.json` exists only to migrate installed
-Tauri releases. A manual `Main Snapshot` run overwrites the `main-snapshot`
-prerelease and does not publish to downstream channels. Release builds require
+Tauri releases. The `Main Snapshot` workflow checks master daily at
+00:00 (UTC+8) and rebuilds the rolling `main-snapshot` prerelease only when
+there are new commits; it can also be dispatched manually and does not publish
+to downstream channels. Release builds require
 the repository variables and secrets named by those workflows; see the release
 section of `BUILDING.md` for details.
 
