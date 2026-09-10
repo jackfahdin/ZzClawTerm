@@ -73,6 +73,7 @@ impl ZzClawTermApp {
                         .icon("icons/fe/refresh.svg")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.refresh_transfer_browser(window, cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }
                 Node::Action(Action::Upload) => ZzClawMenuItem::submenu(
@@ -164,12 +165,14 @@ impl ZzClawTermApp {
                     .icon("icons/fe/up.svg")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_transfer_parent_directory(window, cx);
+                        this.defer_transfer_panel_snapshot_flush(cx);
                     })),
                 Node::Action(Action::Refresh) => {
                     ZzClawMenuItem::action(t!("fileExplorer.cmRefresh"))
                         .icon("icons/fe/refresh.svg")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.refresh_transfer_browser(window, cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }
                 Node::Action(_) => continue,
@@ -248,6 +251,7 @@ impl ZzClawTermApp {
                         .icon("icons/fe/refresh.svg")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.refresh_transfer_browser(window, cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }
                 Node::Action(Action::Upload) => ZzClawMenuItem::submenu(
@@ -277,12 +281,14 @@ impl ZzClawTermApp {
                         .icon("icons/fe/download.svg")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.start_selected_sftp_download_jobs(window, cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }
                 Node::Action(Action::Rename) => ZzClawMenuItem::action(t!("fileExplorer.cmRename"))
                     .icon("icons/session/rename.svg")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_transfer_rename_dialog(window, cx);
+                        this.defer_transfer_panel_snapshot_flush(cx);
                     })),
                 Node::Action(Action::Move) => ZzClawMenuItem::action(t!("fileExplorer.cmMove"))
                     .icon("icons/net/move.svg")
@@ -309,6 +315,7 @@ impl ZzClawTermApp {
                                         window,
                                         cx,
                                     );
+                                    this.defer_transfer_panel_snapshot_flush(cx);
                                 }));
                             if let Some(meta) = target.meta {
                                 item = item.shortcut(meta);
@@ -325,6 +332,7 @@ impl ZzClawTermApp {
                         .icon("icons/fe/star.svg")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.add_transfer_browser_favorite_path(favorite_path.clone(), cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }
                 Node::Action(Action::CopyPath) => {
