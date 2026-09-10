@@ -7,8 +7,11 @@ const config: Config = {
   tagline: 'A desktop client for SSH-centric operations and mixed terminal workflows.',
   favicon: 'img/logo.svg',
 
-  url: 'https://github.com/jackfahdin/ZzClawTerm',
-  baseUrl: '/',
+  // Docusaurus 的 url 只能是裸域名，子路径归 baseUrl。按 GitHub Pages
+  // 项目站惯例配置（https://jackfahdin.github.io/ZzClawTerm/）；将来换
+  // 独立域名时把 url 换成域名、baseUrl 改回 '/'。
+  url: 'https://jackfahdin.github.io',
+  baseUrl: '/ZzClawTerm/',
 
   organizationName: 'Jackfahdin',
   projectName: 'ZzClawTerm',
