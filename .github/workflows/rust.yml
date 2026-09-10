@@ -3,9 +3,9 @@ name: Rust
 on:
   workflow_dispatch:
   push:
-    branches: [main, migration/gpui]
+    branches: [master]
   pull_request:
-    branches: [main, migration/gpui]
+    branches: [master]
 
 # No paths filter on purpose. A workflow filtered out by `paths` never runs, so its
 # gate job never reports either, which leaves a pull request waiting forever on a

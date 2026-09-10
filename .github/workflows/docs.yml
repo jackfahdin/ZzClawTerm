@@ -3,9 +3,9 @@ name: Docs
 on:
   workflow_dispatch:
   push:
-    branches: [main, migration/gpui]
+    branches: [master]
   pull_request:
-    branches: [main, migration/gpui]
+    branches: [master]
 
 # No paths filter, for the same reason as rust.yml: a filtered-out workflow never
 # reports its gate, which blocks any pull request that requires it.

@@ -46,12 +46,12 @@ type LatestDownloadManifest = {
 
 // downloads.json is intentionally separate from latest.json. The latter remains a
 // signed Tauri updater bridge for installed pre-GPUI releases.
-const latestDownloadManifestUrl = 'https://downloads.zzclawterm.app/downloads.json';
-const downloadBaseUrl = 'https://downloads.zzclawterm.app';
-
-// Fallback for the initial render and older manifests that predate portable targets.
-// The application updater itself never uses this unsigned URL derivation.
-const fallbackPortableVersion = 'latest';
+// The manifest rides along as a GitHub release asset; releases/latest/download
+// always resolves to the newest published release.
+const latestDownloadManifestUrl =
+  'https://github.com/jackfahdin/ZzClawTerm/releases/latest/download/downloads.json';
+const downloadBaseUrl = 'https://github.com/jackfahdin/ZzClawTerm';
+const releasesPageUrl = 'https://github.com/jackfahdin/ZzClawTerm/releases/latest';
 
 const portableArchByKey: Partial<Record<DownloadPlatformKey, string>> = {
   'windows-x86_64-portable': 'x64',
@@ -64,40 +64,42 @@ function buildPortableHref(key: DownloadPlatformKey, version: string): string | 
     return undefined;
   }
 
-  return `${downloadBaseUrl}/releases/v${version}/ZzClawTerm_${version}_windows_${arch}_portable.zip`;
+  return `${downloadBaseUrl}/releases/download/v${version}/ZzClawTerm_${version}_windows_${arch}_portable.zip`;
 }
 const downloadPlatforms: DownloadPlatform[] = [
+  // Static hrefs only render before downloads.json loads (or if the fetch
+  // fails); the manifest replaces them with exact per-platform asset URLs.
   {
     key: 'windows-x86_64',
-    href: 'https://zzclawterm.app/download/windows-x86_64',
+    href: releasesPageUrl,
   },
   {
     key: 'windows-aarch64',
-    href: 'https://zzclawterm.app/download/windows-aarch64',
+    href: releasesPageUrl,
   },
   {
     key: 'windows-x86_64-portable',
-    href: buildPortableHref('windows-x86_64-portable', fallbackPortableVersion) ?? '',
+    href: releasesPageUrl,
   },
   {
     key: 'windows-aarch64-portable',
-    href: buildPortableHref('windows-aarch64-portable', fallbackPortableVersion) ?? '',
+    href: releasesPageUrl,
   },
   {
     key: 'linux-x86_64',
-    href: 'https://zzclawterm.app/download/linux-x86_64',
+    href: releasesPageUrl,
   },
   {
     key: 'linux-aarch64',
-    href: 'https://zzclawterm.app/download/linux-aarch64',
+    href: releasesPageUrl,
   },
   {
     key: 'darwin-x86_64',
-    href: 'https://zzclawterm.app/download/darwin-x86_64',
+    href: releasesPageUrl,
   },
   {
     key: 'darwin-aarch64',
-    href: 'https://zzclawterm.app/download/darwin-aarch64',
+    href: releasesPageUrl,
   },
 ];
 
