@@ -4358,7 +4358,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 [[package]]
 name = "ironrdp-async"
 version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bytes",
  "ironrdp-connector",
@@ -4371,12 +4371,12 @@ dependencies = [
 [[package]]
 name = "ironrdp-bulk"
 version = "0.1.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 
 [[package]]
 name = "ironrdp-cfg"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-propertyset",
 ]
@@ -4384,7 +4384,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-client"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -4418,7 +4418,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-cliprdr"
 version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -4430,7 +4430,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-cliprdr-native"
 version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-cliprdr",
  "ironrdp-core",
@@ -4441,7 +4441,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-connector"
 version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-core",
  "ironrdp-error",
@@ -4458,7 +4458,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-core"
 version = "0.2.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-error",
 ]
@@ -4466,7 +4466,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-displaycontrol"
 version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-core",
  "ironrdp-dvc",
@@ -4478,7 +4478,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-dvc"
 version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-core",
  "ironrdp-pdu",
@@ -4489,7 +4489,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-echo"
 version = "0.4.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-core",
  "ironrdp-dvc",
@@ -4500,12 +4500,12 @@ dependencies = [
 [[package]]
 name = "ironrdp-error"
 version = "0.2.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 
 [[package]]
 name = "ironrdp-graphics"
 version = "0.9.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
@@ -4522,7 +4522,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-input"
 version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bitvec",
  "ironrdp-pdu",
@@ -4532,7 +4532,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-mstsgu"
 version = "0.0.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.1",
@@ -4555,7 +4555,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-pdu"
 version = "0.9.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bit_field",
  "bitflags 2.13.1",
@@ -4578,12 +4578,12 @@ dependencies = [
 [[package]]
 name = "ironrdp-propertyset"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 
 [[package]]
 name = "ironrdp-rail"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-core",
  "ironrdp-svc",
@@ -4592,7 +4592,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-rdcleanpath"
 version = "0.2.2"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "der 0.8.1",
 ]
@@ -4600,7 +4600,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-rdpei"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -4613,7 +4613,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-session"
 version = "0.11.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-bulk",
  "ironrdp-core",
@@ -4630,7 +4630,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-svc"
 version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "bitflags 2.13.1",
  "ironrdp-core",
@@ -4640,7 +4640,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-tls"
 version = "0.2.2"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "rustls-native-certs",
  "tokio",
@@ -4651,7 +4651,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-tokio"
 version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=75d9a3b398e22310afbc26f6dfd27eb004e96e5c#75d9a3b398e22310afbc26f6dfd27eb004e96e5c"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b6658790647b757e1b129859ff421300b53467a1#b6658790647b757e1b129859ff421300b53467a1"
 dependencies = [
  "ironrdp-async",
  "ironrdp-connector",
@@ -6169,7 +6169,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.2"
-source = "git+https://gitcode.com/JackfahdinImport/russh?rev=cf257f67d88bdb1bb30f7419b494aa4b990448c7#cf257f67d88bdb1bb30f7419b494aa4b990448c7"
+source = "git+https://gitcode.com/JackfahdinImport/russh?rev=0de037cd096b3e76efd9292d5637856ecee8af24#0de037cd096b3e76efd9292d5637856ecee8af24"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -7623,7 +7623,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.63.1"
-source = "git+https://gitcode.com/JackfahdinImport/russh?rev=cf257f67d88bdb1bb30f7419b494aa4b990448c7#cf257f67d88bdb1bb30f7419b494aa4b990448c7"
+source = "git+https://gitcode.com/JackfahdinImport/russh?rev=0de037cd096b3e76efd9292d5637856ecee8af24#0de037cd096b3e76efd9292d5637856ecee8af24"
 dependencies = [
  "aes 0.9.2",
  "aws-lc-rs",
@@ -7695,7 +7695,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "git+https://gitcode.com/JackfahdinImport/russh?rev=cf257f67d88bdb1bb30f7419b494aa4b990448c7#cf257f67d88bdb1bb30f7419b494aa4b990448c7"
+source = "git+https://gitcode.com/JackfahdinImport/russh?rev=0de037cd096b3e76efd9292d5637856ecee8af24#0de037cd096b3e76efd9292d5637856ecee8af24"
 dependencies = [
  "log",
  "nix 0.31.3",
@@ -7706,7 +7706,7 @@ dependencies = [
 [[package]]
 name = "russh-sftp"
 version = "2.4.0"
-source = "git+https://gitcode.com/JackfahdinImport/russh-sftp?rev=90e4c8d19f88802bfdbd21ce5bfe46050219e0d9#90e4c8d19f88802bfdbd21ce5bfe46050219e0d9"
+source = "git+https://gitcode.com/JackfahdinImport/russh-sftp?rev=e2caffef6d9d3c0ff97cbfedb321116f79f6d68d#e2caffef6d9d3c0ff97cbfedb321116f79f6d68d"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -7725,7 +7725,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://gitcode.com/JackfahdinImport/russh?rev=cf257f67d88bdb1bb30f7419b494aa4b990448c7#cf257f67d88bdb1bb30f7419b494aa4b990448c7"
+source = "git+https://gitcode.com/JackfahdinImport/russh?rev=0de037cd096b3e76efd9292d5637856ecee8af24#0de037cd096b3e76efd9292d5637856ecee8af24"
 dependencies = [
  "chrono",
  "tokio",
