@@ -36,13 +36,7 @@ Windows 便携版解压后运行 `ZzClawTerm.exe` 即可，配置数据保存在
 
 ### macOS
 
-macOS 用户可以通过 Homebrew 安装 ZzClawTerm：
-
-```bash
-brew install jackfahdin/zzclawterm/zzclawterm
-```
-
-该命令会使用 [`jackfahdin/homebrew-zzclawterm`](https://github.com/jackfahdin/homebrew-zzclawterm) tap，并安装 `zzclawterm` cask。也可以从 [GitHub 仓库](https://github.com/jackfahdin/ZzClawTerm) 的 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 下载 `.dmg` 安装包，然后将 ZzClawTerm 拖入 `/Applications`。
+从 [GitHub 仓库](https://github.com/jackfahdin/ZzClawTerm) 的 [Releases](https://github.com/jackfahdin/ZzClawTerm/releases) 下载 `.dmg` 安装包，然后将 ZzClawTerm 拖入 `/Applications`。
 
 ZzClawTerm 目前还没有使用 Apple Developer 证书签名。安装后如果 macOS 提示应用已损坏或无法打开，可以移除 quarantine 属性后再打开：
 

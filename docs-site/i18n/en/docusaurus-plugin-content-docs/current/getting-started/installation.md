@@ -36,13 +36,7 @@ An installed Tauri release can use its existing signed updater once to migrate t
 
 ### macOS
 
-macOS users can install ZzClawTerm with Homebrew:
-
-```bash
-brew install jackfahdin/zzclawterm/zzclawterm
-```
-
-This uses the [`jackfahdin/homebrew-zzclawterm`](https://github.com/jackfahdin/homebrew-zzclawterm) tap and installs the `zzclawterm` cask. You can also download the `.dmg` installer from the [GitHub repository](https://github.com/jackfahdin/ZzClawTerm) or [Releases](https://github.com/jackfahdin/ZzClawTerm/releases), then drag ZzClawTerm into `/Applications`.
+Download the `.dmg` installer from the [GitHub repository](https://github.com/jackfahdin/ZzClawTerm) or [Releases](https://github.com/jackfahdin/ZzClawTerm/releases), then drag ZzClawTerm into `/Applications`.
 
 ZzClawTerm is currently not signed with an Apple Developer certificate. If macOS reports that the app is damaged or cannot be opened after installation, remove the quarantine attribute and open it again:
 

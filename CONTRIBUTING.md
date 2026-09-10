@@ -147,13 +147,13 @@ python scripts/release/verify_native_package.py \
   --artifact-version main-snapshot --dist dist
 ```
 
-Tag releases publish the verified assets to GitHub and Cloudflare R2, then
-trigger the Gitee, AUR, and Homebrew workflows. `downloads.json` is the website
+Tag releases publish the verified assets to GitHub and can then trigger the
+GitCode mirror workflow. `downloads.json` is the website
 download catalog; the signed `latest.json` exists only to migrate installed
 Tauri releases. A manual `Main Snapshot` run overwrites the `main-snapshot`
 prerelease and does not publish to downstream channels. Release builds require
-the repository variables and secrets named by those workflows; missing release
-configuration is a hard failure.
+the repository variables and secrets named by those workflows; see the release
+section of `BUILDING.md` for details.
 
 Tests should live beside the behavior they cover. Storage, credentials,
 encryption, backup, cloud-sync, known-host, and session changes must include

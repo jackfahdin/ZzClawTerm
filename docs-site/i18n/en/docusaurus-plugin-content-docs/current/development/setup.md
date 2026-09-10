@@ -152,9 +152,9 @@ python scripts/release/verify_native_package.py \
   --artifact-version main-snapshot --dist dist
 ```
 
-After validation, a version tag publishes GitHub Release and versioned R2 assets, then triggers Gitee, AUR, and Homebrew. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. Only stable releases replace the root R2 manifests, while prereleases retain versioned manifests. A manual `Main Snapshot` run overwrites the `main-snapshot` prerelease without publishing to downstream channels.
+After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. A manual `Main Snapshot` run overwrites the `main-snapshot` prerelease without publishing to downstream channels.
 
-The Release workflow requires `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID`, the Gitee/R2 repository variables, and the updater, R2, Gitee, AUR, and Homebrew secrets named in the workflows. Missing configuration fails the relevant release step instead of producing an incomplete official release.
+The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` and the `GITCODE_*` mirror configuration are optional, and the corresponding features are skipped when unset. See the release section of `BUILDING.md` for details.
 
 ### Native tools and the manual-acceptance boundary
 

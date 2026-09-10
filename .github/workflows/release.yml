@@ -338,8 +338,7 @@ jobs:
           gh release upload "${TAG}" dist-release/* \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
-  # The Cloudflare R2 download-mirror job was removed for now: the bucket
-  # and public base URL belonged to the original project. It will be
-  # reintroduced together with the site analytics (umami) replacement.
-  # Until then, manifests point at GitHub Releases assets and the
-  # downloads.json / latest.json manifests ride along as release assets.
+  # The Cloudflare R2 download-mirror job was removed: the bucket and public
+  # base URL belonged to the original project. Manifests point at GitHub
+  # Releases assets and the downloads.json / latest.json manifests ride
+  # along as release assets.

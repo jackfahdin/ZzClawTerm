@@ -56,19 +56,6 @@ const config: Config = {
     ],
   ],
 
-  // 站点统计（umami）暂未启用：上游配置指向上游作者的实例
-  // （umami.coderkang.top）。将来有自己的 umami 实例时，恢复本段并替换
-  // websiteID 与 dataHostURL。
-  // plugins: [
-  //   [
-  //     "./src/plugins/umami/index.ts",
-  //     {
-  //       websiteID: "<your-website-id>",
-  //       dataHostURL: "<your-umami-host>",
-  //     },
-  //   ],
-  // ],
-
   themes: [
     [
       "@easyops-cn/docusaurus-search-local",
