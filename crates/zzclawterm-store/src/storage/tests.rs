@@ -4413,3 +4413,26 @@ fn deleting_migrated_shared_icon_clears_legacy_references_without_recreating_it(
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn editing_keywords_preserves_both_values_of_the_retired_soft_wrap_setting() {
+    let dir = unique_temp_dir("keyword-wrap-compatibility");
+    let store = ConnectionStore::open(&dir).expect("store");
+    for legacy_value in [false, true] {
+        store.save_settings_value(&serde_json::json!({
+            "terminal": {"keyword_highlights_across_wrapped_lines": legacy_value, "future_keyword_option": "retain"}
+        })).expect("legacy settings");
+        let mut config = store.load_keyword_highlights().expect("load");
+        config.enabled = true;
+        let saved = store.save_keyword_highlights(&config).expect("save");
+        assert_eq!(saved.across_wrapped_lines, legacy_value);
+        let reloaded = store.load_settings_value().expect("reload");
+        assert_eq!(
+            reloaded["terminal"]["keyword_highlights_across_wrapped_lines"],
+            legacy_value
+        );
+        assert_eq!(reloaded["terminal"]["future_keyword_option"], "retain");
+    }
+    drop(store);
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}

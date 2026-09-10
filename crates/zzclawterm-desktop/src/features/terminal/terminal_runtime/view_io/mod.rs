@@ -814,10 +814,7 @@ impl ZzClawTermApp {
                 self.request_terminal_live_action_link_enrichment(session_id, snapshot.as_ref());
         }
         self.remember_terminal_scroll_window_snapshot(session_id, display_offset, &snapshot);
-        let across_wrapped_lines = self.settings.keyword_config().across_wrapped_lines;
         surface.update(cx, |surface, cx| {
-            let keyword_mode_changed =
-                surface.set_keyword_across_wrapped_lines(across_wrapped_lines);
             let mut changed = false;
             changed |= surface.set_layout_cache(layout_cache);
             changed |= surface.set_background_transparent(transparent_background);
@@ -868,7 +865,7 @@ impl ZzClawTermApp {
                 )
             };
             let selection_changed = surface.set_selection_visual(terminal_selection);
-            if frame_applied || paint_details_changed || keyword_mode_changed {
+            if frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
                     clear_keyword_highlights,
                     keyword_output_pressure,
@@ -878,7 +875,6 @@ impl ZzClawTermApp {
             if changed
                 || frame_applied
                 || paint_details_changed
-                || keyword_mode_changed
                 || selection_changed
                 || had_pending_local_scroll_sync
             {
@@ -1362,10 +1358,7 @@ impl ZzClawTermApp {
             (None, 1)
         };
         self.remember_terminal_scroll_window_snapshot(session_id, display_offset, &snapshot);
-        let across_wrapped_lines = self.settings.keyword_config().across_wrapped_lines;
         surface.update(cx, |surface, cx| {
-            let keyword_mode_changed =
-                surface.set_keyword_across_wrapped_lines(across_wrapped_lines);
             let mut changed = false;
             if let Some(overview_markers) = overview_markers {
                 changed |= surface.set_overview_markers(
@@ -1431,7 +1424,7 @@ impl ZzClawTermApp {
                 )
             };
             let selection_changed = surface.set_selection_visual(terminal_selection);
-            if frame_applied || paint_details_changed || keyword_mode_changed {
+            if frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
                     clear_keyword_highlights,
                     render_output_pressure,
@@ -1441,7 +1434,6 @@ impl ZzClawTermApp {
             if changed
                 || frame_applied
                 || paint_details_changed
-                || keyword_mode_changed
                 || selection_changed
                 || had_pending_local_scroll_sync
             {

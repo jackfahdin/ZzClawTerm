@@ -1778,6 +1778,7 @@
     "unread": "읽지 않음"
   },
   "settings": {
+    "keywordHighlightLogicalLinesDesc": "키워드는 자동 줄 바꿈에 걸쳐 일치하지만 명시적인 개행은 넘지 않습니다.",
     "shortcutConflictMessage": "단축키가 %{shortcut}와 충돌합니다",
     "nativeGpuRenderer": "네이티브 GPU 렌더러",
     "actionLinks": "액션 링크",

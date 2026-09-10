@@ -28,7 +28,6 @@ struct CompiledLiteralKeywordRule {
 }
 
 pub struct TerminalKeywordHighlighter {
-    across_wrapped_lines: bool,
     rules_key: u64,
     regex_rules: CompiledKeywordRules,
     literal_rules: Vec<CompiledLiteralKeywordRule>,
@@ -267,6 +266,8 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
         if cancelled() {
             return None;
         }
+        // Soft-wrapped screen rows are one logical line; hard breaks must never
+        // join unrelated commands or log records. Only pathological lines degrade.
         let group = terminal_keyword_wrapped_group_bounds(snapshot, row);
         let group_range = group.start..group.end;
         let requested = group.start < requested_rows.end && group.end > requested_rows.start;
@@ -292,11 +293,9 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
             continue;
         }
 
-        let group_rows = if group.oversized || !highlighter.across_wrapped_lines {
-            if group.oversized {
-                stats.oversized_wrapped_groups = stats.oversized_wrapped_groups.saturating_add(1);
-                stats.degraded_rows = stats.degraded_rows.saturating_add(group_range.len());
-            }
+        let group_rows = if group.oversized {
+            stats.oversized_wrapped_groups = stats.oversized_wrapped_groups.saturating_add(1);
+            stats.degraded_rows = stats.degraded_rows.saturating_add(group_range.len());
             group_range
                 .clone()
                 .map(|row| {
@@ -786,21 +785,10 @@ pub fn compile_terminal_keyword_highlighter(
 ) -> TerminalKeywordHighlighter {
     let (regex_rules, literal_rules, literal_automaton) = compile_keyword_rule_sets(rules);
     TerminalKeywordHighlighter {
-        across_wrapped_lines: true,
         rules_key: terminal_keyword_rules_key(rules),
         regex_rules,
         literal_rules,
         literal_automaton,
-    }
-}
-
-impl TerminalKeywordHighlighter {
-    pub fn with_across_wrapped_lines(mut self, enabled: bool) -> Self {
-        if self.across_wrapped_lines != enabled {
-            self.rules_key = !self.rules_key;
-        }
-        self.across_wrapped_lines = enabled;
-        self
     }
 }
 
@@ -1933,10 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn disabling_wrapped_matching_invalidates_previous_cross_line_matches() {
-        let mut snapshot = TerminalScreen::new(3, 4).snapshot();
-        set_snapshot_row_wrapped(&mut snapshot, 0, "ERR", 41, false);
-        set_snapshot_row_wrapped(&mut snapshot, 1, "OR", 42, true);
+    fn keyword_matching_follows_alacritty_soft_wraps_but_stops_at_hard_line_breaks() {
         let rules = vec![ResolvedKeywordHighlightRule {
             id: "error".into(),
             name: "Error".into(),
@@ -1944,16 +1929,68 @@ mod tests {
             color: "#ff2244".into(),
             enabled: true,
         }];
-        let enabled = compile_terminal_keyword_highlighter(&rules);
+        let highlighter = compile_terminal_keyword_highlighter(&rules);
         let palette = zzclawterm_ui::theme_palette("github-dark");
-        let previous = precompute_terminal_keyword_highlights(&snapshot, &enabled, palette, None);
-        assert!(previous.range_count() > 0);
-        let disabled =
-            compile_terminal_keyword_highlighter(&rules).with_across_wrapped_lines(false);
-        let current =
-            precompute_terminal_keyword_highlights(&snapshot, &disabled, palette, Some(&previous));
-        assert_eq!(current.range_count(), 0);
-        assert_ne!(previous.rules_key(), current.rules_key());
+        for (input, expected_cells) in [("ERROR", 5), ("ERR\r\nOR", 0)] {
+            let mut screen = TerminalScreen::new(3, 4);
+            screen.advance(input.as_bytes());
+            let snapshot = screen.snapshot();
+            let highlights =
+                precompute_terminal_keyword_highlights(&snapshot, &highlighter, palette, None);
+            let highlighted_cells: usize = highlights
+                .rows
+                .iter()
+                .flatten()
+                .flat_map(|ranges| ranges.iter())
+                .map(|range| range.end_col - range.start_col)
+                .sum();
+            assert_eq!(highlighted_cells, expected_cells, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn keyword_matching_survives_terminal_width_reflow() {
+        let rules = vec![ResolvedKeywordHighlightRule {
+            id: "error".into(),
+            name: "Error".into(),
+            patterns: vec!["ERROR".into()],
+            color: "#ff2244".into(),
+            enabled: true,
+        }];
+        let highlighter = compile_terminal_keyword_highlighter(&rules);
+        let palette = zzclawterm_ui::theme_palette("github-dark");
+        let mut screen = TerminalScreen::new(12, 4);
+        screen.advance(b"ERROR");
+        let mut previous = None;
+        for columns in [12, 3, 8] {
+            screen.resize(columns, 4);
+            // Narrowing may move the start of the logical line into scrollback.
+            let snapshot = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+            let highlights = precompute_terminal_keyword_highlights(
+                &snapshot,
+                &highlighter,
+                palette,
+                previous.as_ref(),
+            );
+            let highlighted_cells: usize = highlights
+                .rows
+                .iter()
+                .flatten()
+                .flat_map(|ranges| ranges.iter())
+                .map(|range| range.end_col - range.start_col)
+                .sum();
+            assert_eq!(
+                highlighted_cells,
+                5,
+                "columns={columns}, rows={:?}",
+                snapshot
+                    .rows()
+                    .iter()
+                    .map(|row| (&row.text, row.wrapped))
+                    .collect::<Vec<_>>()
+            );
+            previous = Some(highlights);
+        }
     }
 
     #[test]

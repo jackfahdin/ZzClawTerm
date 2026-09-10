@@ -1974,7 +1974,6 @@ forward_app_action!(
     toggle_interaction_copy_on_select,
     toggle_interaction_right_click_paste,
     toggle_keyword_highlights,
-    toggle_keyword_highlights_wrapped,
     toggle_mac_ime_compatibility,
     toggle_minimize_to_tray,
     toggle_multi_line_paste_dialog,

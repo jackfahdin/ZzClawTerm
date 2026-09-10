@@ -1825,6 +1825,7 @@
     "unread": "Unread"
   },
   "settings": {
+    "keywordHighlightLogicalLinesDesc": "Keywords match continuously across automatic line wraps, but never across explicit line breaks.",
     "shortcutConflictMessage": "Shortcut conflicts with %{shortcut}",
     "nativeGpuRenderer": "Native GPU renderer",
     "actionLinks": "Action Links",

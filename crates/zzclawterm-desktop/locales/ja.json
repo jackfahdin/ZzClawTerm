@@ -1784,6 +1784,7 @@
   },
 
   "settings": {
+    "keywordHighlightLogicalLinesDesc": "キーワードは自動折り返しをまたいで一致しますが、明示的な改行はまたぎません。",
     "shortcutConflictMessage": "ショートカットが %{shortcut} と競合しています",
     "nativeGpuRenderer": "ネイティブ GPU レンダラー",
     "actionLinks": "アクションリンク",

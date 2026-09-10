@@ -1778,6 +1778,7 @@
     "unread": "Non lu"
   },
   "settings": {
+    "keywordHighlightLogicalLinesDesc": "Les mots-clés sont reconnus à travers les retours visuels automatiques, mais pas à travers les sauts de ligne explicites.",
     "shortcutConflictMessage": "Le raccourci entre en conflit avec %{shortcut}",
     "nativeGpuRenderer": "Rendu GPU natif",
     "actionLinks": "Liens d'action",
