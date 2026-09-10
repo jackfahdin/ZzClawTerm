@@ -43,7 +43,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/jackfahdin/ZzClawTerm/edit/main/docs-site/',
+          editUrl: 'https://github.com/jackfahdin/ZzClawTerm/edit/master/docs-site/',
         },
         blog: false,
         theme: {
@@ -53,15 +53,18 @@ const config: Config = {
     ],
   ],
 
-  plugins: [
-    [
-      "./src/plugins/umami/index.ts",
-      {
-        websiteID: "ba8f55f2-ab09-4cf8-9266-645c4304d58f",
-        dataHostURL: "https://umami.coderkang.top",
-      },
-    ],
-  ],
+  // 站点统计（umami）暂未启用：上游配置指向上游作者的实例
+  // （umami.coderkang.top）。将来有自己的 umami 实例时，恢复本段并替换
+  // websiteID 与 dataHostURL。
+  // plugins: [
+  //   [
+  //     "./src/plugins/umami/index.ts",
+  //     {
+  //       websiteID: "<your-website-id>",
+  //       dataHostURL: "<your-umami-host>",
+  //     },
+  //   ],
+  // ],
 
   themes: [
     [

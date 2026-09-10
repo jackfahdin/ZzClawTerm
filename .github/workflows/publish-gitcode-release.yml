@@ -184,8 +184,10 @@ jobs:
           owner_q = urllib.parse.quote(owner, safe="")
           repo_q = urllib.parse.quote(repo, safe="")
           tag_q = urllib.parse.quote(tag, safe="")
-          release_path = f"/repos/{owner_q}/{repo_q}/releases"
-          existing = request("GET", f"{release_path}/tags/{tag_q}", expected=(200,), allow_404=True)
+          releases_path = f"/repos/{owner_q}/{repo_q}/releases"
+          # GitCode 的 Release 对象没有数值 id，全部按 tag 寻址（与 Gitee 不同）。
+          release_path = f"{releases_path}/{tag_q}"
+          existing = request("GET", f"{releases_path}/tags/{tag_q}", expected=(200,), allow_404=True)
           payload = {
               "tag_name": tag,
               "name": github.get("name") or f"ZzClawTerm {tag}",
@@ -193,12 +195,10 @@ jobs:
               "prerelease": str(bool(github.get("isPrerelease"))).lower(),
           }
           if existing:
-              release_id = existing["id"]
-              request("PATCH", f"{release_path}/{release_id}", data=payload)
+              request("PATCH", release_path, data=payload)
           else:
               payload["target_commitish"] = github.get("targetCommitish") or ""
-              created = request("POST", release_path, data=payload)
-              release_id = created["id"]
+              request("POST", releases_path, data=payload)
 
           github_repo = os.environ["GITHUB_REPOSITORY"]
 
@@ -207,6 +207,49 @@ jobs:
                   f"https://github.com/{github_repo}/releases/download/"
                   f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name)}"
               )
+
+          def upload_asset(asset, content_type):
+              # GitCode 不支持 Gitee 的 POST /releases/{id}/attach_files，而是
+              # 两步式：先按文件名取预签名上传地址，再把文件 PUT/POST 过去。
+              info = request(
+                  "GET",
+                  f"{release_path}/upload_url",
+                  params={"file_name": asset.name},
+              )
+              if not isinstance(info, dict):
+                  raise RuntimeError(f"unexpected upload_url response: {info!r}")
+              url = info.get("upload_url") or info.get("url") or (info.get("data") or {}).get("upload_url")
+              if not url:
+                  raise RuntimeError(f"upload_url response carries no url: {info!r}")
+              fields = (
+                  info.get("fields")
+                  or info.get("form_data")
+                  or info.get("formData")
+                  or (info.get("data") or {}).get("fields")
+                  or {}
+              )
+              # 预签名 URL 里可能带临时签名，日志里只记录主机与路径。
+              safe_url = url.split("?")[0]
+              with asset.open("rb") as handle:
+                  if fields:
+                      form = {key: (None, str(value)) for key, value in fields.items()}
+                      form["file"] = (asset.name, handle, content_type)
+                      response = session.post(url, files=form, timeout=300)
+                  else:
+                      response = session.put(
+                          url,
+                          data=handle,
+                          headers={"Content-Type": content_type},
+                          timeout=300,
+                      )
+              if response.status_code in (200, 201, 204):
+                  return True, ""
+              lowered = response.text.lower()
+              if response.status_code in (400, 409, 422) and any(
+                  word in lowered for word in ("already", "exist", "duplicate", "已存在", "重复")
+              ):
+                  return True, ""
+              return False, f"HTTP {response.status_code} via {safe_url}: {response.text[:300]}"
 
           uploaded = []
           fallbacks = []
@@ -220,26 +263,9 @@ jobs:
               reason = ""
               for attempt in range(1, 4):
                   try:
-                      with asset.open("rb") as handle:
-                          response = session.post(
-                              f"{api}{release_path}/{release_id}/attach_files",
-                              params={"access_token": token},
-                              files={"file": (asset.name, handle, content_type)},
-                              data={"name": asset.name},
-                              timeout=300,
-                          )
-                      if response.status_code in (200, 201):
-                          success = True
+                      success, reason = upload_asset(asset, content_type)
+                      if success:
                           break
-                      lowered = response.text.lower()
-                      if response.status_code in (400, 409, 422) and any(word in lowered for word in ("already", "exist", "duplicate", "已存在", "重复")):
-                          success = True
-                          break
-                      if response.status_code in (401, 403, 404, 429):
-                          print(f"::error::GitCode attachment API failed for {asset.name}: HTTP {response.status_code}")
-                          print(response.text[:3000])
-                          sys.exit(1)
-                      reason = f"HTTP {response.status_code}: {response.text[:300]}"
                   except Exception as error:
                       reason = str(error)
                   if attempt < 3:
@@ -258,7 +284,7 @@ jobs:
               for name, url, reason in fallbacks:
                   body += f"- [{name}]({url})（{reason}）\n"
           payload["body"] = body
-          request("PATCH", f"{release_path}/{release_id}", data=payload)
+          request("PATCH", release_path, data=payload)
           print(f"GitCode release {tag}: {len(uploaded)} attachments, {len(fallbacks)} GitHub links")
           PY
 

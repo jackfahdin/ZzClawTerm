@@ -1,9 +1,10 @@
 name: Publish AUR package
 
 on:
-  workflow_run:
-    workflows: ['Release']
-    types: [completed]
+  # 自动发布（Release 完成后触发）暂未启用：需要 AUR 账号、aur.archlinux.org
+  # 上的 zzclawterm-bin 包仓库和 AUR_SSH_PRIVATE_KEY 密钥。当前保留手动
+  # 触发（workflow_dispatch，支持 dry_run 校验），配好凭据后可恢复
+  # workflow_run 触发。
   workflow_dispatch:
     inputs:
       version:
