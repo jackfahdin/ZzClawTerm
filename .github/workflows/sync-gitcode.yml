@@ -1,0 +1,44 @@
+name: Sync to GitCode
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitcode-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror refs to GitCode
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push refs to GitCode
+        shell: bash
+        env:
+          GITCODE_OWNER: ${{ vars.GITCODE_OWNER }}
+          GITCODE_REPO: ${{ vars.GITCODE_REPO }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITCODE_OWNER:-}" || -z "${GITCODE_REPO:-}" || -z "${GITCODE_TOKEN:-}" ]]; then
+            echo "::notice::GITCODE_OWNER/GITCODE_REPO/GITCODE_TOKEN not configured; skipping GitCode mirror."
+            exit 0
+          fi
+          remote="https://${GITCODE_OWNER}:${GITCODE_TOKEN}@gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git"
+          if [[ "${GITHUB_REF_TYPE}" == 'tag' ]]; then
+            git push "${remote}" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          else
+            git push "${remote}" "refs/heads/${GITHUB_REF_NAME}:refs/heads/${GITHUB_REF_NAME}"
+          fi
