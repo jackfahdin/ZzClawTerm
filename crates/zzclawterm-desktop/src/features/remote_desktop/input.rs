@@ -22,7 +22,11 @@ pub(super) struct RemoteDesktopInput {
 }
 
 impl RemoteDesktopInput {
-    pub(super) fn new(app: WeakEntity<ZzClawTermApp>, session_id: String, focus: FocusHandle) -> Self {
+    pub(super) fn new(
+        app: WeakEntity<ZzClawTermApp>,
+        session_id: String,
+        focus: FocusHandle,
+    ) -> Self {
         Self {
             app,
             session_id,

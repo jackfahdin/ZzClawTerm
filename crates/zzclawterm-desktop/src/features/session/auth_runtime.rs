@@ -670,7 +670,11 @@ impl CredentialPromptBroker {
 
     fn request_secret(&self, prompt: SshCredentialPrompt) -> Result<Option<String>, String> {
         self.attempt.check()?;
-        let id = format!("{}-{}", credential_prompt_id(&prompt), zzclawterm_core::uuid());
+        let id = format!(
+            "{}-{}",
+            credential_prompt_id(&prompt),
+            zzclawterm_core::uuid()
+        );
         let (response_tx, response_rx) = mpsc::channel();
         let request = CredentialPromptRequest::Secret {
             id: id.clone(),
@@ -1239,12 +1243,12 @@ mod prompt_state_debug_tests {
 #[cfg(test)]
 mod attempt_cancellation_tests {
     use super::CredentialPromptBroker;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use zzclawterm_transport::connection_attempt::ConnectionAttempt;
     use zzclawterm_transport::{
         SshCredentialPrompt, SshCredentialPromptKind, SshCredentialPromptReason,
     };
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn cancelling_one_attempt_removes_only_its_prompt_and_wakes_the_waiter() {

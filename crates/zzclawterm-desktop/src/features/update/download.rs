@@ -1,9 +1,9 @@
 use crate::features::ZzClawTermApp;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{Context, Window};
-use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
 const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK";
 
@@ -48,8 +48,9 @@ fn select_update_artifact(
         "linux" => format!("linux_{label}.AppImage"),
         _ => return Err("unsupported update platform".into()),
     };
-    let expected =
-        format!("https://downloads.zzclawterm.app/releases/v{version}/ZzClawTerm_{version}_{suffix}");
+    let expected = format!(
+        "https://downloads.zzclawterm.app/releases/v{version}/ZzClawTerm_{version}_{suffix}"
+    );
     let github = format!(
         "https://github.com/nyakang/zzclawterm/releases/download/v{version}/ZzClawTerm_{version}_{suffix}"
     );

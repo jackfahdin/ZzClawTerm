@@ -72,7 +72,10 @@ pub(super) fn prepare_artifact(
         let stage = target
             .parent()
             .ok_or("AppImage parent unavailable")?
-            .join(format!(".zzclawterm-update-{}.AppImage", zzclawterm_core::uuid()));
+            .join(format!(
+                ".zzclawterm-update-{}.AppImage",
+                zzclawterm_core::uuid()
+            ));
         std::fs::copy(&artifact, &stage).map_err(|error| error.to_string())?;
         std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;

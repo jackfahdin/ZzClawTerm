@@ -1,7 +1,7 @@
 use crate::{SshProxyConfig, SshSessionConfig, connection_attempt::ConnectionAttempt};
-use zzclawterm_core::connection_route::RelayEndpoint;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
+use zzclawterm_core::connection_route::RelayEndpoint;
 
 trait RouteStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> RouteStream for T {}

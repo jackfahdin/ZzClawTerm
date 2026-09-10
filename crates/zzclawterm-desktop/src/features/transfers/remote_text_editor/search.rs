@@ -1,6 +1,8 @@
 use gpui::{Context, Entity, IntoElement, Subscription, div, prelude::*, px};
-use zzclawterm_ui::{ZzClawButton, ZzClawCheckbox, ZzClawInput, ZzClawInputEvent, ZzClawInputState};
 use rust_i18n::t;
+use zzclawterm_ui::{
+    ZzClawButton, ZzClawCheckbox, ZzClawInput, ZzClawInputEvent, ZzClawInputState,
+};
 
 use super::RemoteTextEditor;
 
@@ -12,7 +14,8 @@ impl RemoteTextEditor {
         Entity<ZzClawInputState>,
         Vec<Subscription>,
     ) {
-        let search = cx.new(|cx| ZzClawInputState::new(cx, "").placeholder(t!("documentEditor.find")));
+        let search =
+            cx.new(|cx| ZzClawInputState::new(cx, "").placeholder(t!("documentEditor.find")));
         let replacement =
             cx.new(|cx| ZzClawInputState::new(cx, "").placeholder(t!("documentEditor.replace")));
         let subscription = cx.subscribe(&search, |this, _, event, cx| match event {
@@ -224,11 +227,12 @@ impl RemoteTextEditor {
                                 ),
                         )
                         .child(
-                            ZzClawButton::new("editor-replace-all", t!("documentEditor.replaceAll"))
-                                .small()
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.replace_search(true, cx)),
-                                ),
+                            ZzClawButton::new(
+                                "editor-replace-all",
+                                t!("documentEditor.replaceAll"),
+                            )
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.replace_search(true, cx))),
                         ),
                 )
             })

@@ -322,23 +322,23 @@ impl ZzClawTermApp {
                 encoding,
                 ..
             } => {
-                let shell_args =
-                    match zzclawterm_core::terminal::connection_input::parse_shell_args(&shell_args) {
-                        Ok(args) => args,
-                        Err(_) => {
-                            let message =
-                                rust_i18n::t!("dialog.shellArgsUnclosedQuote").to_string();
-                            self.shell.set_status(message.clone());
-                            self.notify_operation(
-                                "shell-arguments",
-                                zzclawterm_ui::notification::ZzClawNotificationKind::Error,
-                                message,
-                                cx,
-                            );
-                            cx.notify();
-                            return;
-                        }
-                    };
+                let shell_args = match zzclawterm_core::terminal::connection_input::parse_shell_args(
+                    &shell_args,
+                ) {
+                    Ok(args) => args,
+                    Err(_) => {
+                        let message = rust_i18n::t!("dialog.shellArgsUnclosedQuote").to_string();
+                        self.shell.set_status(message.clone());
+                        self.notify_operation(
+                            "shell-arguments",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            message,
+                            cx,
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
                 let encoding = resolve_effective_connection_encoding(&encoding, self);
                 let mut config = LocalSessionConfig {
                     name: connection.name.clone(),

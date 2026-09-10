@@ -4364,7 +4364,11 @@ fn shared_custom_icons_and_pipeline_survive_sessions_replacement() {
         config.custom_icons
     );
     let mut snapshot = store
-        .build_raw_portable_snapshot(zzclawterm_core::PortableSnapshotKind::Sync, "fixture", "2.0.0")
+        .build_raw_portable_snapshot(
+            zzclawterm_core::PortableSnapshotKind::Sync,
+            "fixture",
+            "2.0.0",
+        )
         .unwrap();
     snapshot.recalculate_hash().unwrap();
     store.apply_raw_portable_snapshot(&snapshot).unwrap();

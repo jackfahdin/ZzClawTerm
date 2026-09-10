@@ -1158,17 +1158,23 @@ impl ZzClawTermApp {
                     .child(icon_grid),
             )
             .child(
-                zzclawterm_ui::ZzClawButton::new("import-custom-icon", t!("dialog.importCustomIcon"))
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.import_connection_custom_icon(window, cx)
-                    })),
+                zzclawterm_ui::ZzClawButton::new(
+                    "import-custom-icon",
+                    t!("dialog.importCustomIcon"),
+                )
+                .on_click(
+                    cx.listener(|app, _, window, cx| app.import_connection_custom_icon(window, cx)),
+                ),
             )
             .when_some(custom_selected, |this, id| {
                 this.child(
-                    zzclawterm_ui::ZzClawButton::new("delete-custom-icon", t!("dialog.deleteCustomIcon"))
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.delete_connection_custom_icon(id.clone(), cx)
-                        })),
+                    zzclawterm_ui::ZzClawButton::new(
+                        "delete-custom-icon",
+                        t!("dialog.deleteCustomIcon"),
+                    )
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        app.delete_connection_custom_icon(id.clone(), cx)
+                    })),
                 )
             })
             // Only SSH reports a remote system, so the toggle would be

@@ -262,7 +262,8 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
     for mut raw in file.sessions {
         let session: NyatermJsonSession = serde_json::from_value(raw.clone())
             .map_err(|error| AppError::Config(format!("Invalid session: {error}")))?;
-        let mut prepared = prepare_zzclawterm_json_session(session, &password_ref_map, &key_ref_map)?;
+        let mut prepared =
+            prepare_zzclawterm_json_session(session, &password_ref_map, &key_ref_map)?;
         if let Some(auth) = raw
             .get_mut("auth")
             .and_then(serde_json::Value::as_object_mut)

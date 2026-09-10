@@ -1229,9 +1229,12 @@ impl Render for RemoteTextEditor {
             .px_2()
             .py_1()
             .child(
-                zzclawterm_ui::ZzClawButton::new("editor-fold", rust_i18n::t!("documentEditor.fold"))
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| this.fold_at_cursor(cx))),
+                zzclawterm_ui::ZzClawButton::new(
+                    "editor-fold",
+                    rust_i18n::t!("documentEditor.fold"),
+                )
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.fold_at_cursor(cx))),
             )
             .child(
                 zzclawterm_ui::ZzClawButton::new(

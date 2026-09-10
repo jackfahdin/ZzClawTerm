@@ -99,7 +99,9 @@ impl ZzClawTermApp {
             let _ = window.update(cx, |_, window, cx| {
                 let _ = app.update(cx, |app, cx| {
                     use gpui::{ParentElement as _, Styled as _};
-                    use zzclawterm_ui::{ZzClawDialogWindowExt as _, ZzClawInput, ZzClawInputState};
+                    use zzclawterm_ui::{
+                        ZzClawDialogWindowExt as _, ZzClawInput, ZzClawInputState,
+                    };
                     if window.has_active_nya_dialog(cx) {
                         if let Some(session) = app.remote_desktop.sessions.get_mut(&session_id) {
                             session.state = RemoteDesktopViewState::Disconnected;
