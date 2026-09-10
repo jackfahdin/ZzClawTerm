@@ -131,7 +131,7 @@ def validate_version(raw: str, expected: str | None = None) -> str:
 def validate_artifact_version(raw: str) -> str:
     """Validate a public filename label without changing package metadata."""
     value = raw.strip()
-    if value == "main-snapshot":
+    if value == "continuous-build":
         return value
     return validate_version(value)
 

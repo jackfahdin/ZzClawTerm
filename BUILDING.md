@@ -250,7 +250,7 @@ python scripts/release/package_native.py <rust-target>
 | 变量 | 说明 |
 |------|------|
 | `ZZCLAWTERM_VERSION` | 包元数据版本，默认取 workspace 版本；若显式设置则**必须**与 `Cargo.toml` 的 workspace 版本一致 |
-| `ZZCLAWTERM_ARTIFACT_VERSION` | 产物文件名中的版本标签，默认同上；快照构建可用 `main-snapshot` |
+| `ZZCLAWTERM_ARTIFACT_VERSION` | 产物文件名中的版本标签，默认同上；快照构建可用 `continuous-build` |
 
 各平台产物与前置要求：
 

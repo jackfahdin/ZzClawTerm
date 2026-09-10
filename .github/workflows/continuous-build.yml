@@ -1,4 +1,4 @@
-name: Main Snapshot
+name: Continuous Build
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: main-snapshot
+  group: continuous-build
   cancel-in-progress: true
 
 env:
@@ -20,7 +20,7 @@ env:
   # GitCode 的 HTTP 重定向会让 cargo 内置的 git2 传输在 Windows runner 上失败，
   # 改用系统 git 命令拉取 git 依赖。
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
-  SNAPSHOT_TAG: main-snapshot
+  SNAPSHOT_TAG: continuous-build
 
 jobs:
   prepare:
@@ -75,7 +75,7 @@ jobs:
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
         with:
-          cache-key: main-snapshot-preflight
+          cache-key: continuous-build-preflight
       - name: Install Linux system dependencies
         uses: ./.github/actions/install-linux-deps
       - name: Test workspace
@@ -124,7 +124,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
-          cache-key: main-snapshot-${{ matrix.target }}
+          cache-key: continuous-build-${{ matrix.target }}
           cache-on-failure: 'true'
           save-cache: always
       - name: Install Linux system dependencies
@@ -146,7 +146,7 @@ jobs:
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
-          ZZCLAWTERM_ARTIFACT_VERSION: main-snapshot
+          ZZCLAWTERM_ARTIFACT_VERSION: continuous-build
           ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
           ZZCLAWTERM_VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
@@ -159,11 +159,11 @@ jobs:
         run: >-
           python scripts/release/verify_native_package.py
           --target "${TARGET}" --version "${VERSION}"
-          --artifact-version main-snapshot --dist dist
+          --artifact-version continuous-build --dist dist
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: main-snapshot-${{ matrix.label }}
+          name: continuous-build-${{ matrix.label }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -189,7 +189,7 @@ jobs:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: main-snapshot-*
+          pattern: continuous-build-*
           path: release-assets
           merge-multiple: true
       - name: Validate snapshot assets
@@ -197,7 +197,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: >-
           python3 scripts/ci/check_release_assets.py --dist release-assets
-          --version "${VERSION}" --artifact-version main-snapshot
+          --version "${VERSION}" --artifact-version continuous-build
       - name: Move snapshot tag
         shell: bash
         env:
@@ -225,11 +225,11 @@ jobs:
           This prerelease is overwritten after every successful snapshot build and is intended for testing only.
           EOF
           if gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --title 'ZzClawTerm Main Snapshot' --notes-file release-notes.md --prerelease
+            gh release edit "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --title 'ZzClawTerm Continuous Build' --notes-file release-notes.md --prerelease
             while IFS= read -r asset; do
               [[ -z "${asset}" ]] || gh release delete-asset "${SNAPSHOT_TAG}" "${asset}" --repo "${GITHUB_REPOSITORY}" --yes
             done < <(gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
           else
-            gh release create "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${MAIN_SHA}" --title 'ZzClawTerm Main Snapshot' --notes-file release-notes.md --prerelease
+            gh release create "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${MAIN_SHA}" --title 'ZzClawTerm Continuous Build' --notes-file release-notes.md --prerelease
           fi
           gh release upload "${SNAPSHOT_TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber

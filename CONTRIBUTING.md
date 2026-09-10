@@ -140,18 +140,18 @@ package metadata still uses the workspace SemVer. This is reserved for the
 manual snapshot workflow and must be passed to both packaging and verification:
 
 ```bash
-ZZCLAWTERM_ARTIFACT_VERSION=main-snapshot \
+ZZCLAWTERM_ARTIFACT_VERSION=continuous-build \
   python scripts/release/package_native.py "${TARGET}"
 python scripts/release/verify_native_package.py \
   --target "${TARGET}" --version "${VERSION}" \
-  --artifact-version main-snapshot --dist dist
+  --artifact-version continuous-build --dist dist
 ```
 
 Tag releases publish the verified assets to GitHub and can then trigger the
 GitCode mirror workflow. `downloads.json` is the website
 download catalog; the signed `latest.json` exists only to migrate installed
-Tauri releases. The `Main Snapshot` workflow checks master daily at
-00:00 (UTC+8) and rebuilds the rolling `main-snapshot` prerelease only when
+Tauri releases. The `Continuous Build` workflow checks master daily at
+00:00 (UTC+8) and rebuilds the rolling `continuous-build` prerelease only when
 there are new commits; it can also be dispatched manually and does not publish
 to downstream channels. Release builds require
 the repository variables and secrets named by those workflows; see the release

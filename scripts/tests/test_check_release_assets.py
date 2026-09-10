@@ -18,7 +18,7 @@ class CheckReleaseAssetsTests(unittest.TestCase):
     def test_snapshot_label_accepts_exact_set_and_rejects_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            for name in check_release_assets.expected_artifacts("main-snapshot"):
+            for name in check_release_assets.expected_artifacts("continuous-build"):
                 (directory / name).touch()
             args = [
                 "--dist",
@@ -26,7 +26,7 @@ class CheckReleaseAssetsTests(unittest.TestCase):
                 "--version",
                 "0.0.1",
                 "--artifact-version",
-                "main-snapshot",
+                "continuous-build",
             ]
             self.assertEqual(check_release_assets.main(args), 0)
 

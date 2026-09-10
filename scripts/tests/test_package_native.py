@@ -31,20 +31,20 @@ class PackageNativeTests(unittest.TestCase):
 
     def test_snapshot_is_only_allowed_as_an_artifact_label(self) -> None:
         self.assertEqual(
-            package_native.validate_artifact_version("main-snapshot"),
-            "main-snapshot",
+            package_native.validate_artifact_version("continuous-build"),
+            "continuous-build",
         )
         with self.assertRaises(ValueError):
-            package_native.validate_version("main-snapshot")
+            package_native.validate_version("continuous-build")
         with self.assertRaises(ValueError):
             package_native.validate_artifact_version("nightly")
         self.assertEqual(
             package_native.artifact_names(
-                "x86_64-pc-windows-msvc", "main-snapshot"
+                "x86_64-pc-windows-msvc", "continuous-build"
             ),
             {
-                "ZzClawTerm_main-snapshot_windows_x64_portable.zip",
-                "ZzClawTerm_main-snapshot_windows_x64-setup.exe",
+                "ZzClawTerm_continuous-build_windows_x64_portable.zip",
+                "ZzClawTerm_continuous-build_windows_x64-setup.exe",
             },
         )
 

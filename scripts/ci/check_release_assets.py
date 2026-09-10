@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--artifact-version",
-        help="optional public filename label, for example main-snapshot",
+        help="optional public filename label, for example continuous-build",
     )
     args = parser.parse_args(argv)
 
