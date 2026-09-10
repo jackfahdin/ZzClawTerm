@@ -269,6 +269,7 @@ pub(in crate::features) struct TerminalSurface {
     retained_snapshots: Vec<Arc<TerminalSnapshot>>,
     retained_rows: BTreeMap<usize, Arc<zzclawterm_terminal::TerminalSnapshotRow>>,
     keyword_rules: Arc<Vec<zzclawterm_core::ResolvedKeywordHighlightRule>>,
+    keyword_across_wrapped_lines: bool,
     keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
     keyword_highlight_generation: u64,
     keyword_highlight_cancel_epoch: Arc<AtomicU64>,
@@ -336,6 +337,7 @@ impl TerminalSurface {
             retained_snapshots: Vec::new(),
             retained_rows: BTreeMap::new(),
             keyword_rules: Arc::new(Vec::new()),
+            keyword_across_wrapped_lines: true,
             keyword_highlights: None,
             keyword_highlight_generation: 0,
             keyword_highlight_cancel_epoch: Arc::new(AtomicU64::new(0)),
@@ -1359,6 +1361,18 @@ impl TerminalSurface {
         true
     }
 
+    pub(in crate::features) fn set_keyword_across_wrapped_lines(&mut self, enabled: bool) -> bool {
+        if self.keyword_across_wrapped_lines == enabled {
+            return false;
+        }
+        self.keyword_across_wrapped_lines = enabled;
+        self.cancel_pending_keyword_highlights();
+        self.keyword_highlights = None;
+        self.keyword_highlighter = None;
+        self.keyword_highlighter_rules = None;
+        true
+    }
+
     pub(in crate::features) fn set_decorations_and_keywords(
         &mut self,
         decorations: impl Into<Arc<[TerminalLineDecorations]>>,
@@ -1452,7 +1466,13 @@ impl TerminalSurface {
         let visible_rows =
             terminal_keyword_highlight_expanded_rows(snapshot.as_ref(), visible_rows);
         let rules = self.keyword_rules.clone();
-        let rules_key = terminal_keyword_rules_key(rules.as_slice());
+        let across_wrapped_lines = self.keyword_across_wrapped_lines;
+        let base_rules_key = terminal_keyword_rules_key(rules.as_slice());
+        let rules_key = if across_wrapped_lines {
+            base_rules_key
+        } else {
+            !base_rules_key
+        };
         if self.keyword_highlights.as_ref().is_some_and(|highlights| {
             highlights.rules_key() == rules_key
                 && highlights.matches_snapshot_rows(
@@ -1519,7 +1539,10 @@ impl TerminalSurface {
             let (rules, highlighter, result, highlight_duration) = cx
                 .background_spawn(async move {
                     let highlighter = highlighter.unwrap_or_else(|| {
-                        Arc::new(compile_terminal_keyword_highlighter(rules.as_ref()))
+                        Arc::new(
+                            compile_terminal_keyword_highlighter(rules.as_ref())
+                                .with_across_wrapped_lines(across_wrapped_lines),
+                        )
                     });
                     let highlight_started_at = Instant::now();
                     let result =

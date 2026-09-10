@@ -694,6 +694,9 @@ impl TransferFeatureState {
             return false;
         };
         match field {
+            crate::models::TransferPropertiesField::SymlinkTarget => {
+                state.symlink_target_value = value
+            }
             crate::models::TransferPropertiesField::Mode => state.mode_value = value,
             crate::models::TransferPropertiesField::Owner => state.owner_value = value,
             crate::models::TransferPropertiesField::Group => state.group_value = value,
@@ -761,6 +764,7 @@ impl TransferFeatureState {
         else {
             return false;
         };
+        state.symlink_target_value = properties.symlink_target.clone().unwrap_or_default();
         state.mode_value = mode_value;
         state.owner_value = owner_value;
         state.group_value = group_value;

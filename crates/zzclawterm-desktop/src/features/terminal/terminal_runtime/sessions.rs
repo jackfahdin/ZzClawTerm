@@ -267,15 +267,16 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Tauri minimize_to_tray: hide window instead of taskbar minimize when enabled.
-        // GPUI lacks a portable tray today; minimize still uses the platform minimize path,
-        // and the flag is honored as a documented no-op tray intent with status feedback.
         if self.settings.summary().minimize_to_tray {
-            window.minimize_window();
-            self.shell
-                .set_status("minimized (tray mode preferred; OS tray polish pending)".to_string());
-            cx.notify();
-            return;
+            if self.minimize_to_system_tray(window, cx) {
+                return;
+            }
+            self.notify_operation(
+                "tray-unavailable",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                rust_i18n::t!("tray.unavailable").to_string(),
+                cx,
+            );
         }
         window.minimize_window();
     }
@@ -306,7 +307,9 @@ impl ZzClawTermApp {
         if self.settings.summary().startup_restore {
             self.flush_open_tabs_now(cx);
         }
-        cx.emit(AppLifecycleEvent::ShutdownRequested);
+        if self.prepare_native_update_exit(cx) {
+            cx.emit(AppLifecycleEvent::ShutdownRequested);
+        }
     }
 
     pub(in crate::features) fn open_close_all_sessions_confirm(
@@ -356,6 +359,7 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        self.update.install_requested = false;
         self.session.dialog_cancel_close_all_sessions_confirm();
         self.shell
             .set_status("close all sessions cancelled".to_string());
@@ -373,7 +377,9 @@ impl ZzClawTermApp {
                 self.flush_open_tabs_now(cx);
             }
             self.shell.set_status("closing window".to_string());
-            cx.emit(AppLifecycleEvent::ShutdownRequested);
+            if self.prepare_native_update_exit(cx) {
+                cx.emit(AppLifecycleEvent::ShutdownRequested);
+            }
             return true;
         }
         self.close_all_sessions(cx);

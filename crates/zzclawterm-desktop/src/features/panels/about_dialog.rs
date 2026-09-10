@@ -22,6 +22,13 @@ impl ZzClawTermApp {
 
     fn about_dialog_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.theme_palette();
+        let support_info = format!(
+            "ZzClawTerm {}\nOS: {}\nArchitecture: {}\nMode: {:?}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            self.runtime.mode()
+        );
         div()
             .id("about-dialog-content")
             .debug_selector(|| "about-dialog-content".to_string())
@@ -52,6 +59,25 @@ impl ZzClawTermApp {
                     .text_center()
                     .text_color(rgb(palette.text_muted))
                     .child(t!("about.description")),
+            )
+            .child(div().text_xs().child(support_info.clone()))
+            .child(
+                ZzClawButton::new("about-copy-support", t!("about.copySupportInfo")).on_click(
+                    cx.listener(move |_, _, window, cx| {
+                        use zzclawterm_ui::notification::{
+                            ZzClawNotificationKind, ZzClawNotificationWindowExt as _,
+                        };
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            support_info.clone(),
+                        ));
+                        window.notify_operation(
+                            "support-info-copied",
+                            ZzClawNotificationKind::Success,
+                            t!("about.supportInfoCopied"),
+                            cx,
+                        );
+                    }),
+                ),
             )
             .child(
                 div()

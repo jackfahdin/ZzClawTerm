@@ -28,6 +28,7 @@ struct CompiledLiteralKeywordRule {
 }
 
 pub struct TerminalKeywordHighlighter {
+    across_wrapped_lines: bool,
     rules_key: u64,
     regex_rules: CompiledKeywordRules,
     literal_rules: Vec<CompiledLiteralKeywordRule>,
@@ -291,9 +292,11 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
             continue;
         }
 
-        let group_rows = if group.oversized {
-            stats.oversized_wrapped_groups = stats.oversized_wrapped_groups.saturating_add(1);
-            stats.degraded_rows = stats.degraded_rows.saturating_add(group_range.len());
+        let group_rows = if group.oversized || !highlighter.across_wrapped_lines {
+            if group.oversized {
+                stats.oversized_wrapped_groups = stats.oversized_wrapped_groups.saturating_add(1);
+                stats.degraded_rows = stats.degraded_rows.saturating_add(group_range.len());
+            }
             group_range
                 .clone()
                 .map(|row| {
@@ -783,10 +786,21 @@ pub fn compile_terminal_keyword_highlighter(
 ) -> TerminalKeywordHighlighter {
     let (regex_rules, literal_rules, literal_automaton) = compile_keyword_rule_sets(rules);
     TerminalKeywordHighlighter {
+        across_wrapped_lines: true,
         rules_key: terminal_keyword_rules_key(rules),
         regex_rules,
         literal_rules,
         literal_automaton,
+    }
+}
+
+impl TerminalKeywordHighlighter {
+    pub fn with_across_wrapped_lines(mut self, enabled: bool) -> Self {
+        if self.across_wrapped_lines != enabled {
+            self.rules_key = !self.rules_key;
+        }
+        self.across_wrapped_lines = enabled;
+        self
     }
 }
 
@@ -1916,6 +1930,30 @@ mod tests {
             .expect("second ranges");
 
         assert!(Arc::ptr_eq(&first_ranges, second_ranges));
+    }
+
+    #[test]
+    fn disabling_wrapped_matching_invalidates_previous_cross_line_matches() {
+        let mut snapshot = TerminalScreen::new(3, 4).snapshot();
+        set_snapshot_row_wrapped(&mut snapshot, 0, "ERR", 41, false);
+        set_snapshot_row_wrapped(&mut snapshot, 1, "OR", 42, true);
+        let rules = vec![ResolvedKeywordHighlightRule {
+            id: "error".into(),
+            name: "Error".into(),
+            patterns: vec!["ERROR".into()],
+            color: "#ff2244".into(),
+            enabled: true,
+        }];
+        let enabled = compile_terminal_keyword_highlighter(&rules);
+        let palette = zzclawterm_ui::theme_palette("github-dark");
+        let previous = precompute_terminal_keyword_highlights(&snapshot, &enabled, palette, None);
+        assert!(previous.range_count() > 0);
+        let disabled =
+            compile_terminal_keyword_highlighter(&rules).with_across_wrapped_lines(false);
+        let current =
+            precompute_terminal_keyword_highlights(&snapshot, &disabled, palette, Some(&previous));
+        assert_eq!(current.range_count(), 0);
+        assert_ne!(previous.rules_key(), current.rules_key());
     }
 
     #[test]

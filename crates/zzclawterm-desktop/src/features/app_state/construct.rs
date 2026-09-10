@@ -63,6 +63,7 @@ impl ZzClawTermApp {
         zzclawterm_core::warm_terminal_input_tracker();
         let BootstrapSnapshot {
             database_path,
+            custom_icons,
             connections,
             connection_groups,
             ssh_keys: connection_ssh_keys,
@@ -214,7 +215,7 @@ impl ZzClawTermApp {
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
 
         let blocking_jobs = crate::blocking_jobs::BlockingJobScheduler::new();
-        Self {
+        let mut app = Self {
             blocking_jobs: blocking_jobs.clone(),
             stores,
             store_ui,
@@ -390,7 +391,9 @@ impl ZzClawTermApp {
             )),
             #[cfg(test)]
             _test_config_dir: None,
-        }
+        };
+        app.update_custom_icons(custom_icons, cx);
+        app
     }
 
     pub(crate) fn start_shell_environment_preload(&self, cx: &mut Context<Self>) {

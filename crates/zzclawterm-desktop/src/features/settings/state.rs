@@ -483,11 +483,6 @@ impl SettingsFeatureState {
     pub(in crate::features) fn toggle_x11_server_autostart(&mut self) {
         self.summary.x11_server_autostart = !self.summary.x11_server_autostart;
     }
-
-    pub(in crate::features) fn toggle_terminal_hardware_acceleration(&mut self) {
-        self.summary.terminal_hardware_acceleration = !self.summary.terminal_hardware_acceleration;
-    }
-
     pub(in crate::features) fn toggle_terminal_low_latency_mode(&mut self) -> bool {
         self.summary.terminal_low_latency_mode = !self.summary.terminal_low_latency_mode;
         self.summary.terminal_low_latency_mode

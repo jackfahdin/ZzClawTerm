@@ -1143,7 +1143,7 @@ pub(super) fn connection_editor_ssh_section(
                                             cx,
                                         ))
                                         .child(
-                                            editor_field(
+                                            editor_stepper_field(
                                                 palette,
                                                 t!("dialog.postLoginDelay"),
                                                 ConnectionEditorField::PostLoginDelay,
@@ -1250,7 +1250,7 @@ pub(super) fn connection_editor_ssh_section(
                                         t!("dialog.sftpCwdFollowMode"),
                                         ConnectionEditorSelect::SftpCwdFollowMode,
                                     ))
-                                    .child(editor_field(
+                                    .child(editor_stepper_field(
                                         palette,
                                         t!("dialog.sftpShellDetectionTimeout"),
                                         ConnectionEditorField::SftpShellDetectionTimeout,
@@ -1266,6 +1266,12 @@ pub(super) fn connection_editor_ssh_section(
                                         "connection-editor-sftp-filename-encoding",
                                         t!("dialog.sftpFilenameEncoding"),
                                         ConnectionEditorSelect::SftpFilenameEncoding,
+                                    ))
+                                    .child(connection_editor_select(
+                                        ConnectionEditorRenderContext { palette, fields, cx },
+                                        "connection-editor-sftp-pipeline-depth",
+                                        t!("dialog.sftpPipelineDepth"),
+                                        ConnectionEditorSelect::SftpPipelineDepth,
                                     )),
                             ))
                         },
