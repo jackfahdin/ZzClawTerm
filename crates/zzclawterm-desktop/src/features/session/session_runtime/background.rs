@@ -712,6 +712,7 @@ impl ZzClawTermApp {
                 if should_activate {
                     self.activate_session_id(&session_id, cx);
                     self.load_transfer_browser_for_active_session_if_needed(cx);
+                    self.focus_session_input_after_activation(&session_id, cx);
                 }
                 // First connected frames often land with a login banner burst.
                 // Enter degraded paint immediately so tab-strip/status repaint
@@ -821,6 +822,33 @@ impl ZzClawTermApp {
         }
 
         self.settle_session_start_tab_placements_if_idle();
+    }
+
+    /// Focus the newly activated session's input so typing works without an
+    /// extra click. Every mouse-driven activation path focuses explicitly;
+    /// the programmatic activation on connect success did not, leaving a
+    /// freshly opened tab deaf to the keyboard until clicked.
+    fn focus_session_input_after_activation(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(window) = self.shell.main_window() else {
+            return;
+        };
+        let app = cx.weak_entity();
+        let session_id = session_id.to_string();
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = app.update(cx, |app, cx| {
+                    // The user may have switched to another tab before this runs.
+                    if app.session.active_id() != Some(session_id.as_str()) {
+                        return;
+                    }
+                    if app.remote_desktop.is_session(&session_id) {
+                        window.focus(app.remote_desktop.focus(), cx);
+                    } else {
+                        window.focus(app.terminal.input_focus(), cx);
+                    }
+                });
+            });
+        });
     }
 }
 
