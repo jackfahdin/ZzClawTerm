@@ -297,15 +297,23 @@ def windows_numeric_version(version: str) -> str:
     return ".".join(str(part) for part in numeric)
 
 
-def nsis_path(path: Path) -> str:
-    return str(path.resolve()).replace("/", "\\")
+def innosetup_arch(target: str) -> str:
+    if target.startswith("aarch64-"):
+        return "arm64"
+    return "x64"
 
 
-def find_makensis() -> str:
-    found = shutil.which("makensis") or shutil.which("makensis.exe")
+def find_iscc() -> str:
+    found = shutil.which("iscc") or shutil.which("iscc.exe") or shutil.which("ISCC.exe")
     if found:
         return found
-    raise RuntimeError("makensis not found; install NSIS before packaging Windows")
+    program_files = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    default = Path(program_files) / "Inno Setup 6" / "ISCC.exe"
+    if default.is_file():
+        return str(default)
+    raise RuntimeError(
+        "iscc not found; install Inno Setup 6 before packaging Windows"
+    )
 
 
 def create_windows_packages(
@@ -328,97 +336,25 @@ def create_windows_packages(
     installer_root = WORK_DIR / "windows-installer"
     installer_root.mkdir()
     shutil.copy2(binary, installer_root / "ZzClawTerm.exe")
-    installer_helpers = copy_helpers(installer_root, info.target)
-    installer_vcxsrv = stage_vcxsrv(installer_root)
+    copy_helpers(installer_root, info.target)
+    stage_vcxsrv(installer_root)
     copy_release_documents(installer_root, version)
     shutil.copy2(ICON_DIR / "icon.ico", installer_root / "icon.ico")
 
-    nsis_indent = "\n" + " " * 14
-    helper_install = nsis_indent.join(
-        f'File "{nsis_path(path)}"' for path in installer_helpers
-    )
-    helper_uninstall = nsis_indent.join(
-        f'Delete "$INSTDIR\\{path.name}"' for path in installer_helpers
-    )
-    vcxsrv_install = ""
-    vcxsrv_uninstall = ""
-    if installer_vcxsrv is not None:
-        vcxsrv_install = f'{nsis_indent}File /r "{nsis_path(installer_vcxsrv)}"'
-        vcxsrv_uninstall = f'{nsis_indent}RMDir /r "$INSTDIR\\{VCXSRV_DIRNAME}"'
-
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}-setup.exe"
-    script = WORK_DIR / "zzclawterm-installer.nsi"
-    script.write_text(
-        textwrap.dedent(
-            rf"""
-            Unicode true
-            RequestExecutionLevel user
-            SetCompressor /SOLID lzma
-
-            !include "MUI2.nsh"
-            !define MUI_ICON "{nsis_path(ICON_DIR / 'icon.ico')}"
-            !define MUI_UNICON "{nsis_path(ICON_DIR / 'icon.ico')}"
-
-            Name "ZzClawTerm"
-            OutFile "{nsis_path(output)}"
-            InstallDir "$LOCALAPPDATA\Programs\ZzClawTerm"
-            InstallDirRegKey HKCU "Software\ZzClawTerm" "InstallDir"
-            VIProductVersion "{windows_numeric_version(version)}"
-            VIAddVersionKey "ProductName" "ZzClawTerm"
-            VIAddVersionKey "ProductVersion" "{version}"
-            VIAddVersionKey "FileDescription" "ZzClawTerm native GPUI terminal"
-            VIAddVersionKey "LegalCopyright" "Copyright Jackfahdin"
-
-            !insertmacro MUI_PAGE_WELCOME
-            !insertmacro MUI_PAGE_DIRECTORY
-            !insertmacro MUI_PAGE_INSTFILES
-            !insertmacro MUI_PAGE_FINISH
-            !insertmacro MUI_UNPAGE_CONFIRM
-            !insertmacro MUI_UNPAGE_INSTFILES
-            !insertmacro MUI_LANGUAGE "English"
-
-            Section "ZzClawTerm" SecMain
-              SetOutPath "$INSTDIR"
-              File "{nsis_path(installer_root / 'ZzClawTerm.exe')}"
-              {helper_install}{vcxsrv_install}
-              File "{nsis_path(installer_root / 'LICENSE')}"
-              File "{nsis_path(installer_root / 'VERSION')}"
-              File "{nsis_path(installer_root / 'icon.ico')}"
-              WriteUninstaller "$INSTDIR\Uninstall.exe"
-              WriteRegStr HKCU "Software\ZzClawTerm" "InstallDir" "$INSTDIR"
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}" "" "URL:ZzClawTerm Protocol"
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}" "URL Protocol" ""
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\DefaultIcon" "" "$INSTDIR\ZzClawTerm.exe,0"
-              WriteRegStr HKCU "Software\Classes\{URL_SCHEME}\shell\open\command" "" "$\"$INSTDIR\ZzClawTerm.exe$\" $\"%1$\""
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayName" "ZzClawTerm"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayVersion" "{version}"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "DisplayIcon" "$INSTDIR\ZzClawTerm.exe"
-              WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-              CreateDirectory "$SMPROGRAMS\ZzClawTerm"
-              CreateShortcut "$SMPROGRAMS\ZzClawTerm\ZzClawTerm.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"
-              CreateShortcut "$DESKTOP\ZzClawTerm.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"
-            SectionEnd
-
-            Section "Uninstall"
-              Delete "$DESKTOP\ZzClawTerm.lnk"
-              Delete "$SMPROGRAMS\ZzClawTerm\ZzClawTerm.lnk"
-              RMDir "$SMPROGRAMS\ZzClawTerm"
-              Delete "$INSTDIR\ZzClawTerm.exe"
-              {helper_uninstall}{vcxsrv_uninstall}
-              Delete "$INSTDIR\LICENSE"
-              Delete "$INSTDIR\VERSION"
-              Delete "$INSTDIR\icon.ico"
-              Delete "$INSTDIR\Uninstall.exe"
-              RMDir "$INSTDIR"
-              DeleteRegKey HKCU "Software\Classes\{URL_SCHEME}"
-              DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZzClawTerm"
-              DeleteRegKey HKCU "Software\ZzClawTerm"
-            SectionEnd
-            """
-        ).lstrip(),
-        encoding="utf-8",
+    installer_script = Path(__file__).resolve().with_name("windows-installer.iss")
+    run(
+        [
+            find_iscc(),
+            f"/DSourceDir={installer_root.resolve()}",
+            f"/DVersion={version}",
+            f"/DNumericVersion={windows_numeric_version(version)}",
+            f"/DOutputDir={DIST_DIR.resolve()}",
+            f"/DOutputName={output.stem}",
+            f"/DArch={innosetup_arch(info.target)}",
+            str(installer_script),
+        ]
     )
-    run([find_makensis(), str(script)])
 
 
 def create_macos_packages(

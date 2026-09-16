@@ -175,10 +175,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
-      - name: Install NSIS
+      - name: Install Inno Setup
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/ci/install-nsis.ps1
+        run: ./scripts/ci/install-innosetup.ps1
       - name: Package native application
         shell: bash
         env:

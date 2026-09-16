@@ -136,7 +136,7 @@ class PackageNativeTests(unittest.TestCase):
                 self.assertTrue(path.is_file())
                 self.assertEqual(path.parent, destination)
 
-    def test_windows_installer_script_installs_and_removes_every_helper(self) -> None:
+    def test_windows_installer_invokes_iscc_with_release_parameters(self) -> None:
         target = "x86_64-pc-windows-msvc"
         info = package_native.target_info(target)
         with tempfile.TemporaryDirectory() as directory:
@@ -144,9 +144,9 @@ class PackageNativeTests(unittest.TestCase):
             with (
                 mock.patch.object(package_native, "WORK_DIR", root / "work"),
                 mock.patch.object(package_native, "DIST_DIR", root / "dist"),
-                mock.patch.object(package_native, "run"),
+                mock.patch.object(package_native, "run") as run_mock,
                 mock.patch.object(
-                    package_native, "find_makensis", return_value="makensis"
+                    package_native, "find_iscc", return_value="iscc"
                 ),
             ):
                 package_native.WORK_DIR.mkdir(parents=True)
@@ -159,26 +159,35 @@ class PackageNativeTests(unittest.TestCase):
                 package_native.create_windows_packages(
                     application, info, "0.0.1", "0.0.1"
                 )
-                script = (
-                    package_native.WORK_DIR / "zzclawterm-installer.nsi"
-                ).read_text(encoding="utf-8")
-        for name in package_native.HELPER_BINS:
-            filename = f"{name}.exe"
-            with self.subTest(helper=filename):
-                self.assertRegex(script, rf'File ".*{filename}"')
-                self.assertIn(f'Delete "$INSTDIR\\{filename}"', script)
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[0], "iscc")
+        defines = {arg for arg in args if arg.startswith("/D")}
+        self.assertIn("/DVersion=0.0.1", defines)
+        self.assertIn("/DNumericVersion=0.0.1.0", defines)
+        self.assertIn("/DArch=x64", defines)
+        self.assertTrue(any("windows-installer" in arg for arg in defines))
+        self.assertTrue(
+            any("ZzClawTerm_0.0.1_windows_x64-setup" in arg for arg in defines)
+        )
+        self.assertTrue(args[-1].endswith("windows-installer.iss"))
+
+    def test_windows_installer_script_registers_only_the_zzclawterm_scheme(self) -> None:
+        script = (
+            package_native.ROOT_DIR / "scripts" / "release" / "windows-installer.iss"
+        ).read_text(encoding="utf-8")
+        self.assertIn('Source: "{#SourceDir}\\*.exe"', script)
+        self.assertIn('Source: "{#SourceDir}\\vcxsrv\\*"', script)
         self.assertIn(
-            r'WriteRegStr HKCU "Software\Classes\zzclawterm" "URL Protocol" ""',
+            'Subkey: "Software\\Classes\\zzclawterm"; ValueType: string; '
+            'ValueName: "URL Protocol"',
             script,
         )
         self.assertIn(
-            r'WriteRegStr HKCU "Software\Classes\zzclawterm\shell\open\command" "" "$\"$INSTDIR\ZzClawTerm.exe$\" $\"%1$\""',
+            'Subkey: "Software\\Classes\\zzclawterm\\shell\\open\\command"; '
+            'ValueType: string; ValueData: """{app}\\ZzClawTerm.exe"" ""%1"""',
             script,
         )
-        self.assertIn(
-            r'DeleteRegKey HKCU "Software\Classes\zzclawterm"',
-            script,
-        )
+        self.assertIn('uninsdeletekey', script)
         self.assertNotIn(r"Software\Classes\ssh", script)
         self.assertNotIn(r"Software\Classes\telnet", script)
 
@@ -292,7 +301,7 @@ class PackageNativeTests(unittest.TestCase):
                 mock.patch.object(package_native, "DIST_DIR", root / "dist"),
                 mock.patch.object(package_native, "run"),
                 mock.patch.object(
-                    package_native, "find_makensis", return_value="makensis"
+                    package_native, "find_iscc", return_value="iscc"
                 ),
                 mock.patch.object(
                     package_native, "helper_binary_paths", return_value=helpers
@@ -308,14 +317,16 @@ class PackageNativeTests(unittest.TestCase):
                 package_native.create_windows_packages(
                     application, info, "0.0.1", "0.0.1"
                 )
-                script = (
-                    package_native.WORK_DIR / "zzclawterm-installer.nsi"
-                ).read_text(encoding="utf-8")
+                staged = package_native.WORK_DIR / "windows-installer" / "vcxsrv"
+                staged_exe = (staged / package_native.VCXSRV_EXE).is_file()
+                staged_fonts = (staged / "fonts" / "fonts.dir").is_file()
                 portable = next(package_native.DIST_DIR.glob("*_portable.zip"))
                 with zipfile.ZipFile(portable) as archive:
                     names = set(archive.namelist())
-        self.assertRegex(script, r'File /r ".*\\vcxsrv"')
-        self.assertIn(r'RMDir /r "$INSTDIR\vcxsrv"', script)
+        # The installer script picks up the staged tree; its wildcard and
+        # conditional vcxsrv entry are covered by the .iss content test.
+        self.assertTrue(staged_exe)
+        self.assertTrue(staged_fonts)
         self.assertIn("ZzClawTerm-portable/vcxsrv/vcxsrv.exe", names)
         self.assertIn("ZzClawTerm-portable/vcxsrv/NOTICE.txt", names)
         self.assertIn("ZzClawTerm-portable/vcxsrv/fonts/fonts.dir", names)

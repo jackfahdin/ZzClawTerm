@@ -31,10 +31,10 @@
    （包含 MSVC 编译器、链接器与 Windows SDK）。装完整版 Visual Studio
    或独立的 Build Tools for Visual Studio 都可以
 2. Rust 工具链使用默认的 `stable-x86_64-pc-windows-msvc` 即可
-3. **NSIS**（仅打包安装包时需要）：可用仓库脚本安装
+3. **Inno Setup 6**（仅打包安装包时需要）：可用仓库脚本安装
 
    ```powershell
-   ./scripts/ci/install-nsis.ps1
+   ./scripts/ci/install-innosetup.ps1
    ```
 
 ### macOS
@@ -256,13 +256,13 @@ python scripts/release/package_native.py <rust-target>
 
 ### Windows
 
-前置：NSIS（`./scripts/ci/install-nsis.ps1`）。
+前置：Inno Setup 6（`./scripts/ci/install-innosetup.ps1`）。
 
 ```bash
 python scripts/release/package_native.py x86_64-pc-windows-msvc
 ```
 
-产物：`ZzClawTerm_<版本>_windows_x64-setup.exe`（NSIS 安装包）和
+产物：`ZzClawTerm_<版本>_windows_x64-setup.exe`（Inno Setup 安装包）和
 `..._windows_x64-portable.zip`（便携版，内含应用、helper、LICENSE 等）。
 ARM64 换用 `aarch64-pc-windows-msvc`。
 
