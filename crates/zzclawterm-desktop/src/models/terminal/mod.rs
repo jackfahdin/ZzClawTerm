@@ -334,11 +334,14 @@ pub(crate) struct TerminalRenderCache {
 #[derive(Debug, Default)]
 struct TerminalDecorationCache {
     decoration_lines: HashMap<u64, Arc<[TerminalLineDecorations]>>,
+    decoration_order: VecDeque<u64>,
+    estimated_bytes: usize,
     hits: u64,
     misses: u64,
 }
 
-const TERMINAL_DECORATION_CACHE_CAP: usize = 4096;
+const TERMINAL_DECORATION_CACHE_CAP: usize = 64;
+const TERMINAL_DECORATION_CACHE_BYTE_CAP: usize = 8 * 1024 * 1024;
 
 impl TerminalRenderCache {
     pub(crate) fn clear(&mut self) {
@@ -372,6 +375,8 @@ impl TerminalRenderCache {
 impl TerminalDecorationCache {
     fn clear(&mut self) {
         self.decoration_lines.clear();
+        self.decoration_order.clear();
+        self.estimated_bytes = 0;
         self.hits = 0;
         self.misses = 0;
     }
@@ -381,18 +386,89 @@ impl TerminalDecorationCache {
         key: u64,
         build: impl FnOnce() -> Vec<TerminalLineDecorations>,
     ) -> Arc<[TerminalLineDecorations]> {
-        if let Some(decorations) = self.decoration_lines.get(&key) {
+        self.line_decorations_with_limits(
+            key,
+            build,
+            TERMINAL_DECORATION_CACHE_CAP,
+            TERMINAL_DECORATION_CACHE_BYTE_CAP,
+        )
+    }
+
+    fn line_decorations_with_limits(
+        &mut self,
+        key: u64,
+        build: impl FnOnce() -> Vec<TerminalLineDecorations>,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> Arc<[TerminalLineDecorations]> {
+        if let Some(decorations) = self.decoration_lines.get(&key).map(Arc::clone) {
             self.hits = self.hits.saturating_add(1);
-            return Arc::clone(decorations);
+            self.touch(key);
+            return decorations;
         }
         self.misses = self.misses.saturating_add(1);
-        if self.decoration_lines.len() >= TERMINAL_DECORATION_CACHE_CAP {
-            self.decoration_lines.clear();
-        }
         let decorations: Arc<[TerminalLineDecorations]> = build().into();
+        let estimated_bytes = terminal_line_decorations_estimated_bytes(&decorations);
+        if max_entries == 0 || estimated_bytes > max_bytes {
+            return decorations;
+        }
+        while self.decoration_lines.len() >= max_entries
+            || self.estimated_bytes.saturating_add(estimated_bytes) > max_bytes
+        {
+            if !self.evict_oldest() {
+                break;
+            }
+        }
         self.decoration_lines.insert(key, Arc::clone(&decorations));
+        self.decoration_order.push_back(key);
+        self.estimated_bytes = self.estimated_bytes.saturating_add(estimated_bytes);
         decorations
     }
+
+    fn touch(&mut self, key: u64) {
+        self.decoration_order.retain(|candidate| *candidate != key);
+        self.decoration_order.push_back(key);
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some(key) = self.decoration_order.pop_front() else {
+            return false;
+        };
+        if let Some(removed) = self.decoration_lines.remove(&key) {
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(terminal_line_decorations_estimated_bytes(&removed));
+        }
+        true
+    }
+}
+
+fn terminal_line_decorations_estimated_bytes(lines: &[TerminalLineDecorations]) -> usize {
+    lines
+        .iter()
+        .fold(std::mem::size_of_val(lines), |bytes, line| {
+            bytes
+                .saturating_add(
+                    line.selected_occurrence_ranges
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+                )
+                .saturating_add(
+                    line.search_ranges
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+                )
+                .saturating_add(
+                    line.active_search_ranges
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+                )
+                .saturating_add(
+                    line.link_ranges
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(usize, usize)>()),
+                )
+        })
 }
 
 pub(crate) fn terminal_action_link_matcher_key(

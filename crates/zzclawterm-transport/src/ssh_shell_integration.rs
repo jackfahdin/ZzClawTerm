@@ -13,6 +13,8 @@ const LEGACY_COMMAND_MARKER_PREFIX: &str = "7777;DflyCommand:";
 const MAX_OSC_BUF: usize = 64 * 1024;
 const SUPPRESSED_OUTPUT_LIMIT: usize = 64 * 1024;
 pub(super) const SSH_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(8);
+const SSH_INJECTION_UPLOAD_TIMEOUT: Duration = Duration::from_secs(5);
+const SSH_INJECTION_CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const SUPPRESSION_DIAGNOSTIC_INITIAL: Duration = Duration::from_secs(1);
 const SUPPRESSION_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -29,6 +31,57 @@ pub(super) enum ShellKind {
 pub(super) enum ShellIntegrationMode {
     Full,
     CwdOnly,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct PreparedSshShellIntegration {
+    shell: ShellKind,
+    mode: ShellIntegrationMode,
+    ready_marker: String,
+    payload: String,
+}
+
+impl PreparedSshShellIntegration {
+    fn new(
+        shell: ShellKind,
+        mode: ShellIntegrationMode,
+        ready_marker: &str,
+        payload: String,
+    ) -> Self {
+        Self {
+            shell,
+            mode,
+            ready_marker: ready_marker.to_string(),
+            payload,
+        }
+    }
+
+    pub(super) fn upload_payload(&self) -> Vec<u8> {
+        self.payload.as_bytes().to_vec()
+    }
+
+    pub(super) fn inline_script(&self) -> Vec<u8> {
+        wrap_shell_integration_payload(self.shell, self.mode, &self.ready_marker, &self.payload)
+            .expect("prepared shell integration uses a supported shell")
+            .into_bytes()
+    }
+
+    pub(super) fn uploaded_script(&self, remote_path: &str, remote_dir: &str) -> Vec<u8> {
+        let remote_path = sh_single_quote(remote_path);
+        let remote_dir = sh_single_quote(remote_dir);
+        let source = match self.shell {
+            ShellKind::Bash | ShellKind::Zsh => {
+                format!(". {remote_path}; rm -rf {remote_dir}")
+            }
+            ShellKind::Fish => format!("source {remote_path}; rm -rf {remote_dir}"),
+            ShellKind::PosixSh | ShellKind::Unknown => {
+                unreachable!("prepared shell integration uses a supported shell")
+            }
+        };
+        wrap_shell_integration_payload(self.shell, self.mode, &self.ready_marker, &source)
+            .expect("prepared shell integration uses a supported shell")
+            .into_bytes()
+    }
 }
 
 impl ShellIntegrationMode {
@@ -82,7 +135,7 @@ enum SshShellIntegrationPhase {
 
 pub(super) struct SshShellIntegrationState {
     phase: SshShellIntegrationPhase,
-    pending_script: Option<Vec<u8>>,
+    pending_integration: Option<PreparedSshShellIntegration>,
     stripper: OscStripper,
     suppress_started_at: Option<Instant>,
     suppressed_visible_bytes: usize,
@@ -93,18 +146,18 @@ pub(super) struct SshShellIntegrationState {
 
 impl SshShellIntegrationState {
     pub(super) fn new(
-        pending_script: Option<Vec<u8>>,
+        pending_integration: Option<PreparedSshShellIntegration>,
         ready_marker: String,
         legacy_ready_marker: Option<String>,
     ) -> Self {
-        let phase = if pending_script.is_some() {
+        let phase = if pending_integration.is_some() {
             SshShellIntegrationPhase::WaitInitial
         } else {
             SshShellIntegrationPhase::Normal
         };
         Self {
             phase,
-            pending_script,
+            pending_integration,
             stripper: OscStripper::new(&ready_marker, legacy_ready_marker.as_deref()),
             suppress_started_at: None,
             suppressed_visible_bytes: 0,
@@ -127,22 +180,39 @@ impl SshShellIntegrationState {
     }
 
     pub(super) fn should_inject_on_initial_delay(&self) -> bool {
-        self.phase == SshShellIntegrationPhase::WaitInitial && self.pending_script.is_some()
+        self.phase == SshShellIntegrationPhase::WaitInitial && self.pending_integration.is_some()
     }
 
-    pub(super) async fn inject(&mut self, channel: &mut russh::Channel<client::Msg>) {
-        let Some(script) = self.pending_script.take() else {
-            return;
+    pub(super) fn take_pending_integration(&mut self) -> Option<PreparedSshShellIntegration> {
+        self.pending_integration.take()
+    }
+
+    pub(super) fn begin_suppression(&mut self) {
+        self.phase = SshShellIntegrationPhase::Suppressing;
+        self.suppress_started_at = Some(Instant::now());
+        self.suppressed_visible_bytes = 0;
+        self.suppressed_rx_bytes = 0;
+        self.suppressed_rx_chunks = 0;
+        self.last_diagnostic_at = None;
+    }
+
+    pub(super) async fn apply_upload_outcome(
+        &mut self,
+        outcome: ScriptUploadOutcome,
+        integration: PreparedSshShellIntegration,
+        channel: &mut russh::Channel<client::Msg>,
+    ) {
+        let script = if outcome.success {
+            integration.uploaded_script(&outcome.remote_path, &outcome.remote_dir)
+        } else {
+            integration.inline_script()
         };
         if channel.data_bytes(script).await.is_ok() {
-            self.phase = SshShellIntegrationPhase::Suppressing;
-            self.suppress_started_at = Some(Instant::now());
-            self.suppressed_visible_bytes = 0;
-            self.suppressed_rx_bytes = 0;
-            self.suppressed_rx_chunks = 0;
-            self.last_diagnostic_at = None;
+            self.begin_suppression();
         } else {
-            self.force_normal();
+            self.phase = SshShellIntegrationPhase::Normal;
+            self.suppress_started_at = None;
+            self.suppressed_visible_bytes = 0;
         }
     }
 
@@ -174,7 +244,7 @@ impl SshShellIntegrationState {
     fn force_normal(&mut self) {
         self.phase = SshShellIntegrationPhase::Normal;
         self.suppress_started_at = None;
-        self.pending_script = None;
+        self.pending_integration = None;
         self.suppressed_visible_bytes = 0;
         self.suppressed_rx_bytes = 0;
         self.suppressed_rx_chunks = 0;
@@ -232,6 +302,104 @@ impl SshShellIntegrationState {
     }
 }
 
+pub(super) struct ScriptUploadOutcome {
+    remote_dir: String,
+    remote_path: String,
+    success: bool,
+}
+
+impl ScriptUploadOutcome {
+    pub(super) fn failed() -> Self {
+        Self {
+            remote_dir: String::new(),
+            remote_path: String::new(),
+            success: false,
+        }
+    }
+}
+
+pub(super) async fn upload_integration_script(
+    handle: std::sync::Arc<SshShellHandle>,
+    script: Vec<u8>,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
+) -> ScriptUploadOutcome {
+    let remote_dir = format!("/tmp/.zzclawterm_inj_{}", uuid::Uuid::new_v4().simple());
+    let remote_path = format!("{remote_dir}/script.sh");
+    let deadline = tokio::time::Instant::now() + SSH_INJECTION_UPLOAD_TIMEOUT;
+
+    let open_channel = async {
+        match handle.as_ref() {
+            SshShellHandle::Dedicated(h) => h.channel_open_session().await,
+            SshShellHandle::Multiplexed(h) => {
+                let h = h.lock().await;
+                h.channel_open_session().await
+            }
+        }
+    };
+
+    let mut exec_ch = match tokio::select! {
+        _ = &mut cancel => None,
+        result = tokio::time::timeout_at(deadline, open_channel) => {
+            result.ok().and_then(Result::ok)
+        }
+    } {
+        Some(channel) => channel,
+        None => return ScriptUploadOutcome::failed(),
+    };
+
+    // The UUID makes collisions impractical, while mkdir without -p is the
+    // exclusive creation step: an existing file, directory, or symlink makes
+    // the upload fail instead of being followed. The restrictive umask and
+    // 0700 directory keep the script private even before chmod runs.
+    let cmd = format!(
+        "umask 077; mkdir -m 700 '{dir}' || exit 1; \
+         trap 'rm -rf \"{dir}\"; exit 1' HUP INT TERM; \
+         cat > '{path}' && chmod 700 '{path}' || {{ rm -rf '{dir}'; exit 1; }}",
+        dir = remote_dir,
+        path = remote_path,
+    );
+
+    let upload = async {
+        exec_ch.exec(true, cmd.into_bytes()).await?;
+        exec_ch.data_bytes(script).await?;
+        exec_ch.eof().await?;
+
+        let mut exit_status = None;
+        while let Some(msg) = exec_ch.wait().await {
+            match msg {
+                ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => exit_status = Some(status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok::<bool, anyhow::Error>(exit_status.unwrap_or(0) == 0)
+    };
+
+    let success = tokio::select! {
+        _ = &mut cancel => false,
+        result = tokio::time::timeout_at(deadline, upload) => {
+            match result {
+                Ok(Ok(success)) => success,
+                Ok(Err(_)) | Err(_) => false,
+            }
+        }
+    };
+
+    // Keep the channel owned by this task outside the timeout/cancellation
+    // future so both paths can explicitly close it. This is important for
+    // multiplexed connections, where dropping a plain russh::Channel does not
+    // close the remote channel or terminate a blocked `cat` process.
+    let _ = tokio::time::timeout(SSH_INJECTION_CHANNEL_CLOSE_TIMEOUT, exec_ch.close()).await;
+
+    ScriptUploadOutcome {
+        remote_dir,
+        remote_path,
+        success,
+    }
+}
+
 impl OscResult {
     fn into_output(self) -> SshIntegrationOutput {
         SshIntegrationOutput {
@@ -266,7 +434,7 @@ pub(super) async fn build_ssh_shell_integration_script(
     terminal_shell_integration: bool,
     cwd_follow_mode: super::SftpCwdFollowMode,
     timeout_ms: u64,
-) -> Option<Vec<u8>> {
+) -> Option<PreparedSshShellIntegration> {
     let mode = if terminal_shell_integration {
         ShellIntegrationMode::Full
     } else {
@@ -274,18 +442,15 @@ pub(super) async fn build_ssh_shell_integration_script(
     };
     match cwd_follow_mode {
         super::SftpCwdFollowMode::Off => terminal_shell_integration
-            .then(|| ssh_shell_injection_script(shell, ready_marker, mode))
-            .flatten()
-            .map(String::into_bytes),
+            .then(|| prepare_shell_integration(shell, ready_marker, mode))
+            .flatten(),
         super::SftpCwdFollowMode::ShellIntegration => {
-            ssh_shell_injection_script(shell, ready_marker, mode).map(String::into_bytes)
+            prepare_shell_integration(shell, ready_marker, mode)
         }
         super::SftpCwdFollowMode::RcFile => {
             match install_remote_shell_integration(handle, shell, timeout_ms).await {
-                Ok(()) => activation_script(shell, ready_marker, mode).map(String::into_bytes),
-                Err(_error) => {
-                    ssh_shell_injection_script(shell, ready_marker, mode).map(String::into_bytes)
-                }
+                Ok(()) => prepare_activation(shell, ready_marker, mode),
+                Err(_error) => prepare_shell_integration(shell, ready_marker, mode),
             }
         }
     }
@@ -378,25 +543,57 @@ fn ready_printf(marker: &str) -> String {
         .replace('\'', "'\\''")
 }
 
+#[cfg(test)]
 pub(super) fn ssh_shell_injection_script(
     shell: ShellKind,
     ready_marker: &str,
     mode: ShellIntegrationMode,
 ) -> Option<String> {
-    let script = match mode {
+    prepare_shell_integration(shell, ready_marker, mode).map(|integration| {
+        String::from_utf8(integration.inline_script()).expect("shell script utf8")
+    })
+}
+
+pub(super) fn prepare_shell_integration(
+    shell: ShellKind,
+    ready_marker: &str,
+    mode: ShellIntegrationMode,
+) -> Option<PreparedSshShellIntegration> {
+    let payload = match mode {
         ShellIntegrationMode::Full => persistent_script(shell)?,
         ShellIntegrationMode::CwdOnly => cwd_only_script(shell)?,
     };
+    Some(PreparedSshShellIntegration::new(
+        shell,
+        mode,
+        ready_marker,
+        payload.to_string(),
+    ))
+}
+
+fn wrap_shell_integration_payload(
+    shell: ShellKind,
+    mode: ShellIntegrationMode,
+    ready_marker: &str,
+    payload: &str,
+) -> Option<String> {
     let ready = ready_printf(ready_marker);
     let install_arg = mode.install_arg();
+    let fish_payload;
+    let payload = if shell == ShellKind::Fish {
+        fish_payload = prefix_physical_lines(payload, ' ');
+        fish_payload.as_str()
+    } else {
+        payload
+    };
     // Bash records each top-level definition from a multiline PTY write separately. Keep the
     // guard start and finish on single physical lines so history is disabled between them.
     let prefix = match shell {
         ShellKind::Bash => {
-            " case $- in *h*) ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED=1; ZZCLAWTERM_PRUNE_HISTORY=1 ;; *) unset ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED ZZCLAWTERM_PRUNE_HISTORY ;; esac; ZZCLAWTERM_LAST_HISTCMD=\"${HISTCMD-}\"; export ZZCLAWTERM_INJ=1; set +o history\n"
+            " if [[ -o history ]]; then ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED=1; ZZCLAWTERM_PRUNE_HISTORY=1; else unset ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED ZZCLAWTERM_PRUNE_HISTORY; fi; ZZCLAWTERM_LAST_HISTCMD=\"${HISTCMD-}\"; export ZZCLAWTERM_INJ=1; set +o history\n"
         }
         ShellKind::Zsh => " fc -p /dev/null 2>/dev/null\n export ZZCLAWTERM_INJ=1;\n",
-        ShellKind::Fish => " set fish_private_mode 1 2>/dev/null\n set -gx ZZCLAWTERM_INJ 1\n",
+        ShellKind::Fish => " set -gx ZZCLAWTERM_INJ 1\n",
         ShellKind::PosixSh | ShellKind::Unknown => return None,
     };
     let suffix = match shell {
@@ -406,38 +603,55 @@ pub(super) fn ssh_shell_injection_script(
             )
         }
         ShellKind::Zsh => format!(
-            "\n__zzclawterm_install_prompt {install_arg} 2>/dev/null || true; fc -P 2>/dev/null\nprintf '{ready}'\n"
+            "\n__zzclawterm_install_prompt {install_arg} 2>/dev/null || true; fc -P 2>/dev/null; printf '{ready}'\n"
         ),
         ShellKind::Fish => format!(
-            "\n__zzclawterm_install_prompt {install_arg} 2>/dev/null; or true\nset -e fish_private_mode 2>/dev/null\nprintf '{ready}'\n"
+            "\n __zzclawterm_install_prompt {install_arg} 2>/dev/null; or true\n printf '{ready}'\n"
         ),
         ShellKind::PosixSh | ShellKind::Unknown => return None,
     };
-    Some(format!("{prefix}{script}{suffix}"))
+    Some(format!("{prefix}{payload}{suffix}"))
 }
 
+fn prefix_physical_lines(value: &str, prefix: char) -> String {
+    let mut prefixed = String::with_capacity(value.len() + value.lines().count());
+    for line in value.split_inclusive('\n') {
+        prefixed.push(prefix);
+        prefixed.push_str(line);
+    }
+    prefixed
+}
+
+#[cfg(test)]
 pub(super) fn activation_script(
     shell: ShellKind,
     ready_marker: &str,
     mode: ShellIntegrationMode,
 ) -> Option<String> {
-    let ready = ready_printf(ready_marker);
-    let install_arg = mode.install_arg();
-    match shell {
-        ShellKind::Bash => Some(format!(
-            " ZZCLAWTERM_PRUNE_HISTORY=1; ZZCLAWTERM_READY_PENDING=1; export ZZCLAWTERM_INJ=1; export ZZCLAWTERM_READY_MARKER=\"$(printf '{}')\"; [ -r \"$HOME/.config/zzclawterm/shell-integration.bash\" ] && . \"$HOME/.config/zzclawterm/shell-integration.bash\"; __zzclawterm_install_prompt {install_arg} 2>/dev/null; if [ -n \"${{ZZCLAWTERM_READY_PENDING:-}}\" ]; then unset ZZCLAWTERM_READY_PENDING; printf '%s' \"${{ZZCLAWTERM_READY_MARKER-}}\"; fi\n",
-            ready
-        )),
-        ShellKind::Zsh => Some(format!(
-            " fc -p /dev/null 2>/dev/null\n ZZCLAWTERM_READY_PENDING=1; export ZZCLAWTERM_INJ=1; export ZZCLAWTERM_READY_MARKER=\"$(printf '{}')\"; [ -r \"$HOME/.config/zzclawterm/shell-integration.zsh\" ] && . \"$HOME/.config/zzclawterm/shell-integration.zsh\"; __zzclawterm_install_prompt {install_arg} 2>/dev/null; fc -P 2>/dev/null\n if [ -n \"${{ZZCLAWTERM_READY_PENDING:-}}\" ]; then unset ZZCLAWTERM_READY_PENDING; printf '%s' \"${{ZZCLAWTERM_READY_MARKER-}}\"; fi\n",
-            ready
-        )),
-        ShellKind::Fish => Some(format!(
-            " set fish_private_mode 1 2>/dev/null\n set -g ZZCLAWTERM_READY_PENDING 1; set -gx ZZCLAWTERM_INJ 1; set -gx ZZCLAWTERM_READY_MARKER (printf '{}'); if test -r \"$HOME/.config/zzclawterm/shell-integration.fish\"; source \"$HOME/.config/zzclawterm/shell-integration.fish\"; end; __zzclawterm_install_prompt {install_arg} 2>/dev/null; set -e fish_private_mode 2>/dev/null\n if set -q ZZCLAWTERM_READY_PENDING; set -e ZZCLAWTERM_READY_PENDING; printf '%s' \"$ZZCLAWTERM_READY_MARKER\"; end\n",
-            ready
-        )),
-        ShellKind::PosixSh | ShellKind::Unknown => None,
-    }
+    prepare_activation(shell, ready_marker, mode).map(|integration| {
+        String::from_utf8(integration.inline_script()).expect("shell script utf8")
+    })
+}
+
+fn prepare_activation(
+    shell: ShellKind,
+    ready_marker: &str,
+    mode: ShellIntegrationMode,
+) -> Option<PreparedSshShellIntegration> {
+    let script_path = persistent_script_path(shell)?;
+    let payload = match shell {
+        ShellKind::Bash | ShellKind::Zsh => {
+            format!("[ -r \"{script_path}\" ] && . \"{script_path}\"")
+        }
+        ShellKind::Fish => format!("if test -r \"{script_path}\"\n source \"{script_path}\"\nend"),
+        ShellKind::PosixSh | ShellKind::Unknown => return None,
+    };
+    Some(PreparedSshShellIntegration::new(
+        shell,
+        mode,
+        ready_marker,
+        payload,
+    ))
 }
 
 pub(super) fn persistent_script(shell: ShellKind) -> Option<&'static str> {
@@ -681,64 +895,64 @@ __zzclawterm_register_full_hooks(){
   __zzclawterm_array_contains __zzclawterm_preexec "${preexec_functions[@]}" \
     || preexec_functions+=(__zzclawterm_preexec)
 }
-__zzclaw_bp_require_not_readonly(){
+__nya_bp_require_not_readonly(){
   local var
   for var; do
     if ! ( unset "$var" 2>/dev/null ); then return 1; fi
   done
 }
-__zzclaw_bp_trim_whitespace(){
+__nya_bp_trim_whitespace(){
   local var=${1:?} text=${2:-}
   text="${text#"${text%%[![:space:]]*}"}"
   text="${text%"${text##*[![:space:]]}"}"
   printf -v "$var" '%s' "$text"
 }
-__zzclaw_bp_sanitize_string(){
+__nya_bp_sanitize_string(){
   local var=${1:?} text=${2:-} sanitized
-  __zzclaw_bp_trim_whitespace sanitized "$text"
+  __nya_bp_trim_whitespace sanitized "$text"
   sanitized=${sanitized%;}; sanitized=${sanitized#;}
-  __zzclaw_bp_trim_whitespace sanitized "$sanitized"
+  __nya_bp_trim_whitespace sanitized "$sanitized"
   printf -v "$var" '%s' "$sanitized"
 }
-__zzclaw_bp_set_ret_value(){ return ${1:+"$1"}; }
-__zzclaw_bp_interactive_mode(){ __zzclaw_bp_preexec_interactive_mode=on; }
-__zzclaw_bp_precmd_invoke_cmd(){
-  __zzclaw_bp_last_ret_value="$?" ZZCLAWTERM_BP_PIPESTATUS=("${PIPESTATUS[@]}")
-  if (( __zzclaw_bp_inside_precmd > 0 )); then return; fi
-  local __zzclaw_bp_inside_precmd=1 precmd_function
+__nya_bp_set_ret_value(){ return ${1:+"$1"}; }
+__nya_bp_interactive_mode(){ __nya_bp_preexec_interactive_mode=on; }
+__nya_bp_precmd_invoke_cmd(){
+  __nya_bp_last_ret_value="$?" ZZCLAWTERM_BP_PIPESTATUS=("${PIPESTATUS[@]}")
+  if (( __nya_bp_inside_precmd > 0 )); then return; fi
+  local __nya_bp_inside_precmd=1 precmd_function
   for precmd_function in "${precmd_functions[@]}"; do
     if type -t "$precmd_function" >/dev/null; then
-      __zzclaw_bp_set_ret_value "$__zzclaw_bp_last_ret_value" "$__zzclaw_bp_last_argument"
+      __nya_bp_set_ret_value "$__nya_bp_last_ret_value" "$__nya_bp_last_argument"
       "$precmd_function"
     fi
   done
-  __zzclaw_bp_set_ret_value "$__zzclaw_bp_last_ret_value"
+  __nya_bp_set_ret_value "$__nya_bp_last_ret_value"
 }
-__zzclaw_bp_in_prompt_command(){
+__nya_bp_in_prompt_command(){
   local prompt_command_array IFS=$'\n;'
   read -rd '' -a prompt_command_array <<< "${PROMPT_COMMAND[*]:-}"
   local trimmed_arg command trimmed_command
-  __zzclaw_bp_trim_whitespace trimmed_arg "${1:-}"
+  __nya_bp_trim_whitespace trimmed_arg "${1:-}"
   for command in "${prompt_command_array[@]:-}"; do
-    __zzclaw_bp_trim_whitespace trimmed_command "$command"
+    __nya_bp_trim_whitespace trimmed_command "$command"
     [ "$trimmed_command" = "$trimmed_arg" ] && return 0
   done
   return 1
 }
-__zzclaw_bp_preexec_invoke_exec(){
-  __zzclaw_bp_last_argument="${1:-}"
-  if (( __zzclaw_bp_inside_preexec > 0 )); then return; fi
-  local __zzclaw_bp_inside_preexec=1
+__nya_bp_preexec_invoke_exec(){
+  __nya_bp_last_argument="${1:-}"
+  if (( __nya_bp_inside_preexec > 0 )); then return; fi
+  local __nya_bp_inside_preexec=1
   [ -t 1 ] || return
   [ -z "${COMP_LINE:-}" ] || return
   [ -z "${READLINE_LINE+x}" ] || return
-  if [ -z "${__zzclaw_bp_preexec_interactive_mode:-}" ]; then
+  if [ -z "${__nya_bp_preexec_interactive_mode:-}" ]; then
     return
   elif [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
-    __zzclaw_bp_preexec_interactive_mode=
+    __nya_bp_preexec_interactive_mode=
   fi
-  if __zzclaw_bp_in_prompt_command "${BASH_COMMAND:-}"; then
-    __zzclaw_bp_preexec_interactive_mode=
+  if __nya_bp_in_prompt_command "${BASH_COMMAND:-}"; then
+    __nya_bp_preexec_interactive_mode=
     return
   fi
   local this_command
@@ -747,48 +961,48 @@ __zzclaw_bp_preexec_invoke_exec(){
   local preexec_function preexec_ret=0 function_ret
   for preexec_function in "${preexec_functions[@]:-}"; do
     if type -t "$preexec_function" >/dev/null; then
-      __zzclaw_bp_set_ret_value "${__zzclaw_bp_last_ret_value:-}"
+      __nya_bp_set_ret_value "${__nya_bp_last_ret_value:-}"
       "$preexec_function" "$this_command"
       function_ret=$?
       [ "$function_ret" -eq 0 ] || preexec_ret=$function_ret
     fi
   done
-  __zzclaw_bp_set_ret_value "$preexec_ret" "$__zzclaw_bp_last_argument"
+  __nya_bp_set_ret_value "$preexec_ret" "$__nya_bp_last_argument"
 }
-__zzclaw_bp_install(){
-  case "${PROMPT_COMMAND[*]:-}" in (*__zzclaw_bp_precmd_invoke_cmd*) return 1 ;; esac
-  trap '__zzclaw_bp_preexec_invoke_exec "$_"' DEBUG || return 1
+__nya_bp_install(){
+  case "${PROMPT_COMMAND[*]:-}" in (*__nya_bp_precmd_invoke_cmd*) return 1 ;; esac
+  trap '__nya_bp_preexec_invoke_exec "$_"' DEBUG || return 1
   local prior_trap
-  prior_trap=$(sed "s/[^']*'\(.*\)'[^']*/\1/" <<<"${__zzclaw_bp_trap_string:-}")
-  unset __zzclaw_bp_trap_string
+  prior_trap=$(sed "s/[^']*'\(.*\)'[^']*/\1/" <<<"${__nya_bp_trap_string:-}")
+  unset __nya_bp_trap_string
   if [ -n "$prior_trap" ]; then
-    eval '__zzclaw_bp_original_debug_trap(){ '"$prior_trap"'; }'
-    preexec_functions+=(__zzclaw_bp_original_debug_trap)
+    eval '__nya_bp_original_debug_trap(){ '"$prior_trap"'; }'
+    preexec_functions+=(__nya_bp_original_debug_trap)
   fi
   local existing_prompt_command="${PROMPT_COMMAND:-}"
-  existing_prompt_command="${existing_prompt_command//$__zzclaw_bp_install_string/:}"
+  existing_prompt_command="${existing_prompt_command//$__nya_bp_install_string/:}"
   existing_prompt_command="${existing_prompt_command//$'\n':$'\n'/$'\n'}"
   existing_prompt_command="${existing_prompt_command//$'\n':;/$'\n'}"
-  __zzclaw_bp_sanitize_string existing_prompt_command "$existing_prompt_command"
+  __nya_bp_sanitize_string existing_prompt_command "$existing_prompt_command"
   [ "${existing_prompt_command:-:}" = : ] && existing_prompt_command=
-  PROMPT_COMMAND=__zzclaw_bp_precmd_invoke_cmd
+  PROMPT_COMMAND=__nya_bp_precmd_invoke_cmd
   PROMPT_COMMAND+=${existing_prompt_command:+$'\n'$existing_prompt_command}
   if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-    PROMPT_COMMAND+=(__zzclaw_bp_interactive_mode)
+    PROMPT_COMMAND+=(__nya_bp_interactive_mode)
   else
-    PROMPT_COMMAND+=$'\n__zzclaw_bp_interactive_mode'
+    PROMPT_COMMAND+=$'\n__nya_bp_interactive_mode'
   fi
   ZZCLAWTERM_BASH_HOOKS_READY=1
   unset ZZCLAWTERM_BASH_INSTALL_PENDING
-  __zzclaw_bp_precmd_invoke_cmd
-  __zzclaw_bp_interactive_mode
+  __nya_bp_precmd_invoke_cmd
+  __nya_bp_interactive_mode
 }
-__zzclaw_bp_install_after_session_init(){
-  __zzclaw_bp_require_not_readonly PROMPT_COMMAND HISTCONTROL HISTTIMEFORMAT || return 1
+__nya_bp_install_after_session_init(){
+  __nya_bp_require_not_readonly PROMPT_COMMAND HISTCONTROL HISTTIMEFORMAT || return 1
   local sanitized_prompt_command
-  __zzclaw_bp_sanitize_string sanitized_prompt_command "${PROMPT_COMMAND:-}"
+  __nya_bp_sanitize_string sanitized_prompt_command "${PROMPT_COMMAND:-}"
   [ -z "$sanitized_prompt_command" ] || PROMPT_COMMAND=${sanitized_prompt_command}$'\n'
-  PROMPT_COMMAND+=${__zzclaw_bp_install_string}
+  PROMPT_COMMAND+=${__nya_bp_install_string}
 }
 __zzclawterm_install_cwd(){
   [ -n "${ZZCLAWTERM_BASH_CWD_READY:-}" ] && return 0
@@ -817,19 +1031,19 @@ __zzclawterm_install_full(){
     return 0
   fi
   command -v sed >/dev/null 2>&1 || return 1
-  __zzclaw_bp_require_not_readonly \
+  __nya_bp_require_not_readonly \
     PROMPT_COMMAND HISTCONTROL HISTTIMEFORMAT precmd_functions preexec_functions || return 1
   bash_preexec_imported=defined
   declare -ga precmd_functions preexec_functions
-  __zzclaw_bp_last_ret_value="$?"
-  __zzclaw_bp_last_argument="$_"
-  __zzclaw_bp_inside_precmd=0
-  __zzclaw_bp_inside_preexec=0
-  __zzclaw_bp_preexec_interactive_mode=
-  __zzclaw_bp_install_string=$'__zzclaw_bp_trap_string="$(trap -p DEBUG)"\ntrap - DEBUG\n__zzclaw_bp_install'
+  __nya_bp_last_ret_value="$?"
+  __nya_bp_last_argument="$_"
+  __nya_bp_inside_precmd=0
+  __nya_bp_inside_preexec=0
+  __nya_bp_preexec_interactive_mode=
+  __nya_bp_install_string=$'__nya_bp_trap_string="$(trap -p DEBUG)"\ntrap - DEBUG\n__nya_bp_install'
   __zzclawterm_register_full_hooks
   ZZCLAWTERM_BASH_INSTALL_PENDING=1
-  __zzclaw_bp_install_after_session_init || { unset ZZCLAWTERM_BASH_INSTALL_PENDING; return 1; }
+  __nya_bp_install_after_session_init || { unset ZZCLAWTERM_BASH_INSTALL_PENDING; return 1; }
 }
 __zzclawterm_install_prompt(){
   ZZCLAWTERM_LAST_HISTCMD="${HISTCMD-}"
@@ -1302,15 +1516,21 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     use super::{
-        SSH_INTEGRATION_TIMEOUT, SshShellIntegrationPhase, SshShellIntegrationState,
-        build_legacy_ssh_ready_marker, build_ssh_ready_marker,
+        PreparedSshShellIntegration, SSH_INTEGRATION_TIMEOUT, ShellIntegrationMode, ShellKind,
+        SshShellIntegrationPhase, SshShellIntegrationState, build_legacy_ssh_ready_marker,
+        build_ssh_ready_marker,
     };
 
     fn shell_integration_state(session_id: &str) -> SshShellIntegrationState {
         let ready_marker = build_ssh_ready_marker(session_id);
         let legacy_ready_marker = build_legacy_ssh_ready_marker(&ready_marker);
         SshShellIntegrationState::new(
-            Some(b"inject-script\n".to_vec()),
+            Some(PreparedSshShellIntegration::new(
+                ShellKind::Bash,
+                ShellIntegrationMode::Full,
+                &ready_marker,
+                "inject-script\n".to_string(),
+            )),
             ready_marker,
             legacy_ready_marker,
         )
@@ -1318,8 +1538,81 @@ mod tests {
 
     fn mark_injection_sent(state: &mut SshShellIntegrationState) {
         state.phase = SshShellIntegrationPhase::Suppressing;
-        state.pending_script = None;
+        state.pending_integration = None;
         state.suppress_started_at = Some(Instant::now());
+    }
+
+    #[test]
+    fn uploaded_scripts_source_payload_inside_shell_history_guards() {
+        let ready_marker = build_ssh_ready_marker("history-guard");
+        for shell in [ShellKind::Bash, ShellKind::Zsh, ShellKind::Fish] {
+            let integration =
+                super::prepare_shell_integration(shell, &ready_marker, ShellIntegrationMode::Full)
+                    .expect("prepared shell integration");
+            let uploaded = String::from_utf8(integration.uploaded_script(
+                "/tmp/.zzclawterm_inj_test/script.sh",
+                "/tmp/.zzclawterm_inj_test",
+            ))
+            .expect("utf8 uploaded script");
+
+            assert!(uploaded.contains(".zzclawterm_inj_test/script.sh"));
+            assert!(uploaded.contains("rm -rf '/tmp/.zzclawterm_inj_test'"));
+            assert!(uploaded.contains("ZzClawTermReady:history-guard"));
+            match shell {
+                ShellKind::Bash => {
+                    assert!(uploaded.starts_with(" if [[ -o history ]]"));
+                    assert!(uploaded.contains("set +o history\n. '/tmp/.zzclawterm_inj_test"));
+                    assert!(uploaded.contains("set -o history; __zzclawterm_prune_history"));
+                }
+                ShellKind::Zsh => {
+                    assert!(uploaded.starts_with(" fc -p /dev/null"));
+                    assert!(uploaded.contains("fc -P 2>/dev/null"));
+                }
+                ShellKind::Fish => {
+                    assert!(uploaded.starts_with(" set -gx ZZCLAWTERM_INJ 1"));
+                    assert!(uploaded.contains(" source '/tmp/.zzclawterm_inj_test/script.sh'"));
+                    assert!(!uploaded.contains("fish_private_mode"));
+                    assert!(uploaded.lines().all(|line| line.starts_with(' ')));
+                }
+                ShellKind::PosixSh | ShellKind::Unknown => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn upload_payload_excludes_interactive_history_wrappers() {
+        let ready_marker = build_ssh_ready_marker("payload-only");
+        let integration = super::prepare_shell_integration(
+            ShellKind::Bash,
+            &ready_marker,
+            ShellIntegrationMode::Full,
+        )
+        .expect("prepared shell integration");
+        let payload = String::from_utf8(integration.upload_payload()).expect("utf8 payload");
+
+        assert!(payload.contains("__zzclawterm_install_prompt"));
+        assert!(!payload.contains("set +o history"));
+        assert!(!payload.contains("ZzClawTermReady:payload-only"));
+    }
+
+    #[test]
+    fn rc_activation_scripts_use_shell_history_guards() {
+        let ready_marker = build_ssh_ready_marker("rc-history-guard");
+        for shell in [ShellKind::Bash, ShellKind::Zsh, ShellKind::Fish] {
+            let activation =
+                super::prepare_activation(shell, &ready_marker, ShellIntegrationMode::CwdOnly)
+                    .expect("prepared RC activation");
+            let script = String::from_utf8(activation.inline_script()).expect("utf8 activation");
+
+            assert!(script.contains("__zzclawterm_install_prompt cwd"));
+            assert!(script.contains("ZzClawTermReady:rc-history-guard"));
+            match shell {
+                ShellKind::Bash => assert!(script.contains("if [[ -o history ]]")),
+                ShellKind::Zsh => assert!(script.starts_with(" fc -p /dev/null")),
+                ShellKind::Fish => assert!(script.starts_with(" set -gx ZZCLAWTERM_INJ 1")),
+                ShellKind::PosixSh | ShellKind::Unknown => unreachable!(),
+            }
+        }
     }
 
     #[test]

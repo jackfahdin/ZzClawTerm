@@ -15,11 +15,12 @@ use super::{
     set_connection_drop_target_if_changed, set_connection_editor_advanced_tab,
     set_connection_editor_error, set_connection_editor_field_text, set_connection_editor_icon,
     set_connection_editor_kind, set_connection_editor_password_source,
-    set_connection_editor_select_value, set_connection_editor_ssh_algorithm_enabled,
-    set_connection_editor_ssh_algorithm_tab, set_connection_editor_telnet_tab,
-    set_connection_group_editor_error, set_connection_group_hover, set_network_group_editor_error,
-    set_network_group_editor_name, set_network_proxy_editor_error, set_network_proxy_editor_field,
-    set_network_proxy_protocol, set_network_tunnel_bind_localhost, set_network_tunnel_connection,
+    set_connection_editor_rdp_tab, set_connection_editor_select_value,
+    set_connection_editor_ssh_algorithm_enabled, set_connection_editor_ssh_algorithm_tab,
+    set_connection_editor_telnet_tab, set_connection_group_editor_error,
+    set_connection_group_hover, set_network_group_editor_error, set_network_group_editor_name,
+    set_network_proxy_editor_error, set_network_proxy_editor_field, set_network_proxy_protocol,
+    set_network_tunnel_bind_localhost, set_network_tunnel_connection,
     set_network_tunnel_editor_error, set_network_tunnel_editor_field, set_network_tunnel_group,
     set_network_tunnel_type, sync_connection_search_expansion, toggle_connection_editor_flag,
     toggle_network_move_picker_state, toggle_network_tunnel_auto_open,
@@ -32,12 +33,13 @@ use crate::features::{
     connections::ConnectionDropTarget, connections::ConnectionEditorToggle,
 };
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorField, ConnectionEditorPasswordSource,
-    ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab, ConnectionEditorState,
-    ConnectionEditorTelnetTab, ConnectionGroupEditorMode, ConnectionGroupEditorState,
-    ConnectionKindTab, ConnectionSortMode, NetworkGroupEditorState, NetworkMovePickerState,
-    NetworkProxyEditorField, NetworkProxyEditorState, NetworkTab, NetworkTunnelEditorField,
-    NetworkTunnelEditorState,
+    ConnectionEditorAdvancedTab, ConnectionEditorAdvancedVisibility,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorPasswordSource,
+    ConnectionEditorRdpTab, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
+    ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionGroupEditorMode,
+    ConnectionGroupEditorState, ConnectionKindTab, ConnectionSortMode, NetworkGroupEditorState,
+    NetworkMovePickerState, NetworkProxyEditorField, NetworkProxyEditorState, NetworkTab,
+    NetworkTunnelEditorField, NetworkTunnelEditorState,
 };
 use gpui::{AppContext as _, TestAppContext};
 use std::path::PathBuf;
@@ -668,6 +670,8 @@ fn connection_editor_owner(cx: &TestAppContext) -> ConnectionEditorFeatureState 
         icon_picker_open: false,
         group_select_open: false,
         agent_identity_picker_open: false,
+        credential_overlay: None,
+        baud_popover_open: false,
         agent_preview_generation: 0,
         group_select_trigger_bounds: None,
     };
@@ -1191,7 +1195,10 @@ fn toggle_connection_editor_raw_tcp_forces_cr_enter_mode() {
 #[test]
 fn toggle_connection_editor_advanced_closed_resets_hidden_focus() {
     let mut draft = Some(ConnectionEditorState {
-        advanced_open: true,
+        advanced: ConnectionEditorAdvancedVisibility {
+            ssh: true,
+            ..Default::default()
+        },
         focused_field: ConnectionEditorField::PostLoginDelay,
         error: Some("stale validation".to_string()),
         ..connection_editor_state_with_secret_draft()
@@ -1203,9 +1210,74 @@ fn toggle_connection_editor_advanced_closed_resets_hidden_focus() {
     ));
 
     let editor = draft.expect("editor remains open");
-    assert!(!editor.advanced_open);
+    assert!(!editor.advanced.ssh);
     assert_eq!(editor.focused_field, ConnectionEditorField::Name);
     assert_eq!(editor.error, None);
+}
+
+#[test]
+fn connection_editor_credential_overlay_closes_competing_popups() {
+    let cx = TestAppContext::single();
+    let mut owner = connection_editor_owner(&cx);
+    assert!(owner.set_icon_picker_open(true));
+
+    assert!(owner.set_credential_overlay(Some(ConnectionEditorCredentialOverlay::Passwords)));
+    assert_eq!(
+        owner.credential_overlay(),
+        Some(ConnectionEditorCredentialOverlay::Passwords)
+    );
+    assert!(!owner.icon_picker_is_open());
+    assert!(!owner.group_select_is_open());
+
+    assert!(owner.set_credential_overlay(None));
+    assert_eq!(owner.credential_overlay(), None);
+}
+
+#[test]
+fn connection_editor_new_advanced_tabs_are_selectable() {
+    let mut draft = Some(connection_editor_state_with_secret_draft());
+
+    assert!(set_connection_editor_telnet_tab(
+        &mut draft,
+        ConnectionEditorTelnetTab::Terminal
+    ));
+    assert!(set_connection_editor_rdp_tab(
+        &mut draft,
+        ConnectionEditorRdpTab::Network
+    ));
+
+    let editor = draft.expect("editor remains open");
+    assert_eq!(
+        editor.telnet_advanced_tab,
+        ConnectionEditorTelnetTab::Terminal
+    );
+    assert_eq!(editor.rdp_advanced_tab, ConnectionEditorRdpTab::Network);
+}
+
+#[test]
+fn connection_editor_advanced_visibility_is_independent_per_protocol() {
+    let mut draft = Some(connection_editor_state_with_secret_draft());
+
+    assert!(toggle_connection_editor_flag(
+        &mut draft,
+        ConnectionEditorToggle::Advanced
+    ));
+    assert!(set_connection_editor_kind(
+        &mut draft,
+        ConnectionKindTab::Telnet
+    ));
+    assert!(toggle_connection_editor_flag(
+        &mut draft,
+        ConnectionEditorToggle::Advanced
+    ));
+
+    let editor = draft.expect("editor remains open");
+    assert!(editor.advanced.ssh);
+    assert!(editor.advanced.telnet);
+    assert!(!editor.advanced.local);
+    assert!(!editor.advanced.serial);
+    assert!(!editor.advanced.rdp);
+    assert!(!editor.advanced.vnc);
 }
 
 #[test]
@@ -1790,8 +1862,8 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         post_login_command: String::new(),
         post_login_delay_ms: "1000".to_string(),
         recording: None,
-        advanced_open: false,
-        advanced_network_tab: ConnectionEditorAdvancedTab::Proxy,
+        advanced: ConnectionEditorAdvancedVisibility::default(),
+        advanced_network_tab: ConnectionEditorAdvancedTab::Network,
         advanced_behavior_tab: ConnectionEditorAdvancedTab::PostLogin,
         telnet_advanced_tab: ConnectionEditorTelnetTab::Input,
         connect_after_save: false,

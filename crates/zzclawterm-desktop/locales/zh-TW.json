@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "顯示 NyaTerm",
+    "show": "顯示 ZzClawTerm",
     "newConnection": "新增連線",
     "push": "推送雲端同步",
     "pull": "拉取雲端同步",
@@ -480,6 +480,9 @@
     "vncSecurityMode": "安全",
     "vncSecurityNone": "無",
     "vncSecurityPassword": "VNC 密碼",
+    "vncPasswordLimit": "傳統 VNC 驗證最多支援 8 個密碼位元組，密碼絕不會被靜默截斷。",
+    "vncPasswordTooLong": "傳統 VNC 驗證密碼不得超過 8 個位元組",
+    "vncUnencryptedWarning": "傳統 VNC 不會加密桌面、鍵盤或剪貼簿流量。請使用可信任網路、VPN 或 SSH 通道。",
     "vncSharedSession": "共享會話",
     "vncSharedSessionDesc": "允許其他檢視器保持連線。",
     "vncViewOnly": "僅檢視",
@@ -498,6 +501,8 @@
     "icon": "圖示",
     "iconAutoDetect": "自動識別",
     "iconAutoDetectTooltip": "根據遠端系統資訊更新。",
+    "iconAutoDetectNetworkDeviceTooltip": "網路設備模式會停用遠端系統探測。",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "需要開啟遠端資源統計。",
     "inputPassword": "輸入密碼",
     "loadingSerialPorts": "正在載入序列埠...",
     "localTerminal": "本機終端",
@@ -658,6 +663,8 @@
     "workingDirectorySelectionCancelled": "已取消選擇工作目錄。",
     "x11Forwarding": "X11 轉發",
     "dynamicTabTitle": "動態分頁標題",
+    "dynamicTabTitleDesc": "將目前的應用程式或所在資料夾顯示為標籤名稱與 ZzClawTerm 視窗標題。名稱會隨操作自動更新，修改將於下次連線時生效。",
+    "dynamicTabTitleCustomArgsHint": "使用自訂終端參數時，目前資料夾可能無法自動跟隨；應用程式名稱與既有的目錄資訊仍可顯示。",
     "x11ForwardingDesc": "允許遠端圖形程式透過 SSH 顯示到本機 X server。"
   },
   "dockerManager": {

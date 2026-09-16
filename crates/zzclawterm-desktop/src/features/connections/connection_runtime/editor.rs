@@ -13,7 +13,8 @@ use super::helpers::{
 };
 use crate::features::ZzClawTermApp;
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorField, ConnectionEditorPasswordSource,
+    ConnectionEditorAdvancedTab, ConnectionEditorAdvancedVisibility,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorPasswordSource,
     ConnectionEditorRdpTab, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
     ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionKindTab,
 };
@@ -66,6 +67,9 @@ impl ZzClawTermApp {
             }
             ConnectionEditorValidationError::VncReconnectAttemptsInvalid => {
                 "VNC reconnect attempts must be between 0 and 20".to_string()
+            }
+            ConnectionEditorValidationError::VncPasswordTooLong => {
+                t!("dialog.vncPasswordTooLong").into()
             }
             ConnectionEditorValidationError::PostLoginCommandRequired => {
                 t!("dialog.postLoginCommandRequired").into()
@@ -235,8 +239,8 @@ impl ZzClawTermApp {
                 post_login_command: String::new(),
                 post_login_delay_ms: "1000".to_string(),
                 recording: None,
-                advanced_open: false,
-                advanced_network_tab: ConnectionEditorAdvancedTab::Proxy,
+                advanced: ConnectionEditorAdvancedVisibility::default(),
+                advanced_network_tab: ConnectionEditorAdvancedTab::Network,
                 advanced_behavior_tab: ConnectionEditorAdvancedTab::PostLogin,
                 telnet_advanced_tab: ConnectionEditorTelnetTab::Input,
                 connect_after_save,
@@ -300,6 +304,69 @@ impl ZzClawTermApp {
         {
             cx.notify();
         }
+    }
+
+    pub(in crate::features) fn set_connection_editor_credential_overlay(
+        &mut self,
+        overlay: Option<ConnectionEditorCredentialOverlay>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.set_editor_credential_overlay(overlay) {
+            self.refresh_connection_auth_catalog(cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_connection_editor_baud_popover_open(
+        &mut self,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.set_editor_baud_popover_open(open) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn toggle_connection_editor_password_visibility(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self
+            .connection_state
+            .editor_fields()
+            .get(&ConnectionEditorField::Password)
+            .cloned()
+        else {
+            return;
+        };
+        let masked = field.read(cx).is_masked();
+        field.update(cx, |field, cx| field.set_masked(!masked, cx));
+        cx.notify();
+    }
+
+    pub(in crate::features) fn clear_connection_editor_password(&mut self, cx: &mut Context<Self>) {
+        if let Some(field) = self
+            .connection_state
+            .editor_fields()
+            .get(&ConnectionEditorField::Password)
+            .cloned()
+        {
+            field.update(cx, |field, cx| field.clear(cx));
+        }
+        cx.notify();
+    }
+
+    pub(in crate::features) fn set_connection_editor_baud_rate(
+        &mut self,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state
+            .set_editor_field_text(ConnectionEditorField::BaudRate, value.clone());
+        self.connection_state
+            .reset_editor_field(ConnectionEditorField::BaudRate, &value, cx);
+        self.connection_state.set_editor_baud_popover_open(false);
+        cx.notify();
     }
 
     pub(in crate::features) fn toggle_connection_group_select(&mut self, cx: &mut Context<Self>) {
@@ -671,6 +738,24 @@ impl ZzClawTermApp {
 
         match keystroke.key.as_str() {
             "escape" => {
+                if let Some(overlay) = self.connection_state.editor_credential_overlay() {
+                    self.connection_state.set_editor_credential_overlay(None);
+                    self.refresh_connection_auth_catalog(cx);
+                    let select = match overlay {
+                        ConnectionEditorCredentialOverlay::Passwords => {
+                            ConnectionEditorSelect::SavedPassword
+                        }
+                        ConnectionEditorCredentialOverlay::Keys => ConnectionEditorSelect::SshKey,
+                    };
+                    self.focus_connection_editor_select(select, window, cx);
+                    cx.notify();
+                    return true;
+                }
+                if self.connection_state.editor_baud_popover_is_open() {
+                    self.connection_state.set_editor_baud_popover_open(false);
+                    cx.notify();
+                    return true;
+                }
                 if self.connection_state.editor_icon_picker_is_open() {
                     self.connection_state.close_editor_icon_picker();
                     cx.notify();

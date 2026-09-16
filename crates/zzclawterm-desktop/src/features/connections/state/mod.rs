@@ -20,11 +20,11 @@ use crate::features::pages::connections::list::{
     widest_connection_row,
 };
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorField, ConnectionEditorPasswordSource,
-    ConnectionEditorRdpTab, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
-    ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionGroupEditorMode,
-    ConnectionGroupEditorState, ConnectionImportSource, ConnectionKindTab,
-    ConnectionListContextTarget, ConnectionSortMode, NetworkGroupEditorState,
+    ConnectionEditorAdvancedTab, ConnectionEditorCredentialOverlay, ConnectionEditorField,
+    ConnectionEditorPasswordSource, ConnectionEditorRdpTab, ConnectionEditorSelect,
+    ConnectionEditorSshAlgorithmTab, ConnectionEditorState, ConnectionEditorTelnetTab,
+    ConnectionGroupEditorMode, ConnectionGroupEditorState, ConnectionImportSource,
+    ConnectionKindTab, ConnectionListContextTarget, ConnectionSortMode, NetworkGroupEditorState,
     NetworkMovePickerState, NetworkProxyEditorField, NetworkProxyEditorState, NetworkTab,
     NetworkTunnelEditorField, NetworkTunnelEditorState,
 };
@@ -203,6 +203,8 @@ struct ConnectionEditorFeatureState {
     icon_picker_open: bool,
     group_select_open: bool,
     agent_identity_picker_open: bool,
+    credential_overlay: Option<ConnectionEditorCredentialOverlay>,
+    baud_popover_open: bool,
     agent_preview_generation: u64,
     group_select_trigger_bounds: Option<Bounds<Pixels>>,
 }
@@ -292,6 +294,8 @@ impl ConnectionFeatureState {
                 icon_picker_open: false,
                 group_select_open: false,
                 agent_identity_picker_open: false,
+                credential_overlay: None,
+                baud_popover_open: false,
                 agent_preview_generation: 0,
                 group_select_trigger_bounds: None,
             },
@@ -370,6 +374,22 @@ impl ConnectionFeatureState {
 
     pub fn serial_ports(&self) -> &[String] {
         self.catalog.serial_ports()
+    }
+
+    pub fn serial_ports_loading(&self) -> bool {
+        self.catalog.serial_ports_loading()
+    }
+
+    pub fn serial_ports_error(&self) -> Option<&str> {
+        self.catalog.serial_ports_error()
+    }
+
+    pub fn begin_serial_ports_refresh(&mut self) -> bool {
+        self.catalog.begin_serial_ports_refresh()
+    }
+
+    pub fn fail_serial_ports_refresh(&mut self, error: String) {
+        self.catalog.fail_serial_ports_refresh(error);
     }
 
     pub fn replace_loaded(&mut self, connections: Vec<SavedConnection>, groups: Vec<Group>) {
@@ -703,13 +723,10 @@ impl ConnectionFeatureState {
                 let input = ZzClawInputState::new(cx, value)
                     .masked(masked)
                     .placeholder(placeholder);
-                if matches!(
-                    field,
-                    ConnectionEditorField::Description | ConnectionEditorField::PostLoginCommand
-                ) {
-                    input.multi_line(Some(4))
-                } else {
-                    input
+                match field {
+                    ConnectionEditorField::Description => input.multi_line(Some(2)),
+                    ConnectionEditorField::PostLoginCommand => input.multi_line(Some(4)),
+                    _ => input,
                 }
             });
             let subscription = cx.subscribe(
@@ -873,6 +890,14 @@ impl ConnectionFeatureState {
         self.editor.agent_identity_picker_is_open()
     }
 
+    pub fn editor_credential_overlay(&self) -> Option<ConnectionEditorCredentialOverlay> {
+        self.editor.credential_overlay()
+    }
+
+    pub fn editor_baud_popover_is_open(&self) -> bool {
+        self.editor.baud_popover_is_open()
+    }
+
     pub fn editor_group_select_trigger_bounds(&self) -> Option<Bounds<Pixels>> {
         self.editor.group_select_trigger_bounds()
     }
@@ -939,6 +964,17 @@ impl ConnectionFeatureState {
             }
         }
         changed
+    }
+
+    pub fn set_editor_credential_overlay(
+        &mut self,
+        overlay: Option<ConnectionEditorCredentialOverlay>,
+    ) -> bool {
+        self.editor.set_credential_overlay(overlay)
+    }
+
+    pub fn set_editor_baud_popover_open(&mut self, open: bool) -> bool {
+        self.editor.set_baud_popover_open(open)
     }
 
     pub fn close_editor_group_select(&mut self) {
@@ -1626,6 +1662,8 @@ impl ConnectionEditorFeatureState {
         self.icon_picker_open = false;
         self.group_select_open = false;
         self.agent_identity_picker_open = false;
+        self.credential_overlay = None;
+        self.baud_popover_open = false;
         self.agent_preview_generation = self.agent_preview_generation.wrapping_add(1);
         self.group_select_trigger_bounds = None;
         self.draft = Some(draft);
@@ -1649,6 +1687,14 @@ impl ConnectionEditorFeatureState {
 
     pub fn agent_identity_picker_is_open(&self) -> bool {
         self.agent_identity_picker_open
+    }
+
+    pub fn credential_overlay(&self) -> Option<ConnectionEditorCredentialOverlay> {
+        self.credential_overlay
+    }
+
+    pub fn baud_popover_is_open(&self) -> bool {
+        self.baud_popover_open
     }
 
     pub fn group_select_trigger_bounds(&self) -> Option<Bounds<Pixels>> {
@@ -1726,6 +1772,30 @@ impl ConnectionEditorFeatureState {
             return false;
         }
         self.agent_identity_picker_open = open;
+        true
+    }
+
+    pub fn set_credential_overlay(
+        &mut self,
+        overlay: Option<ConnectionEditorCredentialOverlay>,
+    ) -> bool {
+        if self.credential_overlay == overlay {
+            return false;
+        }
+        self.credential_overlay = overlay;
+        if overlay.is_some() {
+            self.close_icon_picker();
+            self.close_group_select();
+            self.agent_identity_picker_open = false;
+        }
+        true
+    }
+
+    pub fn set_baud_popover_open(&mut self, open: bool) -> bool {
+        if self.baud_popover_open == open {
+            return false;
+        }
+        self.baud_popover_open = open;
         true
     }
 
@@ -1895,6 +1965,8 @@ impl ConnectionEditorFeatureState {
 
     pub fn close(&mut self) {
         self.agent_identity_picker_open = false;
+        self.credential_overlay = None;
+        self.baud_popover_open = false;
         self.agent_preview_generation = self.agent_preview_generation.wrapping_add(1);
         clear_connection_editor_runtime_state(
             &mut self.draft,

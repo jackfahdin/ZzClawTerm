@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -16,7 +16,8 @@ use zzclawterm_terminal::{
 
 use crate::keywords::{
     CompiledKeywordRule, CompiledKeywordRules, TerminalKeywordHighlightSnapshot,
-    compile_keyword_rules, terminal_keyword_rules_key,
+    TerminalKeywordRowReuseKey, compile_keyword_rules, terminal_keyword_row_reuse_key,
+    terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
 };
 use crate::paint::{
     apply_search_ranges, flush_bg, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
@@ -188,6 +189,7 @@ pub struct ZzClawTerminalLayoutCache {
 
 const TERMINAL_LAYOUT_CACHE_ROW_CAP: usize = 4096;
 const TERMINAL_LAYOUT_CACHE_CURSOR_GLYPH_CAP: usize = 256;
+const TERMINAL_LAYOUT_CACHE_ROW_ORDER_MIN_COMPACT: usize = 256;
 const TERMINAL_ELEMENT_PREPAINT_SLOW_MS: u128 = 12;
 const TERMINAL_ELEMENT_PAINT_SLOW_MS: u128 = 12;
 
@@ -298,6 +300,7 @@ impl ZzClawTerminalLayoutCache {
             self.hits = self.hits.saturating_add(1);
             self.rows.insert(key, Arc::clone(&cached));
             self.row_order.push_back(key);
+            self.compact_row_order_if_needed();
             return (cached, false, std::time::Duration::ZERO);
         }
         self.misses = self.misses.saturating_add(1);
@@ -362,6 +365,25 @@ impl ZzClawTerminalLayoutCache {
                 return;
             }
         }
+    }
+
+    fn compact_row_order_if_needed(&mut self) {
+        let compact_threshold = self
+            .rows
+            .len()
+            .saturating_mul(2)
+            .max(TERMINAL_LAYOUT_CACHE_ROW_ORDER_MIN_COMPACT);
+        if self.row_order.len() <= compact_threshold {
+            return;
+        }
+        let mut seen = HashSet::with_capacity(self.rows.len());
+        let mut compacted = VecDeque::with_capacity(self.rows.len());
+        for key in self.row_order.iter().rev() {
+            if self.rows.contains_key(key) && seen.insert(*key) {
+                compacted.push_front(*key);
+            }
+        }
+        self.row_order = compacted;
     }
 }
 
@@ -628,6 +650,7 @@ impl ZzClawTerminalElement {
         row: usize,
         keyword_paint_style_key: u64,
         empty_keyword_paint_style_key: u64,
+        keyword_reuse_key: Option<TerminalKeywordRowReuseKey>,
     ) -> (u64, Option<u64>) {
         let snapshot_row = self.snapshot.row(row);
         let line = snapshot_row.map(|row| row.text.as_str()).unwrap_or("");
@@ -636,8 +659,14 @@ impl ZzClawTerminalElement {
         let row_revision = snapshot_row.map(|row| row.revision);
         let keyword_lookup = self.keyword_highlights.as_ref().and_then(|highlights| {
             highlights
-                .lookup(row, self.snapshot.as_ref())
-                .or_else(|| highlights.stale_lookup(row, self.snapshot.as_ref()))
+                .lookup_with_reuse_key(row, self.snapshot.as_ref(), keyword_reuse_key)
+                .or_else(|| {
+                    highlights.stale_lookup_with_reuse_key(
+                        row,
+                        self.snapshot.as_ref(),
+                        keyword_reuse_key,
+                    )
+                })
         });
         let keyword_result_known_empty = keyword_lookup
             .as_ref()
@@ -1314,16 +1343,40 @@ impl Element for ZzClawTerminalElement {
                 &mut plan.zebra_stripes,
             );
         }
+        let wrapped_scan_start = visible_rows.start.saturating_sub(1);
+        let wrapped_scan_end = visible_rows
+            .end
+            .saturating_add(1)
+            .min(self.snapshot.row_count());
+        let visible_has_wrapped_group = self
+            .snapshot
+            .rows()
+            .get(wrapped_scan_start..wrapped_scan_end)
+            .unwrap_or_default()
+            .iter()
+            .any(|row| row.wrapped);
+        let keyword_row_reuse_keys = self
+            .keyword_highlights
+            .as_ref()
+            .filter(|_| visible_has_wrapped_group)
+            .map(|_| terminal_keyword_row_reuse_keys(self.snapshot.as_ref()));
         // Follow the editor model: once the visible viewport is entirely hot,
         // spend at most one subsequent frame shaping the nearest retained row.
         // Any changed visible row suppresses this work, keeping input/output
         // latency ahead of speculative scroll preparation.
         let prefetch_row = layout_cache.as_deref().and_then(|cache| {
             terminal_layout_prefetch_row(visible_rows.clone(), self.snapshot.row_count(), |row| {
+                let keyword_reuse_key = keyword_row_reuse_keys
+                    .as_deref()
+                    .and_then(|keys| keys.get(row))
+                    .copied()
+                    .flatten()
+                    .or_else(|| terminal_keyword_row_reuse_key(self.snapshot.as_ref(), row));
                 let (key, reuse_key) = self.row_layout_cache_keys(
                     row,
                     keyword_paint_style_key,
                     empty_keyword_paint_style_key,
+                    keyword_reuse_key,
                 );
                 cache.contains_paint_row(key, reuse_key)
             })
@@ -1340,10 +1393,22 @@ impl Element for ZzClawTerminalElement {
             let display_line = if line.is_empty() { " " } else { line };
             let ansi = snapshot_row.map(|row| row.styled_spans.as_ref());
             let row_revision = snapshot_row.map(|row| row.revision);
+            let keyword_reuse_key = keyword_row_reuse_keys
+                .as_deref()
+                .and_then(|keys| keys.get(row))
+                .copied()
+                .flatten()
+                .or_else(|| terminal_keyword_row_reuse_key(self.snapshot.as_ref(), row));
             let keyword_lookup = self.keyword_highlights.as_ref().and_then(|highlights| {
                 highlights
-                    .lookup(row, self.snapshot.as_ref())
-                    .or_else(|| highlights.stale_lookup(row, self.snapshot.as_ref()))
+                    .lookup_with_reuse_key(row, self.snapshot.as_ref(), keyword_reuse_key)
+                    .or_else(|| {
+                        highlights.stale_lookup_with_reuse_key(
+                            row,
+                            self.snapshot.as_ref(),
+                            keyword_reuse_key,
+                        )
+                    })
             });
             let keyword_result_known_empty = keyword_lookup
                 .as_ref()

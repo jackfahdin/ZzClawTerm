@@ -17,7 +17,7 @@ use super::{
     TERMINAL_FRAME_OUTPUT_CHUNK_SIZE, TERMINAL_FRAME_OUTPUT_COALESCE_BYTE_LIMIT,
     TERMINAL_FRAME_VISIBLE_TEXT_TAIL_CAP, TERMINAL_OUTPUT_VISIBLE_BACKLOG_CAP,
     TERMINAL_PERFORMANCE_RECOVERY_NOTICE, TERMINAL_RENDER_DEGRADATION_RECOVERY_CALM,
-    TERMINAL_SCROLLBACK_SNAPSHOT_CACHE_LIMIT, TERMINAL_UI_OUTPUT_TAIL_CAP,
+    TERMINAL_SCROLLBACK_SNAPSHOT_CACHE_LIMIT, TERMINAL_UI_OUTPUT_TAIL_CAP, TerminalDecorationCache,
     TerminalFrameActionLinks, TerminalFrameCommand, TerminalFrameEvent, TerminalFrameEventQueue,
     TerminalFrameEventQueuePushOutcome, TerminalFrameOutputBatch, TerminalFrameOutputEvent,
     TerminalFrameOutputSubmission, TerminalFrameParts, TerminalFramePipeline,
@@ -33,7 +33,8 @@ use super::{
     terminal_expensive_interactions_enabled, terminal_frame_command_channel,
     terminal_frame_output_commands, terminal_frame_scroll_window_extra_rows,
     terminal_frame_search_result_is_current, terminal_frame_snapshot_with_scroll_window,
-    terminal_snapshot_matches_grid_geometry, try_next_terminal_frame_command,
+    terminal_line_decorations_estimated_bytes, terminal_snapshot_matches_grid_geometry,
+    try_next_terminal_frame_command,
 };
 
 fn selected_occurrence_test_key(
@@ -155,6 +156,40 @@ fn terminal_decoration_cache_reuses_shared_lines() {
 
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(cache.decoration_stats(), (1, 1));
+}
+
+#[test]
+fn terminal_decoration_cache_evicts_incrementally_by_lru() {
+    let mut cache = TerminalDecorationCache::default();
+    let build = || vec![TerminalLineDecorations::default()];
+
+    cache.line_decorations_with_limits(1, build, 2, usize::MAX);
+    cache.line_decorations_with_limits(2, build, 2, usize::MAX);
+    cache.line_decorations_with_limits(1, build, 2, usize::MAX);
+    cache.line_decorations_with_limits(3, build, 2, usize::MAX);
+
+    assert!(cache.decoration_lines.contains_key(&1));
+    assert!(!cache.decoration_lines.contains_key(&2));
+    assert!(cache.decoration_lines.contains_key(&3));
+    assert_eq!(cache.decoration_lines.len(), 2);
+}
+
+#[test]
+fn terminal_decoration_cache_respects_estimated_byte_budget() {
+    let sample = vec![TerminalLineDecorations {
+        search_ranges: vec![(1, 2); 8],
+        ..TerminalLineDecorations::default()
+    }];
+    let entry_bytes = terminal_line_decorations_estimated_bytes(&sample);
+    let mut cache = TerminalDecorationCache::default();
+
+    for key in 1..=3 {
+        cache.line_decorations_with_limits(key, || sample.clone(), 10, entry_bytes * 2);
+    }
+
+    assert!(cache.estimated_bytes <= entry_bytes * 2);
+    assert_eq!(cache.decoration_lines.len(), 2);
+    assert!(!cache.decoration_lines.contains_key(&1));
 }
 
 fn output_frame_with_sizes(

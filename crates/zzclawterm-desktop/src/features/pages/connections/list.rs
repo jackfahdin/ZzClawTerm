@@ -1233,6 +1233,150 @@ pub(super) fn editor_field(
         .child(editor_field_box(palette, field, fields, cx))
 }
 
+pub(super) fn connection_editor_select_on_open(
+    render: ConnectionEditorRenderContext<'_, '_>,
+    id: &'static str,
+    label: impl Into<FieldLabel>,
+    select: ConnectionEditorSelect,
+    on_open: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let ConnectionEditorRenderContext {
+        palette,
+        fields,
+        cx,
+    } = render;
+    let _ = cx;
+    let label = label.into();
+    let show_label = !label.is_empty();
+    div()
+        .id(SharedString::from(id))
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .when(show_label, |this| {
+            this.child(field_caption(palette, &label))
+        })
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-container")))
+                .h(px(EDITOR_CONTROL_HEIGHT_PX))
+                .min_w_0()
+                .child(ZzClawSelect::new(&fields.select(select)).on_open(on_open)),
+        )
+}
+
+pub(super) struct EditorSecretFieldOptions<ToggleVisibility, Clear> {
+    disabled: bool,
+    visibility_tooltip: SharedString,
+    clear_tooltip: SharedString,
+    on_toggle_visibility: ToggleVisibility,
+    on_clear: Clear,
+}
+
+impl<ToggleVisibility, Clear> EditorSecretFieldOptions<ToggleVisibility, Clear> {
+    pub(super) fn new(
+        disabled: bool,
+        visibility_tooltip: impl Into<SharedString>,
+        clear_tooltip: impl Into<SharedString>,
+        on_toggle_visibility: ToggleVisibility,
+        on_clear: Clear,
+    ) -> Self {
+        Self {
+            disabled,
+            visibility_tooltip: visibility_tooltip.into(),
+            clear_tooltip: clear_tooltip.into(),
+            on_toggle_visibility,
+            on_clear,
+        }
+    }
+}
+
+pub(super) fn editor_secret_field<ToggleVisibility, Clear>(
+    palette: crate::theme::ThemePalette,
+    label: impl Into<FieldLabel>,
+    field: ConnectionEditorField,
+    fields: &ConnectionEditorFields,
+    options: EditorSecretFieldOptions<ToggleVisibility, Clear>,
+    cx: &App,
+) -> impl IntoElement
+where
+    ToggleVisibility: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    Clear: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+{
+    let EditorSecretFieldOptions {
+        disabled,
+        visibility_tooltip,
+        clear_tooltip,
+        on_toggle_visibility,
+        on_clear,
+    } = options;
+    let label = label.into();
+    let entity = fields.get(&field).cloned();
+    let focused = entity
+        .as_ref()
+        .is_some_and(|field| field.read(cx).has_focus());
+    let masked = entity
+        .as_ref()
+        .is_none_or(|field| field.read(cx).is_masked());
+    div()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .when(!label.is_empty(), |this| {
+            this.child(field_caption(palette, &label))
+        })
+        .child(
+            div()
+                .h(px(EDITOR_CONTROL_HEIGHT_PX))
+                .min_w_0()
+                .px(px(ORDINARY_INPUT_SHELL_PADDING_X_PX))
+                .flex()
+                .items_center()
+                .gap_1()
+                .opacity(if disabled { 0.55 } else { 1.0 })
+                .rounded_sm()
+                .border_1()
+                .border_color(ordinary_input_shell_border_color(palette, focused))
+                .when(focused, |this| {
+                    this.shadow(ordinary_input_focus_ring(palette))
+                })
+                .bg(rgb(palette.input))
+                .children(entity.map(|field| {
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(rgb(palette.text))
+                        .child(ZzClawInput::new(&field))
+                }))
+                .child(
+                    zzclawterm_ui::ZzClawIconButton::new(
+                        "connection-editor-password-visibility",
+                        if masked {
+                            "icons/eye.svg"
+                        } else {
+                            "icons/eye-off.svg"
+                        },
+                    )
+                    .disabled(disabled)
+                    .tooltip(visibility_tooltip)
+                    .on_click(on_toggle_visibility),
+                )
+                .child(
+                    zzclawterm_ui::ZzClawIconButton::new(
+                        "connection-editor-password-clear",
+                        "icons/delete.svg",
+                    )
+                    .disabled(disabled)
+                    .tooltip(clear_tooltip)
+                    .on_click(on_clear),
+                ),
+        )
+}
+
 pub(super) fn forwarding_endpoint_editor_field(
     palette: crate::theme::ThemePalette,
     label: impl Into<FieldLabel>,

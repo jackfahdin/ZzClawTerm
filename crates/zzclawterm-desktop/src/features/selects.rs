@@ -133,6 +133,20 @@ impl ZzClawTermApp {
             .is_some_and(|select| select.read(cx).is_menu_focused(window, cx))
     }
 
+    pub(in crate::features) fn focus_select(
+        &self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let Some(select) = self.selects.fields.get(id) else {
+            return false;
+        };
+        let focus = select.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        true
+    }
+
     pub(in crate::features) fn select_with_prefix_is_focused(
         &self,
         prefix: &str,

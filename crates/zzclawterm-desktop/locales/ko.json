@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "NyaTerm 표시",
+    "show": "ZzClawTerm 표시",
     "newConnection": "새 연결",
     "push": "클라우드에 보내기",
     "pull": "클라우드에서 가져오기",
@@ -480,6 +480,9 @@
     "vncSecurityMode": "보안",
     "vncSecurityNone": "없음",
     "vncSecurityPassword": "VNC 비밀번호",
+    "vncPasswordLimit": "클래식 VNC 인증은 최대 8바이트 암호만 지원하며 암호를 자동으로 자르지 않습니다.",
+    "vncPasswordTooLong": "클래식 VNC 인증 암호는 8바이트 이하여야 합니다",
+    "vncUnencryptedWarning": "클래식 VNC는 데스크톱, 키보드 또는 클립보드 트래픽을 암호화하지 않습니다. 신뢰할 수 있는 네트워크, VPN 또는 SSH 터널을 사용하세요.",
     "vncSharedSession": "공유 세션",
     "vncSharedSessionDesc": "다른 뷰어가 계속 연결할 수 있도록 허용합니다.",
     "vncViewOnly": "보기 전용",
@@ -498,6 +501,8 @@
     "icon": "아이콘",
     "iconAutoDetect": "자동 감지",
     "iconAutoDetectTooltip": "원격 시스템 정보로 업데이트합니다.",
+    "iconAutoDetectNetworkDeviceTooltip": "네트워크 장비 프로필은 원격 시스템 탐지를 비활성화합니다.",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "원격 리소스 통계가 필요합니다.",
     "inputPassword": "비밀번호",
     "loadingSerialPorts": "시리얼 포트 불러오는 중...",
     "localTerminal": "로컬",
@@ -658,6 +663,8 @@
     "workingDirectorySelectionCancelled": "작업 디렉터리 선택이 취소되었습니다.",
     "x11Forwarding": "X11 포워딩",
     "dynamicTabTitle": "동적 탭 제목",
+    "dynamicTabTitleDesc": "현재 사용하는 앱이나 폴더를 탭 이름과 ZzClawTerm 창 제목으로 표시합니다. 작업 중 이름이 자동으로 업데이트되며, 변경 사항은 다음 연결부터 적용됩니다.",
+    "dynamicTabTitleCustomArgsHint": "사용자 지정 터미널 옵션을 사용하면 현재 폴더를 자동으로 추적하지 못할 수 있습니다. 앱 이름과 기존 폴더 정보는 계속 표시할 수 있습니다.",
     "x11ForwardingDesc": "SSH를 통해 원격 그래픽 애플리케이션을 로컬 X 서버에 표시할 수 있도록 허용합니다."
   },
   "dockerManager": {

@@ -9,6 +9,8 @@ pub(super) struct ConnectionCatalogState {
     connections: Vec<SavedConnection>,
     groups: Vec<Group>,
     serial_ports: Vec<String>,
+    serial_ports_loading: bool,
+    serial_ports_error: Option<String>,
     connections_revision: u64,
     groups_revision: u64,
 }
@@ -19,6 +21,8 @@ impl ConnectionCatalogState {
             connections,
             groups,
             serial_ports: Vec::new(),
+            serial_ports_loading: false,
+            serial_ports_error: None,
             connections_revision: 0,
             groups_revision: 0,
         }
@@ -34,6 +38,14 @@ impl ConnectionCatalogState {
 
     pub(super) fn serial_ports(&self) -> &[String] {
         &self.serial_ports
+    }
+
+    pub(super) fn serial_ports_loading(&self) -> bool {
+        self.serial_ports_loading
+    }
+
+    pub(super) fn serial_ports_error(&self) -> Option<&str> {
+        self.serial_ports_error.as_deref()
     }
 
     pub(super) fn connections_revision(&self) -> u64 {
@@ -53,6 +65,22 @@ impl ConnectionCatalogState {
 
     pub(super) fn replace_serial_ports(&mut self, serial_ports: Vec<String>) {
         self.serial_ports = serial_ports;
+        self.serial_ports_loading = false;
+        self.serial_ports_error = None;
+    }
+
+    pub(super) fn begin_serial_ports_refresh(&mut self) -> bool {
+        if self.serial_ports_loading {
+            return false;
+        }
+        self.serial_ports_loading = true;
+        self.serial_ports_error = None;
+        true
+    }
+
+    pub(super) fn fail_serial_ports_refresh(&mut self, error: String) {
+        self.serial_ports_loading = false;
+        self.serial_ports_error = Some(error);
     }
 
     pub(super) fn update_connection(&mut self, updated: SavedConnection) -> bool {
@@ -194,6 +222,23 @@ mod tests {
             ["target-0", "target-1", "a", "b"]
         );
         assert!(catalog.connections()[0].group_id.is_none());
+    }
+
+    #[test]
+    fn serial_port_refresh_tracks_loading_success_and_error() {
+        let mut catalog = ConnectionCatalogState::new(Vec::new(), Vec::new());
+
+        assert!(catalog.begin_serial_ports_refresh());
+        assert!(catalog.serial_ports_loading());
+        assert!(!catalog.begin_serial_ports_refresh());
+
+        catalog.fail_serial_ports_refresh("enumeration failed".to_string());
+        assert!(!catalog.serial_ports_loading());
+        assert_eq!(catalog.serial_ports_error(), Some("enumeration failed"));
+
+        catalog.replace_serial_ports(vec!["COM3".to_string()]);
+        assert_eq!(catalog.serial_ports(), ["COM3"]);
+        assert_eq!(catalog.serial_ports_error(), None);
     }
 
     #[test]

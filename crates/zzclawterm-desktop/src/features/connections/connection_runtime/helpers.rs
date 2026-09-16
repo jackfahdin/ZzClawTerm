@@ -9,11 +9,11 @@ use zzclawterm_core::{
 };
 use zzclawterm_store::{StoreDomain, store_request};
 
-use crate::features::ZzClawTermApp;
+use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorField, ConnectionEditorPasswordSource,
-    ConnectionEditorRdpTab, ConnectionEditorSshAlgorithmTab, ConnectionEditorState,
-    ConnectionEditorTelnetTab, ConnectionKindTab,
+    ConnectionEditorAdvancedTab, ConnectionEditorAdvancedVisibility, ConnectionEditorField,
+    ConnectionEditorPasswordSource, ConnectionEditorRdpTab, ConnectionEditorSshAlgorithmTab,
+    ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionKindTab,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,7 @@ pub(super) enum ConnectionEditorValidationError {
     RdpDisplayHeightInvalid,
     RdpReconnectAttemptsInvalid,
     VncReconnectAttemptsInvalid,
+    VncPasswordTooLong,
     PostLoginCommandRequired,
     PostLoginDelayInvalid,
     SftpShellDetectionTimeoutInvalid,
@@ -165,8 +166,8 @@ pub(super) fn connection_editor_from_saved(
         post_login_command: post_login.command,
         post_login_delay_ms: post_login.delay_ms.to_string(),
         recording: connection.recording.clone(),
-        advanced_open: false,
-        advanced_network_tab: ConnectionEditorAdvancedTab::Proxy,
+        advanced: ConnectionEditorAdvancedVisibility::default(),
+        advanced_network_tab: ConnectionEditorAdvancedTab::Network,
         advanced_behavior_tab: ConnectionEditorAdvancedTab::PostLogin,
         telnet_advanced_tab: ConnectionEditorTelnetTab::Input,
         connect_after_save,
@@ -527,6 +528,12 @@ pub(super) fn build_saved_connection_from_editor(
             let port = parse_port(&editor.port)?;
             if editor.vnc_reconnect.max_attempts > 20 {
                 return Err(ConnectionEditorValidationError::VncReconnectAttemptsInvalid);
+            }
+            if editor.auth_mode == "password"
+                && editor.password_source == ConnectionEditorPasswordSource::Direct
+                && editor.password.trim().len() > 8
+            {
+                return Err(ConnectionEditorValidationError::VncPasswordTooLong);
             }
             ConnectionType::Vnc {
                 host,
@@ -1370,6 +1377,16 @@ mod tests {
             ConnectionEditorValidationError::VncReconnectAttemptsInvalid
         );
 
+        let mut password_boundary = editor.clone();
+        password_boundary.password_source = ConnectionEditorPasswordSource::Direct;
+        password_boundary.password = "12345678".to_string().into();
+        assert!(build_saved_connection_from_editor(&password_boundary).is_ok());
+        password_boundary.password = "密码密码密".to_string().into();
+        assert_eq!(
+            build_saved_connection_from_editor(&password_boundary).unwrap_err(),
+            ConnectionEditorValidationError::VncPasswordTooLong
+        );
+
         let saved = build_saved_connection_from_editor(&editor).expect("valid connection");
         let ConnectionType::Vnc {
             host,
@@ -1528,6 +1545,34 @@ impl ZzClawTermApp {
                 .list_serial_ports()
                 .unwrap_or_default(),
         );
+    }
+
+    pub(in crate::features) fn request_connection_serial_ports_refresh(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.connection_state.begin_serial_ports_refresh() {
+            return;
+        }
+        let manager = self.session.manager_handle();
+        let scheduler = self.blocking_jobs.clone();
+        cx.spawn(async move |this, cx| {
+            let task = scheduler.submit_task("connection-serial-ports", move |_| {
+                manager
+                    .list_serial_ports()
+                    .map_err(|error| error.to_string())
+            });
+            let result = await_blocking_job(task).await.and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(ports) => this.connection_state.replace_serial_ports(ports),
+                    Err(error) => this.connection_state.fail_serial_ports_refresh(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 

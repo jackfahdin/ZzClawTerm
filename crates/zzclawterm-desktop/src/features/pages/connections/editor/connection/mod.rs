@@ -22,12 +22,11 @@ use gpui::{
 use zzclawterm_core::{ConnectionType, Group, SavedConnection, natural_compare, truncate_preview};
 use zzclawterm_ui::{
     ZzClawCheckbox, ZzClawInput, ZzClawPopover, ZzClawScrollArea, ZzClawScrollable,
-    ZzClawSelectOption, ZzClawSelectState, ZzClawTabItem, ZzClawTabs,
+    ZzClawSelectOption, ZzClawSelectState, ZzClawSwitch, ZzClawTabItem, ZzClawTabs, ZzClawTooltip,
 };
 
 use self::local::connection_editor_local_section;
 use self::rdp::connection_editor_rdp_section;
-use self::recording::connection_editor_recording_section;
 use self::serial::connection_editor_serial_section;
 use self::ssh::{
     SshConnectionSectionLabels, SshConnectionSectionOptions, connection_editor_ssh_section,
@@ -45,7 +44,8 @@ use crate::features::{
     view_widgets::modal_dialog_shell, view_widgets::themed_icon,
 };
 use crate::models::{
-    ConnectionEditorField, ConnectionEditorSelect, ConnectionEditorState, ConnectionKindTab,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorSelect,
+    ConnectionEditorState, ConnectionKindTab,
 };
 
 #[derive(Clone, Copy)]
@@ -53,6 +53,7 @@ struct ConnectionEditorSectionContext<'a> {
     palette: crate::theme::ThemePalette,
     editor: &'a ConnectionEditorState,
     fields: &'a ConnectionEditorFields,
+    baud_popover_open: bool,
 }
 
 impl ZzClawTermApp {
@@ -207,6 +208,39 @@ impl ZzClawTermApp {
     ) -> AnyElement {
         self.connection_state
             .ensure_editor_forwarding_endpoint_fields(cx);
+        let password_disabled =
+            editor.kind == ConnectionKindTab::Vnc && editor.vnc_security.mode == "none";
+        if let Some(field) = self
+            .connection_state
+            .editor_fields()
+            .get(&ConnectionEditorField::Password)
+            .cloned()
+        {
+            field.update(cx, |field, cx| field.set_disabled(password_disabled, cx));
+        }
+        for (field, disabled) in [
+            (
+                ConnectionEditorField::SftpShellDetectionTimeout,
+                editor.kind == ConnectionKindTab::Ssh && !editor.sftp_enabled,
+            ),
+            (
+                ConnectionEditorField::RdpReconnectAttempts,
+                editor.kind == ConnectionKindTab::Rdp && !editor.rdp_reconnect.enabled,
+            ),
+            (
+                ConnectionEditorField::VncReconnectAttempts,
+                editor.kind == ConnectionKindTab::Vnc && !editor.vnc_reconnect.enabled,
+            ),
+        ] {
+            if let Some(entity) = self
+                .connection_state
+                .editor_number_fields()
+                .get(&field)
+                .cloned()
+            {
+                entity.update(cx, |entity, cx| entity.set_disabled(disabled, cx));
+            }
+        }
         let palette = self.theme_palette();
         let title = if editor.id.is_some() {
             t!("dialog.editConnection")
@@ -225,6 +259,18 @@ impl ZzClawTermApp {
         let icon_auto_detect_label = t!("dialog.iconAutoDetect");
         let icon_auto_detect_hint = t!("dialog.iconAutoDetectTooltip");
         let icon_auto_detect = editor.icon_auto_detect;
+        let icon_auto_detect_enabled = editor.kind == ConnectionKindTab::Ssh
+            && editor.ssh_profile == zzclawterm_core::SshProfile::Standard
+            && self.settings.summary().ui_show_remote_stats;
+        let icon_auto_detect_hint = if editor.kind != ConnectionKindTab::Ssh
+            || editor.ssh_profile == zzclawterm_core::SshProfile::NetworkDevice
+        {
+            t!("dialog.iconAutoDetectNetworkDeviceTooltip").to_string()
+        } else if !self.settings.summary().ui_show_remote_stats {
+            t!("dialog.iconAutoDetectRemoteStatsDisabledTooltip").to_string()
+        } else {
+            icon_auto_detect_hint.to_string()
+        };
         let group_options = connection_editor_group_menu_options(
             self.connection_state.groups(),
             &editor,
@@ -856,6 +902,15 @@ impl ZzClawTermApp {
             ConnectionEditorChoice::new(Some(value.to_string()), label, editor.shell_path == value)
         })
         .collect::<Vec<_>>();
+        let serial_port_placeholder = if self.connection_state.serial_ports_loading() {
+            t!("dialog.loadingSerialPorts").to_string()
+        } else if let Some(error) = self.connection_state.serial_ports_error() {
+            format!("{}: {error}", t!("dialog.serialPortsLoadFailed"))
+        } else if self.connection_state.serial_ports().is_empty() {
+            t!("dialog.noSerialPortsFound").to_string()
+        } else {
+            t!("dialog.selectSerialPort").to_string()
+        };
         let mut selects = HashMap::new();
         for (select_key, choices, placeholder) in [
             (
@@ -976,7 +1031,7 @@ impl ZzClawTermApp {
             (
                 ConnectionEditorSelect::SerialPort,
                 serial_port_options.as_slice(),
-                t!("dialog.selectSerialPort").to_string(),
+                serial_port_placeholder,
             ),
             (
                 ConnectionEditorSelect::BaudRate,
@@ -999,10 +1054,18 @@ impl ZzClawTermApp {
                 String::new(),
             ),
         ] {
-            selects.insert(
+            let select = self.connection_editor_select_entity(select_key, choices, placeholder, cx);
+            let disabled = matches!(
                 select_key,
-                self.connection_editor_select_entity(select_key, choices, placeholder, cx),
-            );
+                ConnectionEditorSelect::SftpCwdFollowMode
+                    | ConnectionEditorSelect::SftpFilenameEncoding
+                    | ConnectionEditorSelect::SftpPipelineDepth
+            ) && !editor.sftp_enabled
+                || select_key == ConnectionEditorSelect::SavedPassword && password_disabled
+                || select_key == ConnectionEditorSelect::SerialPort
+                    && self.connection_state.serial_ports_loading();
+            select.update(cx, |select, cx| select.set_disabled(disabled, cx));
+            selects.insert(select_key, select);
         }
         let forwarding_endpoint_selects = editor
             .agent_forwarding_config
@@ -1041,6 +1104,8 @@ impl ZzClawTermApp {
         let group_select_open = self.connection_state.editor_group_select_is_open();
         let agent_identity_picker_open =
             self.connection_state.editor_agent_identity_picker_is_open();
+        let credential_overlay = self.connection_state.editor_credential_overlay();
+        let baud_popover_open = self.connection_state.editor_baud_popover_is_open();
         let icon_picker_bg = if native_window {
             rgb(palette.surface)
         } else {
@@ -1053,6 +1118,7 @@ impl ZzClawTermApp {
             palette,
             editor: &editor,
             fields: &fields,
+            baud_popover_open,
         };
         let mut icon_grid = div().grid().grid_cols(7).gap_1();
         for icon_key in CONNECTION_ICON_OPTIONS.iter().copied() {
@@ -1177,59 +1243,59 @@ impl ZzClawTermApp {
                     })),
                 )
             })
-            // Only SSH reports a remote system, so the toggle would be
-            // inert on the other kinds.
-            .when(
-                editor.kind == ConnectionKindTab::Ssh
-                    && editor.ssh_profile == zzclawterm_core::SshProfile::Standard,
-                |this| {
-                    this.child(
-                        div()
-                            .id("connection-editor-icon-auto-detect")
-                            .mt_2()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(rgb(palette.border))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(palette.text))
-                                            .child(icon_auto_detect_label),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(palette.text_dimmed))
-                                            .child(icon_auto_detect_hint),
-                                    ),
-                            )
-                            .child(crate::features::pages::settings::settings_switch(
-                                palette,
-                                "connection-editor-icon-auto-detect-switch",
-                                icon_auto_detect,
-                                cx.listener(move |this, _, _, cx| {
+            .when(editor.kind == ConnectionKindTab::Ssh, |this| {
+                this.child(
+                    div()
+                        .id("connection-editor-icon-auto-detect")
+                        .mt_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(palette.border))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .opacity(if icon_auto_detect_enabled { 1.0 } else { 0.55 })
+                        .when(icon_auto_detect_enabled, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     this.set_connection_editor_icon_auto_detect(
                                         !icon_auto_detect,
                                         cx,
                                     );
-                                }),
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_connection_editor_icon_auto_detect(!icon_auto_detect, cx);
-                            })),
-                    )
-                },
-            );
+                                }))
+                        })
+                        .when(!icon_auto_detect_enabled, |this| {
+                            let tooltip = icon_auto_detect_hint.clone();
+                            this.tooltip(move |window, cx| {
+                                ZzClawTooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(palette.text))
+                                        .child(icon_auto_detect_label),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(palette.text_dimmed))
+                                        .child(icon_auto_detect_hint),
+                                ),
+                        )
+                        .child(
+                            ZzClawSwitch::new("connection-editor-icon-auto-detect-switch")
+                                .checked(icon_auto_detect)
+                                .disabled(!icon_auto_detect_enabled),
+                        ),
+                )
+            });
         let icon_picker = div()
             .flex_none()
             .flex()
@@ -1256,6 +1322,7 @@ impl ZzClawTermApp {
 
         let card = div()
             .id(SharedString::from("connection-editor-panel"))
+            .debug_selector(|| "connection-editor-panel".to_string())
             .w_full()
             .when(native_window, |this| this.size_full())
             .when(!native_window, |this| this.max_h(px(640.)))
@@ -1287,8 +1354,8 @@ impl ZzClawTermApp {
             .child(
                 div()
                     .flex_none()
-                    .px_4()
-                    .pt_4()
+                    .px(px(20.))
+                    .pt(px(20.))
                     .when(!native_window, |this| this.pt_3())
                     .child(
                         ZzClawTabs::new("connection-kind-tabs")
@@ -1324,6 +1391,7 @@ impl ZzClawTermApp {
             .child(
                 div()
                     .id("connection-editor-scroll")
+                    .debug_selector(|| "connection-editor-scroll".to_string())
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -1333,7 +1401,7 @@ impl ZzClawTermApp {
                             cx.stop_propagation();
                         }
                     }))
-                    .p_4()
+                    .p(px(20.))
                     .flex()
                     .flex_col()
                     .gap_3()
@@ -1397,43 +1465,12 @@ impl ZzClawTermApp {
                     .when(editor.kind == ConnectionKindTab::Serial, |this| {
                         this.child(connection_editor_serial_section(section_context, cx))
                     })
-                    .when(
-                        matches!(editor.kind, ConnectionKindTab::Rdp | ConnectionKindTab::Vnc),
-                        |this| {
-                            this.child(crate::features::pages::connections::list::connection_editor_select(
-                                crate::features::pages::connections::list::ConnectionEditorRenderContext {
-                                    palette,
-                                    fields: &fields,
-                                    cx,
-                                },
-                                "remote-desktop-proxy",
-                                t!("dialog.proxySelect"),
-                                ConnectionEditorSelect::Proxy,
-                            ))
-                            .child(
-                                crate::features::pages::connections::list::connection_editor_select(
-                                    crate::features::pages::connections::list::ConnectionEditorRenderContext {
-                                        palette,
-                                        fields: &fields,
-                                        cx,
-                                    },
-                                    "remote-desktop-jump",
-                                    t!("dialog.proxyJump"),
-                                    ConnectionEditorSelect::ProxyJump,
-                                ),
-                            )
-                        },
-                    )
                     .when(editor.kind == ConnectionKindTab::Rdp, |this| {
                         this.child(connection_editor_rdp_section(section_context, cx))
                     })
                     .when(editor.kind == ConnectionKindTab::Vnc, |this| {
                         this.child(connection_editor_vnc_section(section_context, cx))
                     })
-                    .when(
-                        !matches!(editor.kind, ConnectionKindTab::Rdp | ConnectionKindTab::Vnc),
-                        |this| this.child(connection_editor_recording_section(section_context, cx)),
-                    )
                     .child(connection_description_field(
                         palette,
                         description_label,
@@ -1443,6 +1480,12 @@ impl ZzClawTermApp {
                     .when_some(editor.error.clone(), |this, error| {
                         this.child(
                             div()
+                                .id("connection-editor-error")
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(palette.danger))
+                                .bg(rgba((palette.danger << 8) | 0x18))
+                                .p_2()
                                 .text_size(px(12.))
                                 .text_color(rgb(palette.danger))
                                 .child(error),
@@ -1451,7 +1494,7 @@ impl ZzClawTermApp {
             )
             .child(
                 div()
-                    .h(px(52.))
+                    .h(px(60.))
                     .flex_none()
                     .border_t_1()
                     .border_color(rgb(palette.border))
@@ -1460,16 +1503,8 @@ impl ZzClawTermApp {
                     .py_3()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_end()
                     .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_size(px(10.))
-                            .text_color(rgb(palette.danger))
-                            .child(validation_error.unwrap_or_default()),
-                    )
                     .child(
                         div()
                             .flex_none()
@@ -1482,6 +1517,7 @@ impl ZzClawTermApp {
                                 cancel_label,
                                 false,
                                 true,
+                                None,
                                 cx.listener(|this, _, _, cx| {
                                     this.close_connection_editor(cx);
                                 }),
@@ -1492,6 +1528,7 @@ impl ZzClawTermApp {
                                 save_label,
                                 true,
                                 save_enabled,
+                                validation_error.clone(),
                                 cx.listener(|this, _, window, cx| {
                                     this.save_connection_editor(window, cx);
                                 }),
@@ -1509,6 +1546,9 @@ impl ZzClawTermApp {
                 this.child(connection_editor_agent_identity_picker(
                     palette, &editor, cx,
                 ))
+            })
+            .when_some(credential_overlay, |this, overlay| {
+                this.child(self.connection_editor_credential_manager(overlay, cx))
             });
         if native_window {
             surface.into_any_element()
@@ -1523,9 +1563,221 @@ impl ZzClawTermApp {
             .into_any_element()
         }
     }
+
+    fn connection_editor_credential_manager(
+        &mut self,
+        overlay: ConnectionEditorCredentialOverlay,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.theme_palette();
+        let (title, add_label) = match overlay {
+            ConnectionEditorCredentialOverlay::Passwords => {
+                (t!("dialog.managePasswords"), t!("passwordManager.add"))
+            }
+            ConnectionEditorCredentialOverlay::Keys => {
+                (t!("dialog.manageKeys"), t!("securityAuth.addKey"))
+            }
+        };
+        let entries = match overlay {
+            ConnectionEditorCredentialOverlay::Passwords => self
+                .security
+                .passwords()
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.name.clone()))
+                .collect::<Vec<_>>(),
+            ConnectionEditorCredentialOverlay::Keys => self
+                .security
+                .ssh_keys()
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.name.clone()))
+                .collect::<Vec<_>>(),
+        };
+        let mut rows = div().flex().flex_col();
+        if entries.is_empty() {
+            rows = rows.child(
+                div()
+                    .p_4()
+                    .text_xs()
+                    .text_color(rgb(palette.text_muted))
+                    .child(match overlay {
+                        ConnectionEditorCredentialOverlay::Passwords => {
+                            t!("passwordManager.noPasswords")
+                        }
+                        ConnectionEditorCredentialOverlay::Keys => t!("securityAuth.noKeys"),
+                    }),
+            );
+        } else {
+            let count = entries.len();
+            for (index, (id, name)) in entries.into_iter().enumerate() {
+                let edit_id = id.clone();
+                let delete_id = id.clone();
+                rows = rows.child(
+                    div()
+                        .min_h(px(42.))
+                        .px_3()
+                        .py_2()
+                        .when(index + 1 < count, |this| {
+                            this.border_b_1().border_color(rgb(palette.border))
+                        })
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(palette.text))
+                                .child(truncate_preview(&name, 40)),
+                        )
+                        .child(
+                            zzclawterm_ui::ZzClawIconButton::new(
+                                format!("connection-editor-credential-edit-{id}"),
+                                "icons/edit.svg",
+                            )
+                            .tooltip(t!("common.edit"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| match overlay {
+                                    ConnectionEditorCredentialOverlay::Passwords => {
+                                        this.open_security_password_editor(
+                                            Some(edit_id.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    ConnectionEditorCredentialOverlay::Keys => {
+                                        this.open_security_key_editor(
+                                            Some(edit_id.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                },
+                            )),
+                        )
+                        .child(
+                            zzclawterm_ui::ZzClawIconButton::new(
+                                format!("connection-editor-credential-delete-{id}"),
+                                "icons/delete.svg",
+                            )
+                            .tooltip(t!("common.delete"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| match overlay {
+                                    ConnectionEditorCredentialOverlay::Passwords => {
+                                        this.request_delete_security_password(
+                                            delete_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    ConnectionEditorCredentialOverlay::Keys => {
+                                        this.request_delete_security_key(
+                                            delete_id.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .id("connection-editor-credential-overlay")
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x00000088))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(460.))
+                    .max_h(px(500.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(palette.border))
+                    .bg(rgb(palette.surface_elevated))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(48.))
+                            .flex_none()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(rgb(palette.border))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight(600.))
+                                    .child(title),
+                            )
+                            .child(
+                                zzclawterm_ui::ZzClawButton::new(
+                                    "connection-editor-credential-add",
+                                    add_label,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| match overlay {
+                                        ConnectionEditorCredentialOverlay::Passwords => {
+                                            this.open_security_password_editor(None, window, cx);
+                                        }
+                                        ConnectionEditorCredentialOverlay::Keys => {
+                                            this.open_security_key_editor(None, window, cx);
+                                        }
+                                    },
+                                )),
+                            )
+                            .child(
+                                zzclawterm_ui::ZzClawIconButton::new(
+                                    "connection-editor-credential-close",
+                                    "icons/close.svg",
+                                )
+                                .tooltip(t!("common.close"))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.set_connection_editor_credential_overlay(None, cx);
+                                        let select = match overlay {
+                                            ConnectionEditorCredentialOverlay::Passwords => {
+                                                ConnectionEditorSelect::SavedPassword
+                                            }
+                                            ConnectionEditorCredentialOverlay::Keys => {
+                                                ConnectionEditorSelect::SshKey
+                                            }
+                                        };
+                                        this.focus_connection_editor_select(select, window, cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(rows)),
+            )
+            .into_any_element()
+    }
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn focus_connection_editor_select(
+        &self,
+        select: ConnectionEditorSelect,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> bool {
+        self.focus_select(connection_editor_select_id(select), window, cx)
+    }
+
     fn connection_editor_select_is_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
         connection_editor_select_keys()
             .into_iter()
@@ -2412,7 +2664,7 @@ fn connection_description_field(
                 .id("connection-editor-description")
                 // Fixed: in a flex column the box would otherwise shrink to
                 // whatever space the form had left, cutting a row in half.
-                .h(px(72.))
+                .h(px(56.))
                 .flex_none()
                 .min_w_0()
                 .overflow_hidden()
@@ -2441,6 +2693,7 @@ fn connection_editor_footer_button(
     label: impl Into<SharedString>,
     primary: bool,
     enabled: bool,
+    disabled_tooltip: Option<String>,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let label: SharedString = label.into();
@@ -2454,10 +2707,10 @@ fn connection_editor_footer_button(
     } else {
         palette.text
     };
-    div()
+    let button = div()
         .id(id)
-        .h(px(28.))
-        .px_3()
+        .h(px(36.))
+        .px_4()
         .flex()
         .items_center()
         .rounded_sm()
@@ -2476,7 +2729,14 @@ fn connection_editor_footer_button(
                 .hover(move |this| this.opacity(0.86))
                 .on_click(on_click)
         })
-        .child(label)
+        .child(label);
+    if enabled {
+        button
+    } else if let Some(tooltip) = disabled_tooltip {
+        button.tooltip(move |window, cx| ZzClawTooltip::new(tooltip.clone()).build(window, cx))
+    } else {
+        button
+    }
 }
 
 fn connection_proxy_jump_would_cycle(
@@ -2504,14 +2764,137 @@ fn connection_proxy_jump_would_cycle(
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_core::Group;
+    use std::path::Path;
+
+    use gpui::{
+        AppContext as _, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, div, px,
+    };
+    use zzclawterm_core::{AppRuntime, Group, RuntimeMode};
 
     use super::{connection_editor_group_menu_options, ordered_connection_groups};
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
     use crate::features::selects::PENDING_CONNECTION_GROUP_VALUE;
     use crate::models::{
-        ConnectionEditorAdvancedTab, ConnectionEditorField, ConnectionEditorPasswordSource,
-        ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionKindTab,
+        ConnectionEditorAdvancedTab, ConnectionEditorAdvancedVisibility, ConnectionEditorField,
+        ConnectionEditorPasswordSource, ConnectionEditorState, ConnectionEditorTelnetTab,
+        ConnectionKindTab,
     };
+    use crate::test_support::TestConfigDir;
+
+    struct EditorHost {
+        app: Entity<ZzClawTermApp>,
+        width: f32,
+        height: f32,
+        font_size: f32,
+    }
+
+    impl Render for EditorHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let editor = self
+                .app
+                .read(cx)
+                .connection_state
+                .active_editor_draft()
+                .expect("connection editor draft");
+            let editor = self
+                .app
+                .update(cx, |app, cx| app.connection_editor_panel(editor, cx));
+            div()
+                .debug_selector(|| "connection-editor-test-host".to_string())
+                .w(px(self.width))
+                .h(px(self.height))
+                .text_size(px(self.font_size))
+                .overflow_hidden()
+                .child(editor)
+        }
+    }
+
+    fn test_app(cx: &mut TestAppContext, root: &Path) -> Entity<ZzClawTermApp> {
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.to_path_buf(),
+            root.join("config"),
+            root.join("logs"),
+            root.join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx))
+    }
+
+    fn hosted_editor<'a>(
+        cx: &'a mut TestAppContext,
+        root: &Path,
+        width: f32,
+        height: f32,
+        font_size: f32,
+    ) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
+        let app = test_app(cx, root);
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.connection_state.begin_editor(editor(None, None));
+            app.connection_state.build_editor_fields(cx);
+        });
+        let host_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| EditorHost {
+            app: host_app,
+            width,
+            height,
+            font_size,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            draw_editor(&app, vcx);
+        }
+        (app, vcx)
+    }
+
+    fn draw_editor(app: &Entity<ZzClawTermApp>, vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            app.update(cx, |_, cx| cx.notify());
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    fn protocol_selectors(kind: ConnectionKindTab) -> (&'static str, &'static str) {
+        match kind {
+            ConnectionKindTab::Ssh => (
+                "connection-editor-ssh-section",
+                "connection-editor-ssh-advanced",
+            ),
+            ConnectionKindTab::Local => (
+                "connection-editor-local-section",
+                "connection-editor-local-advanced",
+            ),
+            ConnectionKindTab::Telnet => (
+                "connection-editor-telnet-section",
+                "connection-editor-telnet-advanced",
+            ),
+            ConnectionKindTab::Serial => (
+                "connection-editor-serial-section",
+                "connection-editor-serial-advanced",
+            ),
+            ConnectionKindTab::Rdp => (
+                "connection-editor-rdp-section",
+                "connection-editor-rdp-advanced",
+            ),
+            ConnectionKindTab::Vnc => (
+                "connection-editor-vnc-section",
+                "connection-editor-vnc-advanced",
+            ),
+        }
+    }
 
     fn group(id: &str, name: &str, parent_id: Option<&str>, sort_order: i32) -> Group {
         Group {
@@ -2612,8 +2995,8 @@ mod tests {
             post_login_enabled: false,
             post_login_command: String::new(),
             post_login_delay_ms: "0".to_string(),
-            advanced_open: false,
-            advanced_network_tab: ConnectionEditorAdvancedTab::Proxy,
+            advanced: ConnectionEditorAdvancedVisibility::default(),
+            advanced_network_tab: ConnectionEditorAdvancedTab::Network,
             advanced_behavior_tab: ConnectionEditorAdvancedTab::PostLogin,
             telnet_advanced_tab: ConnectionEditorTelnetTab::Input,
             connect_after_save: false,
@@ -2701,5 +3084,61 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(selected, vec![Some("child".to_string())]);
+    }
+
+    #[test]
+    fn connection_editor_protocol_sections_fit_supported_viewports_with_advanced_collapsed() {
+        for (width, height, font_size) in [(520., 620., 12.), (420., 480., 24.)] {
+            let test_dir = TestConfigDir::new("zzclawterm-connection-editor-layout");
+            let mut cx = TestAppContext::single();
+            let (app, vcx) = hosted_editor(&mut cx, test_dir.path(), width, height, font_size);
+
+            for kind in [
+                ConnectionKindTab::Ssh,
+                ConnectionKindTab::Local,
+                ConnectionKindTab::Telnet,
+                ConnectionKindTab::Serial,
+                ConnectionKindTab::Rdp,
+                ConnectionKindTab::Vnc,
+            ] {
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.set_connection_editor_kind(kind, cx);
+                    });
+                });
+                draw_editor(&app, vcx);
+
+                let host = vcx
+                    .debug_bounds("connection-editor-test-host")
+                    .expect("test host should render");
+                let panel = vcx
+                    .debug_bounds("connection-editor-panel")
+                    .expect("editor panel should render");
+                let scroll = vcx
+                    .debug_bounds("connection-editor-scroll")
+                    .expect("editor scroll viewport should render");
+                let (section_selector, advanced_selector) = protocol_selectors(kind);
+                let section = vcx
+                    .debug_bounds(section_selector)
+                    .expect("active protocol section should render");
+
+                assert!(
+                    panel.left() >= host.left() && panel.right() <= host.right(),
+                    "{kind:?} panel must fit width {width} at UI font size {font_size}"
+                );
+                assert!(
+                    panel.top() >= host.top() && panel.bottom() <= host.bottom(),
+                    "{kind:?} panel must fit height {height} at UI font size {font_size}"
+                );
+                assert!(
+                    section.left() >= scroll.left() && section.right() <= scroll.right(),
+                    "{kind:?} section must not overflow horizontally at width {width} and UI font size {font_size}"
+                );
+                assert!(
+                    vcx.debug_bounds(advanced_selector).is_none(),
+                    "{kind:?} Advanced content must be collapsed on first render"
+                );
+            }
+        }
     }
 }

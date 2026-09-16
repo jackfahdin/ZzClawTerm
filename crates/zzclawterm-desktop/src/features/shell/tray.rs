@@ -205,11 +205,15 @@ impl ZzClawTermApp {
         }
         #[cfg(target_os = "macos")]
         {
+            let _ = window;
             cx.hide();
-            return true;
+            true
         }
-        let _ = (window, cx);
-        false
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window, cx);
+            false
+        }
     }
 }
 

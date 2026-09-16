@@ -1058,7 +1058,7 @@ impl ZzClawTermApp {
                     *request_id = None;
                     *status = TransferBrowserChildrenMenuStatus::Error(error.clone());
                 }
-                if error == SFTP_TRANSFER_CANCELLED {
+                if error.contains(SFTP_TRANSFER_CANCELLED) {
                     job.status = TransferJobStatus::Cancelled;
                     job.detail = "Cancelled".to_string();
                     self.shell
@@ -1248,7 +1248,7 @@ mod tests {
     };
     use zzclawterm_core::{AppRuntime, RuntimeMode};
     use zzclawterm_transport::{
-        SftpPathTransferOptions, SftpTransferProgress, SftpTransferSummary,
+        SFTP_TRANSFER_CANCELLED, SftpPathTransferOptions, SftpTransferProgress, SftpTransferSummary,
     };
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
@@ -1619,6 +1619,43 @@ mod tests {
                 Some(TransferJobStatus::Failed),
                 "the failure must have landed, not still be queued"
             );
+        });
+    }
+
+    #[test]
+    fn wrapped_transfer_cancellation_marks_the_job_cancelled() {
+        let test_dir = TestConfigDir::new("zzclawterm-transfer-cancelled");
+        let mut cx = TestAppContext::single();
+        let (app, vcx) = hosted(&mut cx, test_dir.path());
+        let sender = vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.transfer.enqueue_transfer_job(running_job("job-0"));
+                app.start_transfer_event_drain(cx);
+                app.transfer.transfer_event_sender()
+            })
+        });
+        vcx.run_until_parked();
+
+        sender
+            .unbounded_send(TransferJobResult {
+                id: "job-0".to_string(),
+                event: TransferJobEvent::Finished(Err(format!(
+                    "operation stopped: {SFTP_TRANSFER_CANCELLED}"
+                ))),
+            })
+            .expect("send cancellation event");
+        vcx.run_until_parked();
+
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            let job = app
+                .transfer
+                .transfer_jobs()
+                .iter()
+                .find(|job| job.id == "job-0")
+                .expect("cancelled job should remain visible");
+            assert_eq!(job.status, TransferJobStatus::Cancelled);
+            assert_eq!(job.detail, "Cancelled");
         });
     }
 

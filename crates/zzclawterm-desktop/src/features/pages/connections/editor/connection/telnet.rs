@@ -10,17 +10,17 @@ use gpui::{
 
 use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
 use crate::models::{
-    ConnectionEditorField, ConnectionEditorPasswordSource, ConnectionEditorSelect,
-    ConnectionEditorTelnetTab,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorPasswordSource,
+    ConnectionEditorSelect, ConnectionEditorTelnetTab,
 };
 use zzclawterm_ui::{ZzClawSwitch, ZzClawTabItem, ZzClawTabs};
 
 use super::super::super::list::{
-    ConnectionEditorRenderContext, connection_editor_select, editor_field, editor_stepper_field,
-    required,
+    ConnectionEditorRenderContext, EditorSecretFieldOptions, connection_editor_select,
+    editor_field, editor_secret_field, editor_stepper_field, required,
 };
 
-use super::ConnectionEditorSectionContext;
+use super::{ConnectionEditorSectionContext, recording::connection_editor_recording_section};
 
 fn telnet_switch_row(
     palette: crate::theme::ThemePalette,
@@ -88,6 +88,7 @@ pub(super) fn connection_editor_telnet_section(
         palette,
         editor,
         fields,
+        baud_popover_open: _,
     } = section;
     let auth_values = ["none".to_string(), "password".to_string()];
     let auth_tabs = ZzClawTabs::new("connection-telnet-auth-tabs")
@@ -128,24 +129,25 @@ pub(super) fn connection_editor_telnet_section(
     let tabs = ZzClawTabs::new("connection-telnet-tabs")
         .items([
             ZzClawTabItem::new(t!("dialog.telnetInputSettings")),
+            ZzClawTabItem::new(t!("dialog.encodingSettings")),
             ZzClawTabItem::new(t!("dialog.telnetCompatibility")),
         ])
-        .selected_index(
-            if editor.telnet_advanced_tab == ConnectionEditorTelnetTab::Input {
-                0
-            } else {
-                1
-            },
-        )
+        .selected_index(match editor.telnet_advanced_tab {
+            ConnectionEditorTelnetTab::Input => 0,
+            ConnectionEditorTelnetTab::Terminal => 1,
+            ConnectionEditorTelnetTab::Compatibility => 2,
+        })
         .on_select(cx.listener(|this, index, _, cx| {
             let tab = match *index {
                 0 => ConnectionEditorTelnetTab::Input,
+                1 => ConnectionEditorTelnetTab::Terminal,
                 _ => ConnectionEditorTelnetTab::Compatibility,
             };
             this.set_connection_editor_telnet_tab(tab, cx);
         }));
 
     div()
+        .debug_selector(|| "connection-editor-telnet-section".to_string())
         .flex()
         .flex_col()
         .gap_3()
@@ -192,11 +194,22 @@ pub(super) fn connection_editor_telnet_section(
                         .when(
                             editor.password_source == ConnectionEditorPasswordSource::Direct,
                             |this| {
-                                this.child(editor_field(
+                                this.child(editor_secret_field(
                                     palette,
                                     t!("dialog.password"),
                                     ConnectionEditorField::Password,
                                     fields,
+                                    EditorSecretFieldOptions::new(
+                                        false,
+                                        t!("passwordManager.showPassword"),
+                                        t!("dialog.clearPassword"),
+                                        cx.listener(|this, _, _, cx| {
+                                            this.toggle_connection_editor_password_visibility(cx);
+                                        }),
+                                        cx.listener(|this, _, _, cx| {
+                                            this.clear_connection_editor_password(cx);
+                                        }),
+                                    ),
                                     cx,
                                 ))
                             },
@@ -204,16 +217,39 @@ pub(super) fn connection_editor_telnet_section(
                         .when(
                             editor.password_source == ConnectionEditorPasswordSource::Saved,
                             |this| {
-                                this.child(connection_editor_select(
-                                    ConnectionEditorRenderContext {
-                                        palette,
-                                        fields,
-                                        cx,
-                                    },
-                                    "connection-editor-telnet-saved-password",
-                                    t!("dialog.savedPassword"),
-                                    ConnectionEditorSelect::SavedPassword,
-                                ))
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_end()
+                                        .gap_2()
+                                        .child(div().min_w(px(180.)).flex_1().child(
+                                            connection_editor_select(
+                                                ConnectionEditorRenderContext {
+                                                    palette,
+                                                    fields,
+                                                    cx,
+                                                },
+                                                "connection-editor-telnet-saved-password",
+                                                t!("dialog.savedPassword"),
+                                                ConnectionEditorSelect::SavedPassword,
+                                            ),
+                                        ))
+                                        .child(
+                                            zzclawterm_ui::ZzClawButton::new(
+                                                "connection-editor-telnet-manage-passwords",
+                                                t!("dialog.managePasswords"),
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.set_connection_editor_credential_overlay(
+                                                    Some(
+                                                        ConnectionEditorCredentialOverlay::Passwords,
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                        ),
+                                )
                             },
                         )
                 }),
@@ -235,7 +271,7 @@ pub(super) fn connection_editor_telnet_section(
                 .child(
                     svg()
                         .size(px(14.))
-                        .path(if editor.advanced_open {
+                        .path(if editor.advanced.telnet {
                             "icons/chevron-down.svg"
                         } else {
                             "icons/fe/forward.svg"
@@ -244,8 +280,15 @@ pub(super) fn connection_editor_telnet_section(
                 )
                 .child(t!("dialog.advancedConfig")),
         )
-        .when(editor.advanced_open, |this| {
-            this.child(tabs)
+        .when(editor.advanced.telnet, |this| {
+            this.child(
+                div()
+                    .id("connection-editor-telnet-advanced")
+                    .debug_selector(|| "connection-editor-telnet-advanced".to_string())
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(tabs)
                 .when(
                     editor.telnet_advanced_tab == ConnectionEditorTelnetTab::Input,
                     |this| {
@@ -268,7 +311,7 @@ pub(super) fn connection_editor_telnet_section(
                                 .child(
                                     div()
                                         .grid()
-                                        .grid_cols(3)
+                                        .grid_cols(2)
                                         .gap_2()
                                         .child(connection_editor_select(
                                             ConnectionEditorRenderContext {
@@ -289,18 +332,35 @@ pub(super) fn connection_editor_telnet_section(
                                             "connection-editor-telnet-enter-mode",
                                             t!("dialog.telnetEnterMode"),
                                             ConnectionEditorSelect::TelnetEnterMode,
-                                        ))
-                                        .child(connection_editor_select(
-                                            ConnectionEditorRenderContext {
-                                                palette,
-                                                fields,
-                                                cx,
-                                            },
-                                            "connection-editor-telnet-encoding",
-                                            t!("connection.encoding"),
-                                            ConnectionEditorSelect::Encoding,
                                         )),
                                 ),
+                        )
+                    },
+                )
+                .when(
+                    editor.telnet_advanced_tab == ConnectionEditorTelnetTab::Terminal,
+                    |this| {
+                        this.child(
+                            div()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(palette.border))
+                                .bg(rgb(palette.bg))
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(connection_editor_select(
+                                    ConnectionEditorRenderContext {
+                                        palette,
+                                        fields,
+                                        cx,
+                                    },
+                                    "connection-editor-telnet-encoding",
+                                    t!("connection.encoding"),
+                                    ConnectionEditorSelect::Encoding,
+                                ))
+                                .child(connection_editor_recording_section(section, cx)),
                         )
                     },
                 )
@@ -511,6 +571,7 @@ pub(super) fn connection_editor_telnet_section(
                                 ),
                         )
                     },
-                )
+                ),
+            )
         })
 }

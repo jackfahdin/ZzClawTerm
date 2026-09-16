@@ -11,13 +11,13 @@ use zzclawterm_ui::{ZzClawSwitch, ZzClawTabItem, ZzClawTabs};
 
 use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
 use crate::models::{
-    ConnectionEditorField, ConnectionEditorPasswordSource, ConnectionEditorRdpTab,
-    ConnectionEditorSelect,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorPasswordSource,
+    ConnectionEditorRdpTab, ConnectionEditorSelect,
 };
 
 use super::super::super::list::{
-    ConnectionEditorRenderContext, connection_editor_select, editor_field, editor_stepper_field,
-    required,
+    ConnectionEditorRenderContext, EditorSecretFieldOptions, connection_editor_select,
+    editor_field, editor_secret_field, editor_stepper_field, required,
 };
 use super::ConnectionEditorSectionContext;
 
@@ -71,67 +71,73 @@ pub(super) fn connection_editor_rdp_section(
         palette,
         editor,
         fields,
+        baud_popover_open: _,
     } = section;
-    let auth_values = ["none".to_string(), "password".to_string()];
     let auth_tabs = ZzClawTabs::new("connection-rdp-auth-tabs")
         .items([
-            ZzClawTabItem::new(t!("dialog.noAuthentication")),
-            ZzClawTabItem::new(t!("dialog.password")),
-        ])
-        .selected_index(if editor.auth_mode == "none" { 0 } else { 1 })
-        .on_select(cx.listener(move |this, index: &usize, _, cx| {
-            let Some(value) = auth_values.get(*index) else {
-                return;
-            };
-            this.set_connection_editor_select_value(
-                ConnectionEditorSelect::Authentication,
-                Some(value.as_str()),
-                cx,
-            );
-        }));
-    let password_source_tabs = ZzClawTabs::new("connection-rdp-password-source-tabs")
-        .items([
-            ZzClawTabItem::new(t!("dialog.askWhenConnecting")),
             ZzClawTabItem::new(t!("dialog.directPassword")),
             ZzClawTabItem::new(t!("dialog.savedPassword")),
+            ZzClawTabItem::new(t!("dialog.askWhenConnecting")),
+            ZzClawTabItem::new(t!("dialog.noAuthentication")),
         ])
-        .selected_index(match editor.password_source {
-            ConnectionEditorPasswordSource::Ask => 0,
-            ConnectionEditorPasswordSource::Direct => 1,
-            ConnectionEditorPasswordSource::Saved => 2,
+        .selected_index(if editor.auth_mode == "none" {
+            3
+        } else {
+            match editor.password_source {
+                ConnectionEditorPasswordSource::Direct => 0,
+                ConnectionEditorPasswordSource::Saved => 1,
+                ConnectionEditorPasswordSource::Ask => 2,
+            }
         })
-        .on_select(cx.listener(|this, index, _, cx| {
-            let source = match *index {
-                0 => ConnectionEditorPasswordSource::Ask,
-                1 => ConnectionEditorPasswordSource::Direct,
-                _ => ConnectionEditorPasswordSource::Saved,
-            };
-            this.set_connection_editor_password_source(source, cx);
+        .on_select(cx.listener(move |this, index: &usize, _, cx| {
+            if *index == 3 {
+                this.set_connection_editor_select_value(
+                    ConnectionEditorSelect::Authentication,
+                    Some("none"),
+                    cx,
+                );
+            } else {
+                this.set_connection_editor_select_value(
+                    ConnectionEditorSelect::Authentication,
+                    Some("password"),
+                    cx,
+                );
+                let source = match *index {
+                    0 => ConnectionEditorPasswordSource::Direct,
+                    1 => ConnectionEditorPasswordSource::Saved,
+                    _ => ConnectionEditorPasswordSource::Ask,
+                };
+                this.set_connection_editor_password_source(source, cx);
+            }
         }));
     let advanced_tabs = ZzClawTabs::new("connection-rdp-advanced-tabs")
         .items([
             ZzClawTabItem::new(t!("dialog.rdpSecurity")),
+            ZzClawTabItem::new(t!("panel.network")),
             ZzClawTabItem::new(t!("dialog.rdpDisplay")),
             ZzClawTabItem::new(t!("dialog.rdpClipboard")),
             ZzClawTabItem::new(t!("dialog.rdpReconnect")),
         ])
         .selected_index(match editor.rdp_advanced_tab {
             ConnectionEditorRdpTab::Security => 0,
-            ConnectionEditorRdpTab::Display => 1,
-            ConnectionEditorRdpTab::Clipboard => 2,
-            ConnectionEditorRdpTab::Reconnect => 3,
+            ConnectionEditorRdpTab::Network => 1,
+            ConnectionEditorRdpTab::Display => 2,
+            ConnectionEditorRdpTab::Clipboard => 3,
+            ConnectionEditorRdpTab::Reconnect => 4,
         })
         .on_select(cx.listener(|this, index, _, cx| {
             let tab = match *index {
                 0 => ConnectionEditorRdpTab::Security,
-                1 => ConnectionEditorRdpTab::Display,
-                2 => ConnectionEditorRdpTab::Clipboard,
+                1 => ConnectionEditorRdpTab::Network,
+                2 => ConnectionEditorRdpTab::Display,
+                3 => ConnectionEditorRdpTab::Clipboard,
                 _ => ConnectionEditorRdpTab::Reconnect,
             };
             this.set_connection_editor_rdp_tab(tab, cx);
         }));
 
     div()
+        .debug_selector(|| "connection-editor-rdp-section".to_string())
         .flex()
         .flex_col()
         .gap_3()
@@ -154,20 +160,26 @@ pub(super) fn connection_editor_rdp_section(
                     cx,
                 ))),
         )
-        .child(editor_field(
-            palette,
-            required(t!("dialog.username")),
-            ConnectionEditorField::Username,
-            fields,
-            cx,
-        ))
-        .child(editor_field(
-            palette,
-            t!("dialog.rdpDomain"),
-            ConnectionEditorField::Domain,
-            fields,
-            cx,
-        ))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_3()
+                .child(div().min_w(px(180.)).flex_1().child(editor_field(
+                    palette,
+                    required(t!("dialog.username")),
+                    ConnectionEditorField::Username,
+                    fields,
+                    cx,
+                )))
+                .child(div().min_w(px(160.)).flex_1().child(editor_field(
+                    palette,
+                    t!("dialog.rdpDomain"),
+                    ConnectionEditorField::Domain,
+                    fields,
+                    cx,
+                ))),
+        )
         .child(
             div()
                 .flex()
@@ -182,34 +194,67 @@ pub(super) fn connection_editor_rdp_section(
                 )
                 .child(auth_tabs)
                 .when(editor.auth_mode != "none", |this| {
-                    this.child(password_source_tabs)
-                        .when(
-                            editor.password_source == ConnectionEditorPasswordSource::Direct,
-                            |this| {
-                                this.child(editor_field(
-                                    palette,
-                                    t!("dialog.password"),
-                                    ConnectionEditorField::Password,
-                                    fields,
-                                    cx,
-                                ))
-                            },
-                        )
-                        .when(
-                            editor.password_source == ConnectionEditorPasswordSource::Saved,
-                            |this| {
-                                this.child(connection_editor_select(
-                                    ConnectionEditorRenderContext {
-                                        palette,
-                                        fields,
-                                        cx,
-                                    },
-                                    "connection-editor-rdp-saved-password",
-                                    t!("dialog.savedPassword"),
-                                    ConnectionEditorSelect::SavedPassword,
-                                ))
-                            },
-                        )
+                    this.when(
+                        editor.password_source == ConnectionEditorPasswordSource::Direct,
+                        |this| {
+                            this.child(editor_secret_field(
+                                palette,
+                                t!("dialog.password"),
+                                ConnectionEditorField::Password,
+                                fields,
+                                EditorSecretFieldOptions::new(
+                                    false,
+                                    t!("passwordManager.showPassword"),
+                                    t!("dialog.clearPassword"),
+                                    cx.listener(|this, _, _, cx| {
+                                        this.toggle_connection_editor_password_visibility(cx);
+                                    }),
+                                    cx.listener(|this, _, _, cx| {
+                                        this.clear_connection_editor_password(cx);
+                                    }),
+                                ),
+                                cx,
+                            ))
+                        },
+                    )
+                    .when(
+                        editor.password_source == ConnectionEditorPasswordSource::Saved,
+                        |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_end()
+                                    .gap_2()
+                                    .child(div().min_w(px(180.)).flex_1().child(
+                                        connection_editor_select(
+                                            ConnectionEditorRenderContext {
+                                                palette,
+                                                fields,
+                                                cx,
+                                            },
+                                            "connection-editor-rdp-saved-password",
+                                            t!("dialog.savedPassword"),
+                                            ConnectionEditorSelect::SavedPassword,
+                                        ),
+                                    ))
+                                    .child(
+                                        zzclawterm_ui::ZzClawButton::new(
+                                            "connection-editor-rdp-manage-passwords",
+                                            t!("dialog.managePasswords"),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.set_connection_editor_credential_overlay(
+                                                Some(ConnectionEditorCredentialOverlay::Passwords),
+                                                cx,
+                                            );
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        },
+                    )
                 }),
         )
         .child(
@@ -226,7 +271,7 @@ pub(super) fn connection_editor_rdp_section(
                 .child(
                     svg()
                         .size(px(14.))
-                        .path(if editor.advanced_open {
+                        .path(if editor.advanced.rdp {
                             "icons/chevron-down.svg"
                         } else {
                             "icons/fe/forward.svg"
@@ -238,9 +283,11 @@ pub(super) fn connection_editor_rdp_section(
                     this.toggle_connection_editor_flag(ConnectionEditorToggle::Advanced, cx);
                 })),
         )
-        .when(editor.advanced_open, |this| {
+        .when(editor.advanced.rdp, |this| {
             this.child(advanced_tabs).child(
                 div()
+                    .id("connection-editor-rdp-advanced")
+                    .debug_selector(|| "connection-editor-rdp-advanced".to_string())
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(palette.border))
@@ -277,6 +324,34 @@ pub(super) fn connection_editor_rdp_section(
                         },
                     )
                     .when(
+                        editor.rdp_advanced_tab == ConnectionEditorRdpTab::Network,
+                        |this| {
+                            this.flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(connection_editor_select(
+                                    ConnectionEditorRenderContext {
+                                        palette,
+                                        fields,
+                                        cx,
+                                    },
+                                    "connection-editor-rdp-proxy",
+                                    t!("dialog.proxySelect"),
+                                    ConnectionEditorSelect::Proxy,
+                                ))
+                                .child(connection_editor_select(
+                                    ConnectionEditorRenderContext {
+                                        palette,
+                                        fields,
+                                        cx,
+                                    },
+                                    "connection-editor-rdp-jump",
+                                    t!("dialog.proxyJump"),
+                                    ConnectionEditorSelect::ProxyJump,
+                                ))
+                        },
+                    )
+                    .when(
                         editor.rdp_advanced_tab == ConnectionEditorRdpTab::Display,
                         |this| {
                             this.flex()
@@ -292,29 +367,31 @@ pub(super) fn connection_editor_rdp_section(
                                     t!("dialog.rdpDisplayMode"),
                                     ConnectionEditorSelect::RdpDisplayMode,
                                 ))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_3()
-                                        .child(div().min_w_0().flex_1().child(
-                                            editor_stepper_field(
-                                                palette,
-                                                t!("dialog.rdpWidth"),
-                                                ConnectionEditorField::RdpDisplayWidth,
-                                                fields,
-                                                cx,
-                                            ),
-                                        ))
-                                        .child(div().min_w_0().flex_1().child(
-                                            editor_stepper_field(
-                                                palette,
-                                                t!("dialog.rdpHeight"),
-                                                ConnectionEditorField::RdpDisplayHeight,
-                                                fields,
-                                                cx,
-                                            ),
-                                        )),
-                                )
+                                .when(editor.rdp_display.mode == "fixed", |this| {
+                                    this.child(
+                                        div()
+                                            .flex()
+                                            .gap_3()
+                                            .child(div().min_w_0().flex_1().child(
+                                                editor_stepper_field(
+                                                    palette,
+                                                    t!("dialog.rdpWidth"),
+                                                    ConnectionEditorField::RdpDisplayWidth,
+                                                    fields,
+                                                    cx,
+                                                ),
+                                            ))
+                                            .child(div().min_w_0().flex_1().child(
+                                                editor_stepper_field(
+                                                    palette,
+                                                    t!("dialog.rdpHeight"),
+                                                    ConnectionEditorField::RdpDisplayHeight,
+                                                    fields,
+                                                    cx,
+                                                ),
+                                            )),
+                                    )
+                                })
                         },
                     )
                     .when(

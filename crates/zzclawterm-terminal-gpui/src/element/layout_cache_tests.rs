@@ -7,10 +7,11 @@ use zzclawterm_core::ResolvedKeywordHighlightRule;
 use zzclawterm_terminal::{ShellInputLineKind, TerminalScreen, TerminalSnapshot};
 
 use super::{
-    TERMINAL_LAYOUT_CACHE_ROW_CAP, TerminalGridSelection, TerminalKeywordLayoutState,
-    TerminalLineDecorations, TerminalRowBackgroundRange, TerminalRowUnderlineRange,
-    ZzClawTerminalElement, ZzClawTerminalLayoutCache, append_padded_wide_cells, hash_styled_spans,
-    pad_wide_cells, push_dynamic_decoration_backgrounds, push_dynamic_link_underlines,
+    TERMINAL_LAYOUT_CACHE_ROW_CAP, TERMINAL_LAYOUT_CACHE_ROW_ORDER_MIN_COMPACT,
+    TerminalGridSelection, TerminalKeywordLayoutState, TerminalLineDecorations,
+    TerminalRowBackgroundRange, TerminalRowUnderlineRange, ZzClawTerminalElement,
+    ZzClawTerminalLayoutCache, append_padded_wide_cells, hash_styled_spans, pad_wide_cells,
+    push_dynamic_decoration_backgrounds, push_dynamic_link_underlines,
     push_dynamic_selection_background, push_terminal_zebra_stripes,
     terminal_background_ranges_for_spans, terminal_cursor_cell_hidden,
     terminal_glyph_decorations_needed, terminal_layout_height_px, terminal_layout_prefetch_row,
@@ -21,7 +22,7 @@ use super::{
 };
 use crate::keywords::{
     compile_terminal_keyword_highlighter, precompute_terminal_keyword_highlights,
-    terminal_keyword_rules_key,
+    terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
 };
 use crate::paint::{apply_action_link_ranges, flatten_highlight_spans};
 use crate::types::{TerminalHighlightSpan, TerminalPaintGeometry};
@@ -653,6 +654,30 @@ fn paint_row_cache_promotes_equivalent_keyword_result() {
     assert_eq!(cache.shape_calls, 1);
 }
 
+#[test]
+fn paint_row_cache_promotion_does_not_accumulate_stale_order_keys() {
+    let mut cache = ZzClawTerminalLayoutCache::default();
+    cache.paint_row(0, 1, || {
+        (
+            Arc::new(ShapedLine::default()),
+            std::time::Duration::ZERO,
+            1,
+            Vec::new(),
+            Vec::new(),
+        )
+    });
+
+    for key in 2..=5_000 {
+        cache.paint_row_reusing(0, key, Some(key - 1), || {
+            panic!("equivalent promotion should reuse the previous row")
+        });
+    }
+
+    assert_eq!(cache.rows.len(), 1);
+    assert!(cache.row_order.len() <= TERMINAL_LAYOUT_CACHE_ROW_ORDER_MIN_COMPACT);
+    assert_eq!(cache.row_order.back(), Some(&5_000));
+}
+
 fn highlight_span(
     text: &str,
     color: Option<u32>,
@@ -1007,10 +1032,10 @@ fn row_layout_key_ignores_link_ranges_when_keyword_rules_can_paint() {
     let linked_empty_key = linked.paint_style_key(0);
 
     assert_eq!(
-        base.row_layout_cache_keys(0, base_paint_key, base_empty_key)
+        base.row_layout_cache_keys(0, base_paint_key, base_empty_key, None)
             .0,
         linked
-            .row_layout_cache_keys(0, linked_paint_key, linked_empty_key)
+            .row_layout_cache_keys(0, linked_paint_key, linked_empty_key, None)
             .0
     );
 }
@@ -1115,8 +1140,13 @@ fn precomputed_keyword_match_does_not_reuse_plain_pending_row() {
     let keyword_paint_style_key = element.paint_style_key(highlights.rules_key());
     let empty_keyword_paint_style_key = element.paint_style_key(0);
 
-    let (_, pending_key) =
-        element.row_layout_cache_keys(0, keyword_paint_style_key, empty_keyword_paint_style_key);
+    let keyword_reuse_key = terminal_keyword_row_reuse_keys(element.snapshot.as_ref())[0];
+    let (_, pending_key) = element.row_layout_cache_keys(
+        0,
+        keyword_paint_style_key,
+        empty_keyword_paint_style_key,
+        keyword_reuse_key,
+    );
 
     assert!(pending_key.is_none());
 }

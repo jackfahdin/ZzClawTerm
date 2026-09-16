@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "Show NyaTerm",
+    "show": "Show ZzClawTerm",
     "newConnection": "New connection",
     "push": "Push cloud sync",
     "pull": "Pull cloud sync",
@@ -527,6 +527,9 @@
     "vncSecurityMode": "Security",
     "vncSecurityNone": "None",
     "vncSecurityPassword": "VNC password",
+    "vncPasswordLimit": "Classic VNC authentication supports at most 8 password bytes. Passwords are never truncated.",
+    "vncPasswordTooLong": "Classic VNC authentication passwords must be 8 bytes or fewer",
+    "vncUnencryptedWarning": "Classic VNC does not encrypt the desktop, keyboard, or clipboard traffic. Use a trusted network, VPN, or SSH tunnel.",
     "vncSharedSession": "Shared session",
     "vncSharedSessionDesc": "Allow other viewers to stay connected.",
     "vncViewOnly": "View only",
@@ -545,6 +548,8 @@
     "icon": "Icon",
     "iconAutoDetect": "Auto detect",
     "iconAutoDetectTooltip": "Updates from remote system info.",
+    "iconAutoDetectNetworkDeviceTooltip": "Network device profile disables remote system probing.",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "Requires remote resource stats.",
     "inputPassword": "Password",
     "loadingSerialPorts": "Loading serial ports...",
     "localTerminal": "Local",
@@ -705,6 +710,8 @@
     "workingDirectorySelectionCancelled": "Working directory selection cancelled.",
     "x11Forwarding": "X11 Forwarding",
     "dynamicTabTitle": "Dynamic tab title",
+    "dynamicTabTitleDesc": "Show the current app or folder as the tab name and ZzClawTerm window title. The name updates automatically as you work. Changes take effect the next time you connect.",
+    "dynamicTabTitleCustomArgsHint": "Custom shell options may prevent automatic folder tracking. App names and existing folder information can still be shown.",
     "x11ForwardingDesc": "Allow remote graphical applications to display on your local X server through SSH."
   },
   "dockerManager": {

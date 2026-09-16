@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "显示 NyaTerm",
+    "show": "显示 ZzClawTerm",
     "newConnection": "新建连接",
     "push": "推送云同步",
     "pull": "拉取云同步",
@@ -527,6 +527,9 @@
     "vncSecurityMode": "安全",
     "vncSecurityNone": "无",
     "vncSecurityPassword": "VNC 密码",
+    "vncPasswordLimit": "经典 VNC 身份验证最多支持 8 个密码字节，密码绝不会被静默截断。",
+    "vncPasswordTooLong": "经典 VNC 身份验证密码不得超过 8 个字节",
+    "vncUnencryptedWarning": "经典 VNC 不会加密桌面、键盘或剪贴板流量。请使用可信网络、VPN 或 SSH 隧道。",
     "vncSharedSession": "共享会话",
     "vncSharedSessionDesc": "允许其他查看器保持连接。",
     "vncViewOnly": "仅查看",
@@ -545,6 +548,8 @@
     "icon": "图标",
     "iconAutoDetect": "自动识别",
     "iconAutoDetectTooltip": "根据远程系统信息更新。",
+    "iconAutoDetectNetworkDeviceTooltip": "网络设备模式会禁用远程系统探测。",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "需要开启远程资源统计。",
     "inputPassword": "输入密码",
     "loadingSerialPorts": "正在加载串口...",
     "localTerminal": "本地终端",
@@ -705,6 +710,8 @@
     "workingDirectorySelectionCancelled": "已取消选择工作目录。",
     "x11Forwarding": "X11 转发",
     "dynamicTabTitle": "动态标签标题",
+    "dynamicTabTitleDesc": "将当前应用或所在文件夹显示为标签名称和 ZzClawTerm 窗口标题。名称会随操作自动更新，修改将在下次连接时生效。",
+    "dynamicTabTitleCustomArgsHint": "使用自定义终端参数时，当前文件夹可能无法自动跟随；应用名称和已有的目录信息仍可显示。",
     "x11ForwardingDesc": "允许远端图形程序通过 SSH 显示到本机 X server。"
   },
   "dockerManager": {

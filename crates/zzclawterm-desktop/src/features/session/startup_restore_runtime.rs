@@ -487,7 +487,7 @@ impl ZzClawTermApp {
     fn start_restorable_open_tab(
         &mut self,
         tab: &RestorableOpenTab,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let custom_name = tab
@@ -638,7 +638,7 @@ impl ZzClawTermApp {
                 self.settle_remote_desktop_restore(cx);
                 return true;
             }
-            self.start_saved_connection_with_options(
+            self.continue_saved_connection_start(
                 connection,
                 SavedConnectionStartOptions {
                     custom_name,
@@ -646,7 +646,6 @@ impl ZzClawTermApp {
                     locked: tab.locked,
                     ..Default::default()
                 },
-                window,
                 cx,
             );
             return true;

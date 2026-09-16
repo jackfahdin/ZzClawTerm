@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "NyaTerm を表示",
+    "show": "ZzClawTerm を表示",
     "newConnection": "新しい接続",
     "push": "クラウドへ送信",
     "pull": "クラウドから取得",
@@ -481,6 +481,9 @@
     "vncSecurityMode": "セキュリティ",
     "vncSecurityNone": "なし",
     "vncSecurityPassword": "VNC パスワード",
+    "vncPasswordLimit": "クラシック VNC 認証のパスワードは最大 8 バイトです。パスワードが自動的に切り詰められることはありません。",
+    "vncPasswordTooLong": "クラシック VNC 認証のパスワードは 8 バイト以下にしてください",
+    "vncUnencryptedWarning": "クラシック VNC はデスクトップ、キーボード、クリップボードの通信を暗号化しません。信頼できるネットワーク、VPN、または SSH トンネルを使用してください。",
     "vncSharedSession": "共有セッション",
     "vncSharedSessionDesc": "他のビューアーの接続を維持できるようにします。",
     "vncViewOnly": "表示のみ",
@@ -499,6 +502,8 @@
     "icon": "アイコン",
     "iconAutoDetect": "自動検出",
     "iconAutoDetectTooltip": "リモートのシステム情報から更新します。",
+    "iconAutoDetectNetworkDeviceTooltip": "ネットワーク機器プロファイルではリモートシステムの検出が無効になります。",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "リモートリソース統計を有効にする必要があります。",
     "inputPassword": "パスワード",
     "loadingSerialPorts": "シリアルポートを読み込み中...",
     "localTerminal": "ローカル",
@@ -659,6 +664,8 @@
     "workingDirectorySelectionCancelled": "作業ディレクトリの選択をキャンセルしました。",
     "x11Forwarding": "X11 転送",
     "dynamicTabTitle": "動的タブタイトル",
+    "dynamicTabTitleDesc": "現在のアプリまたはフォルダーをタブ名と ZzClawTerm ウィンドウタイトルに表示します。作業に応じて名前は自動更新され、変更は次回接続時から有効です。",
+    "dynamicTabTitleCustomArgsHint": "カスタムシェルオプションを使用すると、フォルダーの自動追跡ができない場合があります。アプリ名と既存のフォルダー情報は引き続き表示できます。",
     "x11ForwardingDesc": "SSH 経由でリモートのグラフィカルアプリケーションをローカルの X サーバーに表示できるようにします。"
   },
 

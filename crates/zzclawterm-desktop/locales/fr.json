@@ -1,6 +1,6 @@
 {
   "tray": {
-    "show": "Afficher NyaTerm",
+    "show": "Afficher ZzClawTerm",
     "newConnection": "Nouvelle connexion",
     "push": "Envoyer vers le cloud",
     "pull": "Récupérer du cloud",
@@ -480,6 +480,9 @@
     "vncSecurityMode": "Sécurité",
     "vncSecurityNone": "Aucune",
     "vncSecurityPassword": "Mot de passe VNC",
+    "vncPasswordLimit": "L’authentification VNC classique accepte au maximum 8 octets de mot de passe. Les mots de passe ne sont jamais tronqués.",
+    "vncPasswordTooLong": "Le mot de passe VNC classique doit contenir au maximum 8 octets",
+    "vncUnencryptedWarning": "Le VNC classique ne chiffre pas le bureau, le clavier ni le presse-papiers. Utilisez un réseau de confiance, un VPN ou un tunnel SSH.",
     "vncSharedSession": "Session partagée",
     "vncSharedSessionDesc": "Permettre aux autres visionneuses de rester connectées.",
     "vncViewOnly": "Lecture seule",
@@ -498,6 +501,8 @@
     "icon": "Icône",
     "iconAutoDetect": "Détection automatique",
     "iconAutoDetectTooltip": "Se met à jour d'après les informations système distantes.",
+    "iconAutoDetectNetworkDeviceTooltip": "Le profil d'équipement réseau désactive la détection du système distant.",
+    "iconAutoDetectRemoteStatsDisabledTooltip": "Nécessite les statistiques de ressources distantes.",
     "inputPassword": "Mot de passe",
     "loadingSerialPorts": "Chargement des ports série…",
     "localTerminal": "Local",
@@ -658,6 +663,8 @@
     "workingDirectorySelectionCancelled": "Sélection du répertoire de travail annulée.",
     "x11Forwarding": "Transfert X11",
     "dynamicTabTitle": "Titre d’onglet dynamique",
+    "dynamicTabTitleDesc": "Affiche l’application ou le dossier actuel comme nom d’onglet et titre de fenêtre ZzClawTerm. Le nom se met à jour automatiquement pendant l’utilisation. Les changements prennent effet à la prochaine connexion.",
+    "dynamicTabTitleCustomArgsHint": "Des options de shell personnalisées peuvent empêcher le suivi automatique du dossier. Le nom de l’application et les informations de dossier existantes restent disponibles.",
     "x11ForwardingDesc": "Autoriser les applications graphiques distantes à s'afficher sur votre serveur X local via SSH."
   },
   "dockerManager": {

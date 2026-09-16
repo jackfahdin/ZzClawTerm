@@ -89,8 +89,7 @@ pub(crate) enum ConnectionEditorPasswordSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionEditorAdvancedTab {
-    Proxy,
-    JumpHost,
+    Network,
     TwoFactor,
     AgentForwarding,
     PostLogin,
@@ -111,15 +110,59 @@ pub(crate) enum ConnectionEditorSshAlgorithmTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionEditorTelnetTab {
     Input,
+    Terminal,
     Compatibility,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionEditorRdpTab {
     Security,
+    Network,
     Display,
     Clipboard,
     Reconnect,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionEditorAdvancedVisibility {
+    pub(crate) ssh: bool,
+    pub(crate) local: bool,
+    pub(crate) telnet: bool,
+    pub(crate) serial: bool,
+    pub(crate) rdp: bool,
+    pub(crate) vnc: bool,
+}
+
+impl ConnectionEditorAdvancedVisibility {
+    pub(crate) fn is_open(self, kind: ConnectionKindTab) -> bool {
+        match kind {
+            ConnectionKindTab::Ssh => self.ssh,
+            ConnectionKindTab::Local => self.local,
+            ConnectionKindTab::Telnet => self.telnet,
+            ConnectionKindTab::Serial => self.serial,
+            ConnectionKindTab::Rdp => self.rdp,
+            ConnectionKindTab::Vnc => self.vnc,
+        }
+    }
+
+    pub(crate) fn toggle(&mut self, kind: ConnectionKindTab) -> bool {
+        let open = match kind {
+            ConnectionKindTab::Ssh => &mut self.ssh,
+            ConnectionKindTab::Local => &mut self.local,
+            ConnectionKindTab::Telnet => &mut self.telnet,
+            ConnectionKindTab::Serial => &mut self.serial,
+            ConnectionKindTab::Rdp => &mut self.rdp,
+            ConnectionKindTab::Vnc => &mut self.vnc,
+        };
+        *open = !*open;
+        *open
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionEditorCredentialOverlay {
+    Passwords,
+    Keys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -386,7 +429,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) post_login_command: String,
     pub(crate) post_login_delay_ms: String,
     pub(crate) recording: Option<zzclawterm_core::ConnectionRecordingSettings>,
-    pub(crate) advanced_open: bool,
+    pub(crate) advanced: ConnectionEditorAdvancedVisibility,
     pub(crate) advanced_network_tab: ConnectionEditorAdvancedTab,
     pub(crate) advanced_behavior_tab: ConnectionEditorAdvancedTab,
     pub(crate) telnet_advanced_tab: ConnectionEditorTelnetTab,

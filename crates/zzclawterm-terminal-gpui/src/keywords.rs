@@ -51,7 +51,7 @@ const MAX_KEYWORD_WRAPPED_GROUP_ROWS: usize = 512;
 const MAX_KEYWORD_WRAPPED_GROUP_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TerminalKeywordRowReuseKey {
+pub(super) enum TerminalKeywordRowReuseKey {
     Single { revision: u64 },
     Wrapped { group_key: u64, row_offset: usize },
 }
@@ -121,30 +121,55 @@ impl TerminalKeywordHighlightSnapshot {
         }
         let start = rows.start.min(snapshot.row_count());
         let end = rows.end.min(snapshot.row_count()).max(start);
-        (start..end).all(|row| self.has_row_at(row, snapshot))
+        let reuse_keys = terminal_keyword_row_reuse_keys(snapshot);
+        (start..end).all(|row| {
+            self.has_row_at_with_reuse_key(row, snapshot, reuse_keys.get(row).copied().flatten())
+        })
     }
 
+    #[cfg(test)]
     pub(super) fn lookup(
         &self,
         row: usize,
         snapshot: &TerminalSnapshot,
     ) -> Option<TerminalKeywordHighlightLookup<'_>> {
+        let reuse_key = terminal_keyword_row_reuse_key(snapshot, row);
+        self.lookup_with_reuse_key(row, snapshot, reuse_key)
+    }
+
+    pub(super) fn lookup_with_reuse_key(
+        &self,
+        row: usize,
+        snapshot: &TerminalSnapshot,
+        reuse_key: Option<TerminalKeywordRowReuseKey>,
+    ) -> Option<TerminalKeywordHighlightLookup<'_>> {
         snapshot.row(row)?;
-        if self.has_row_at(row, snapshot) {
+        if self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
             return Some(TerminalKeywordHighlightLookup::Current(
                 self.rows.get(row)?.as_ref(),
             ));
         }
-        let reuse_key = terminal_keyword_row_reuse_key(snapshot, row)?;
+        let reuse_key = reuse_key?;
         self.rows_by_reuse_key
             .get(&reuse_key)
             .map(|ranges| TerminalKeywordHighlightLookup::Reused(ranges.as_ref()))
     }
 
+    #[cfg(test)]
     pub(super) fn stale_lookup(
         &self,
         row: usize,
         snapshot: &TerminalSnapshot,
+    ) -> Option<TerminalKeywordHighlightLookup<'_>> {
+        let reuse_key = terminal_keyword_row_reuse_key(snapshot, row);
+        self.stale_lookup_with_reuse_key(row, snapshot, reuse_key)
+    }
+
+    pub(super) fn stale_lookup_with_reuse_key(
+        &self,
+        row: usize,
+        snapshot: &TerminalSnapshot,
+        reuse_key: Option<TerminalKeywordRowReuseKey>,
     ) -> Option<TerminalKeywordHighlightLookup<'_>> {
         if self.display_offset != snapshot.display_offset
             || self.row_revisions.len() != snapshot.row_count()
@@ -152,7 +177,7 @@ impl TerminalKeywordHighlightSnapshot {
             return None;
         }
         snapshot.row(row)?;
-        if !self.has_row_at(row, snapshot) {
+        if !self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
             return None;
         }
         Some(TerminalKeywordHighlightLookup::Current(
@@ -160,15 +185,19 @@ impl TerminalKeywordHighlightSnapshot {
         ))
     }
 
-    fn has_row_at(&self, row: usize, snapshot: &TerminalSnapshot) -> bool {
+    fn has_row_at_with_reuse_key(
+        &self,
+        row: usize,
+        snapshot: &TerminalSnapshot,
+        reuse_key: Option<TerminalKeywordRowReuseKey>,
+    ) -> bool {
         let Some(snapshot_row) = snapshot.row(row) else {
             return false;
         };
         self.known_rows.get(row).copied().unwrap_or(false)
             && self.row_revisions.get(row).copied() == Some(snapshot_row.revision)
             && self.wrapped_flags.get(row).copied() == Some(snapshot_row.wrapped)
-            && self.row_reuse_keys.get(row).and_then(|key| *key)
-                == terminal_keyword_row_reuse_key(snapshot, row)
+            && self.row_reuse_keys.get(row).and_then(|key| *key) == reuse_key
     }
 }
 
@@ -427,7 +456,7 @@ fn terminal_keyword_row_bytes(row: &zzclawterm_terminal::TerminalSnapshotRow) ->
         .sum()
 }
 
-fn terminal_keyword_row_reuse_key(
+pub(super) fn terminal_keyword_row_reuse_key(
     snapshot: &TerminalSnapshot,
     row: usize,
 ) -> Option<TerminalKeywordRowReuseKey> {
@@ -454,7 +483,7 @@ fn terminal_keyword_row_reuse_key(
     })
 }
 
-fn terminal_keyword_row_reuse_keys(
+pub(super) fn terminal_keyword_row_reuse_keys(
     snapshot: &TerminalSnapshot,
 ) -> Vec<Option<TerminalKeywordRowReuseKey>> {
     let mut keys = vec![None; snapshot.row_count()];
@@ -462,11 +491,18 @@ fn terminal_keyword_row_reuse_keys(
     while row < snapshot.row_count() {
         let group = terminal_keyword_wrapped_group_bounds(snapshot, row);
         if group.oversized || group.end == group.start.saturating_add(1) {
-            keys[row] = snapshot
-                .row(row)
-                .map(|row| TerminalKeywordRowReuseKey::Single {
-                    revision: row.revision,
-                });
+            for (idx, key) in keys
+                .iter_mut()
+                .enumerate()
+                .take(group.end)
+                .skip(group.start)
+            {
+                *key = snapshot
+                    .row(idx)
+                    .map(|row| TerminalKeywordRowReuseKey::Single {
+                        revision: row.revision,
+                    });
+            }
             row = group.end;
             continue;
         }
@@ -1659,6 +1695,11 @@ mod tests {
         assert!(stats.degraded_rows > 0);
         assert!(stats.processed_bytes > 0);
         assert_eq!(highlights.known_row_count(), snapshot.row_count());
+        assert!(
+            terminal_keyword_row_reuse_keys(&snapshot)
+                .iter()
+                .all(Option::is_some)
+        );
     }
 
     #[test]

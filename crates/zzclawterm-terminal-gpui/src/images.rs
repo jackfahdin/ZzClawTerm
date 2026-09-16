@@ -1,18 +1,23 @@
 //! Decode terminal graphics payloads into GPUI `RenderImage`s.
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 
 use gpui::RenderImage;
 use image::{Frame, ImageReader, Limits};
 use smallvec::SmallVec;
 
-/// Process-wide decode cache keyed by placement id + payload fingerprint.
+/// Process-wide decode cache keyed by payload fingerprint.
 static DECODE_CACHE: Mutex<Option<DecodeCache>> = Mutex::new(None);
+static DECODE_WORKERS: OnceLock<DecodeWorkerPool> = OnceLock::new();
 
 const MAX_DECODE_CACHE_ENTRIES: usize = 128;
 const MAX_DECODE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PENDING_DECODE_ENTRIES: usize = 32;
+const MAX_PENDING_DECODE_BYTES: u64 = 16 * 1024 * 1024;
+const DECODE_WORKER_COUNT: usize = 2;
+const DECODE_QUEUE_CAP: usize = MAX_PENDING_DECODE_ENTRIES;
 const MAX_DECODED_IMAGE_DIMENSION: u32 = 4096;
 const MAX_DECODED_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -20,19 +25,21 @@ struct DecodeCache {
     entries: HashMap<DecodeCacheKey, CachedDecode>,
     lru: VecDeque<DecodeCacheKey>,
     decoded_bytes: u64,
+    pending_count: usize,
+    pending_bytes: u64,
     completed_tx: mpsc::Sender<CompletedDecode>,
     completed_rx: mpsc::Receiver<CompletedDecode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DecodeCacheKey {
-    placement_id: u64,
     content_id: u64,
 }
 
 struct CachedDecode {
     state: DecodeCacheEntryState,
     decoded_bytes: u64,
+    input_bytes: u64,
 }
 
 enum DecodeCacheEntryState {
@@ -43,6 +50,16 @@ enum DecodeCacheEntryState {
 struct CompletedDecode {
     key: DecodeCacheKey,
     image: Option<Arc<RenderImage>>,
+}
+
+struct DecodeJob {
+    key: DecodeCacheKey,
+    data: Arc<[u8]>,
+    completed_tx: mpsc::Sender<CompletedDecode>,
+}
+
+struct DecodeWorkerPool {
+    jobs: mpsc::SyncSender<DecodeJob>,
 }
 
 #[derive(Clone)]
@@ -59,6 +76,8 @@ impl Default for DecodeCache {
             entries: HashMap::new(),
             lru: VecDeque::new(),
             decoded_bytes: 0,
+            pending_count: 0,
+            pending_bytes: 0,
             completed_tx,
             completed_rx,
         }
@@ -83,18 +102,32 @@ impl DecodeCache {
         Some(state)
     }
 
-    fn insert_pending(&mut self, key: DecodeCacheKey) {
+    fn insert_pending(&mut self, key: DecodeCacheKey, input_bytes: u64) -> bool {
         if self.entries.contains_key(&key) {
-            return;
+            return false;
+        }
+        if self.pending_count >= MAX_PENDING_DECODE_ENTRIES
+            || self.pending_bytes.saturating_add(input_bytes) > MAX_PENDING_DECODE_BYTES
+        {
+            return false;
+        }
+        while self.entries.len() >= MAX_DECODE_CACHE_ENTRIES {
+            if !self.evict_oldest_ready() {
+                return false;
+            }
         }
         self.entries.insert(
             key,
             CachedDecode {
                 state: DecodeCacheEntryState::Pending,
                 decoded_bytes: 0,
+                input_bytes,
             },
         );
+        self.pending_count = self.pending_count.saturating_add(1);
+        self.pending_bytes = self.pending_bytes.saturating_add(input_bytes);
         self.touch(key);
+        true
     }
 
     fn insert_ready(&mut self, key: DecodeCacheKey, image: Option<Arc<RenderImage>>) {
@@ -117,21 +150,55 @@ impl DecodeCache {
             CachedDecode {
                 state: DecodeCacheEntryState::Ready(image),
                 decoded_bytes,
+                input_bytes: 0,
             },
         ) {
             self.decoded_bytes = self.decoded_bytes.saturating_sub(replaced.decoded_bytes);
+            if matches!(replaced.state, DecodeCacheEntryState::Pending) {
+                self.pending_count = self.pending_count.saturating_sub(1);
+                self.pending_bytes = self.pending_bytes.saturating_sub(replaced.input_bytes);
+            }
         }
         self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
         self.touch(key);
         while self.entries.len() > max_entries || self.decoded_bytes > max_bytes {
-            let Some(oldest) = self.lru.pop_front() else {
+            if !self.evict_oldest_ready() {
                 break;
-            };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.decoded_bytes = self.decoded_bytes.saturating_sub(removed.decoded_bytes);
-                self.lru.retain(|candidate| *candidate != oldest);
             }
         }
+    }
+
+    fn remove(&mut self, key: DecodeCacheKey) {
+        if let Some(removed) = self.entries.remove(&key) {
+            self.decoded_bytes = self.decoded_bytes.saturating_sub(removed.decoded_bytes);
+            if matches!(removed.state, DecodeCacheEntryState::Pending) {
+                self.pending_count = self.pending_count.saturating_sub(1);
+                self.pending_bytes = self.pending_bytes.saturating_sub(removed.input_bytes);
+            }
+        }
+        self.lru.retain(|candidate| *candidate != key);
+    }
+
+    fn evict_oldest_ready(&mut self) -> bool {
+        let candidates = self.lru.len();
+        for _ in 0..candidates {
+            let Some(key) = self.lru.pop_front() else {
+                return false;
+            };
+            let is_pending = self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, DecodeCacheEntryState::Pending));
+            if is_pending {
+                self.lru.push_back(key);
+                continue;
+            }
+            if let Some(removed) = self.entries.remove(&key) {
+                self.decoded_bytes = self.decoded_bytes.saturating_sub(removed.decoded_bytes);
+                return true;
+            }
+        }
+        false
     }
 
     fn touch(&mut self, key: DecodeCacheKey) {
@@ -141,6 +208,42 @@ impl DecodeCache {
 
     fn completed_sender(&self) -> mpsc::Sender<CompletedDecode> {
         self.completed_tx.clone()
+    }
+}
+
+impl DecodeWorkerPool {
+    fn new() -> Self {
+        let (jobs, receiver) = mpsc::sync_channel::<DecodeJob>(DECODE_QUEUE_CAP);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for worker_index in 0..DECODE_WORKER_COUNT {
+            let receiver = Arc::clone(&receiver);
+            thread::Builder::new()
+                .name(format!("zzclawterm-image-decode-{worker_index}"))
+                .spawn(move || {
+                    loop {
+                        let job = receiver
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .recv();
+                        let Ok(job) = job else {
+                            break;
+                        };
+                        let image = decode_render_image(&job.data);
+                        let _ = job.completed_tx.send(CompletedDecode {
+                            key: job.key,
+                            image,
+                        });
+                    }
+                })
+                .expect("spawn terminal image decode worker");
+        }
+        Self { jobs }
+    }
+
+    fn try_schedule(&self, job: DecodeJob) -> Result<(), DecodeJob> {
+        self.jobs.try_send(job).map_err(|error| match error {
+            mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
+        })
     }
 }
 
@@ -157,11 +260,12 @@ fn cache() -> std::sync::MutexGuard<'static, Option<DecodeCache>> {
     DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn cache_key(placement_id: u64, content_id: u64) -> DecodeCacheKey {
-    DecodeCacheKey {
-        placement_id,
-        content_id,
-    }
+fn cache_key(_placement_id: u64, content_id: u64) -> DecodeCacheKey {
+    DecodeCacheKey { content_id }
+}
+
+fn decode_workers() -> &'static DecodeWorkerPool {
+    DECODE_WORKERS.get_or_init(DecodeWorkerPool::new)
 }
 
 /// Decode encoded image bytes (NYAR RGBA / PNG/JPEG/GIF/BMP) into a BGRA `RenderImage`.
@@ -231,7 +335,7 @@ fn unpack_nyar(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((width, height, data[12..12 + need].to_vec()))
 }
 
-/// Cached decode for a placement. First access schedules decode work and returns
+/// Cached decode for a payload. First access schedules decode work and returns
 /// pending; later accesses return ready or failed state.
 pub fn cached_render_image(
     placement_id: u64,
@@ -242,20 +346,25 @@ pub fn cached_render_image(
         return CachedRenderImage::Failed;
     }
     let key = cache_key(placement_id, content_id);
-    let sender = {
+    {
         let mut guard = cache();
         let cache = guard.get_or_insert_with(DecodeCache::default);
         if let Some(hit) = cache.get(key) {
             return hit;
         }
-        cache.insert_pending(key);
-        cache.completed_sender()
-    };
-
-    thread::spawn(move || {
-        let image = decode_render_image(&data);
-        let _ = sender.send(CompletedDecode { key, image });
-    });
+        let input_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if !cache.insert_pending(key, input_bytes) {
+            return CachedRenderImage::Pending;
+        }
+        let job = DecodeJob {
+            key,
+            data,
+            completed_tx: cache.completed_sender(),
+        };
+        if decode_workers().try_schedule(job).is_err() {
+            cache.remove(key);
+        }
+    }
 
     CachedRenderImage::Pending
 }
@@ -278,9 +387,9 @@ mod tests {
     use gpui::RenderImage;
 
     use super::{
-        CachedRenderImage, DecodeCache, MAX_DECODE_CACHE_ENTRIES, MAX_DECODED_IMAGE_BYTES, cache,
-        cache_key, cached_render_image, cached_render_image_poll, decode_render_image,
-        decoded_rgba_bytes,
+        CachedRenderImage, DecodeCache, MAX_DECODE_CACHE_ENTRIES, MAX_DECODED_IMAGE_BYTES,
+        MAX_PENDING_DECODE_BYTES, MAX_PENDING_DECODE_ENTRIES, cache, cache_key,
+        cached_render_image, cached_render_image_poll, decode_render_image, decoded_rgba_bytes,
     };
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -407,10 +516,32 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_uses_placement_and_content_ids() {
+    fn cache_key_reuses_content_across_placements() {
         assert_eq!(cache_key(42, 7), cache_key(42, 7));
-        assert_ne!(cache_key(42, 7), cache_key(43, 7));
+        assert_eq!(cache_key(42, 7), cache_key(43, 7));
         assert_ne!(cache_key(42, 7), cache_key(42, 8));
+    }
+
+    #[test]
+    fn cache_returns_same_arc_for_same_content_across_placements() {
+        let _guard = TEST_CACHE_LOCK.lock().unwrap();
+        clear_cache();
+        let png = tiny_png();
+        let a = wait_ready(42, &png);
+        let b = wait_ready(43, &png);
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn pending_decode_budget_is_bounded() {
+        let mut cache = DecodeCache::default();
+        let input_bytes = MAX_PENDING_DECODE_BYTES / MAX_PENDING_DECODE_ENTRIES as u64;
+        for content_id in 0..MAX_PENDING_DECODE_ENTRIES as u64 {
+            assert!(cache.insert_pending(cache_key(1, content_id), input_bytes));
+        }
+        assert!(!cache.insert_pending(cache_key(1, u64::MAX), 1));
+        assert_eq!(cache.pending_count, MAX_PENDING_DECODE_ENTRIES);
+        assert_eq!(cache.pending_bytes, MAX_PENDING_DECODE_BYTES);
     }
 
     #[test]

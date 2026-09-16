@@ -277,8 +277,7 @@ pub(super) fn set_connection_editor_advanced_tab(
         return false;
     };
     match tab {
-        ConnectionEditorAdvancedTab::Proxy
-        | ConnectionEditorAdvancedTab::JumpHost
+        ConnectionEditorAdvancedTab::Network
         | ConnectionEditorAdvancedTab::TwoFactor
         | ConnectionEditorAdvancedTab::AgentForwarding => editor.advanced_network_tab = tab,
         ConnectionEditorAdvancedTab::PostLogin
@@ -763,8 +762,8 @@ pub(super) fn toggle_connection_editor_flag(
             recording.auto_start = Some(!recording.auto_start.unwrap_or(false));
         }
         ConnectionEditorToggle::Advanced => {
-            editor.advanced_open = !editor.advanced_open;
-            if !editor.advanced_open
+            let open = editor.advanced.toggle(editor.kind);
+            if !open
                 && matches!(
                     editor.focused_field,
                     ConnectionEditorField::PostLoginCommand | ConnectionEditorField::PostLoginDelay
@@ -811,7 +810,7 @@ pub(super) fn advance_connection_editor_focus(draft: &mut Option<ConnectionEdito
     };
     let password_field_visible = editor.auth_mode == "password"
         && editor.password_source == ConnectionEditorPasswordSource::Direct;
-    let post_login_fields_visible = editor.advanced_open
+    let post_login_fields_visible = editor.advanced.is_open(ConnectionKindTab::Ssh)
         && editor.post_login_enabled
         && editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::PostLogin;
     editor.focused_field = editor.focused_field.next(

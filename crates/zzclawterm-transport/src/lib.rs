@@ -191,14 +191,17 @@ pub use remote_process::{
 pub(crate) use remote_process::{
     PROCESS_TIMEOUT, ensure_remote_command_success, run_ssh_command, run_ssh_exec_operation,
 };
+#[cfg(all(test, unix))]
+use ssh_shell_integration::prepare_shell_integration;
 #[cfg(test)]
 use ssh_shell_integration::{
     OscStripper, ShellIntegrationMode, activation_script, bytes_after_ssh_ready_marker,
     persistent_script, rc_managed_block, ssh_shell_injection_script, strip_ssh_ready_markers,
 };
 use ssh_shell_integration::{
-    ShellKind, SshIntegrationOutput, SshShellIntegrationState, build_legacy_ssh_ready_marker,
-    build_ssh_ready_marker, build_ssh_shell_integration_script, detect_ssh_shell_type,
+    PreparedSshShellIntegration, ShellKind, SshIntegrationOutput, SshShellIntegrationState,
+    build_legacy_ssh_ready_marker, build_ssh_ready_marker, build_ssh_shell_integration_script,
+    detect_ssh_shell_type,
 };
 pub use stats::{
     CpuCoreUsage, CpuInfo, CpuUsageSource, DiskInfo, LoadInfo, MemoryInfo, NetworkInfo,
@@ -701,16 +704,16 @@ enum SshCommand {
 }
 
 struct OpenSshShellSession {
+    handle: SshShellHandle,
     attempt: connection_attempt::ConnectionAttempt,
     post_login: Option<zzclawterm_core::models::sessions::ConnectionPostLogin>,
-    handle: Option<client::Handle<SshClientHandler>>,
     channel: russh::Channel<client::Msg>,
     jump_handles: Vec<client::Handle<SshClientHandler>>,
     disconnect_on_close: bool,
     x11_forwarder: Option<X11Forwarder>,
     x11_multiplex_registration: Option<SshMultiplexHandle>,
     local_notice: Option<Vec<u8>>,
-    injection_script: Option<Vec<u8>>,
+    prepared_shell_integration: Option<PreparedSshShellIntegration>,
     ready_marker: String,
     legacy_ready_marker: Option<String>,
     shell_kind: Option<ShellKind>,
@@ -1928,6 +1931,24 @@ fn drain_deferred_ssh_open_commands(
     }
 }
 
+struct PendingSshIntegrationUpload {
+    integration: PreparedSshShellIntegration,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    join: tokio::task::JoinHandle<ssh_shell_integration::ScriptUploadOutcome>,
+}
+
+async fn cancel_pending_upload(pending_upload: &mut Option<PendingSshIntegrationUpload>) {
+    let Some(mut pending) = pending_upload.take() else {
+        return;
+    };
+
+    if let Some(cancel) = pending.cancel.take() {
+        let _ = cancel.send(());
+    }
+
+    let _ = tokio::time::timeout(Duration::from_secs(1), &mut pending.join).await;
+}
+
 async fn run_open_ssh_shell_session(
     session_id: String,
     open_session: OpenSshShellSession,
@@ -1945,13 +1966,17 @@ async fn run_open_ssh_shell_session(
         x11_forwarder,
         x11_multiplex_registration,
         local_notice,
-        injection_script,
+        prepared_shell_integration,
         ready_marker,
         legacy_ready_marker,
         shell_kind: _shell_kind,
     } = open_session;
-    let mut shell_integration =
-        SshShellIntegrationState::new(injection_script, ready_marker, legacy_ready_marker);
+    let handle = Arc::new(handle);
+    let mut shell_integration = SshShellIntegrationState::new(
+        prepared_shell_integration,
+        ready_marker,
+        legacy_ready_marker,
+    );
     if let Some(notice) = local_notice {
         event_queue.push(SessionEvent::Output {
             session_id: session_id.clone(),
@@ -1968,7 +1993,7 @@ async fn run_open_ssh_shell_session(
                 send_session_error(&event_queue, &session_id, error);
                 disconnect_open_ssh_shell(
                     &session_id,
-                    handle,
+                    &handle,
                     jump_handles,
                     disconnect_on_close,
                     x11_multiplex_registration,
@@ -1983,6 +2008,8 @@ async fn run_open_ssh_shell_session(
     tokio::pin!(initial_inject_delay);
     let inject_timeout = tokio::time::sleep(ssh_shell_integration::SSH_INTEGRATION_TIMEOUT);
     tokio::pin!(inject_timeout);
+
+    let mut pending_upload: Option<PendingSshIntegrationUpload> = None;
 
     post_login = post_login.filter(|command| command.enabled && !command.command.trim().is_empty());
     let post_login_timer = tokio::time::sleep(Duration::ZERO);
@@ -2011,7 +2038,48 @@ async fn run_open_ssh_shell_session(
                 }
             }
             _ = &mut initial_inject_delay, if shell_integration.should_inject_on_initial_delay() => {
-                shell_integration.inject(&mut channel).await;
+                if let Some(integration) = shell_integration.take_pending_integration() {
+                    shell_integration.begin_suppression();
+                    inject_timeout
+                        .as_mut()
+                        .reset(
+                            tokio::time::Instant::now()
+                                + ssh_shell_integration::SSH_INTEGRATION_TIMEOUT,
+                    );
+                    let task_handle = Arc::clone(&handle);
+                    let upload_payload = integration.upload_payload();
+                    let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+                    let join = tokio::spawn(ssh_shell_integration::upload_integration_script(
+                        task_handle,
+                        upload_payload,
+                        cancel_rx,
+                    ));
+                    pending_upload = Some(PendingSshIntegrationUpload {
+                        integration,
+                        cancel: Some(cancel),
+                        join,
+                    });
+                }
+            }
+            outcome = async {
+                match pending_upload.as_mut() {
+                    Some(pending) => (&mut pending.join).await,
+                    None => std::future::pending().await,
+                }
+            }, if pending_upload.is_some() => {
+                let pending = pending_upload
+                    .take()
+                    .expect("pending_upload checked Some by the select guard");
+                let outcome = outcome.unwrap_or_else(|_join_error| {
+                    // The upload task panicked or was cancelled; treat it as
+                    // a failed upload so we fall back to the direct-write
+                    // path below instead of hanging the injection forever.
+                    ssh_shell_integration::ScriptUploadOutcome::failed()
+                });
+                let integration = pending.integration;
+                shell_integration
+                    .apply_upload_outcome(outcome, integration, &mut channel)
+                    .await;
                 inject_timeout
                     .as_mut()
                     .reset(
@@ -2079,14 +2147,29 @@ async fn run_open_ssh_shell_session(
                         let was_waiting_initial = shell_integration.is_waiting_initial();
                         let output = shell_integration.filter_output(&data);
                         push_ssh_integration_output(&event_queue, &session_id, output);
-                        if was_waiting_initial && shell_integration.is_waiting_initial() {
-                            shell_integration.inject(&mut channel).await;
+                        if was_waiting_initial
+                            && shell_integration.is_waiting_initial()
+                            && let Some(integration) = shell_integration.take_pending_integration() {
+                            shell_integration.begin_suppression();
                             inject_timeout
                                 .as_mut()
                                 .reset(
                                     tokio::time::Instant::now()
                                         + ssh_shell_integration::SSH_INTEGRATION_TIMEOUT,
-                                );
+                            );
+                            let task_handle = Arc::clone(&handle);
+                            let upload_payload = integration.upload_payload();
+                            let (cancel, cancel_rx) = tokio::sync::oneshot::channel();
+                            let join = tokio::spawn(ssh_shell_integration::upload_integration_script(
+                                task_handle,
+                                upload_payload,
+                                cancel_rx,
+                            ));
+                            pending_upload = Some(PendingSshIntegrationUpload {
+                                integration,
+                                cancel: Some(cancel),
+                                join,
+                            });
                         }
                         if shell_integration.is_normal() {
                             while let Some(data) = pending_writes.pop_front() {
@@ -2130,10 +2213,11 @@ async fn run_open_ssh_shell_session(
             }
         }
     }
+    cancel_pending_upload(&mut pending_upload).await;
 
     disconnect_open_ssh_shell(
         &session_id,
-        handle,
+        &handle,
         jump_handles,
         disconnect_on_close,
         x11_multiplex_registration,
@@ -2360,7 +2444,7 @@ async fn open_ssh_shell_from_pending(
         } else {
             None
         };
-    let injection_script = match shell_kind {
+    let prepared_shell_integration = match shell_kind {
         Some(kind) => {
             build_ssh_shell_integration_script(
                 &handle,
@@ -2381,13 +2465,9 @@ async fn open_ssh_shell_from_pending(
         profile = ?config.profile,
         cwd_follow_mode = ?cwd_follow_mode,
         shell_detected = shell_kind.is_some(),
-        integration_enabled = injection_script.is_some(),
+        integration_enabled = prepared_shell_integration.is_some(),
         "resolved SSH shell integration"
     );
-    let handle = match handle {
-        SshShellHandle::Dedicated(handle) => Some(handle),
-        SshShellHandle::Multiplexed(_) => None,
-    };
     Ok(OpenSshShellSession {
         attempt: config.attempt.clone(),
         post_login: config.post_login.clone(),
@@ -2398,7 +2478,7 @@ async fn open_ssh_shell_from_pending(
         x11_forwarder,
         x11_multiplex_registration,
         local_notice,
-        injection_script,
+        prepared_shell_integration,
         ready_marker,
         legacy_ready_marker,
         shell_kind,
@@ -2422,7 +2502,7 @@ async fn disconnect_pending_ssh_shell(session: PendingOpenSshShellSession) {
 
 async fn disconnect_open_ssh_shell(
     session_id: &str,
-    handle: Option<client::Handle<SshClientHandler>>,
+    handle: &SshShellHandle,
     jump_handles: Vec<client::Handle<SshClientHandler>>,
     disconnect_on_close: bool,
     x11_multiplex_registration: Option<SshMultiplexHandle>,
@@ -2431,7 +2511,7 @@ async fn disconnect_open_ssh_shell(
         multiplex.unregister_x11_sender(session_id).await;
     }
     if disconnect_on_close {
-        if let Some(handle) = handle {
+        if let SshShellHandle::Dedicated(handle) = handle {
             let _ = handle
                 .disconnect(Disconnect::ByApplication, "session closed", "en")
                 .await;

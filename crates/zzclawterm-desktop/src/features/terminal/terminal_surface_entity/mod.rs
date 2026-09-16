@@ -46,6 +46,7 @@ pub(in crate::features) static TERMINAL_SURFACE_PAINT_COUNT: AtomicU64 = AtomicU
 pub(in crate::features) static FULL_SHELL_PAINT_COUNT: AtomicU64 = AtomicU64::new(0);
 const TERMINAL_SURFACE_RETAINED_SNAPSHOT_LIMIT: usize = 12;
 const TERMINAL_SURFACE_RETAINED_ROW_LIMIT: usize = 4096;
+const TERMINAL_SURFACE_RETAINED_ROW_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TERMINAL_SURFACE_SYNTHESIZED_WINDOW_MIN_EXTRA_ROWS: usize = 32;
 const TERMINAL_SURFACE_SYNTHESIZED_WINDOW_MAX_EXTRA_ROWS: usize = 192;
 const TERMINAL_SURFACE_SCROLL_PENDING_WARN_AFTER: Duration = Duration::from_millis(48);
@@ -87,14 +88,11 @@ fn terminal_keyword_highlight_request_key(
     let row_start = rows.start.min(snapshot.row_count());
     let row_end = rows.end.min(snapshot.row_count()).max(row_start);
     let mut hasher = DefaultHasher::new();
-    snapshot
-        .rows()
-        .get(row_start..row_end)
-        .unwrap_or_default()
-        .iter()
-        .map(|row| (row.signature, row.wrapped))
-        .collect::<Vec<_>>()
-        .hash(&mut hasher);
+    let rows = snapshot.rows().get(row_start..row_end).unwrap_or_default();
+    rows.len().hash(&mut hasher);
+    for row in rows {
+        (row.signature, row.wrapped).hash(&mut hasher);
+    }
     TerminalKeywordHighlightRequestKey {
         rules_key,
         display_offset: snapshot.display_offset,
@@ -102,6 +100,27 @@ fn terminal_keyword_highlight_request_key(
         row_end,
         line_signatures_key: hasher.finish(),
     }
+}
+
+fn terminal_snapshot_row_estimated_bytes(row: &zzclawterm_terminal::TerminalSnapshotRow) -> usize {
+    let mut bytes = std::mem::size_of_val(row)
+        .saturating_add(std::mem::size_of_val(row.cells.as_ref()))
+        .saturating_add(std::mem::size_of_val(row.styled_spans.as_ref()))
+        .saturating_add(std::mem::size_of_val(row.hyperlinks.as_ref()))
+        .saturating_add(row.text.capacity());
+    for cell in &row.cells {
+        bytes = bytes.saturating_add(cell.text.len());
+        if let Some(uri) = cell.hyperlink.as_deref() {
+            bytes = bytes.saturating_add(uri.len());
+        }
+    }
+    for span in &row.styled_spans {
+        bytes = bytes.saturating_add(span.text.capacity());
+    }
+    for hyperlink in &row.hyperlinks {
+        bytes = bytes.saturating_add(hyperlink.uri.capacity());
+    }
+    bytes
 }
 
 fn terminal_keyword_highlight_prefetch_viewports(output_pressure: bool) -> usize {
@@ -268,6 +287,7 @@ pub(in crate::features) struct TerminalSurface {
     snapshot: Option<Arc<TerminalSnapshot>>,
     retained_snapshots: Vec<Arc<TerminalSnapshot>>,
     retained_rows: BTreeMap<usize, Arc<zzclawterm_terminal::TerminalSnapshotRow>>,
+    retained_row_estimated_bytes: usize,
     keyword_rules: Arc<Vec<zzclawterm_core::ResolvedKeywordHighlightRule>>,
     keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
     keyword_highlight_generation: u64,
@@ -335,6 +355,7 @@ impl TerminalSurface {
             snapshot: None,
             retained_snapshots: Vec::new(),
             retained_rows: BTreeMap::new(),
+            retained_row_estimated_bytes: 0,
             keyword_rules: Arc::new(Vec::new()),
             keyword_highlights: None,
             keyword_highlight_generation: 0,
@@ -699,6 +720,7 @@ impl TerminalSurface {
     fn clear_retained_scroll_state(&mut self) {
         self.retained_snapshots.clear();
         self.retained_rows.clear();
+        self.retained_row_estimated_bytes = 0;
         self.decorations = Arc::from(Vec::<TerminalLineDecorations>::new());
         self.selection_visual = None;
         self.has_action_link_decorations = false;
@@ -911,6 +933,7 @@ impl TerminalSurface {
             snapshot_total_rows = snapshot.total_rows,
             retained_snapshots = self.retained_snapshots.len(),
             retained_rows = self.retained_rows.len(),
+            retained_row_bytes = self.retained_row_estimated_bytes,
             pending_ms = pending_for.as_millis(),
             "terminal surface retained text while waiting for target scroll snapshot"
         );
@@ -937,6 +960,19 @@ impl TerminalSurface {
     }
 
     fn remember_retained_snapshot_rows(&mut self, snapshot: &TerminalSnapshot) -> usize {
+        self.remember_retained_snapshot_rows_with_limits(
+            snapshot,
+            TERMINAL_SURFACE_RETAINED_ROW_LIMIT,
+            TERMINAL_SURFACE_RETAINED_ROW_BYTE_LIMIT,
+        )
+    }
+
+    fn remember_retained_snapshot_rows_with_limits(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> usize {
         let Some((start, _)) = terminal_snapshot_absolute_window(snapshot) else {
             return 0;
         };
@@ -953,14 +989,25 @@ impl TerminalSurface {
             }) {
                 continue;
             }
-            self.retained_rows.insert(abs_row, Arc::clone(snapshot_row));
+            if let Some(replaced) = self.retained_rows.insert(abs_row, Arc::clone(snapshot_row)) {
+                self.retained_row_estimated_bytes = self
+                    .retained_row_estimated_bytes
+                    .saturating_sub(terminal_snapshot_row_estimated_bytes(&replaced));
+            }
+            self.retained_row_estimated_bytes = self
+                .retained_row_estimated_bytes
+                .saturating_add(terminal_snapshot_row_estimated_bytes(snapshot_row));
             refreshed_rows = refreshed_rows.saturating_add(1);
         }
-        while self.retained_rows.len() > TERMINAL_SURFACE_RETAINED_ROW_LIMIT {
+        while self.retained_rows.len() > max_rows || self.retained_row_estimated_bytes > max_bytes {
             let Some(drop_key) = self.retained_rows.keys().next().copied() else {
                 break;
             };
-            self.retained_rows.remove(&drop_key);
+            if let Some(removed) = self.retained_rows.remove(&drop_key) {
+                self.retained_row_estimated_bytes = self
+                    .retained_row_estimated_bytes
+                    .saturating_sub(terminal_snapshot_row_estimated_bytes(&removed));
+            }
         }
         refreshed_rows
     }

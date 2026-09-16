@@ -31,9 +31,10 @@ use super::{
     terminal_keyword_highlight_prefetch_viewports, terminal_keyword_highlight_pressure_delay,
     terminal_keyword_highlight_request_key, terminal_keyword_highlight_visible_rows,
     terminal_line_number_digits, terminal_snapshot_anchor_row_for_display_offset,
-    terminal_snapshot_covers_display_offset, terminal_surface_fractional_prefetch_offset,
-    terminal_surface_synthesized_window_extra_rows, terminal_surface_text_first_repaint_ready,
-    terminal_surface_visible_rows_for_viewport, terminal_visual_scroll_offset_px,
+    terminal_snapshot_covers_display_offset, terminal_snapshot_row_estimated_bytes,
+    terminal_surface_fractional_prefetch_offset, terminal_surface_synthesized_window_extra_rows,
+    terminal_surface_text_first_repaint_ready, terminal_surface_visible_rows_for_viewport,
+    terminal_visual_scroll_offset_px,
 };
 
 struct TerminalSurfaceLayoutTestView {
@@ -436,6 +437,24 @@ fn retained_row_cache_refreshes_only_changed_snapshot_rows() {
         surface.remember_retained_snapshot_rows(&metadata_changed),
         1
     );
+}
+
+#[test]
+fn retained_row_cache_respects_estimated_byte_budget() {
+    let mut screen = TerminalScreen::default();
+    screen.advance_decoded_text(&terminal_test_output_lines(80));
+    let snapshot = screen.viewport_snapshot(0);
+    let row_bytes = snapshot
+        .row(0)
+        .map(terminal_snapshot_row_estimated_bytes)
+        .expect("snapshot row");
+    let max_bytes = row_bytes.saturating_mul(2);
+    let mut surface = TerminalSurface::new("session");
+
+    surface.remember_retained_snapshot_rows_with_limits(&snapshot, usize::MAX, max_bytes);
+
+    assert!(surface.retained_row_estimated_bytes <= max_bytes);
+    assert!(surface.retained_rows.len() < snapshot.row_count());
 }
 
 #[test]

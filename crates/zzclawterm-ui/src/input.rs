@@ -169,6 +169,10 @@ impl ZzClawInputState {
         }
     }
 
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
