@@ -15,9 +15,9 @@ use zzclawterm_terminal::{
 };
 
 use crate::keywords::{
-    CompiledKeywordRule, CompiledKeywordRules, TerminalKeywordHighlightSnapshot,
-    TerminalKeywordRowReuseKey, compile_keyword_rules, terminal_keyword_row_reuse_key,
-    terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
+    CompiledKeywordRule, CompiledKeywordRules, TerminalKeywordHighlightLookup,
+    TerminalKeywordHighlightSnapshot, TerminalKeywordRowReuseKey, compile_keyword_rules,
+    terminal_keyword_row_reuse_key, terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
 };
 use crate::paint::{
     apply_search_ranges, flush_bg, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
@@ -675,11 +675,11 @@ impl ZzClawTerminalElement {
             .as_ref()
             .and_then(|lookup| lookup.ranges())
             .is_some();
-        let paint_style_key = if keyword_result_known_empty {
-            empty_keyword_paint_style_key
-        } else {
-            keyword_paint_style_key
-        };
+        let paint_style_key = terminal_keyword_row_paint_style_key(
+            keyword_paint_style_key,
+            empty_keyword_paint_style_key,
+            keyword_lookup.as_ref(),
+        );
         let default_decorations;
         let decorations = if let Some(decorations) = self.decorations.get(row) {
             decorations
@@ -709,7 +709,9 @@ impl ZzClawTerminalElement {
             )
         };
         let row_key = row_layout_key(paint_style_key, keyword_spans_present);
-        let pending_keyword_row_is_equivalent = keyword_lookup.is_some()
+        let pending_keyword_row_is_equivalent = keyword_lookup
+            .as_ref()
+            .is_some_and(|lookup| !lookup.is_stale())
             && (keyword_result_known_empty || !self.keyword_rules.is_empty());
         let pending_keyword_row_key = pending_keyword_row_is_equivalent
             .then(|| row_layout_key(keyword_paint_style_key, false))
@@ -886,6 +888,30 @@ fn terminal_text_run_for_span(
                     .into(),
             )
         }),
+    }
+}
+
+fn terminal_keyword_row_paint_style_key(
+    keyword_key: u64,
+    empty_key: u64,
+    lookup: Option<&TerminalKeywordHighlightLookup<'_>>,
+) -> u64 {
+    match lookup {
+        Some(lookup) if lookup.is_known_empty() => empty_key,
+        Some(TerminalKeywordHighlightLookup::Stale(ranges)) => {
+            // A provisional prefix is not equivalent to the final parse, and
+            // successive provisional snapshots may retain different ranges.
+            let mut hasher = DefaultHasher::new();
+            "terminal-stale-keyword-prefix".hash(&mut hasher);
+            keyword_key.hash(&mut hasher);
+            for range in *ranges {
+                range.start_col.hash(&mut hasher);
+                range.end_col.hash(&mut hasher);
+                range.color.hash(&mut hasher);
+            }
+            hasher.finish()
+        }
+        _ => keyword_key,
     }
 }
 
@@ -1415,11 +1441,11 @@ impl Element for ZzClawTerminalElement {
                 .is_some_and(|lookup| lookup.is_known_empty());
             let keyword_ranges = keyword_lookup.as_ref().and_then(|lookup| lookup.ranges());
             let keyword_spans_present = keyword_ranges.is_some();
-            let row_paint_style_key = if keyword_result_known_empty {
-                empty_keyword_paint_style_key
-            } else {
-                keyword_paint_style_key
-            };
+            let row_paint_style_key = terminal_keyword_row_paint_style_key(
+                keyword_paint_style_key,
+                empty_keyword_paint_style_key,
+                keyword_lookup.as_ref(),
+            );
             let default_decorations;
             let decorations = if let Some(decorations) = self.decorations.get(row) {
                 decorations
@@ -1486,7 +1512,9 @@ impl Element for ZzClawTerminalElement {
             // Reuse a pending row only when its paint is equivalent to the parsed result.
             // TerminalSurface intentionally omits synchronous rules, so a matching result
             // there must rebuild instead of promoting the cached plain row as highlighted.
-            let pending_keyword_row_is_equivalent = keyword_lookup.is_some()
+            let pending_keyword_row_is_equivalent = keyword_lookup
+                .as_ref()
+                .is_some_and(|lookup| !lookup.is_stale())
                 && (keyword_result_known_empty || !self.keyword_rules.is_empty());
             let pending_keyword_row_key = pending_keyword_row_is_equivalent
                 .then(|| row_layout_key(keyword_paint_style_key, false))
@@ -1538,7 +1566,7 @@ impl Element for ZzClawTerminalElement {
                         terminal_highlight_spans_with_keyword_ranges(
                             display_line,
                             ansi,
-                            Some(ranges.as_ref()),
+                            Some(ranges),
                             &keyword_excluded_ranges,
                             self.palette,
                         )

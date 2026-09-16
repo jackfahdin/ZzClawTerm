@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use zzclawterm_core::ResolvedKeywordHighlightRule;
-use zzclawterm_terminal::{TerminalSnapshot, terminal_cell_col_for_byte_index};
+use zzclawterm_terminal::{
+    TerminalSnapshot, TerminalSnapshotRow, terminal_cell_col_for_byte_index,
+};
 
 use crate::element::{TerminalBufferMatch, TerminalSearchFlags};
 use crate::types::{TerminalHighlightSpan, TerminalKeywordRange};
@@ -59,25 +61,34 @@ pub(super) enum TerminalKeywordRowReuseKey {
 /// Immutable keyword data prepared away from GPUI's paint path.
 pub struct TerminalKeywordHighlightSnapshot {
     rules_key: u64,
+    cols: usize,
     display_offset: usize,
+    scrollback_len: usize,
     row_revisions: Vec<u64>,
     wrapped_flags: Vec<bool>,
     row_reuse_keys: Vec<Option<TerminalKeywordRowReuseKey>>,
     known_rows: Vec<bool>,
     rows: Vec<Option<Arc<Vec<TerminalKeywordRange>>>>,
+    source_rows: Vec<Option<Arc<TerminalSnapshotRow>>>,
     rows_by_reuse_key: HashMap<TerminalKeywordRowReuseKey, Option<Arc<Vec<TerminalKeywordRange>>>>,
 }
 
 pub(super) enum TerminalKeywordHighlightLookup<'a> {
     Current(Option<&'a Arc<Vec<TerminalKeywordRange>>>),
     Reused(Option<&'a Arc<Vec<TerminalKeywordRange>>>),
+    Stale(&'a [TerminalKeywordRange]),
 }
 
 impl<'a> TerminalKeywordHighlightLookup<'a> {
-    pub(super) fn ranges(&self) -> Option<&'a Arc<Vec<TerminalKeywordRange>>> {
+    pub(super) fn ranges(&self) -> Option<&'a [TerminalKeywordRange]> {
         match self {
-            Self::Current(ranges) | Self::Reused(ranges) => *ranges,
+            Self::Current(ranges) | Self::Reused(ranges) => ranges.map(|ranges| ranges.as_slice()),
+            Self::Stale(ranges) => Some(ranges),
         }
+    }
+
+    pub(super) fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale(_))
     }
 
     pub(super) fn is_known_empty(&self) -> bool {
@@ -176,13 +187,37 @@ impl TerminalKeywordHighlightSnapshot {
         {
             return None;
         }
-        snapshot.row(row)?;
-        if !self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
+        let snapshot_row = snapshot.row(row)?;
+        if self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
+            return Some(TerminalKeywordHighlightLookup::Current(
+                self.rows.get(row)?.as_ref(),
+            ));
+        }
+        let source = self.source_rows.get(row)?.as_ref()?;
+        // Only retain a same-column prefix on the same unwrapped line. A changed
+        // logical line or viewport must not inherit another line's matches.
+        if self.cols != snapshot.cols
+            || self.scrollback_len != snapshot.scrollback_len
+            || source.line_id.is_none()
+            || source.line_id != snapshot_row.line_id
+            || source.wrapped
+            || snapshot_row.wrapped
+            || self.wrapped_flags.get(row + 1).copied().unwrap_or(false)
+            || snapshot.row(row + 1).is_some_and(|row| row.wrapped)
+        {
             return None;
         }
-        Some(TerminalKeywordHighlightLookup::Current(
-            self.rows.get(row)?.as_ref(),
-        ))
+        let ranges = self.rows.get(row)?.as_ref()?;
+        let end_col = ranges.last()?.end_col;
+        let unchanged_cols = source
+            .cells
+            .iter()
+            .zip(snapshot_row.cells.iter())
+            .take(end_col)
+            .take_while(|(old, new)| old.text == new.text && old.width == new.width)
+            .count();
+        let retained = ranges.partition_point(|range| range.end_col <= unchanged_cols);
+        (retained > 0).then(|| TerminalKeywordHighlightLookup::Stale(&ranges[..retained]))
     }
 
     fn has_row_at_with_reuse_key(
@@ -360,11 +395,18 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
         .collect();
     let snapshot = TerminalKeywordHighlightSnapshot {
         rules_key: highlighter.rules_key,
+        cols: snapshot.cols,
         display_offset: snapshot.display_offset,
+        scrollback_len: snapshot.scrollback_len,
         row_revisions: snapshot.rows().iter().map(|row| row.revision).collect(),
         wrapped_flags: snapshot.rows().iter().map(|row| row.wrapped).collect(),
         row_reuse_keys,
         known_rows,
+        source_rows: rows
+            .iter()
+            .zip(snapshot.rows())
+            .map(|(ranges, row)| ranges.as_ref().map(|_| row.clone()))
+            .collect(),
         rows,
         rows_by_reuse_key,
     };
@@ -1161,8 +1203,9 @@ mod tests {
 
     use super::{
         CompiledKeywordRule, MAX_KEYWORD_WRAPPED_GROUP_ROWS, TerminalKeywordHighlightLookup,
-        compile_keyword_rules, compile_terminal_keyword_highlighter,
-        keyword_highlight_spans_compiled, keyword_matches_compiled, keyword_matches_highlighter,
+        TerminalKeywordHighlightSnapshot, compile_keyword_rules,
+        compile_terminal_keyword_highlighter, keyword_highlight_spans_compiled,
+        keyword_matches_compiled, keyword_matches_highlighter,
         precompute_terminal_keyword_highlights, precompute_terminal_keyword_highlights_for_rows,
         precompute_terminal_keyword_highlights_for_rows_with_stats, terminal_buffer_matches,
         terminal_keyword_row_reuse_keys,
@@ -1650,7 +1693,10 @@ mod tests {
                 .and_then(|row| row.ranges())
                 .is_some()
         );
-        assert!(highlights.stale_lookup(0, &changed_revision).is_none());
+        assert!(matches!(
+            highlights.stale_lookup(0, &changed_revision),
+            Some(TerminalKeywordHighlightLookup::Stale(_))
+        ));
         assert!(highlights.stale_lookup(usize::MAX, &snapshot).is_none());
         assert!(
             highlights
@@ -1665,6 +1711,171 @@ mod tests {
             highlights.matches_snapshot(&snapshot, zzclawterm_ui::theme_palette("github-light"),)
         );
         assert!(highlights.rows.iter().skip(1).all(Option::is_none));
+    }
+
+    #[test]
+    fn stale_keyword_prefix_stays_highlighted_during_continuous_shell_echo() {
+        let mut screen = TerminalScreen::new(40, 3);
+        screen.advance(b"# ps -ef");
+        let original = screen.snapshot();
+        let highlights = command_highlights(&original);
+        let original_ranges = highlights.lookup(0, &original).unwrap().ranges().unwrap();
+
+        for echo in [" e", "f", "e", "\x08 \x08"] {
+            screen.advance(echo.as_bytes());
+            let snapshot = screen.snapshot();
+            assert!(highlights.lookup(0, &snapshot).is_none());
+            let lookup = highlights.stale_lookup(0, &snapshot).unwrap();
+            assert!(lookup.is_stale());
+            assert_eq!(lookup.ranges().unwrap(), original_ranges);
+            // A provisional result must never satisfy the scheduler's freshness check.
+            assert!(!highlights.matches_snapshot_rows(
+                &snapshot,
+                zzclawterm_ui::theme_palette("github-dark"),
+                0..1,
+            ));
+        }
+    }
+
+    fn command_highlights(snapshot: &TerminalSnapshot) -> TerminalKeywordHighlightSnapshot {
+        let rules = vec![ResolvedKeywordHighlightRule {
+            id: "options".into(),
+            name: "Options".into(),
+            patterns: vec!["-[a-z]+".into()],
+            color: "#ff2244".into(),
+            enabled: true,
+        }];
+        precompute_terminal_keyword_highlights(
+            snapshot,
+            &compile_terminal_keyword_highlighter(&rules),
+            zzclawterm_ui::theme_palette("github-dark"),
+            None,
+        )
+    }
+
+    #[test]
+    fn stale_keyword_prefix_rejects_edits_before_or_inside_the_match() {
+        let mut original = TerminalScreen::default().snapshot();
+        set_snapshot_row(&mut original, 0, "# ps -ef tail", 41);
+        let highlights = command_highlights(&original);
+        for text in [
+            "# ps x-ef tail",
+            "# ps-ef tail",
+            "# ps -ex tail",
+            "# ps -e tail",
+        ] {
+            let mut changed = original.clone();
+            set_snapshot_row(&mut changed, 0, text, 42);
+            assert!(highlights.stale_lookup(0, &changed).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn stale_keyword_prefix_retains_only_complete_unchanged_matches() {
+        let mut original = TerminalScreen::default().snapshot();
+        set_snapshot_row(&mut original, 0, "# ps -ef tail -aux", 41);
+        let highlights = command_highlights(&original);
+        let ranges = highlights.lookup(0, &original).unwrap().ranges().unwrap();
+        assert_eq!(ranges.len(), 2);
+        let mut changed = original.clone();
+        set_snapshot_row(&mut changed, 0, "# ps -ef tail -ax", 42);
+        assert_eq!(
+            highlights
+                .stale_lookup(0, &changed)
+                .unwrap()
+                .ranges()
+                .unwrap(),
+            &ranges[..1],
+        );
+    }
+
+    #[test]
+    fn stale_keyword_prefix_rejects_viewport_resize_scroll_and_line_replacement() {
+        let mut original = TerminalScreen::default().snapshot();
+        set_snapshot_row(&mut original, 0, "# ps -ef", 41);
+        let highlights = command_highlights(&original);
+        let mut changed = original.clone();
+        set_snapshot_row(&mut changed, 0, "# ps -ef e", 42);
+
+        let mut resized = changed.clone();
+        resized.cols += 1;
+        assert!(highlights.stale_lookup(0, &resized).is_none());
+        let mut scrolled = changed.clone();
+        scrolled.scrollback_len += 1;
+        assert!(highlights.stale_lookup(0, &scrolled).is_none());
+        assert!(
+            highlights
+                .stale_lookup(0, &shifted_display_offset(&changed, 1))
+                .is_none()
+        );
+        let mut fewer_rows = changed.clone();
+        fewer_rows.row_data = fewer_rows.rows()[..1].to_vec().into();
+        assert!(highlights.stale_lookup(0, &fewer_rows).is_none());
+        let rows = Arc::make_mut(&mut changed.row_data);
+        assert!(rows[0].line_id.is_some());
+        Arc::make_mut(&mut rows[0]).line_id = None;
+        assert!(highlights.stale_lookup(0, &changed).is_none());
+
+        let rows = Arc::make_mut(&mut original.row_data);
+        Arc::make_mut(&mut rows[0]).line_id = None;
+        let without_line_id = command_highlights(&original);
+        assert!(without_line_id.stale_lookup(0, &changed).is_none());
+    }
+
+    #[test]
+    fn stale_keyword_prefix_rejects_new_and_existing_soft_wraps() {
+        for cols in [6, 9] {
+            let mut screen = TerminalScreen::new(cols, 4);
+            screen.advance(b"# ps -ef");
+            let original = screen.snapshot();
+            let highlights = command_highlights(&original);
+            screen.advance(b" e");
+            let changed = screen.snapshot();
+            assert!(changed.row(1).unwrap().wrapped);
+            for row in 0..2 {
+                assert!(
+                    highlights.stale_lookup(row, &changed).is_none(),
+                    "{cols}, {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_keyword_prefix_checks_wide_and_combining_cell_geometry() {
+        for text in ["\u{754c} -ef", "e\u{301} -ef"] {
+            let mut original = TerminalScreen::default().snapshot();
+            set_snapshot_row(&mut original, 0, text, 41);
+            let highlights = command_highlights(&original);
+            let mut changed = original.clone();
+            set_snapshot_row(&mut changed, 0, format!("{text} e"), 42);
+            assert!(highlights.stale_lookup(0, &changed).is_some());
+            let rows = Arc::make_mut(&mut changed.row_data);
+            let width = rows[0].cells[0].width;
+            Arc::make_mut(&mut rows[0]).cells[0].width = if width == 1 { 2 } else { 1 };
+            assert!(highlights.stale_lookup(0, &changed).is_none());
+            set_snapshot_row(&mut changed, 0, format!("{text} e"), 42);
+            let rows = Arc::make_mut(&mut changed.row_data);
+            Arc::make_mut(&mut rows[0]).cells[0].text = Arc::from("e");
+            assert!(highlights.stale_lookup(0, &changed).is_none());
+        }
+    }
+
+    #[test]
+    fn stale_keyword_prefix_does_not_treat_an_empty_old_result_as_current() {
+        let mut original = TerminalScreen::default().snapshot();
+        set_snapshot_row(&mut original, 0, "# ps", 41);
+        let highlights = command_highlights(&original);
+        let mut changed = original.clone();
+        set_snapshot_row(&mut changed, 0, "# ps -ef", 42);
+        assert!(highlights.stale_lookup(0, &changed).is_none());
+        assert!(
+            command_highlights(&changed)
+                .lookup(0, &changed)
+                .unwrap()
+                .ranges()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1725,7 +1936,7 @@ mod tests {
             .expect("first ERROR should be highlighted");
 
         assert_eq!(
-            ranges.as_slice(),
+            ranges,
             &[
                 TerminalKeywordRange {
                     start_col: 0,
@@ -1765,7 +1976,7 @@ mod tests {
             .expect("version should still be highlighted");
 
         assert_eq!(
-            ranges.as_slice(),
+            ranges,
             &[
                 TerminalKeywordRange {
                     start_col: "Ubuntu ".len(),
@@ -1941,11 +2152,7 @@ mod tests {
         let palette = zzclawterm_ui::theme_palette("github-dark");
         let first_highlights =
             precompute_terminal_keyword_highlights(&first_snapshot, &highlighter, palette, None);
-        let first_ranges = first_highlights
-            .lookup(0, &first_snapshot)
-            .and_then(|row| row.ranges())
-            .expect("first ranges")
-            .clone();
+        let first_ranges = first_highlights.rows[0].as_ref().expect("first ranges");
 
         let second_highlights = precompute_terminal_keyword_highlights(
             &second_snapshot,
@@ -1953,12 +2160,9 @@ mod tests {
             palette,
             Some(&first_highlights),
         );
-        let second_ranges = second_highlights
-            .lookup(5, &second_snapshot)
-            .and_then(|row| row.ranges())
-            .expect("second ranges");
+        let second_ranges = second_highlights.rows[5].as_ref().expect("second ranges");
 
-        assert!(Arc::ptr_eq(&first_ranges, second_ranges));
+        assert!(Arc::ptr_eq(first_ranges, second_ranges));
     }
 
     #[test]
@@ -2066,7 +2270,7 @@ mod tests {
             .expect("second wrapped row ranges");
 
         assert_eq!(
-            first.as_ref(),
+            first,
             &[TerminalKeywordRange {
                 start_col: 0,
                 end_col: 3,
@@ -2074,7 +2278,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            second.as_ref(),
+            second,
             &[TerminalKeywordRange {
                 start_col: 0,
                 end_col: 2,

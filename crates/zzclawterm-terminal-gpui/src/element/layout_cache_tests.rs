@@ -21,10 +21,13 @@ use super::{
     terminal_visible_rows_for_bounds, terminal_visible_rows_for_clipped_bounds,
 };
 use crate::keywords::{
-    compile_terminal_keyword_highlighter, precompute_terminal_keyword_highlights,
-    terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
+    TerminalKeywordHighlightLookup, compile_terminal_keyword_highlighter,
+    precompute_terminal_keyword_highlights, terminal_keyword_row_reuse_keys,
+    terminal_keyword_rules_key,
 };
-use crate::paint::{apply_action_link_ranges, flatten_highlight_spans};
+use crate::paint::{
+    apply_action_link_ranges, flatten_highlight_spans, terminal_highlight_spans_with_keyword_ranges,
+};
 use crate::types::{TerminalHighlightSpan, TerminalPaintGeometry};
 
 fn edit_snapshot_row(
@@ -1149,6 +1152,104 @@ fn precomputed_keyword_match_does_not_reuse_plain_pending_row() {
     );
 
     assert!(pending_key.is_none());
+}
+
+#[test]
+fn stale_keyword_prefix_is_painted_and_not_reused_as_the_final_parse() {
+    let mut screen = TerminalScreen::new(40, 3);
+    screen.advance(b"# ps -ef");
+    let original = screen.snapshot();
+    let rules = vec![ResolvedKeywordHighlightRule {
+        id: "options".into(),
+        name: "Options".into(),
+        patterns: vec!["-[a-z]+".into()],
+        color: "#ff2244".into(),
+        enabled: true,
+    }];
+    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let old = Arc::new(precompute_terminal_keyword_highlights(
+        &original,
+        &highlighter,
+        palette,
+        None,
+    ));
+    screen.advance(b" -aux");
+    let changed = Arc::new(screen.snapshot());
+    let current = Arc::new(precompute_terminal_keyword_highlights(
+        &changed,
+        &highlighter,
+        palette,
+        Some(&old),
+    ));
+    let make_element = || {
+        ZzClawTerminalElement::new(
+            changed.clone(),
+            Arc::new(Vec::new()),
+            Vec::new(),
+            false,
+            "block",
+            8.0,
+            16.0,
+            palette,
+            "monospace".to_string(),
+            14.0,
+            400.0,
+            700.0,
+        )
+    };
+    let plain = make_element();
+    let stale = make_element().with_keyword_highlights(old.clone());
+    let parsed = make_element().with_keyword_highlights(current.clone());
+    let keyword_key = parsed.paint_style_key(current.rules_key());
+    let empty_key = parsed.paint_style_key(0);
+    let reuse_key = terminal_keyword_row_reuse_keys(&changed)[0];
+    let keys = |element: &ZzClawTerminalElement| {
+        element.row_layout_cache_keys(0, keyword_key, empty_key, reuse_key)
+    };
+    assert_ne!(keys(&plain).0, keys(&stale).0);
+    assert_ne!(keys(&stale).0, keys(&parsed).0);
+    assert!(keys(&stale).1.is_none());
+    assert!(keys(&parsed).1.is_none());
+
+    let row = changed.row(0).unwrap();
+    let lookup = old.stale_lookup(0, &changed).unwrap();
+    let spans = terminal_highlight_spans_with_keyword_ranges(
+        &row.text,
+        Some(&row.styled_spans),
+        lookup.ranges(),
+        &[],
+        palette,
+    );
+    let cells = flatten_highlight_spans(spans);
+    assert!(cells[5..8].iter().all(|cell| cell.color == Some(0xff2244)));
+    assert!(cells[9..13].iter().all(|cell| !cell.keyword));
+    assert_eq!(
+        current.lookup(0, &changed).unwrap().ranges().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn stale_keyword_cache_key_tracks_the_retained_ranges() {
+    let ranges = [
+        crate::types::TerminalKeywordRange {
+            start_col: 5,
+            end_col: 8,
+            color: 0xff2244,
+        },
+        crate::types::TerminalKeywordRange {
+            start_col: 9,
+            end_col: 13,
+            color: 0xff2244,
+        },
+    ];
+    let first = TerminalKeywordHighlightLookup::Stale(&ranges[..1]);
+    let second = TerminalKeywordHighlightLookup::Stale(&ranges);
+    assert_ne!(
+        super::terminal_keyword_row_paint_style_key(41, 0, Some(&first)),
+        super::terminal_keyword_row_paint_style_key(41, 0, Some(&second)),
+    );
 }
 
 #[test]
