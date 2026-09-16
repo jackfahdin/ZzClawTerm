@@ -402,8 +402,12 @@ impl ConnectionStore {
     }
 
     pub fn replace_sessions(&self, config: &SessionsConfig) -> Result<(), StorageError> {
+        let mut config = config.clone();
+        for connection in &mut config.connections {
+            self.encrypt_connection_password_for_storage(connection)?;
+        }
         let txn = self.db.begin_write()?;
-        replace_sessions_in_txn(&txn, config)?;
+        replace_sessions_in_txn(&txn, &config)?;
         txn.commit()?;
         Ok(())
     }
@@ -494,8 +498,10 @@ impl ConnectionStore {
     }
 
     pub fn save_connection(&self, connection: &SavedConnection) -> Result<(), StorageError> {
+        let mut connection = connection.clone();
+        self.encrypt_connection_password_for_storage(&mut connection)?;
         let txn = self.db.begin_write()?;
-        save_connection_in_txn(&txn, connection)?;
+        save_connection_in_txn(&txn, &connection)?;
         txn.commit()?;
         Ok(())
     }
@@ -505,10 +511,42 @@ impl ConnectionStore {
         group: &Group,
         connection: &SavedConnection,
     ) -> Result<(), StorageError> {
+        let mut connection = connection.clone();
+        self.encrypt_connection_password_for_storage(&mut connection)?;
         let txn = self.db.begin_write()?;
         save_group_in_txn(&txn, group)?;
-        save_connection_in_txn(&txn, connection)?;
+        save_connection_in_txn(&txn, &connection)?;
         txn.commit()?;
+        Ok(())
+    }
+
+    /// Encrypt a plaintext in-memory connection password before it is written
+    /// to the credentials table. Values arrive as plaintext whenever
+    /// `auth.has_password` is false (editor input, decrypted backups); a true
+    /// flag means the value is still the stored ciphertext and must pass
+    /// through unchanged so locked entries survive unrelated edits.
+    pub(crate) fn encrypt_connection_password_for_storage(
+        &self,
+        connection: &mut SavedConnection,
+    ) -> Result<(), StorageError> {
+        let Some(auth) = connection.auth.as_mut() else {
+            return Ok(());
+        };
+        if auth.has_password {
+            return Ok(());
+        }
+        let Some(plaintext) = auth
+            .password
+            .as_ref()
+            .map(|value| value.expose_secret().to_string())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let crypto = self.credential_crypto()?;
+        let master_key_token = self.get_or_create_master_key_token(&crypto)?;
+        auth.password = Some(crypto.encrypt_secret(&master_key_token, &plaintext)?.into());
+        auth.has_password = true;
         Ok(())
     }
 
@@ -878,20 +916,28 @@ impl ConnectionStore {
             let key = entity_key(CONNECTION_PASSWORD_PREFIX, &connection.id);
             if let Some(raw) = table.get(key.as_str())? {
                 let record: ConnectionPasswordRecord = deserialize_json(raw.value())?;
-                if let Some(master_key_token) = master_key_token.as_deref() {
-                    match crypto.decrypt_secret(master_key_token, record.password.expose_secret()) {
-                        Ok(plaintext) => {
-                            auth.password = Some(plaintext.into());
-                            auth.has_password = false;
-                        }
-                        Err(_) => {
-                            auth.password = Some(record.password);
-                            auth.has_password = true;
-                        }
+                let stored = record.password.expose_secret();
+                let decrypted = master_key_token
+                    .as_deref()
+                    .and_then(|token| crypto.decrypt_secret(token, stored).ok());
+                match decrypted {
+                    Some(plaintext) => {
+                        auth.password = Some(plaintext.into());
+                        auth.has_password = false;
                     }
-                } else {
-                    auth.password = Some(record.password);
-                    auth.has_password = true;
+                    // The GPUI migration briefly wrote direct-input passwords
+                    // unencrypted. A value that is not shaped like our
+                    // ciphertext is such legacy plaintext and stays usable;
+                    // genuine ciphertext (locked vault, wrong key, corruption)
+                    // keeps the locked semantics.
+                    None if !stored_password_is_ciphertext(stored) => {
+                        auth.password = Some(record.password);
+                        auth.has_password = false;
+                    }
+                    None => {
+                        auth.password = Some(record.password);
+                        auth.has_password = true;
+                    }
                 }
             }
         }
@@ -1052,7 +1098,7 @@ impl ConnectionStore {
         Ok(token)
     }
 
-    fn save_master_key_token(&self, token: &str) -> Result<(), StorageError> {
+    pub(crate) fn save_master_key_token(&self, token: &str) -> Result<(), StorageError> {
         let txn = self.db.begin_write()?;
         txn.open_table(META_TABLE)?.insert(META_MASTER_KEY, token)?;
         txn.open_table(TEXT_DOCS_TABLE)?
@@ -1530,6 +1576,18 @@ where
     T: DeserializeOwned,
 {
     Ok(serde_json::from_slice(value)?)
+}
+
+/// AES-256-GCM payload shape: 12-byte nonce + ciphertext + 16-byte tag,
+/// base64-encoded. Used to tell genuine ciphertext apart from legacy
+/// plaintext written before direct-input passwords were encrypted on save.
+fn stored_password_is_ciphertext(value: &str) -> bool {
+    const MIN_CIPHERTEXT_LEN: usize = 12 + 1 + 16;
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map(|raw| raw.len() >= MIN_CIPHERTEXT_LEN)
+        .unwrap_or(false)
 }
 
 fn entity_key(prefix: &str, id: &str) -> String {

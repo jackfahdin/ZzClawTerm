@@ -77,6 +77,9 @@ impl ConnectionStore {
         }
 
         let crypto = self.credential_crypto()?;
+        for connection in &mut connections {
+            self.encrypt_connection_password_for_storage(connection)?;
+        }
         let needs_master_key = prepared.passwords.iter().any(|entry| {
             entry
                 .password

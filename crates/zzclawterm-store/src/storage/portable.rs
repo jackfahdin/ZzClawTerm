@@ -494,6 +494,19 @@ impl ConnectionStore {
             PortableSnapshotKind::Backup => normalize_backup_agent_settings(&mut sessions),
         }
 
+        // Install the snapshot's master key before encrypting imported
+        // plaintext connection passwords: the import txn below re-inserts the
+        // same token, and every imported secret must be wrapped by it.
+        if let Some(token) = master_key_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+        {
+            self.save_master_key_token(token)?;
+        }
+        for connection in &mut sessions.connections {
+            self.encrypt_connection_password_for_storage(connection)?;
+        }
+
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(PORTABLE_OPAQUE_ENTITIES_TABLE)?;

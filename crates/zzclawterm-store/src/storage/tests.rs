@@ -24,7 +24,7 @@ use super::{
     SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SSH_KEY_FILE_IMPORT_MAX_BYTES, SSH_KEY_PREFIX,
     SavedConnection, SessionsConfig, StorageError, TEXT_DOCS_TABLE, TUNNELS_TABLE, TunnelConfig,
     TunnelGroup, current_time_ms, default_settings_value, deserialize_json, entity_key, json_path,
-    set_nested_json_value, stable_id, write_json_in_txn,
+    set_nested_json_value, stable_id, stored_password_is_ciphertext, write_json_in_txn,
 };
 
 #[test]
@@ -146,7 +146,7 @@ fn round_trips_sessions_in_redb_compatible_tables() {
         loaded.connections[0]
             .auth
             .as_ref()
-            .is_some_and(|auth| auth.has_password)
+            .is_some_and(|auth| !auth.has_password)
     );
 
     std::fs::remove_dir_all(dir).ok();
@@ -4439,4 +4439,158 @@ fn editing_keywords_preserves_both_values_of_the_retired_soft_wrap_setting() {
     }
     drop(store);
     std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+fn direct_password_test_connection(id: &str, password: &str) -> SavedConnection {
+    SavedConnection {
+        extensions: Default::default(),
+        id: id.to_string(),
+        name: "SSH".to_string(),
+        config: ConnectionType::Ssh {
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            backspace_mode: "del".to_string(),
+            ai_execution_profile: AiExecutionProfile::Auto,
+            x11_forwarding: false,
+            auth_agent_endpoint: None,
+            agent_forwarding_config: None,
+            legacy_agent_forwarding: None,
+            encoding: String::new(),
+            dynamic_tab_title: false,
+        },
+        group_id: None,
+        description: None,
+        sort_order: 0,
+        icon: None,
+        icon_auto_detect: None,
+        auth: Some(ConnectionAuth {
+            mode: "password".to_string(),
+            password: Some(password.into()),
+            ..Default::default()
+        }),
+        ssh_algorithms: None,
+        ssh_profile: Default::default(),
+        terminal_type: None,
+        sftp: Default::default(),
+        network: None,
+        post_login: None,
+        recording: None,
+        asset: None,
+        created_at_ms: None,
+        updated_at_ms: None,
+        last_used_at_ms: None,
+    }
+}
+
+#[test]
+fn save_connection_encrypts_direct_password_and_roundtrips() {
+    let dir = unique_temp_dir("direct-password-roundtrip");
+    let store = ConnectionStore::open(&dir).expect("store");
+    store
+        .save_connection(&direct_password_test_connection("ssh-direct", "secret123"))
+        .expect("save");
+
+    let stored_record: ConnectionPasswordRecord = {
+        let txn = store.db.begin_read().expect("txn");
+        let table = txn.open_table(CREDENTIALS_TABLE).expect("credentials");
+        let raw = table
+            .get(entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-direct").as_str())
+            .expect("get")
+            .expect("record");
+        deserialize_json(raw.value()).expect("deserialize")
+    };
+    let stored = stored_record.password.expose_secret().to_string();
+    assert_ne!(stored, "secret123");
+    assert!(stored_password_is_ciphertext(&stored));
+
+    let loaded = store.load_sessions().expect("load");
+    let auth = loaded.connections[0].auth.as_ref().expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("secret123"));
+    assert!(!auth.has_password);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn load_sessions_heals_legacy_plaintext_connection_password_record() {
+    let dir = unique_temp_dir("heal-plaintext-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = direct_password_test_connection("ssh-legacy", "plaintext-secret");
+    connection.auth.as_mut().expect("auth").password = None;
+    store.save_connection(&connection).expect("save");
+
+    let master_key = test_key(7);
+    let master_key_token = encrypt_for_test(master_key.as_slice(), &home_wrapping_key());
+    let now = current_time_ms();
+    let record = ConnectionPasswordRecord {
+        id: "ssh-legacy".to_string(),
+        connection_id: "ssh-legacy".to_string(),
+        password: "plaintext-secret".into(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    {
+        let txn = store.db.begin_write().expect("txn");
+        txn.open_table(META_TABLE)
+            .expect("meta")
+            .insert(META_MASTER_KEY, master_key_token.as_str())
+            .expect("insert master");
+        write_json_in_txn(
+            &txn,
+            CREDENTIALS_TABLE,
+            &entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-legacy"),
+            &record,
+        )
+        .expect("write credential");
+        txn.commit().expect("commit");
+    }
+
+    let loaded = store.load_sessions().expect("load");
+    let auth = loaded.connections[0].auth.as_ref().expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("plaintext-secret"));
+    assert!(!auth.has_password);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn load_sessions_keeps_undecryptable_ciphertext_locked() {
+    let dir = unique_temp_dir("locked-ciphertext-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = direct_password_test_connection("ssh-locked", "whatever");
+    connection.auth.as_mut().expect("auth").password = None;
+    store.save_connection(&connection).expect("save");
+
+    // Record encrypted under a different master key than the one in META.
+    let record_key = test_key(8);
+    let meta_key = test_key(9);
+    let meta_key_token = encrypt_for_test(meta_key.as_slice(), &home_wrapping_key());
+    let now = current_time_ms();
+    let record = ConnectionPasswordRecord {
+        id: "ssh-locked".to_string(),
+        connection_id: "ssh-locked".to_string(),
+        password: encrypt_for_test(b"real-secret", &record_key).into(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    {
+        let txn = store.db.begin_write().expect("txn");
+        txn.open_table(META_TABLE)
+            .expect("meta")
+            .insert(META_MASTER_KEY, meta_key_token.as_str())
+            .expect("insert master");
+        write_json_in_txn(
+            &txn,
+            CREDENTIALS_TABLE,
+            &entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-locked"),
+            &record,
+        )
+        .expect("write credential");
+        txn.commit().expect("commit");
+    }
+
+    let loaded = store.load_sessions().expect("load");
+    let auth = loaded.connections[0].auth.as_ref().expect("auth");
+    assert!(auth.has_password);
+    assert_ne!(auth.password.as_deref(), Some("real-secret"));
+    std::fs::remove_dir_all(dir).ok();
 }
