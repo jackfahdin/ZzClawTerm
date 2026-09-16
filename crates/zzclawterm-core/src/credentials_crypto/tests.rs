@@ -107,6 +107,53 @@ fn rewraps_master_key_between_fallback_and_password_keys() {
     );
 }
 
+#[test]
+fn creates_portable_key_on_first_use_and_shares_it_across_instances() {
+    let dir = std::env::temp_dir().join(format!("zzclawterm-crypto-test-{}", uuid::Uuid::new_v4()));
+    let key_path = dir.join("config").join("portable.key");
+    let crypto = CredentialCrypto::new(Some(key_path.clone()), None);
+
+    let master_key_token = crypto
+        .generate_master_key_token()
+        .expect("generate master key with missing portable key");
+    assert!(key_path.exists(), "portable key should be created");
+
+    let secret = crypto
+        .encrypt_secret(&master_key_token, "portable-password")
+        .expect("encrypt secret");
+
+    // A later process instance reads the same key file and must decrypt data
+    // written by the first one.
+    let restarted = CredentialCrypto::new(Some(key_path.clone()), None);
+    assert_eq!(
+        restarted
+            .decrypt_secret(&master_key_token, &secret)
+            .expect("decrypt with restarted instance"),
+        "portable-password"
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn empty_portable_key_file_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("zzclawterm-crypto-test-{}", uuid::Uuid::new_v4()));
+    let key_path = dir.join("portable.key");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::write(&key_path, "  \n").expect("write empty key");
+
+    let crypto = CredentialCrypto::new(Some(key_path.clone()), None);
+    let error = crypto
+        .generate_master_key_token()
+        .expect_err("empty portable key must fail");
+    assert!(matches!(
+        error,
+        super::CredentialCryptoError::EmptyPortableKey(_)
+    ));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
 #[allow(deprecated)]
 fn test_key(seed: u8) -> Key<Aes256Gcm> {
     *Key::<Aes256Gcm>::from_slice(&[seed; 32])

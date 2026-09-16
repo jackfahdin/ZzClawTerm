@@ -18,6 +18,11 @@ pub enum CredentialCryptoError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to write portable key {path}: {source}")]
+    WritePortableKey {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("portable key file is empty: {0}")]
     EmptyPortableKey(PathBuf),
     #[error("invalid base64: {0}")]
@@ -190,22 +195,49 @@ impl CredentialCrypto {
 
     fn fallback_key_material(&self) -> Result<Vec<u8>, CredentialCryptoError> {
         if let Some(path) = &self.portable_key_path {
-            let material = std::fs::read_to_string(path).map_err(|source| {
-                CredentialCryptoError::ReadPortableKey {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            let material = material.trim();
-            if material.is_empty() {
-                return Err(CredentialCryptoError::EmptyPortableKey(path.clone()));
-            }
-            return Ok(material.as_bytes().to_vec());
+            return read_or_create_portable_key_material(path);
         }
 
         let home = dirs::home_dir().ok_or(CredentialCryptoError::MissingHomeDir)?;
         Ok(home.to_string_lossy().as_bytes().to_vec())
     }
+}
+
+// Portable installs have no stable per-user secret to derive the wrapping key
+// from, so the material lives in a key file beside the data. The file is
+// created on first use; re-reading after the write converges on one key when
+// two processes race to create it.
+fn read_or_create_portable_key_material(
+    path: &std::path::Path,
+) -> Result<Vec<u8>, CredentialCryptoError> {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                CredentialCryptoError::WritePortableKey {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let bytes: [u8; 32] = rand::rng().random();
+        let material = B64.encode(bytes);
+        std::fs::write(path, format!("{material}\n")).map_err(|source| {
+            CredentialCryptoError::WritePortableKey {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    }
+    let material =
+        std::fs::read_to_string(path).map_err(|source| CredentialCryptoError::ReadPortableKey {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let material = material.trim();
+    if material.is_empty() {
+        return Err(CredentialCryptoError::EmptyPortableKey(path.to_path_buf()));
+    }
+    Ok(material.as_bytes().to_vec())
 }
 
 #[allow(deprecated)]
