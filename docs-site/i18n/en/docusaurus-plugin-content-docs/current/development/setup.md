@@ -158,7 +158,7 @@ The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GIT
 
 ### Native tools and the manual-acceptance boundary
 
-Native packaging depends on target-platform tools: Windows uses Inno Setup 6 and package verification also needs 7-Zip; macOS uses `codesign` and `hdiutil`; Linux uses tools such as `appimagetool`, `dpkg-shlibdeps`, `dpkg-deb`, `rpmbuild`, and `rpm`/`rpm2cpio`. Running only the Python packaging unit tests on a machine without those tools is therefore not a native package build.
+Native packaging depends on target-platform tools: Windows uses Inno Setup 6 (installer verification performs a real silent install); macOS uses `codesign` and `hdiutil`; Linux uses tools such as `appimagetool`, `dpkg-shlibdeps`, `dpkg-deb`, `rpmbuild`, and `rpm`/`rpm2cpio`. Running only the Python packaging unit tests on a machine without those tools is therefore not a native package build.
 
 Automated verification checks the artifact set, archive paths, application and helper presence, binary architecture, version, and package metadata. It does not prove that the GUI launches, and does not cover real install/upgrade/uninstall flows, shortcuts or `zzclawterm:` URL-handler invocation, signing/notarization and Gatekeeper/SmartScreen trust, real RDP/VNC sessions, or GPU, IME, PTY, clipboard, and window lifecycle behavior. Release candidates must be accepted manually on the corresponding target OS, with the actual platform and results recorded truthfully.
 

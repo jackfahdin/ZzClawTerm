@@ -155,7 +155,7 @@ Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_C
 
 ### 原生工具与手工验收边界
 
-原生打包依赖目标平台工具：Windows 使用 Inno Setup 6，验证安装包时还需要 7-Zip；macOS 使用 `codesign` 和 `hdiutil`；Linux 使用 `appimagetool`、`dpkg-shlibdeps`、`dpkg-deb`、`rpmbuild`、`rpm`/`rpm2cpio` 等工具。因此在缺少对应工具的平台上，单独运行 Python 打包单测并不等于完成原生打包。
+原生打包依赖目标平台工具：Windows 使用 Inno Setup 6（安装包校验通过真实静默安装完成）；macOS 使用 `codesign` 和 `hdiutil`；Linux 使用 `appimagetool`、`dpkg-shlibdeps`、`dpkg-deb`、`rpmbuild`、`rpm`/`rpm2cpio` 等工具。因此在缺少对应工具的平台上，单独运行 Python 打包单测并不等于完成原生打包。
 
 自动验证会检查产物集合、归档路径、应用与 helper 是否齐全、二进制架构、版本及包元数据。它不会证明 GUI 能实际启动，也不会覆盖真实安装/升级/卸载、快捷方式或 `zzclawterm:` URL handler 调用、签名/notarization 与 Gatekeeper/SmartScreen 信任、真实 RDP/VNC 会话，以及 GPU、IME、PTY、剪贴板和窗口生命周期。发布候选必须在对应目标操作系统上手工验收这些行为，并如实记录实际执行的平台与结果。
 

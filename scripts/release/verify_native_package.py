@@ -201,52 +201,59 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             )
 
 
-def find_7zip() -> str:
-    for name in ("7z", "7z.exe"):
-        found = shutil.which(name)
-        if found:
-            return found
-    raise RuntimeError("7-Zip is required to verify the Windows installer")
-
-
 def verify_windows_installer(path: Path, target: str) -> None:
     with path.open("rb") as handle:
         header = handle.read(2)
     if header != b"MZ":
         raise RuntimeError(f"{path.name} is not a Windows executable")
+    if sys.platform != "win32":
+        raise RuntimeError(
+            f"{path.name} can only be verified on Windows: the check performs a "
+            "real silent install of the Inno Setup package"
+        )
     with tempfile.TemporaryDirectory() as directory:
-        output = Path(directory) / "installer"
+        installed_dir = Path(directory) / "installed"
+        # Silent-install the package for real. This doubles as a smoke test of
+        # the installer itself and avoids depending on 7-Zip's Inno extraction.
         subprocess.run(
-            [find_7zip(), "x", "-y", f"-o{output}", str(path)],
+            [
+                str(path),
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                f"/DIR={installed_dir}",
+            ],
             check=True,
-            stdout=subprocess.DEVNULL,
         )
         installed = [
-            candidate for candidate in output.rglob("*") if candidate.is_file()
+            candidate for candidate in installed_dir.rglob("*") if candidate.is_file()
         ]
-    names = {candidate.name for candidate in installed}
-    # Inno Setup generates the uninstaller (unins000.exe) at install time from
-    # its own embedded template, so it is not a payload file we can check here.
-    required = {"ZzClawTerm.exe", "LICENSE", "VERSION"}
-    required.update(helper_filenames(target))
-    missing = required - names
-    if missing:
-        raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
-    # The VcXsrv directory is optional; when present it must ship vcxsrv.exe
-    # and the GPLv3 NOTICE.txt next to it.
-    vcxsrv_entries = [
-        candidate
-        for candidate in installed
-        if package_native.VCXSRV_DIRNAME
-        in candidate.relative_to(output).parts
-    ]
-    if vcxsrv_entries:
-        vcxsrv_names = {candidate.name for candidate in vcxsrv_entries}
-        for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
-            if member not in vcxsrv_names:
-                raise RuntimeError(
-                    f"{path.name} contains a vcxsrv directory without {member}"
-                )
+        names = {candidate.name for candidate in installed}
+        required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "unins000.exe"}
+        required.update(helper_filenames(target))
+        missing = required - names
+        if missing:
+            raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
+        # The VcXsrv directory is optional; when present it must ship
+        # vcxsrv.exe and the GPLv3 NOTICE.txt next to it.
+        vcxsrv_entries = [
+            candidate
+            for candidate in installed
+            if package_native.VCXSRV_DIRNAME
+            in candidate.relative_to(installed_dir).parts
+        ]
+        if vcxsrv_entries:
+            vcxsrv_names = {candidate.name for candidate in vcxsrv_entries}
+            for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
+                if member not in vcxsrv_names:
+                    raise RuntimeError(
+                        f"{path.name} contains a vcxsrv directory without {member}"
+                    )
+        # Leave the machine as we found it.
+        subprocess.run(
+            [str(installed_dir / "unins000.exe"), "/VERYSILENT", "/NORESTART"],
+            check=True,
+        )
 
 
 def verify_macos_archive(path: Path, target: str, version: str) -> None:
