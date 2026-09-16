@@ -206,7 +206,7 @@ def find_7zip() -> str:
         found = shutil.which(name)
         if found:
             return found
-    raise RuntimeError("7-Zip is required to verify the NSIS installer")
+    raise RuntimeError("7-Zip is required to verify the Windows installer")
 
 
 def verify_windows_installer(path: Path, target: str) -> None:
@@ -225,7 +225,9 @@ def verify_windows_installer(path: Path, target: str) -> None:
             candidate for candidate in output.rglob("*") if candidate.is_file()
         ]
     names = {candidate.name for candidate in installed}
-    required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
+    # Inno Setup generates the uninstaller (unins000.exe) at install time from
+    # its own embedded template, so it is not a payload file we can check here.
+    required = {"ZzClawTerm.exe", "LICENSE", "VERSION"}
     required.update(helper_filenames(target))
     missing = required - names
     if missing:

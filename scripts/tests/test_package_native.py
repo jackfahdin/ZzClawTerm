@@ -141,6 +141,12 @@ class PackageNativeTests(unittest.TestCase):
         info = package_native.target_info(target)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            helpers = []
+            for name in package_native.HELPER_BINS:
+                fake = root / "build" / f"{name}.exe"
+                fake.parent.mkdir(parents=True, exist_ok=True)
+                fake.write_bytes(b"MZ")
+                helpers.append(fake)
             with (
                 mock.patch.object(package_native, "WORK_DIR", root / "work"),
                 mock.patch.object(package_native, "DIST_DIR", root / "dist"),
@@ -148,14 +154,14 @@ class PackageNativeTests(unittest.TestCase):
                 mock.patch.object(
                     package_native, "find_iscc", return_value="iscc"
                 ),
+                mock.patch.object(
+                    package_native, "helper_binary_paths", return_value=helpers
+                ),
             ):
                 package_native.WORK_DIR.mkdir(parents=True)
                 package_native.DIST_DIR.mkdir(parents=True)
                 application = root / "zzclawterm.exe"
                 application.write_bytes(b"MZ")
-                for path in package_native.helper_binary_paths(target):
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"MZ")
                 package_native.create_windows_packages(
                     application, info, "0.0.1", "0.0.1"
                 )
