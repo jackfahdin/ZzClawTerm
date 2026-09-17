@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import plistlib
 import shutil
 import struct
@@ -211,6 +212,19 @@ def verify_windows_installer(path: Path, target: str) -> None:
             f"{path.name} can only be verified on Windows: the check performs a "
             "real silent install of the Inno Setup package"
         )
+    # An arch-restricted installer refuses to install on the other Windows
+    # architecture, and GitHub's Windows runners are all x64: the arm64
+    # package can only get its MZ header + size checks here. Payload arch
+    # correctness is covered by the portable zip's PE machine checks.
+    host_arch = platform.machine().lower()
+    host_arch = "arm64" if host_arch in ("arm64", "aarch64") else "x64"
+    target_arch = "arm64" if target.startswith("aarch64-") else "x64"
+    if host_arch != target_arch:
+        print(
+            f"Skipping silent-install verification of {path.name}: "
+            f"{target_arch} installer cannot install on {host_arch} Windows"
+        )
+        return
     with tempfile.TemporaryDirectory() as directory:
         installed_dir = Path(directory) / "installed"
         # Silent-install the package for real. This doubles as a smoke test of
