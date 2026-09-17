@@ -39,6 +39,18 @@ impl super::ShellEnvironmentCache {
             .shell_path = Some(path);
         cache
     }
+
+    pub(crate) fn with_shell_path_and_timeout_for_test(
+        path: std::path::PathBuf,
+        timeout: Duration,
+    ) -> Arc<Self> {
+        let mut cache = Self::new();
+        let cache_mut =
+            Arc::get_mut(&mut cache).expect("new shell environment cache is not shared");
+        cache_mut.shell_path = Some(path);
+        cache_mut.timeout = timeout;
+        cache
+    }
 }
 
 #[cfg(unix)]
@@ -516,7 +528,12 @@ async fn windows_shell_loader_falls_back_to_cmd_after_spawn_failure() {
 #[cfg(windows)]
 #[tokio::test]
 async fn powershell_shell_loader_reads_requested_value_when_available() {
-    let cache = ShellEnvironmentCache::with_shell_path_for_test(PathBuf::from("powershell.exe"));
+    // powershell.exe cold start on a loaded CI runner can exceed the default
+    // ten-second timeout; give the real shell generous room.
+    let cache = ShellEnvironmentCache::with_shell_path_and_timeout_for_test(
+        PathBuf::from("powershell.exe"),
+        Duration::from_secs(60),
+    );
 
     match cache.refresh("PATH").await {
         Ok(value) => assert!(value.is_some()),
