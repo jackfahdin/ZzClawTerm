@@ -40,6 +40,7 @@ impl super::ShellEnvironmentCache {
         cache
     }
 
+    #[cfg(windows)]
     pub(crate) fn with_shell_path_and_timeout_for_test(
         path: std::path::PathBuf,
         timeout: Duration,
