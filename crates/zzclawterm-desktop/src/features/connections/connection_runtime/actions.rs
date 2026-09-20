@@ -1,6 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{Context, KeyDownEvent, Window};
+use gpui::{Context, FocusHandle, KeyDownEvent, Window};
 use zzclawterm_core::{SavedConnection, SessionsConfig};
 use zzclawterm_store::{StoreDomain, store_request};
 
@@ -359,11 +359,15 @@ impl ZzClawTermApp {
     pub(in crate::features) fn handle_connection_search_key_down(
         &mut self,
         event: &KeyDownEvent,
+        restore_focus: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.mark_user_activity();
         let keystroke = &event.keystroke;
+        if keystroke.key != "escape" {
+            self.connection_state.expand_list_search();
+        }
         if keystroke.modifiers.alt
             || keystroke.modifiers.function
             || keystroke.modifiers.platform
@@ -375,7 +379,7 @@ impl ZzClawTermApp {
         match keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
-                self.clear_connection_search(window, cx);
+                self.clear_connection_search(restore_focus, window, cx);
             }
             "up" | "down" if !self.connection_state.list_search_is_empty() => {
                 if self.step_connection_keyboard_active(keystroke.key == "down", cx) {
@@ -392,11 +396,33 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn clear_connection_search(
+    pub(in crate::features) fn focus_connection_search(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.connection_state.expand_list_search();
+        let field = self.connection_state.list_search_field();
+        window.focus(&field.read(cx).focus_handle(), cx);
+        cx.notify();
+    }
+
+    pub(in crate::features) fn clear_connection_search(
+        &mut self,
+        restore_focus: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.list_search_is_empty() {
+            self.connection_state.collapse_list_search();
+            window.focus(restore_focus, cx);
+            self.shell
+                .set_status("connection search closed".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.connection_state.expand_list_search();
         let field = self.connection_state.list_search_field();
         field.update(cx, |field, cx| field.set_content("", cx));
         self.connection_state.set_list_search_text(String::new());
@@ -482,6 +508,7 @@ mod tests {
     fn saved_connection(id: &str) -> SavedConnection {
         SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: id.to_string(),
             name: id.to_string(),
             config: ConnectionType::LocalTerminal {

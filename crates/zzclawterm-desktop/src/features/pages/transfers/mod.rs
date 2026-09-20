@@ -35,6 +35,7 @@ mod queue;
 mod resize;
 #[cfg(test)]
 pub(in crate::features::pages::transfers) mod tests_support;
+mod tree;
 
 use entry_row::{
     TransferBrowserEntryRowPresentation, transfer_browser_entry_row,

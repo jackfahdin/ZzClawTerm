@@ -33,6 +33,7 @@ impl ZzClawTermApp {
         ) {
             self.shell
                 .set_status("close active session before pulling provider cloud sync".to_string());
+            self.cloud_sync.set_status(self.shell.status().to_string());
             cx.notify();
             return;
         }
@@ -81,6 +82,7 @@ impl ZzClawTermApp {
                 }
                 .to_string(),
             );
+            self.cloud_sync.set_status(self.shell.status().to_string());
             cx.notify();
             return;
         }
@@ -108,6 +110,7 @@ impl ZzClawTermApp {
             self.shell.set_status(
                 "close active sessions before recovering cloud sync metadata".to_string(),
             );
+            self.cloud_sync.set_status(self.shell.status().to_string());
             cx.notify();
             return;
         }

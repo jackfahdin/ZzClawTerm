@@ -143,9 +143,10 @@ fn default_config_dir_from(executable: &Path, home: Option<&Path>) -> anyhow::Re
     {
         return Ok(directory.join("data").join("config"));
     }
-    Ok(home
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve user home directory"))?
-        .join(".zzclawterm"))
+    Ok(zzclawterm_core::runtime::AppRuntime::installed_config_dir(
+        home.ok_or_else(|| anyhow::anyhow!("cannot resolve user home directory"))?,
+        zzclawterm_core::app_identity::AppFlavor::current(),
+    ))
 }
 
 #[cfg(test)]
@@ -153,6 +154,19 @@ mod tests {
     use super::{DiscoveryStore, default_config_dir_from};
     #[cfg(windows)]
     use zzclawterm_mcp_protocol::DiscoveryDocument;
+
+    #[test]
+    fn installed_discovery_uses_the_current_application_flavor() {
+        let home = std::path::Path::new("test-home");
+        let executable = std::path::Path::new("test-bin/zzclawterm");
+        assert_eq!(
+            default_config_dir_from(executable, Some(home)).unwrap(),
+            zzclawterm_core::runtime::AppRuntime::installed_config_dir(
+                home,
+                zzclawterm_core::app_identity::AppFlavor::current()
+            )
+        );
+    }
 
     #[test]
     fn stale_discovery_can_be_removed_repeatedly() {

@@ -12,9 +12,7 @@ use crate::features::{
     formatting::format_cloud_provider, formatting::format_history_timestamp_ms,
     pages::settings::panel::SettingsPanel, view_widgets::dialog_action_button,
 };
-use crate::models::{
-    CloudSyncConflictState, CloudSyncInputField, SettingsTab, SnapshotPasswordPromptKind,
-};
+use crate::models::{CloudSyncConflictState, CloudSyncInputField, SettingsTab};
 use crate::theme::ThemePalette;
 use crate::widgets::small_button;
 
@@ -209,19 +207,6 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let cloud_snapshot_prompt = self.settings.snapshot_password_prompt().filter(|prompt| {
-            matches!(
-                prompt.kind,
-                SnapshotPasswordPromptKind::CloudForcePush
-                    | SnapshotPasswordPromptKind::CloudForcePull
-                    | SnapshotPasswordPromptKind::CloudProviderPush
-                    | SnapshotPasswordPromptKind::CloudProviderPull
-                    | SnapshotPasswordPromptKind::CloudProviderForcePush
-                    | SnapshotPasswordPromptKind::CloudProviderForcePull
-                    | SnapshotPasswordPromptKind::CloudRecoverCurrent
-                    | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent
-            )
-        });
         let cloud_conflict = self.cloud_sync.conflict().cloned();
         let active_cloud_provider = configured_cloud_sync_provider(self.cloud_sync.settings());
         let form_enabled = self.cloud_sync_form_enabled();
@@ -241,6 +226,8 @@ impl SettingsPanel {
         };
         let prompt_busy = self.settings.snapshot_password_prompt_active()
             || self.settings.config_path_prompt_active();
+        let local_backup_status = self.settings.local_backup_status.clone();
+        let local_backup_ready = self.settings.local_backup_ready;
         let actions_busy = prompt_busy || self.cloud_sync.job_running();
         let can_run_actions = action_block_message.is_none() && !actions_busy;
         let can_run_enabled_actions = can_run_actions && self.cloud_sync.settings().enabled;
@@ -424,7 +411,26 @@ impl SettingsPanel {
                                 this.prompt_encrypted_portable_snapshot_import(window, cx);
                             }),
                         ),
-                    )),
+                    ))
+                    .when(!local_backup_status.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if local_backup_ready {
+                                    palette.success
+                                } else {
+                                    palette.border
+                                }))
+                                .bg(rgb(palette.surface_elevated))
+                                .px_3()
+                                .py_2()
+                                .text_size(px(12.))
+                                .text_color(rgb(palette.text_muted))
+                                .child(local_backup_status),
+                        )
+                    }),
             ))
             .child(settings_form_section(
                 palette,
@@ -684,9 +690,6 @@ impl SettingsPanel {
                             )),
                     ),
             ))
-            .when_some(cloud_snapshot_prompt, |this, prompt| {
-                this.child(self.snapshot_password_prompt_banner(prompt, cx))
-            })
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.syncConflictSection")),

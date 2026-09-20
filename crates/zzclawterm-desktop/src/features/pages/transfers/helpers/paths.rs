@@ -33,25 +33,6 @@ pub(in crate::features::pages::transfers) fn remote_parent_path(path: &str) -> S
     }
 }
 
-pub(in crate::features::pages::transfers) fn remote_sibling_path(
-    old_path: &str,
-    new_name: &str,
-) -> String {
-    if looks_like_native_path(old_path) {
-        return Path::new(old_path)
-            .parent()
-            .unwrap_or_else(|| Path::new(old_path))
-            .join(new_name)
-            .to_string_lossy()
-            .into_owned();
-    }
-    match remote_parent_path(old_path).as_str() {
-        "/" => format!("/{new_name}"),
-        "." => new_name.to_string(),
-        parent => format!("{parent}/{new_name}"),
-    }
-}
-
 pub(in crate::features::pages::transfers) fn remote_child_path(
     parent: &str,
     child_name: &str,

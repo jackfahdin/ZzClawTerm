@@ -1,3 +1,5 @@
+use rust_i18n::t;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -911,6 +913,7 @@ impl ZzClawTermApp {
         &mut self,
         session_id: String,
         paths: Vec<std::path::PathBuf>,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
         self.terminal.clear_terminal_file_drop_hover();
@@ -962,9 +965,20 @@ impl ZzClawTermApp {
                     cx.notify();
                 }
             }
-            Some(
-                SessionKind::Ssh | SessionKind::Telnet | SessionKind::Serial | SessionKind::RawTcp,
-            ) => {
+            Some(SessionKind::Serial) => {
+                if has_dirs {
+                    self.shell
+                        .set_status(t!("terminalCtx.serialFoldersUnsupported").to_string());
+                    cx.notify();
+                    return;
+                }
+                let files = path_strings
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                self.open_serial_upload_protocol_dialog(session_id, files, window, cx);
+            }
+            Some(SessionKind::Ssh | SessionKind::Telnet | SessionKind::RawTcp) => {
                 if has_dirs {
                     self.shell.set_status(
                         "folders cannot be uploaded via ZMODEM; use the remote file browser"

@@ -162,6 +162,7 @@ mod tests {
             "icons/session/folder-open.svg", // Open
             "icons/copy.svg",                // Copy path / name / dir
             "icons/fe/send-path.svg",        // Send path / name / dir to terminal
+            "icons/fe/locate.svg",           // Reveal current directory in tree
             "icons/net/delete.svg",          // Delete (danger)
             // Preview window toolbar.
             "icons/fe/refresh.svg",         // Refresh

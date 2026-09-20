@@ -66,6 +66,27 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
                 checksum_lines,
             )
 
+    def test_stable_and_prerelease_publish_to_separate_channel_manifests(self) -> None:
+        self.assertEqual(
+            generate_release_metadata.channel_manifest_destinations("2.0.0"),
+            {
+                "latest.json": "latest.json",
+                "downloads.json": "downloads.json",
+            },
+        )
+        preview = generate_release_metadata.channel_manifest_destinations(
+            "2.0.0-preview.2"
+        )
+        self.assertEqual(
+            preview,
+            {
+                "latest.json": "channels/preview/latest.json",
+                "downloads.json": "channels/preview/downloads.json",
+            },
+        )
+        self.assertNotIn("latest.json", preview.values())
+        self.assertNotIn("downloads.json", preview.values())
+
     def test_rejects_mismatched_tag_and_missing_signature(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

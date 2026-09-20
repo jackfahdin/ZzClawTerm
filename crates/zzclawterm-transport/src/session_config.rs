@@ -240,6 +240,7 @@ pub enum SshSessionProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SftpSettings {
+    pub compatibility_mode: bool,
     pub pipeline_depth: Option<u32>,
     pub enabled: bool,
     pub cwd_follow_mode: SftpCwdFollowMode,
@@ -250,6 +251,7 @@ pub struct SftpSettings {
 impl Default for SftpSettings {
     fn default() -> Self {
         Self {
+            compatibility_mode: false,
             pipeline_depth: None,
             enabled: true,
             cwd_follow_mode: SftpCwdFollowMode::ShellIntegration,
@@ -265,6 +267,7 @@ pub struct SshSessionConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub host_key_alias: Option<String>,
     pub username: String,
     pub password: Option<SecretString>,
     pub key_auth: Option<SshKeyAuthConfig>,
@@ -416,6 +419,7 @@ impl std::fmt::Debug for SshSessionConfig {
         f.debug_struct("SshSessionConfig")
             .field("name", &self.name)
             .field("host", &self.host)
+            .field("host_key_alias", &self.host_key_alias)
             .field("port", &self.port)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -659,6 +663,7 @@ impl Default for SshSessionConfig {
             name: "SSH".to_string(),
             host: String::new(),
             port: 22,
+            host_key_alias: None,
             username: "root".to_string(),
             password: None,
             key_auth: None,

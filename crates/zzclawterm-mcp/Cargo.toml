@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 dirs.workspace = true
+zzclawterm-core.workspace = true
 zzclawterm-mcp-protocol.workspace = true
 rmcp = { workspace = true, features = ["server", "transport-io"] }
 schemars.workspace = true

@@ -6,6 +6,7 @@ mod credentials;
 mod delete;
 mod jobs;
 mod keys;
+mod known_hosts;
 mod otp;
 mod passwords;
 mod unlock;

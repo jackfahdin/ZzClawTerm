@@ -34,6 +34,8 @@ struct NyatermJsonPassword {
     #[serde(rename = "ref")]
     ref_name: String,
     name: String,
+    #[serde(default)]
+    username: String,
     password: crate::SecretString,
 }
 
@@ -57,6 +59,10 @@ struct NyatermJsonGroup {
 #[derive(Deserialize)]
 struct NyatermJsonSshAuth {
     mode: String,
+    #[serde(default)]
+    account_ref: Option<String>,
+    #[serde(default)]
+    password_source: Option<crate::models::credentials::ConnectionPasswordSource>,
     #[serde(default)]
     password: Option<crate::SecretString>,
     #[serde(default)]
@@ -110,6 +116,10 @@ enum NyatermJsonSession {
         host: String,
         #[serde(default = "default_telnet_port")]
         port: u16,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        auth: Option<NyatermJsonSshAuth>,
         #[serde(default = "default_telnet_backspace_mode")]
         backspace_mode: String,
         #[serde(default)]
@@ -214,6 +224,7 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
         password_ref_map.insert(ref_name, id.clone());
         passwords.push(SavedPassword {
             id,
+            username: entry.username,
             name: required_string(entry.name, "password name", "passwords")?,
             password: Some(entry.password),
             has_password: false,
@@ -269,6 +280,7 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
             .and_then(serde_json::Value::as_object_mut)
         {
             auth.remove("password_ref");
+            auth.remove("account_ref");
             auth.remove("key_ref");
         }
         let mut saved: crate::SavedConnection = serde_json::from_value(raw)
@@ -368,6 +380,8 @@ fn prepare_zzclawterm_json_session(
             group_path,
             host,
             port,
+            username,
+            auth,
             backspace_mode,
             description,
             sort_order,
@@ -382,7 +396,7 @@ fn prepare_zzclawterm_json_session(
                 config: ConnectionType::Telnet {
                     host: required_string(host, "host", &context)?,
                     port,
-                    username: String::new(),
+                    username,
                     ai_execution_profile: AiExecutionProfile::Auto,
                     backspace_mode,
                     raw_tcp_cli: false,
@@ -399,7 +413,11 @@ fn prepare_zzclawterm_json_session(
                 description: normalize_optional_string(description),
                 sort_order,
                 icon: normalize_optional_string(icon),
-                auth: None,
+                auth: auth
+                    .map(|auth| {
+                        prepare_json_ssh_auth(Some(auth), password_ref_map, key_ref_map, &context)
+                    })
+                    .transpose()?,
             })
         }
         NyatermJsonSession::Serial {
@@ -448,6 +466,8 @@ fn prepare_json_ssh_auth(
 ) -> AppResult<ConnectionAuth> {
     let Some(auth) = auth else {
         return Ok(ConnectionAuth {
+            account_id: None,
+            password_source: None,
             mode: "none".to_string(),
             password_id: None,
             password: None,
@@ -458,6 +478,15 @@ fn prepare_json_ssh_auth(
         });
     };
 
+    let account_id = normalize_optional_string(auth.account_ref.clone())
+        .map(|reference| {
+            password_ref_map
+                .get(&reference)
+                .cloned()
+                .ok_or_else(|| AppError::Config(format!("{context}: account_ref was not found")))
+        })
+        .transpose()?;
+    let password_source = auth.password_source;
     match auth.mode.trim() {
         "none" => {
             if auth.password.is_some() || auth.password_ref.is_some() || auth.key_ref.is_some() {
@@ -466,6 +495,8 @@ fn prepare_json_ssh_auth(
                 )));
             }
             Ok(ConnectionAuth {
+                account_id,
+                password_source,
                 mode: "none".to_string(),
                 password_id: None,
                 password: None,
@@ -481,7 +512,22 @@ fn prepare_json_ssh_auth(
                 .as_ref()
                 .is_some_and(|value| !value.is_empty());
             let password_ref = normalize_optional_string(auth.password_ref);
-            if has_password == password_ref.is_some() {
+            let account_password = password_source
+                == Some(crate::models::credentials::ConnectionPasswordSource::Account);
+            if account_password && (account_id.is_none() || has_password || password_ref.is_some())
+            {
+                return Err(AppError::Config(format!(
+                    "{context}: account password requires only account_ref"
+                )));
+            }
+            let connection_password = password_source
+                == Some(crate::models::credentials::ConnectionPasswordSource::Connection);
+            if connection_password && password_ref.is_some() {
+                return Err(AppError::Config(format!(
+                    "{context}: connection password cannot use password_ref"
+                )));
+            }
+            if !account_password && !connection_password && has_password == password_ref.is_some() {
                 return Err(AppError::Config(format!(
                     "{context}: password auth must include exactly one of password or password_ref"
                 )));
@@ -498,6 +544,8 @@ fn prepare_json_ssh_auth(
             let password = auth.password;
 
             Ok(ConnectionAuth {
+                account_id,
+                password_source,
                 mode: "password".to_string(),
                 password_id,
                 password,
@@ -520,6 +568,8 @@ fn prepare_json_ssh_auth(
             })?;
 
             Ok(ConnectionAuth {
+                account_id,
+                password_source,
                 mode: "key".to_string(),
                 password_id: None,
                 password: None,
@@ -624,4 +674,83 @@ fn validate_serial_config(
         }
     }
     validate_backspace_mode(backspace_mode, "serial session")
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::parse_zzclawterm_json_content;
+    use crate::models::credentials::ConnectionPasswordSource;
+
+    #[test]
+    fn native_session_tags_import_and_keep_top_level_authority() {
+        let content = serde_json::json!({"sessions":[
+            {"type":"ssh", "name":"Legacy", "host":"test.invalid", "asset":{"tags":["legacy"]}},
+            {"type":"ssh", "name":"New", "host":"test.invalid", "tags":["canonical"], "asset":{"tags":["stale"], "future_asset":true}}
+        ]}).to_string();
+        let prepared = parse_zzclawterm_json_content(&content).unwrap();
+        assert_eq!(
+            prepared.connections[0].saved.as_ref().unwrap().tags,
+            ["legacy"]
+        );
+        assert_eq!(
+            prepared.connections[1].saved.as_ref().unwrap().tags,
+            ["canonical"]
+        );
+        let raw = serde_json::to_value(prepared.connections[1].saved.as_ref().unwrap()).unwrap();
+        assert_eq!(raw["asset"]["tags"], raw["tags"]);
+        assert_eq!(raw["asset"]["future_asset"], true);
+    }
+
+    #[test]
+    fn ssh_and_telnet_account_refs_resolve_to_imported_ids_and_keep_username() {
+        let content = serde_json::json!({
+            "version":1,
+            "passwords":[{"ref":"shared", "name":"Shared", "username":"shared-user", "password":"synthetic-secret"}],
+            "sessions":[
+                {"type":"ssh", "name":"SSH", "host":"test.invalid", "auth":{"mode":"password", "account_ref":"shared", "password_source":"account"}},
+                {"type":"telnet", "name":"Telnet", "host":"test.invalid", "auth":{"mode":"password", "account_ref":"shared", "password_source":"connection"}}
+            ]
+        }).to_string();
+        let prepared = parse_zzclawterm_json_content(&content).unwrap();
+        assert_eq!(prepared.passwords[0].username, "shared-user");
+        for connection in &prepared.connections {
+            assert_eq!(
+                connection.auth.as_ref().unwrap().account_id.as_deref(),
+                Some(prepared.passwords[0].id.as_str())
+            );
+            let raw = serde_json::to_value(connection.saved.as_ref().unwrap()).unwrap();
+            assert!(raw["auth"].get("account_ref").is_none());
+        }
+        assert_eq!(
+            prepared.connections[0]
+                .auth
+                .as_ref()
+                .unwrap()
+                .password_source,
+            Some(ConnectionPasswordSource::Account)
+        );
+        assert_eq!(
+            prepared.connections[1]
+                .auth
+                .as_ref()
+                .unwrap()
+                .password_source,
+            Some(ConnectionPasswordSource::Connection)
+        );
+    }
+
+    #[test]
+    fn unknown_account_refs_and_connection_source_password_refs_are_rejected() {
+        for auth in [
+            serde_json::json!({"mode":"password", "account_ref":"missing", "password_source":"account"}),
+            serde_json::json!({"mode":"password", "password_ref":"shared", "password_source":"connection"}),
+        ] {
+            let content = serde_json::json!({
+                "passwords":[{"ref":"shared", "name":"Shared", "password":"synthetic-secret"}],
+                "sessions":[{"type":"ssh", "name":"SSH", "host":"test.invalid", "auth":auth}]
+            })
+            .to_string();
+            assert!(parse_zzclawterm_json_content(&content).is_err());
+        }
+    }
 }

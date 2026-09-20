@@ -34,6 +34,8 @@ UPDATER_ARTIFACTS = {
     "windows-aarch64-nsis": "ZzClawTerm_{version}_windows_arm64-setup.exe",
 }
 
+CHANNEL_MANIFEST_NAMES = ("latest.json", "downloads.json")
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -53,6 +55,12 @@ def expected_artifacts(version: str) -> set[str]:
 def artifact_url(base_url: str, tag: str, filename: str) -> str:
     # GitHub Releases asset download URL. `base_url` is the repository URL.
     return f"{base_url.rstrip('/')}/releases/download/{tag}/{filename}"
+
+
+def channel_manifest_destinations(version: str) -> dict[str, str]:
+    version = package_native.validate_version(version)
+    prefix = "channels/preview/" if "-" in version else ""
+    return {name: f"{prefix}{name}" for name in CHANNEL_MANIFEST_NAMES}
 
 
 def generate(

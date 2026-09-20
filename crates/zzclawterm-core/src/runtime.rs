@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::app_identity::AppFlavor;
+
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("unable to resolve home directory for installed configuration")]
@@ -36,21 +38,34 @@ impl AppRuntime {
         }
 
         let home = dirs::home_dir().ok_or(RuntimeError::MissingConfigDir)?;
-        let config_dir = home.join(".zzclawterm");
+        Ok(Self::installed_from(
+            &home,
+            dirs::cache_dir().as_deref(),
+            AppFlavor::current(),
+        ))
+    }
+
+    pub fn installed_config_dir(home: &Path, flavor: AppFlavor) -> PathBuf {
+        home.join(flavor.config_directory_name())
+    }
+
+    fn installed_from(home: &Path, cache: Option<&Path>, flavor: AppFlavor) -> Self {
+        let config_dir = Self::installed_config_dir(home, flavor);
         let data_dir = config_dir.clone();
         let log_dir = data_dir.join("logs");
-        let cache_dir = dirs::cache_dir()
+        let cache_dir = cache
+            .map(Path::to_path_buf)
             .unwrap_or_else(|| data_dir.join("cache"))
-            .join("zzclawterm");
+            .join(flavor.desktop_id());
 
-        Ok(Self {
+        Self {
             mode: RuntimeMode::Installed,
             data_dir,
             config_dir,
             log_dir,
             cache_dir,
             portable_key_path: None,
-        })
+        }
     }
 
     pub fn ensure_directories(&self) -> Result<(), RuntimeError> {
@@ -94,6 +109,10 @@ impl AppRuntime {
 
     fn portable_from_current_exe() -> Option<Self> {
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        Self::portable_from_directory(&exe_dir)
+    }
+
+    fn portable_from_directory(exe_dir: &Path) -> Option<Self> {
         let marker = exe_dir.join("zzclawterm-portable");
         if !marker.exists() {
             return None;
@@ -127,5 +146,52 @@ impl AppRuntime {
             cache_dir,
             portable_key_path,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app_identity::AppFlavor;
+    use crate::runtime::{AppRuntime, RuntimeMode};
+    use std::path::Path;
+
+    #[test]
+    fn installed_flavors_isolate_all_runtime_and_instance_paths() {
+        let home = Path::new("home");
+        let stable = AppRuntime::installed_from(home, Some(Path::new("cache")), AppFlavor::Stable);
+        let preview =
+            AppRuntime::installed_from(home, Some(Path::new("cache")), AppFlavor::Preview);
+        assert_eq!(stable.config_dir(), home.join(".zzclawterm"));
+        assert_eq!(preview.config_dir(), home.join(".zzclawterm-preview"));
+        assert_eq!(stable.cache_dir(), Path::new("cache/zzclawterm"));
+        assert_eq!(preview.cache_dir(), Path::new("cache/zzclawterm-preview"));
+        assert_ne!(stable.data_dir(), preview.data_dir());
+        assert_ne!(stable.log_dir(), preview.log_dir());
+        assert_ne!(
+            stable.config_dir().join(".instance/owner.lock"),
+            preview.config_dir().join(".instance/owner.lock")
+        );
+        let stable = AppRuntime::installed_from(home, None, AppFlavor::Stable);
+        let preview = AppRuntime::installed_from(home, None, AppFlavor::Preview);
+        assert_ne!(stable.cache_dir(), preview.cache_dir());
+    }
+
+    #[test]
+    fn portable_runtime_remains_directory_local() {
+        let directory =
+            std::env::temp_dir().join(format!("zzclawterm-runtime-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(AppRuntime::portable_from_directory(&directory).is_none());
+        std::fs::write(directory.join("zzclawterm-portable"), b"").unwrap();
+        let runtime = AppRuntime::portable_from_directory(&directory).unwrap();
+        assert_eq!(runtime.mode(), RuntimeMode::Portable);
+        assert_eq!(runtime.config_dir(), directory.join("data/config"));
+        assert_eq!(runtime.log_dir(), directory.join("data/logs"));
+        assert_eq!(runtime.cache_dir(), directory.join("data/cache"));
+        assert_eq!(
+            runtime.portable_key_path(),
+            Some(directory.join("data/config/portable.key").as_path())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

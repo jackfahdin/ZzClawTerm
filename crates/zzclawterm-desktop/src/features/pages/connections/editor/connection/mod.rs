@@ -3,6 +3,7 @@ mod rdp;
 mod recording;
 mod serial;
 mod ssh;
+mod tags;
 mod telnet;
 mod vnc;
 
@@ -298,13 +299,20 @@ impl ZzClawTermApp {
             })
             .unwrap_or_else(|| none_label.to_string());
         let password_label = editor
-            .password_id
-            .as_deref()
+            .account_id
+            .as_ref()
+            .filter(|_| {
+                matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                )
+            })
+            .or(editor.password_id.as_ref())
             .and_then(|id| {
                 self.security
                     .passwords()
                     .iter()
-                    .find(|password| password.id == id)
+                    .find(|password| password.id == id.as_str())
                     .map(|password| password.name.clone())
             })
             .unwrap_or_else(|| t!("dialog.selectPassword").to_string());
@@ -411,14 +419,22 @@ impl ZzClawTermApp {
         let mut password_options = vec![ConnectionEditorChoice::new(
             None,
             none_label.clone(),
-            editor.password_id.is_none(),
+            editor.account_id.is_none() && editor.password_id.is_none(),
         )];
         password_options.extend(self.security.passwords().iter().map(|password| {
             ConnectionEditorChoice::new(
                 Some(password.id.clone()),
                 password.name.clone(),
-                editor.password_id.as_deref() == Some(password.id.as_str()),
+                if matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                ) {
+                    editor.account_id.as_deref() == Some(password.id.as_str())
+                } else {
+                    editor.password_id.as_deref() == Some(password.id.as_str())
+                },
             )
+            .subtitle(password.username.clone())
         }));
         let mut otp_options = vec![ConnectionEditorChoice::new(
             None,
@@ -915,6 +931,11 @@ impl ZzClawTermApp {
         for (select_key, choices, placeholder) in [
             (
                 ConnectionEditorSelect::SavedPassword,
+                password_options.as_slice(),
+                password_label.clone(),
+            ),
+            (
+                ConnectionEditorSelect::Account,
                 password_options.as_slice(),
                 password_label.clone(),
             ),
@@ -1477,6 +1498,7 @@ impl ZzClawTermApp {
                         &fields,
                         cx,
                     ))
+                    .child(tags::connection_tags_field(palette, &editor, &fields, cx))
                     .when_some(editor.error.clone(), |this, error| {
                         this.child(
                             div()
@@ -2076,10 +2098,11 @@ fn connection_editor_agent_identity_picker(
     .into_any_element()
 }
 
-fn connection_editor_select_keys() -> [ConnectionEditorSelect; 29] {
+fn connection_editor_select_keys() -> [ConnectionEditorSelect; 30] {
     [
         ConnectionEditorSelect::Group,
         ConnectionEditorSelect::SavedPassword,
+        ConnectionEditorSelect::Account,
         ConnectionEditorSelect::SshKey,
         ConnectionEditorSelect::Otp,
         ConnectionEditorSelect::Proxy,
@@ -2119,6 +2142,7 @@ fn connection_editor_select_id(select: ConnectionEditorSelect) -> &'static str {
         ConnectionEditorSelect::SshAgentForwardingPolicy => "connection-editor-ssh-agent-policy",
         ConnectionEditorSelect::Group => "connection-editor-group-select",
         ConnectionEditorSelect::SavedPassword => "connection-editor-saved-password",
+        ConnectionEditorSelect::Account => "connection-editor-account",
         ConnectionEditorSelect::SshKey => "connection-editor-ssh-key",
         ConnectionEditorSelect::Otp => "connection-editor-otp",
         ConnectionEditorSelect::Proxy => "connection-editor-proxy",
@@ -2151,6 +2175,7 @@ fn connection_editor_select_is_searchable(select: ConnectionEditorSelect) -> boo
     matches!(
         select,
         ConnectionEditorSelect::SavedPassword
+            | ConnectionEditorSelect::Account
             | ConnectionEditorSelect::SshKey
             | ConnectionEditorSelect::Otp
             | ConnectionEditorSelect::Proxy
@@ -2161,6 +2186,7 @@ fn connection_editor_select_is_searchable(select: ConnectionEditorSelect) -> boo
 fn connection_editor_select_search_placeholder(select: ConnectionEditorSelect) -> Option<String> {
     match select {
         ConnectionEditorSelect::SavedPassword => Some(t!("dialog.selectPassword").to_string()),
+        ConnectionEditorSelect::Account => Some(t!("dialog.account").to_string()),
         ConnectionEditorSelect::SshKey => Some(t!("dialog.privateKey").to_string()),
         ConnectionEditorSelect::Otp => Some(t!("dialog.searchOtpEntries").to_string()),
         ConnectionEditorSelect::Proxy => Some(t!("network.searchProxies").to_string()),
@@ -2913,6 +2939,8 @@ mod tests {
             kind: ConnectionKindTab::Ssh,
             name: String::new(),
             description: String::new(),
+            tags: Vec::new(),
+            new_tag: String::new(),
             icon: None,
             icon_auto_detect: false,
             recording: None,
@@ -2938,6 +2966,7 @@ mod tests {
             vnc_view_only: false,
             password_source: ConnectionEditorPasswordSource::Ask,
             password_id: None,
+            account_id: None,
             password: zzclawterm_core::SecretString::default(),
             existing_password: None,
             key_id: None,
@@ -2945,6 +2974,7 @@ mod tests {
             auto_fill_otp: false,
             proxy_id: None,
             proxy_jump_id: None,
+            host_key_alias: None,
             x11_forwarding: false,
             dynamic_tab_title: false,
             agent_endpoint: Default::default(),
@@ -2958,6 +2988,7 @@ mod tests {
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp_enabled: true,
+            sftp_compatibility_mode: false,
             sftp_cwd_follow_mode: "shell_integration".to_string(),
             sftp_shell_detection_timeout_ms: "3000".to_string(),
             sftp_pipeline_depth: None,

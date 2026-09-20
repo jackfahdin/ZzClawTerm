@@ -59,13 +59,14 @@ pub fn parse_asset_view_mode(value: &str) -> AssetViewMode {
     }
 }
 
-/// The four AND-combined asset filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// AND-combined filters; legacy fact filters remain available to non-UI callers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AssetFilterKey {
     Linux,
     Windows,
     Gpu,
     Npu,
+    Tag(String),
 }
 
 /// The seven sortable columns.
@@ -226,6 +227,7 @@ pub fn connection_matches_filters(
             AssetFilterKey::Windows => is_windows_asset(asset),
             AssetFilterKey::Gpu => has_gpu(asset),
             AssetFilterKey::Npu => has_npu(asset),
+            AssetFilterKey::Tag(tag) => connection.tags.contains(tag),
         };
         if !matches {
             return false;

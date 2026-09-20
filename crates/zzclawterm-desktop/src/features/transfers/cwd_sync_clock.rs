@@ -46,13 +46,18 @@ impl ZzClawTermApp {
     /// `sync_transfer_cwd_if_due` re-checks them every beat instead.
     pub(in crate::features) fn transfer_cwd_sync_needs_polling(&self) -> bool {
         self.current_left_panel() == Some(NavItem::Transfers)
+            && self.settings.summary().ui_file_explorer_view_mode
+                == zzclawterm_core::TransferBrowserViewMode::List
     }
 
     /// List the remote cwd if it has gone stale.
     ///
     /// The same conditions and the same deferral gate the shell-wide clock applied.
     pub(in crate::features) fn sync_transfer_cwd_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.session.active_file_browser_backend().is_none() || self.remote_refresh_is_deferred()
+        if self.settings.summary().ui_file_explorer_view_mode
+            != zzclawterm_core::TransferBrowserViewMode::List
+            || self.session.active_file_browser_backend().is_none()
+            || self.remote_refresh_is_deferred()
         {
             return false;
         }

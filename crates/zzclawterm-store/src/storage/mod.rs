@@ -41,7 +41,9 @@ use self::keyword_highlights::{
     merge_keyword_highlight_rules, normalize_keyword_highlight_rule, parse_keyword_highlight_import,
 };
 use self::known_hosts::replace_known_hosts_text_in_txn;
-pub use self::known_hosts::{KnownHostCheck, RdpCertificateMetadata, RdpKnownHostCheck};
+pub use self::known_hosts::{
+    KnownHostCheck, KnownHostEntry, RdpCertificateMetadata, RdpKnownHostCheck,
+};
 pub use self::remote_file_backend::{RemoteFileBackendCache, RemoteFileBackendCacheEntry};
 
 const DATABASE_FILE: &str = "zzclawterm.redb";
@@ -1035,14 +1037,7 @@ impl ConnectionStore {
         } else {
             None
         };
-        let master_key_token = master_key_token.as_deref();
-        for profile in &mut settings.provider_profiles {
-            profile.api_key = encrypt_optional_secret(&crypto, master_key_token, &profile.api_key)?;
-        }
-        for credential in &mut settings.provider_credentials {
-            credential.api_key =
-                encrypt_optional_secret(&crypto, master_key_token, &credential.api_key)?;
-        }
+        encrypt_ai_settings_secrets(&mut settings, &crypto, master_key_token.as_deref())?;
         Ok(settings)
     }
 
@@ -1177,6 +1172,21 @@ impl ConnectionStore {
             })
             .collect()
     }
+}
+
+fn encrypt_ai_settings_secrets(
+    settings: &mut AiSettings,
+    crypto: &CredentialCrypto,
+    master_key_token: Option<&str>,
+) -> Result<(), StorageError> {
+    for profile in &mut settings.provider_profiles {
+        profile.api_key = encrypt_optional_secret(crypto, master_key_token, &profile.api_key)?;
+    }
+    for credential in &mut settings.provider_credentials {
+        credential.api_key =
+            encrypt_optional_secret(crypto, master_key_token, &credential.api_key)?;
+    }
+    Ok(())
 }
 
 fn merge_unknown_json(current: &serde_json::Value, next: &mut serde_json::Value) {

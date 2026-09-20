@@ -621,12 +621,18 @@ pub(super) fn build_shell_command(shell_path: &Path, script: &str) -> Command {
     }
     #[cfg(windows)]
     {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
         let mut command = Command::new(shell_path);
         if is_powershell_shell(shell_path) {
             command.args(["-NoLogo", "-Command", script]);
         } else {
             command.args(["/d", "/s", "/c", script]);
         }
+        // Environment discovery is a pipe-only background probe. ZzClawTerm is a
+        // GUI-subsystem process, so an ordinary console child would otherwise
+        // create a short-lived visible console during application startup.
+        command.creation_flags(CREATE_NO_WINDOW);
         command
     }
 }

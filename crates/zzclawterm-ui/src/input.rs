@@ -523,6 +523,7 @@ pub struct ZzClawInputShell {
     size: Size,
     multi_line: bool,
     search: bool,
+    framed: bool,
     trailing: Vec<AnyElement>,
     on_key_down: Option<KeyDownHandler>,
 }
@@ -535,6 +536,7 @@ impl ZzClawInputShell {
             size: Size::Medium,
             multi_line: false,
             search: false,
+            framed: true,
             trailing: Vec::new(),
             on_key_down: None,
         }
@@ -553,6 +555,12 @@ impl ZzClawInputShell {
 
     fn search(mut self) -> Self {
         self.search = true;
+        self
+    }
+
+    /// Remove the component chrome when a parent surface owns the frame.
+    pub fn bare(mut self) -> Self {
+        self.framed = false;
         self
     }
 
@@ -578,6 +586,7 @@ impl RenderOnce for ZzClawInputShell {
             size,
             multi_line,
             search,
+            framed,
             trailing,
             on_key_down,
         } = self;
@@ -590,6 +599,9 @@ impl RenderOnce for ZzClawInputShell {
             ComponentState::Input(state) => {
                 let mut input = Input::new(&state)
                     .with_size(size)
+                    .appearance(framed)
+                    .bordered(framed)
+                    .focus_bordered(framed)
                     .disabled(disabled)
                     .readonly(readonly);
                 if multi_line || state_multi_line {
@@ -657,6 +669,18 @@ impl ZzClawSearchInput {
 
     pub fn trailing(mut self, child: impl IntoElement) -> Self {
         self.shell = self.shell.trailing(child);
+        self
+    }
+
+    /// Use the 24px input size inside dense toolbars and overlays.
+    pub fn compact(mut self) -> Self {
+        self.shell = self.shell.compact();
+        self
+    }
+
+    /// Remove the input frame when the containing overlay draws it.
+    pub fn bare(mut self) -> Self {
+        self.shell = self.shell.bare();
         self
     }
 

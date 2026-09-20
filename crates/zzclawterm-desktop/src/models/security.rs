@@ -4,11 +4,13 @@ pub(crate) enum SecurityAuthTab {
     Passwords,
     Credentials,
     Otp,
+    KnownHosts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SecurityUnlockAction {
     ViewPrivateKey(String),
+    CopyPublicKey(String),
     OpenPasswordEditor(Option<String>),
     RevealPassword(String),
     CopyPassword(String),
@@ -26,6 +28,7 @@ impl SecurityAuthTab {
             Self::Passwords => "securityAuth.passwords",
             Self::Credentials => "securityAuth.credentials",
             Self::Otp => "securityAuth.otp",
+            Self::KnownHosts => "securityAuth.knownHosts",
         }
     }
 
@@ -35,6 +38,7 @@ impl SecurityAuthTab {
             Self::Passwords => "Pwd",
             Self::Credentials => "Cred",
             Self::Otp => "OTP",
+            Self::KnownHosts => "Hosts",
         }
     }
 }
@@ -82,6 +86,7 @@ pub(crate) struct SecurityOtpEditorState {
 pub(crate) struct SecurityPasswordEditorState {
     pub(crate) id: Option<String>,
     pub(crate) name: String,
+    pub(crate) username: String,
     pub(crate) password: zzclawterm_core::SecretString,
     pub(crate) has_password: bool,
     pub(crate) show_password: bool,

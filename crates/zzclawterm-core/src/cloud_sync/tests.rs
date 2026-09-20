@@ -1792,6 +1792,7 @@ fn options(config_dir: &Path, remote_dir: &Path, device_id: &str) -> LocalCloudS
 fn local_connection(id: &str, name: &str, shell: &str) -> SavedConnection {
     SavedConnection {
         extensions: Default::default(),
+        tags: Vec::new(),
         id: id.to_string(),
         name: name.to_string(),
         config: ConnectionType::LocalTerminal {

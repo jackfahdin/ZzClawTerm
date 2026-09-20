@@ -25,14 +25,18 @@ impl ZzClawTermApp {
                 if self.transfer.rename_dialog_is_open() {
                     return Vec::new();
                 }
-                let Some(entry) = self
-                    .transfer
-                    .browser_view()
-                    .entries
-                    .iter()
-                    .find(|entry| entry.matches_identity(&path))
-                    .cloned()
-                else {
+                let Some(entry) = (if self.settings.summary().ui_file_explorer_view_mode
+                    == zzclawterm_core::TransferBrowserViewMode::Tree
+                {
+                    self.selected_transfer_entry()
+                } else {
+                    self.transfer
+                        .browser_view()
+                        .entries
+                        .iter()
+                        .find(|entry| entry.matches_identity(&path))
+                        .cloned()
+                }) else {
                     return Vec::new();
                 };
                 self.transfer_browser_entry_context_menu_items(entry, cx)
@@ -144,6 +148,27 @@ impl ZzClawTermApp {
             };
             items.push(item);
         }
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            let show_hidden = self.settings.summary().ui_file_explorer_show_hidden_files;
+            items.push(ZzClawMenuItem::separator());
+            items.push(
+                ZzClawMenuItem::action(if show_hidden {
+                    t!("fileExplorer.hideHiddenFiles")
+                } else {
+                    t!("fileExplorer.showHiddenFiles")
+                })
+                .icon(if show_hidden {
+                    "icons/eye-off.svg"
+                } else {
+                    "icons/eye.svg"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_transfer_browser_hidden_files(cx);
+                })),
+            );
+        }
         items
     }
 
@@ -195,6 +220,7 @@ impl ZzClawTermApp {
 
         let ai_actions = self.enabled_transfer_file_ai_actions_for_entry(&entry);
         let send_targets = self.transfer_send_to_targets();
+        let selection_count = self.selected_transfer_entries().len();
         let policy = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_directory: entry.is_directory(),
             show_open_internal: self.show_transfer_open_internal_menu_entry(&entry),
@@ -286,6 +312,7 @@ impl ZzClawTermApp {
                 }
                 Node::Action(Action::Rename) => ZzClawMenuItem::action(t!("fileExplorer.cmRename"))
                     .icon("icons/session/rename.svg")
+                    .disabled(selection_count != 1)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_transfer_rename_dialog(window, cx);
                         this.defer_transfer_panel_snapshot_flush(cx);

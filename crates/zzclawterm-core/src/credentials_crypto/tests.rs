@@ -76,6 +76,29 @@ fn generated_master_key_encrypts_and_decrypts_secret() {
 }
 
 #[test]
+fn generated_master_key_uses_configured_master_password() {
+    let crypto = CredentialCrypto::new(None, Some("configured-password".into()));
+    let master_key_token = crypto
+        .generate_master_key_token()
+        .expect("generate password-wrapped master key");
+    let secret = crypto
+        .encrypt_secret(&master_key_token, "stored-secret")
+        .expect("encrypt secret");
+
+    assert_eq!(
+        crypto
+            .decrypt_secret(&master_key_token, &secret)
+            .expect("decrypt secret"),
+        "stored-secret"
+    );
+    assert!(
+        CredentialCrypto::new(None, Some("wrong-password".into()))
+            .decrypt_secret(&master_key_token, &secret)
+            .is_err()
+    );
+}
+
+#[test]
 fn rewraps_master_key_between_fallback_and_password_keys() {
     let fallback = CredentialCrypto::default();
     let original_token = fallback

@@ -6,7 +6,7 @@ use gpui::{
     Subscription, Task, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
-use zzclawterm_core::NoteDocument;
+use zzclawterm_core::{NoteDocument, NotesSnapshot};
 use zzclawterm_store::{StoreDomain, store_request};
 use zzclawterm_ui::{
     ZzClawConfirmDialog, ZzClawDialogFooter, ZzClawDialogWindowExt as _, ZzClawDocumentEditor,
@@ -44,6 +44,23 @@ enum SaveStatus {
     Conflict,
     Deleted,
     ExternalUpdate,
+}
+
+fn editor_blocks_export(dirty: bool, saving: bool, refreshing: bool, status: SaveStatus) -> bool {
+    dirty
+        || saving
+        || refreshing
+        || matches!(
+            status,
+            SaveStatus::Conflict | SaveStatus::Deleted | SaveStatus::ExternalUpdate
+        )
+}
+
+fn matches_export_revision(note_id: &str, revision: u64, snapshot: &NotesSnapshot) -> bool {
+    snapshot
+        .notes
+        .iter()
+        .any(|note| note.id == note_id && note.revision == revision)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +109,7 @@ enum MarkdownCommand {
     CodeBlock(&'static str),
 }
 
-struct NoteEditorWindow {
+pub(super) struct NoteEditorWindow {
     app: Entity<ZzClawTermApp>,
     note: NoteDocument,
     editor: Entity<ZzClawDocumentEditorState>,
@@ -114,6 +131,19 @@ struct NoteEditorWindow {
 }
 
 impl NoteEditorWindow {
+    pub(super) fn blocks_export(&self) -> bool {
+        editor_blocks_export(
+            self.dirty,
+            self.saving,
+            self.external_refresh_pending,
+            self.status,
+        )
+    }
+
+    pub(super) fn matches_export_snapshot(&self, snapshot: &NotesSnapshot) -> bool {
+        matches_export_revision(&self.note.id, self.note.revision, snapshot)
+    }
+
     fn new(
         app: Entity<ZzClawTermApp>,
         note: NoteDocument,
@@ -1015,6 +1045,10 @@ fn open_note_editor_window(app: Entity<ZzClawTermApp>, note: NoteDocument, cx: &
         let view =
             cx.new(|cx| NoteEditorWindow::new(view_app.clone(), note_for_view, chrome, window, cx));
         let weak_view = view.downgrade();
+        view_app.update(cx, |app, _| {
+            app.notes
+                .register_editor_view(close_note_id.clone(), weak_view.clone());
+        });
         window.on_window_should_close(cx, move |_, cx| {
             let should_close = weak_view
                 .update(cx, |editor, cx| editor.request_close(cx))
@@ -1044,9 +1078,47 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AUTOSAVE_DELAY, ExternalNoteAction, MarkdownCommand, NotesCatalogEvent,
-        event_revision_for_note, external_note_action, markdown_edit,
+        AUTOSAVE_DELAY, ExternalNoteAction, MarkdownCommand, NotesCatalogEvent, SaveStatus,
+        editor_blocks_export, event_revision_for_note, external_note_action, markdown_edit,
+        matches_export_revision,
     };
+
+    #[test]
+    fn unsaved_saving_conflicted_or_refreshing_editors_block_export() {
+        assert!(!editor_blocks_export(
+            false,
+            false,
+            false,
+            SaveStatus::Saved
+        ));
+        assert!(editor_blocks_export(
+            true,
+            false,
+            false,
+            SaveStatus::Unsaved
+        ));
+        assert!(editor_blocks_export(false, true, false, SaveStatus::Saving));
+        assert!(editor_blocks_export(false, false, true, SaveStatus::Saved));
+        for status in [
+            SaveStatus::Conflict,
+            SaveStatus::Deleted,
+            SaveStatus::ExternalUpdate,
+        ] {
+            assert!(editor_blocks_export(false, false, false, status));
+        }
+    }
+
+    #[test]
+    fn a_save_completed_after_snapshot_read_cannot_export_the_older_revision() {
+        let snapshot: zzclawterm_core::NotesSnapshot = serde_json::from_value(serde_json::json!({
+            "notes": [{ "id": "n", "parent_id": null, "title": "N", "markdown": "saved",
+                "sort_order": 0, "revision": 7, "created_at_ms": 0, "updated_at_ms": 0 }]
+        }))
+        .expect("snapshot");
+        assert!(matches_export_revision("n", 7, &snapshot));
+        assert!(!matches_export_revision("n", 8, &snapshot));
+        assert!(!matches_export_revision("missing", 7, &snapshot));
+    }
 
     #[test]
     fn markdown_commands_wrap_selection_and_snap_unicode_boundaries() {

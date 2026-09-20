@@ -7,9 +7,10 @@ use crate::models::{
 };
 use gpui::{Context, Window};
 use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::RemoteFilePath;
-
-use super::super::helpers::{remote_child_path, remote_file_name, remote_parent_path};
+use zzclawterm_transport::{
+    FileBrowserBackendKind, RemoteFilePath, file_browser_join, file_browser_name,
+    file_browser_parent, file_browser_path_is_root,
+};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_transfer_move_dialog(
@@ -19,19 +20,34 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.forget_text_inputs("transfer.move.");
-        let entry = self
-            .transfer
-            .browser_view()
-            .entries
-            .iter()
-            .find(|entry| entry.matches_identity(&identity))
-            .cloned();
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(FileBrowserBackendKind::Remote);
+        let entry = if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            self.selected_transfer_entries()
+                .into_iter()
+                .find(|entry| entry.path == identity || entry.matches_identity(&identity))
+        } else {
+            self.transfer
+                .browser_view()
+                .entries
+                .iter()
+                .find(|entry| entry.matches_identity(&identity))
+                .cloned()
+        };
         let old_path = entry
             .as_ref()
             .map(|entry| entry.path.clone())
             .unwrap_or(identity);
-        let name = remote_file_name(&old_path);
-        if old_path.trim().is_empty() || old_path == "/" || name == "." || name == ".." {
+        let name = file_browser_name(backend, &old_path);
+        if old_path.trim().is_empty()
+            || file_browser_path_is_root(backend, &old_path)
+            || name == "."
+            || name == ".."
+        {
             self.shell
                 .set_status(t!("fileTransfer.statusCannotMove", path = old_path).to_string());
             cx.notify();
@@ -77,8 +93,15 @@ impl ZzClawTermApp {
             .selected_transfer_entries()
             .into_iter()
             .filter(|entry| {
-                let name = remote_file_name(&entry.path);
-                !entry.path.trim().is_empty() && entry.path != "/" && name != "." && name != ".."
+                let backend = self
+                    .session
+                    .active_file_browser_backend()
+                    .unwrap_or(FileBrowserBackendKind::Remote);
+                let name = file_browser_name(backend, &entry.path);
+                !entry.path.trim().is_empty()
+                    && !file_browser_path_is_root(backend, &entry.path)
+                    && name != "."
+                    && name != ".."
             })
             .collect::<Vec<_>>();
 
@@ -95,21 +118,25 @@ impl ZzClawTermApp {
         }
 
         self.forget_text_inputs("transfer.move.");
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(FileBrowserBackendKind::Remote);
         let additional_entries = entries
             .iter()
             .skip(1)
             .map(|entry| TransferMoveEntry {
                 old_path: entry.path.clone(),
                 raw_path_token: entry.raw_path_token.clone(),
-                name: remote_file_name(&entry.path),
+                name: file_browser_name(backend, &entry.path),
             })
             .collect::<Vec<_>>();
         // The default destination directory is the parent the selection lives in.
-        let default_dir = remote_parent_path(&first.path);
+        let default_dir = file_browser_parent(backend, &first.path);
         self.transfer.open_move_dialog(TransferMoveState {
             old_path: first.path.clone(),
             raw_path_token: first.raw_path_token.clone(),
-            name: remote_file_name(&first.path),
+            name: file_browser_name(backend, &first.path),
             value: default_dir,
             additional_entries,
         });
@@ -160,12 +187,11 @@ impl ZzClawTermApp {
         // Batch move: `value` is a destination directory and each selected entry
         // is moved into it under its own name.
         if !state.additional_entries.is_empty() {
-            let target_dir = new_path.trim_end_matches('/').to_string();
-            let target_dir = if target_dir.is_empty() {
-                "/".to_string()
-            } else {
-                target_dir
-            };
+            let backend = self
+                .session
+                .active_file_browser_backend()
+                .unwrap_or(FileBrowserBackendKind::Remote);
+            let target_dir = new_path;
             self.transfer.close_move_dialog();
             let mut started = 0;
             let all_entries = std::iter::once(TransferMoveEntry {
@@ -176,7 +202,7 @@ impl ZzClawTermApp {
             .chain(state.additional_entries)
             .collect::<Vec<_>>();
             for entry in all_entries {
-                let destination = remote_child_path(&target_dir, &entry.name);
+                let destination = file_browser_join(backend, &target_dir, &entry.name);
                 if destination == entry.old_path {
                     continue;
                 }
@@ -243,8 +269,9 @@ impl ZzClawTermApp {
                 return;
             }
         };
+        let backend = service.kind();
         let old_display_path = old_path.display_path.clone();
-        let parent_path = remote_parent_path(&old_display_path);
+        let parent_path = file_browser_parent(backend, &old_display_path);
         let id = self.transfer.next_transfer_job_id("sftp-move");
         self.transfer.enqueue_transfer_job(TransferJobState {
             id: id.clone(),
@@ -262,6 +289,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell.set_status(
             t!(
@@ -301,14 +329,18 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(FileBrowserBackendKind::Remote);
         let paths = self
             .selected_transfer_entries()
             .into_iter()
             .map(|entry| entry.remote_path())
             .filter(|path| {
-                let name = remote_file_name(&path.display_path);
+                let name = file_browser_name(backend, &path.display_path);
                 !path.display_path.trim().is_empty()
-                    && path.display_path != "/"
+                    && !file_browser_path_is_root(backend, &path.display_path)
                     && name != "."
                     && name != ".."
             })
@@ -323,7 +355,7 @@ impl ZzClawTermApp {
         let title = if delete_count == 1 {
             t!(
                 "fileExplorer.sureDelete",
-                name = remote_file_name(&paths[0].display_path)
+                name = file_browser_name(backend, &paths[0].display_path)
             )
             .to_string()
         } else {
@@ -332,7 +364,7 @@ impl ZzClawTermApp {
         let preview = paths
             .iter()
             .take(6)
-            .map(|path| truncate_preview(&remote_file_name(&path.display_path), 72))
+            .map(|path| truncate_preview(&file_browser_name(backend, &path.display_path), 72))
             .collect::<Vec<_>>()
             .join("\n");
         let remaining = delete_count.saturating_sub(6);
@@ -385,8 +417,9 @@ impl ZzClawTermApp {
                 return;
             }
         };
+        let backend = service.kind();
         let remote_display_path = remote_path.display_path.clone();
-        let parent_path = remote_parent_path(&remote_display_path);
+        let parent_path = file_browser_parent(backend, &remote_display_path);
         let id = self.transfer.next_transfer_job_id("sftp-delete");
         self.transfer.enqueue_transfer_job(TransferJobState {
             id: id.clone(),
@@ -407,6 +440,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell.set_status(
             t!(

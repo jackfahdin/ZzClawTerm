@@ -15,8 +15,8 @@ use super::{
 use zzclawterm_core::{
     AppSettingsSummary, CredentialCrypto, DEFAULT_RECORDING_PATH_TEMPLATE,
     DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, RecordingMode,
-    RecordingRotationPolicy, SearchEngineConfig, default_panel_open_mode, default_search_engines,
-    normalize_panel_open_mode,
+    RecordingRotationPolicy, SearchEngineConfig, TransferBrowserViewMode, default_panel_open_mode,
+    default_search_engines, normalize_panel_open_mode,
 };
 
 impl ConnectionStore {
@@ -115,6 +115,11 @@ impl ConnectionStore {
                     _ => 700,
                 }
             },
+            bold_default_foreground: json_bool(
+                &value,
+                &["appearance", "bold_default_foreground"],
+                false,
+            ),
             x11_display: json_string(&value, &["terminal", "x11_display"], ""),
             x11_server_autostart: json_bool(&value, &["terminal", "x11_server_autostart"], true),
             x11_server_path: json_string(&value, &["terminal", "x11_server_path"], ""),
@@ -245,6 +250,11 @@ impl ConnectionStore {
                 &["ui", "file_explorer_show_hidden_files"],
                 true,
             ),
+            ui_file_explorer_view_mode: TransferBrowserViewMode::from_compat_value(&json_string(
+                &value,
+                &["ui", "file_explorer_view_mode"],
+                "list",
+            )),
             ui_file_explorer_auto_sync_cwd_connection_ids: json_string_vec(
                 &value,
                 &["ui", "file_explorer_auto_sync_cwd_connection_ids"],
@@ -723,6 +733,14 @@ impl ConnectionStore {
             &["ui", "file_explorer_show_hidden_files"],
             serde_json::Value::Bool(settings.ui_file_explorer_show_hidden_files),
         );
+        set_nested_json_string(
+            &mut value,
+            &["ui", "file_explorer_view_mode"],
+            settings
+                .ui_file_explorer_view_mode
+                .compat_value()
+                .to_string(),
+        );
         set_nested_json_value(
             &mut value,
             &["ui", "file_explorer_auto_sync_cwd_connection_ids"],
@@ -1060,6 +1078,11 @@ impl ConnectionStore {
             &["appearance", "font_weight_bold"],
             serde_json::Value::from(font_weight_bold),
         );
+        if settings.bold_default_foreground {
+            set_nested_json_bool(&mut value, &["appearance", "bold_default_foreground"], true);
+        } else {
+            remove_nested_json_value(&mut value, &["appearance", "bold_default_foreground"]);
+        }
         set_nested_json_string(
             &mut value,
             &["terminal", "x11_display"],
@@ -1962,6 +1985,25 @@ fn set_nested_json_string(value: &mut serde_json::Value, path: &[&str], new_valu
 
 fn set_nested_json_bool(value: &mut serde_json::Value, path: &[&str], new_value: bool) {
     set_nested_json_value(value, path, serde_json::Value::Bool(new_value));
+}
+
+fn remove_nested_json_value(value: &mut serde_json::Value, path: &[&str]) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut current = value;
+    for key in parents {
+        let Some(next) = current
+            .as_object_mut()
+            .and_then(|object| object.get_mut(*key))
+        else {
+            return;
+        };
+        current = next;
+    }
+    if let Some(object) = current.as_object_mut() {
+        object.remove(*last);
+    }
 }
 
 /// The title bar's centre reading, defaulting to the session it always showed.

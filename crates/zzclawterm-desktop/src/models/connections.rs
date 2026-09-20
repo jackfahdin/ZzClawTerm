@@ -53,6 +53,7 @@ pub(crate) enum ConnectionEditorSelect {
     SshAgentForwardingPolicy,
     Group,
     SavedPassword,
+    Account,
     SshKey,
     Otp,
     Proxy,
@@ -168,6 +169,7 @@ pub(crate) enum ConnectionEditorCredentialOverlay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConnectionEditorField {
     Name,
+    NewTag,
     NewGroupName,
     Description,
     Host,
@@ -346,6 +348,8 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) kind: ConnectionKindTab,
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) new_tag: String,
     pub(crate) icon: Option<String>,
     /// Mirrors `SavedConnection::icon_auto_detect_enabled` while editing.
     pub(crate) icon_auto_detect: bool,
@@ -371,6 +375,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) vnc_view_only: bool,
     pub(crate) password_source: ConnectionEditorPasswordSource,
     pub(crate) password_id: Option<String>,
+    pub(crate) account_id: Option<String>,
     pub(crate) password: zzclawterm_core::SecretString,
     pub(crate) existing_password: Option<zzclawterm_core::SecretString>,
     pub(crate) key_id: Option<String>,
@@ -378,6 +383,8 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) auto_fill_otp: bool,
     pub(crate) proxy_id: Option<String>,
     pub(crate) proxy_jump_id: Option<String>,
+    /// Preserved for imported SSH configs even though it is not an ordinary editor field.
+    pub(crate) host_key_alias: Option<String>,
     pub(crate) x11_forwarding: bool,
     pub(crate) dynamic_tab_title: bool,
     pub(crate) agent_endpoint: zzclawterm_core::SshAgentEndpoint,
@@ -391,6 +398,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) ssh_profile: zzclawterm_core::SshProfile,
     pub(crate) terminal_type: Option<zzclawterm_core::SshTerminalType>,
     pub(crate) sftp_enabled: bool,
+    pub(crate) sftp_compatibility_mode: bool,
     pub(crate) sftp_cwd_follow_mode: String,
     pub(crate) sftp_shell_detection_timeout_ms: String,
     pub(crate) sftp_filename_encoding: String,
@@ -436,6 +444,24 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) connect_after_save: bool,
     pub(crate) focused_field: ConnectionEditorField,
     pub(crate) error: Option<String>,
+}
+
+impl ConnectionEditorState {
+    pub(crate) fn add_tag(&mut self) -> bool {
+        let tag = self.new_tag.trim();
+        if tag.is_empty() || self.tags.iter().any(|existing| existing == tag) {
+            return false;
+        }
+        self.tags.push(tag.to_string());
+        self.new_tag.clear();
+        true
+    }
+
+    pub(crate) fn remove_tag(&mut self, tag: &str) -> bool {
+        let count = self.tags.len();
+        self.tags.retain(|existing| existing != tag);
+        count != self.tags.len()
+    }
 }
 
 impl std::fmt::Debug for ConnectionEditorState {

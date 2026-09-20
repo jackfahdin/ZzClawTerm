@@ -12,8 +12,8 @@ pub use runtime::{
 };
 
 pub use storage::{
-    ConfigBackupInfo, ConnectionStore, KnownHostCheck, RdpCertificateMetadata, RdpKnownHostCheck,
-    RemoteFileBackendCache, RemoteFileBackendCacheEntry, StorageError,
+    ConfigBackupInfo, ConnectionStore, KnownHostCheck, KnownHostEntry, RdpCertificateMetadata,
+    RdpKnownHostCheck, RemoteFileBackendCache, RemoteFileBackendCacheEntry, StorageError,
 };
 
 pub use portable_codec::{

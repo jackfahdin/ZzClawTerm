@@ -79,7 +79,7 @@ impl CloudSyncFeatureState {
             history_expanded: HashSet::new(),
             conflict: None,
             secret_draft: CloudSyncSecretDraft::default(),
-            status: "local provider ready".to_string(),
+            status: String::new(),
             job_running: false,
             focused_field: CloudSyncInputField::RemoteRoot,
             github: GithubGistAuthFeatureState {
@@ -668,6 +668,7 @@ mod tests {
         assert_eq!(cloud_sync.settings().provider, "webdav");
         assert_eq!(cloud_sync.settings().remote_root, "team");
         assert_eq!(cloud_sync.history().len(), 1);
+        assert!(cloud_sync.status().is_empty());
         assert!(
             cloud_sync
                 .take_github_auth_event_receiver()

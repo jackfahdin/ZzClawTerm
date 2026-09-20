@@ -431,12 +431,35 @@ impl ConnectionStore {
 
     pub fn load_notes_snapshot(&self) -> Result<NotesSnapshot, StorageError> {
         self.ensure_notes_ready()?;
+        // One read transaction keeps folder references and document revisions consistent.
+        let txn = self.db.begin_read()?;
+        let folder_table = txn.open_table(NOTE_FOLDERS_TABLE)?;
+        let mut folders = Vec::new();
+        for item in folder_table.iter()? {
+            let (key, value) = item?;
+            if key.value().starts_with(NOTE_FOLDER_PREFIX) {
+                folders.push(deserialize_json(value.value())?);
+            }
+        }
+        let note_table = txn.open_table(NOTES_TABLE)?;
+        let mut notes = Vec::new();
+        for item in note_table.iter()? {
+            let (key, value) = item?;
+            if key.value().starts_with(NOTE_DOCUMENT_PREFIX) {
+                notes.push(deserialize_json(value.value())?);
+            }
+        }
+        let extra = note_table
+            .get(NOTE_SNAPSHOT_EXTRA_KEY)?
+            .map(|value| deserialize_json(value.value()))
+            .transpose()?
+            .unwrap_or_default();
+        sort_note_folders(&mut folders);
+        sort_notes(&mut notes);
         Ok(NotesSnapshot {
-            folders: self.list_note_folders_ready()?,
-            notes: self.list_notes_ready()?,
-            extra: self
-                .read_json_table::<BTreeMap<String, Value>>(NOTES_TABLE, NOTE_SNAPSHOT_EXTRA_KEY)?
-                .unwrap_or_default(),
+            folders,
+            notes,
+            extra,
         })
     }
 

@@ -7,7 +7,7 @@ use crate::models::{
 };
 use gpui::{Context, Window};
 
-use super::super::helpers::remote_child_path;
+use zzclawterm_transport::file_browser_join;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_transfer_new_folder_dialog(
@@ -15,11 +15,7 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let parent_path = if self.transfer.browser_view().path.trim().is_empty() {
-            self.transfer.normalized_remote_path()
-        } else {
-            self.transfer.browser_view().path.clone()
-        };
+        let parent_path = self.transfer_browser_operation_target_directory();
         self.transfer
             .open_new_folder_dialog(TransferNewFolderState {
                 parent_path,
@@ -74,7 +70,11 @@ impl ZzClawTermApp {
             return false;
         }
         self.transfer.close_new_folder_dialog();
-        let remote_path = remote_child_path(&state.parent_path, &name);
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
+        let remote_path = file_browser_join(backend, &state.parent_path, &name);
         self.start_sftp_mkdir_job(
             remote_path,
             state.parent_path,
@@ -134,6 +134,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell
             .set_status(format!("remote folder creation started: {remote_path}"));
@@ -174,11 +175,7 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let parent_path = if self.transfer.browser_view().path.trim().is_empty() {
-            self.transfer.normalized_remote_path()
-        } else {
-            self.transfer.browser_view().path.clone()
-        };
+        let parent_path = self.transfer_browser_operation_target_directory();
         self.transfer.open_new_file_dialog(TransferNewFileState {
             parent_path,
             value: String::new(),
@@ -230,7 +227,11 @@ impl ZzClawTermApp {
             return false;
         }
         self.transfer.close_new_file_dialog();
-        let remote_path = remote_child_path(&state.parent_path, &name);
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
+        let remote_path = file_browser_join(backend, &state.parent_path, &name);
         self.start_sftp_create_file_job(
             remote_path,
             state.parent_path,
@@ -288,6 +289,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell
             .set_status(format!("remote file creation started: {remote_path}"));

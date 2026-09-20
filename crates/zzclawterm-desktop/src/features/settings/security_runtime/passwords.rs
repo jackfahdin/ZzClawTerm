@@ -43,6 +43,7 @@ impl ZzClawTermApp {
             SecurityPasswordEditorState {
                 id: Some(entry.id),
                 name: entry.name,
+                username: entry.username,
                 password: zzclawterm_core::SecretString::default(),
                 has_password: entry.has_password,
                 show_password: false,
@@ -52,6 +53,7 @@ impl ZzClawTermApp {
             SecurityPasswordEditorState {
                 id: None,
                 name: String::new(),
+                username: String::new(),
                 password: zzclawterm_core::SecretString::default(),
                 has_password: false,
                 show_password: false,
@@ -152,14 +154,17 @@ impl ZzClawTermApp {
         let name = editor.name.trim().to_string();
         if name.is_empty() {
             if let Some(editor) = self.security.password_editor_mut() {
-                editor.error = Some("password name is required".to_string());
+                editor.error = Some(t!("passwordManager.nameRequired").to_string());
             }
             cx.notify();
             return;
         }
-        if editor.id.is_none() && editor.password.trim().is_empty() {
+        if editor.id.is_none()
+            && editor.password.trim().is_empty()
+            && editor.username.trim().is_empty()
+        {
             if let Some(editor) = self.security.password_editor_mut() {
-                editor.error = Some("password value is required".to_string());
+                editor.error = Some(t!("passwordManager.credentialsRequired").to_string());
             }
             cx.notify();
             return;
@@ -167,6 +172,7 @@ impl ZzClawTermApp {
         let entry = SavedPassword {
             id: editor.id.clone().unwrap_or_default(),
             name,
+            username: editor.username.trim().to_string(),
             password: if editor.password.trim().is_empty() {
                 None
             } else {

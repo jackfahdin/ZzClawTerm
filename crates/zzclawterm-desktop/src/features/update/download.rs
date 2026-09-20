@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{Context, Window};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use zzclawterm_core::updater::{UpdateManifest, UpdateTarget, parse_current_version};
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
 const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK";
@@ -21,49 +22,14 @@ pub(in crate::features) fn supports_native_install(portable: bool) -> bool {
         && (cfg!(windows) || cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some())
 }
 
-fn select_update_artifact(
-    manifest: &serde_json::Value,
-    version: &str,
-    platform: &str,
-    arch: &str,
-) -> Result<(String, String), String> {
-    if version.is_empty()
-        || !version
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
-    {
-        return Err("invalid update version".into());
-    }
-    if manifest["version"].as_str() != Some(version) {
-        return Err("update manifest version mismatch".into());
-    }
-    let label = match arch {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        _ => return Err("unsupported update architecture".into()),
-    };
-    let suffix = match platform {
-        "windows" => format!("windows_{label}-setup.exe"),
-        "darwin" => format!("macos_{label}.app.tar.gz"),
-        "linux" => format!("linux_{label}.AppImage"),
-        _ => return Err("unsupported update platform".into()),
-    };
-    let expected = format!(
-        "https://downloads.zzclawterm.app/releases/v{version}/ZzClawTerm_{version}_{suffix}"
-    );
-    let github = format!(
-        "https://github.com/nyakang/zzclawterm/releases/download/v{version}/ZzClawTerm_{version}_{suffix}"
-    );
-    let entry = &manifest["platforms"][format!("{platform}-{arch}")];
-    let url = entry["url"].as_str().ok_or("missing update URL")?;
-    if url != expected && url != github {
-        return Err("update package does not match the selected platform and version".into());
-    }
-    let signature = entry["signature"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .ok_or("missing update signature")?;
-    Ok((url.to_owned(), signature.to_owned()))
+fn decode_update_signature(value: &str) -> Result<minisign_verify::Signature, String> {
+    let signature = STANDARD
+        .decode(value)
+        .map_err(|_| "invalid update signature encoding")?;
+    minisign_verify::Signature::decode(
+        std::str::from_utf8(&signature).map_err(|_| "invalid update signature")?,
+    )
+    .map_err(|_| "invalid update signature".to_string())
 }
 
 fn download_signed_update(
@@ -72,24 +38,23 @@ fn download_signed_update(
     cancel: &ConnectionAttempt,
     mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(PathBuf, PathBuf), String> {
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        _ => return Err("unsupported update architecture".into()),
-    };
-    let platform = if cfg!(windows) {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else {
-        "linux"
-    };
+    let version = parse_current_version(version).map_err(|error| error.to_string())?;
+    if !zzclawterm_core::app_identity::AppFlavor::current().accepts_update(&version) {
+        return Err("update belongs to a different application flavor".into());
+    }
+    let target = UpdateTarget::from_rust_target(std::env::consts::OS, std::env::consts::ARCH)
+        .map_err(|error| error.to_string())?;
     let client = zed_reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|error| error.to_string())?;
-    let manifest_url = format!("https://downloads.zzclawterm.app/releases/v{version}/latest.json");
+    let manifest_url = if version.pre.is_empty() {
+        format!("https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/latest.json")
+    } else {
+        "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/latest.json"
+            .to_string()
+    };
     let mut manifest_body = String::new();
     client
         .get(&manifest_url)
@@ -103,16 +68,12 @@ fn download_signed_update(
     if manifest_body.len() > 1024 * 1024 {
         return Err("update manifest too large".into());
     }
-    let manifest: serde_json::Value =
-        serde_json::from_str(&manifest_body).map_err(|error| error.to_string())?;
-    let (url, signature) = select_update_artifact(&manifest, version, platform, arch)?;
-    let signature = STANDARD
-        .decode(signature)
-        .map_err(|_| "invalid update signature encoding")?;
-    let signature = minisign_verify::Signature::decode(
-        std::str::from_utf8(&signature).map_err(|_| "invalid update signature")?,
-    )
-    .map_err(|_| "invalid update signature")?;
+    let manifest = UpdateManifest::parse_for_version(&manifest_body, &version)
+        .map_err(|error| error.to_string())?;
+    let selected = manifest
+        .select_artifact(&version, target)
+        .map_err(|error| error.to_string())?;
+    let signature = decode_update_signature(&selected.signature)?;
     let public_key = STANDARD
         .decode(PUBLIC_KEY)
         .map_err(|_| "invalid public key")?;
@@ -125,15 +86,12 @@ fn download_signed_update(
         .map_err(|_| "unsupported update signature")?;
     cancel.check()?;
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let name = url.rsplit('/').next().ok_or("missing update filename")?;
-    if name.contains(['\\', '%', '?', '#']) || name == ".." {
-        return Err("invalid update filename".into());
-    }
+    let name = selected.filename;
     let partial = directory.join(format!("{name}.partial"));
-    let artifact = directory.join(name);
+    let artifact = directory.join(&name);
     let result = (|| {
         let mut response = client
-            .get(&url)
+            .get(&selected.url)
             .send()
             .map_err(|error| error.to_string())?
             .error_for_status()
@@ -334,18 +292,8 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{PUBLIC_KEY, supports_native_install};
+    use super::{PUBLIC_KEY, decode_update_signature, supports_native_install};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    #[test]
-    fn rejects_wrong_platform_version_or_unsigned_update_packages() {
-        let mut manifest = serde_json::json!({"version":"2.1.0","platforms":{"windows-x86_64":{"url":"https://github.com/nyakang/zzclawterm/releases/download/v2.1.0/ZzClawTerm_2.1.0_windows_x64-setup.exe","signature":"signed"}}});
-        assert!(super::select_update_artifact(&manifest, "2.1.0", "windows", "x86_64").is_ok());
-        assert!(super::select_update_artifact(&manifest, "2.1.0", "windows", "aarch64").is_err());
-        assert!(super::select_update_artifact(&manifest, "2.0.0", "windows", "x86_64").is_err());
-        manifest["platforms"]["windows-x86_64"]["url"] =
-            serde_json::json!("https://example.com/update.exe");
-        assert!(super::select_update_artifact(&manifest, "2.1.0", "windows", "x86_64").is_err());
-    }
 
     #[test]
     fn published_signing_key_loads_and_portable_installs_never_self_replace() {
@@ -355,5 +303,11 @@ mod tests {
         if cfg!(debug_assertions) {
             assert!(!supports_native_install(false));
         }
+    }
+
+    #[test]
+    fn malformed_update_signatures_are_rejected_before_download() {
+        assert!(decode_update_signature("not-base64").is_err());
+        assert!(decode_update_signature(&STANDARD.encode("not a minisign signature")).is_err());
     }
 }

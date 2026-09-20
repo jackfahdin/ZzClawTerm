@@ -106,6 +106,18 @@ impl CredentialCrypto {
         encrypt_bytes(master_key.as_slice(), &wrapping_key)
     }
 
+    pub fn rewrap_master_key_token_for(
+        &self,
+        token: &str,
+        target: &Self,
+    ) -> Result<String, CredentialCryptoError> {
+        let raw = B64.decode(token.trim())?;
+        let (master_key, _) =
+            self.unwrap_master_key_with_compatible_wrapping(&raw, self.master_password.as_deref())?;
+        let wrapping_key = target.derive_wrapping_key(target.master_password.as_deref())?;
+        encrypt_bytes(master_key.as_slice(), &wrapping_key)
+    }
+
     pub fn decrypt_secret(
         &self,
         master_key_token: &str,
@@ -128,7 +140,7 @@ impl CredentialCrypto {
 
     pub fn generate_master_key_token(&self) -> Result<String, CredentialCryptoError> {
         let master_key: [u8; 32] = rand::rng().random();
-        let wrapping_key = self.derive_wrapping_key(None)?;
+        let wrapping_key = self.derive_wrapping_key(self.master_password.as_deref())?;
         encrypt_bytes(&master_key, &wrapping_key)
     }
 

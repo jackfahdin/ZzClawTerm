@@ -79,6 +79,7 @@ pub use x11_server::{
 };
 mod sftp_transfer_types;
 mod trzsz;
+pub mod xymodem;
 mod zmodem;
 
 pub use environment::{
@@ -86,8 +87,9 @@ pub use environment::{
     normalize_environment_variable_name,
 };
 pub use file_browser::{
-    FileBrowserBackendKind, FileBrowserCapabilities, FileBrowserService, file_browser_join,
-    file_browser_name, file_browser_parent, valid_file_browser_child_name,
+    FileBrowserBackendKind, FileBrowserCapabilities, FileBrowserService, file_browser_identity,
+    file_browser_join, file_browser_name, file_browser_parent, file_browser_path_eq,
+    file_browser_path_is_root, file_browser_root, valid_file_browser_child_name,
 };
 pub use session_config::{
     LocalSessionConfig, SerialSessionConfig, SftpCwdFollowMode, SftpSettings, SshAgentEndpoint,
@@ -213,6 +215,7 @@ pub use stats::{
 pub struct SshMultiplexInfo {
     pub name: String,
     pub host: String,
+    pub host_key_alias: Option<String>,
     pub port: u16,
     pub username: String,
     pub proxy: Option<SshProxyConfig>,
@@ -343,6 +346,12 @@ impl SshMultiplexHandle {
 
     pub fn matches_config(&self, config: &SshSessionConfig) -> bool {
         self.inner.info.host == config.host
+            && self.inner.info.host_key_alias.as_deref()
+                == config
+                    .host_key_alias
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
             && self.inner.info.port == config.port
             && self.inner.info.username == config.username
             && self.inner.info.proxy == config.proxy
@@ -516,6 +525,12 @@ pub fn open_ssh_multiplex_handle(config: SshSessionConfig) -> anyhow::Result<Ssh
     let info = SshMultiplexInfo {
         name: config.name,
         host: config.host,
+        host_key_alias: config
+            .host_key_alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         port: config.port,
         username: config.username,
         proxy: config.proxy,
@@ -2696,6 +2711,7 @@ async fn open_authenticated_ssh_handle_once(
                 SshClientHandler {
                     host: config.host.clone(),
                     port: config.port,
+                    host_key_alias: config.host_key_alias.clone(),
                     verifier: config.host_key_verifier.clone(),
                     forwarded_tcpip: forwarded_tcpip.clone(),
                     x11: x11.clone(),
@@ -2759,6 +2775,7 @@ async fn connect_ssh_transport(
     let handler = SshClientHandler {
         host: config.host.clone(),
         port: config.port,
+        host_key_alias: config.host_key_alias.clone(),
         verifier: config.host_key_verifier.clone(),
         forwarded_tcpip,
         x11,
@@ -3011,6 +3028,7 @@ fn local_shell_quote(value: &str) -> String {
 struct SshClientHandler {
     host: String,
     port: u16,
+    host_key_alias: Option<String>,
     verifier: Option<Arc<dyn SshHostKeyVerifier>>,
     forwarded_tcpip: Option<ForwardedTcpIpRegistry>,
     x11: Option<X11Registry>,
@@ -3042,7 +3060,13 @@ impl client::Handler for SshClientHandler {
         let Some(verifier) = &self.verifier else {
             return Ok(false);
         };
-        let host_identifier = ssh_host_identifier(&self.host, self.port);
+        let host_identifier = self
+            .host_key_alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| ssh_host_identifier(&self.host, self.port));
         let host_key = SshHostKey {
             host: self.host.clone(),
             port: self.port,

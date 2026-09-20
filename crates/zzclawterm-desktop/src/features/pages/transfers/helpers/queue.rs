@@ -84,15 +84,6 @@ pub(in crate::features::pages::transfers) fn transfer_job_can_retry(
     )
 }
 
-pub(in crate::features::pages::transfers) fn transfer_progress_percent_label(
-    progress: &SftpTransferProgress,
-    streaming_label: &str,
-) -> String {
-    transfer_progress_ratio(progress)
-        .map(|ratio| format!("{:.0}%", ratio * 100.))
-        .unwrap_or_else(|| streaming_label.to_string())
-}
-
 pub(in crate::features::pages::transfers) fn transfer_progress_ratio(
     progress: &SftpTransferProgress,
 ) -> Option<f32> {

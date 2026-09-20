@@ -90,6 +90,9 @@ impl ZzClawTermApp {
                                         .overflow_hidden()
                                         .child(truncate_preview(&entry.name, 28)),
                                 )
+                                .when(!entry.username.is_empty(), |this| {
+                                    this.child(div().text_xs().text_color(rgb(palette.text_muted)).child(truncate_preview(&entry.username, 36)))
+                                })
                                 .when(is_revealed, |this| {
                                     this.child(
                                         div()

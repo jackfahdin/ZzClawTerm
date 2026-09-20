@@ -440,11 +440,19 @@ impl Render for NotesPanel {
 fn notes_more_menu(app: WeakEntity<ZzClawTermApp>) -> ZzClawDropdownMenu {
     let expand_app = app.clone();
     let collapse_app = app.clone();
+    let export_app = app.clone();
     ZzClawDropdownMenu::new("notes-more")
         .icon("icons/session/more.svg")
         .icon_size(px(16.))
         .tooltip(t!("common.more"))
         .items([
+            ZzClawMenuItem::action(t!("notes.exportMarkdown").to_string())
+                .icon("icons/fe/download.svg")
+                .on_click(move |_, _, cx| {
+                    if let Some(app) = export_app.upgrade() {
+                        app.update(cx, |app, cx| app.prompt_export_notes(cx));
+                    }
+                }),
             ZzClawMenuItem::action(t!("notes.expandAll").to_string()).on_click(move |_, _, cx| {
                 if let Some(app) = expand_app.upgrade() {
                     app.update(cx, |app, cx| app.set_all_notes_expanded(true, cx));

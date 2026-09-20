@@ -14,6 +14,7 @@
     {"path": "crates/zzclawterm-desktop/src/features/session/auth_runtime.rs", "max_count": 1, "reason": "The prompt broker test joins its named request thread."},
     {"path": "crates/zzclawterm-desktop/src/features/session/mod.rs", "max_count": 1, "reason": "SessionProtocolRuntimeState owns and joins multiplex disconnect workers."},
     {"path": "crates/zzclawterm-desktop/src/features/session/trzsz_runtime.rs", "max_count": 3, "reason": "Per-session trzsz state owns, stops, and joins prepare, upload, and download workers."},
+    {"path": "crates/zzclawterm-desktop/src/features/session/xymodem_runtime.rs", "max_count": 1, "reason": "Per-session X/YMODEM state owns, stops, and joins its upload worker."},
     {"path": "crates/zzclawterm-desktop/src/features/session/zmodem_runtime.rs", "max_count": 1, "reason": "Per-session ZMODEM state owns, stops, and joins its transfer worker."},
     {"path": "crates/zzclawterm-desktop/src/features/transfers/external_sync_runtime.rs", "max_count": 2, "reason": "Transfer state owns and joins the external-editor watcher; its unit test also joins its fixture worker."}
   ],

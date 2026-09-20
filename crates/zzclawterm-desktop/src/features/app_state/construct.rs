@@ -292,6 +292,7 @@ impl ZzClawTermApp {
                 transfer_duplicate_policy,
                 transfer_panel_height,
                 TransferFeatureFocus {
+                    tree: cx.focus_handle(),
                     queue: cx.focus_handle(),
                     browser: cx.focus_handle(),
                     editor: cx.focus_handle(),

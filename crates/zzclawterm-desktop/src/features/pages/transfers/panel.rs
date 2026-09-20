@@ -5,6 +5,7 @@ use gpui::{
     Context, Entity, FocusHandle, IntoElement, Render, Rgba, ScrollHandle, UniformListScrollHandle,
     WeakEntity, Window,
 };
+use zzclawterm_core::TransferBrowserViewMode;
 use zzclawterm_transport::SftpFileEntry;
 use zzclawterm_ui::ZzClawInputState;
 
@@ -37,6 +38,9 @@ pub(in crate::features) struct TransferChrome {
 /// it. The costly field -- the listing -- is shared rather than copied; the rest are
 /// short paths and small sets.
 pub(in crate::features) struct TransferBrowserPresentation {
+    pub view_mode: TransferBrowserViewMode,
+    pub tree: crate::features::transfers::TransferTreePresentation,
+    pub tree_focus: FocusHandle,
     pub local_backend: bool,
     pub path: String,
     pub home_dir: String,
@@ -347,6 +351,118 @@ mod tests {
 
     fn paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
         app.read(cx).transfer_panel.read(cx).paint_count()
+    }
+
+    struct QueueHost {
+        panel: Entity<super::TransferPanel>,
+        width: f32,
+    }
+
+    impl Render for QueueHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let queue = self.panel.update(cx, |panel, cx| {
+                super::super::queue::transfer_queue_view(panel, cx).into_any_element()
+            });
+            div().w(px(self.width)).h(px(240.)).child(queue)
+        }
+    }
+
+    #[test]
+    fn long_transfer_text_shrinks_without_displacing_status_when_panel_resizes() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
+
+        let test_dir = TestConfigDir::new("zzclawterm-transfer-queue-layout");
+        let mut cx = TestAppContext::single();
+        let app = app(&mut cx, test_dir.path());
+        let panel = cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.flush_transfer_panel_snapshot(cx);
+            app.transfer_panel.clone()
+        });
+        let host_panel = panel.clone();
+        let (host, vcx) = cx.add_window_view(move |_, _| QueueHost {
+            panel: host_panel,
+            width: 240.,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+
+        for status in [
+            TransferJobStatus::Running,
+            TransferJobStatus::Completed,
+            TransferJobStatus::Failed,
+        ] {
+            vcx.update(|_, cx| {
+                panel.update(cx, |panel, cx| {
+                    let snapshot = panel.snapshot.as_mut().expect("flushed");
+                    snapshot.has_session = true;
+                    snapshot.queue.download_path = "E:/Downloads/".repeat(20);
+                    snapshot.queue.rows = Arc::from([TransferJobRowSnapshot {
+                        id: "long-name".to_string(),
+                        kind: TransferJobKind::Download {
+                            remote_path: "/remote/file.bin".to_string(),
+                            raw_path_token: None,
+                            local_path: PathBuf::from("file.bin"),
+                        },
+                        status,
+                        display_name: "google-chrome-stable_current_x86_64".repeat(8),
+                        detail: "long transfer error detail ".repeat(20),
+                        created_at_ms: 1_785_555_123_000,
+                        progress: None,
+                        summary: None,
+                        speed_bytes_per_sec: 1024. * 1024. * 128.,
+                    }]);
+                    cx.notify();
+                });
+            });
+            let mut previous_name_width = px(0.);
+            for width in [240., 320., 640.] {
+                vcx.update(|window, cx| {
+                    host.update(cx, |host, cx| {
+                        host.width = width;
+                        cx.notify();
+                    });
+                    _ = window.draw(cx);
+                });
+                vcx.run_until_parked();
+                let row = vcx.debug_bounds("transfer-job-row-long-name").expect("row");
+                let name = vcx
+                    .debug_bounds("transfer-job-name-long-name")
+                    .expect("name");
+                let detail = vcx
+                    .debug_bounds("transfer-job-detail-long-name")
+                    .expect("detail");
+                let status = vcx
+                    .debug_bounds("transfer-job-status-long-name")
+                    .expect("status");
+                let footer = vcx
+                    .debug_bounds("transfer-download-path-footer")
+                    .expect("footer");
+
+                assert!(row.right() <= px(width));
+                assert!(status.right() <= row.right());
+                assert!(status.size.width >= px(52.));
+                assert!(name.right() < status.left());
+                assert!(detail.right() < status.left());
+                assert!(name.size.width > previous_name_width);
+                assert!(
+                    name.size.height <= px(20.),
+                    "filename must remain single-line"
+                );
+                assert!(
+                    detail.size.height <= px(16.),
+                    "detail must remain single-line"
+                );
+                assert!(footer.right() <= px(width));
+                previous_name_width = name.size.width;
+            }
+        }
     }
 
     /// 后台冲突必须自行打开窗口级对话框；激活任务在首次绘制前启动，整个过程

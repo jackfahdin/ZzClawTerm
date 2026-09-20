@@ -7,6 +7,7 @@ use hmac::{Hmac, Mac, digest::KeyInit as HmacKeyInit};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
+use ssh_key::{HashAlg, PublicKey};
 
 use super::{
     ConnectionStore, KNOWN_HOST_PREFIX, KNOWN_HOST_RAW_PREFIX, KNOWN_HOSTS_TABLE,
@@ -23,6 +24,16 @@ pub enum KnownHostCheck {
     Match,
     HostSeen,
     UnknownHost,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct KnownHostEntry {
+    pub id: String,
+    pub marker: Option<String>,
+    pub host_identifier: String,
+    pub host_patterns: Vec<String>,
+    pub key_type: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +172,74 @@ impl ConnectionStore {
     pub fn replace_known_hosts_export(&self, content: &str) -> Result<(), StorageError> {
         let txn = self.db.begin_write()?;
         replace_known_hosts_text_in_txn(&txn, content)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn list_known_hosts(&self) -> Result<Vec<KnownHostEntry>, StorageError> {
+        let records = self.list_raw_by_prefix(KNOWN_HOSTS_TABLE, KNOWN_HOST_PREFIX)?;
+        let mut entries = Vec::new();
+        for (id, value) in records {
+            if id.starts_with(KNOWN_HOST_RAW_PREFIX) {
+                continue;
+            }
+            let record: KnownHostRecord = deserialize_json(&value)?;
+            let Some(fingerprint) = known_host_fingerprint(&record) else {
+                // Invalid legacy records remain exportable but are not manageable entries.
+                continue;
+            };
+            entries.push(KnownHostEntry {
+                id,
+                marker: record.marker.clone(),
+                host_identifier: record.host_identifier.clone(),
+                host_patterns: record.host_patterns.clone(),
+                key_type: record.key_type.clone(),
+                fingerprint,
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.host_identifier
+                .to_lowercase()
+                .cmp(&right.host_identifier.to_lowercase())
+                .then_with(|| left.host_identifier.cmp(&right.host_identifier))
+                .then_with(|| left.key_type.cmp(&right.key_type))
+                .then_with(|| left.marker.cmp(&right.marker))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(entries)
+    }
+
+    pub fn delete_known_host(&self, id: &str) -> Result<(), StorageError> {
+        if !id.starts_with(KNOWN_HOST_PREFIX) || id.starts_with(KNOWN_HOST_RAW_PREFIX) {
+            return Err(StorageError::InvalidData(
+                "invalid SSH known host id".to_string(),
+            ));
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(KNOWN_HOSTS_TABLE)?;
+            let manageable = table
+                .get(id)?
+                .map(|value| {
+                    let record: KnownHostRecord = deserialize_json(value.value())?;
+                    Ok::<_, StorageError>(known_host_fingerprint(&record).is_some())
+                })
+                .transpose()?
+                .unwrap_or(true);
+            if !manageable {
+                return Err(StorageError::InvalidData(
+                    "unparsed SSH host records require clear-all".into(),
+                ));
+            }
+            table.remove(id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_known_hosts(&self) -> Result<(), StorageError> {
+        let txn = self.db.begin_write()?;
+        clear_prefix_in_txn(&txn, KNOWN_HOSTS_TABLE, KNOWN_HOST_PREFIX)?;
         txn.commit()?;
         Ok(())
     }
@@ -320,6 +399,12 @@ impl ConnectionStore {
         txn.commit()?;
         Ok(())
     }
+}
+
+fn known_host_fingerprint(record: &KnownHostRecord) -> Option<String> {
+    let key =
+        PublicKey::from_openssh(&format!("{} {}", record.key_type, record.key_base64)).ok()?;
+    Some(key.fingerprint(HashAlg::Sha256).to_string())
 }
 
 pub(super) fn replace_known_hosts_text_in_txn(

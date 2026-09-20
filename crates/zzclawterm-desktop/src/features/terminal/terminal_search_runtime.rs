@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use futures::StreamExt as _;
 use gpui::{Context, KeyDownEvent, Window};
+use rust_i18n::t;
 
 use crate::features::terminal::terminal_surface::{
     TerminalOverviewMarker, TerminalOverviewMarkerKind,
@@ -534,19 +535,44 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        self.terminal.search.active_index = (self.terminal.search.active_index as isize + direction)
-            .rem_euclid(count as isize) as usize;
+        let wrap_around = self.terminal.search_wrap_around(self.session.active_id());
+        let (next_index, hit_boundary) = terminal_search_next_index(
+            self.terminal.search.active_index,
+            direction,
+            count,
+            wrap_around,
+        );
+        self.terminal.search.active_index = next_index;
         if self.terminal.search.mode == TerminalSearchMode::Buffer
             && let Ok(matches) = self.terminal_buffer_matches()
             && let Some(m) = matches.get(self.terminal.search.active_index)
         {
             self.reveal_terminal_absolute_line(m.line_index, cx);
         }
-        self.shell.set_status(format!(
-            "terminal search match {}/{}",
-            self.terminal.search.active_index + 1,
-            count
-        ));
+        self.shell.set_status(if hit_boundary {
+            if direction < 0 {
+                t!(
+                    "terminalCtx.searchReachedFirst",
+                    current = self.terminal.search.active_index + 1,
+                    total = count
+                )
+                .to_string()
+            } else {
+                t!(
+                    "terminalCtx.searchReachedLast",
+                    current = self.terminal.search.active_index + 1,
+                    total = count
+                )
+                .to_string()
+            }
+        } else {
+            t!(
+                "terminalCtx.searchMatchStatus",
+                current = self.terminal.search.active_index + 1,
+                total = count
+            )
+            .to_string()
+        });
         self.notify_active_terminal_surface(cx);
         cx.notify();
     }
@@ -595,6 +621,27 @@ impl ZzClawTermApp {
     ) {
         self.session.set_active_search_draft(text);
         cx.notify();
+    }
+}
+
+fn terminal_search_next_index(
+    current: usize,
+    direction: isize,
+    count: usize,
+    wrap_around: bool,
+) -> (usize, bool) {
+    if count == 0 {
+        return (0, false);
+    }
+    let candidate = current.min(count - 1) as isize + direction;
+    if wrap_around {
+        (candidate.rem_euclid(count as isize) as usize, false)
+    } else if candidate < 0 {
+        (0, true)
+    } else if candidate >= count as isize {
+        (count - 1, true)
+    } else {
+        (candidate as usize, false)
     }
 }
 
@@ -659,7 +706,7 @@ mod tests {
 
     use super::{
         TerminalSelectedOccurrenceMatches, current_selected_occurrence_matches,
-        terminal_matches_in_absolute_range,
+        terminal_matches_in_absolute_range, terminal_search_next_index,
     };
     use crate::features::terminal::terminal_surface::{
         TerminalDecorationSources, TerminalOverviewMarker, TerminalOverviewMarkerKind,
@@ -670,6 +717,16 @@ mod tests {
         TerminalSelection, TerminalViewState,
     };
     use crate::terminal::TerminalBufferMatch;
+
+    #[test]
+    fn search_navigation_wraps_by_default_and_stops_when_disabled() {
+        assert_eq!(terminal_search_next_index(2, 1, 3, true), (0, false));
+        assert_eq!(terminal_search_next_index(0, -1, 3, true), (2, false));
+        assert_eq!(terminal_search_next_index(2, 1, 3, false), (2, true));
+        assert_eq!(terminal_search_next_index(0, -1, 3, false), (0, true));
+        assert_eq!(terminal_search_next_index(1, 1, 3, false), (2, false));
+        assert_eq!(terminal_search_next_index(8, -1, 3, false), (1, false));
+    }
 
     #[test]
     fn selected_occurrence_filter_excludes_the_original_selection_only() {

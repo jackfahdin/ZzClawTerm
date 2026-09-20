@@ -137,8 +137,8 @@ pub const APPEARANCE_THEME_IDS: &[&str] = &[
 pub fn appearance_theme_label(theme: &str) -> &'static str {
     match theme {
         "github-dark" => "GitHub Dark",
-        "nya-high-contrast" => "Nya HC",
-        "nya-high-contrast-white" => "Nya HC White",
+        "nya-high-contrast" => "ZzClaw HC",
+        "nya-high-contrast-white" => "ZzClaw HC White",
         "dracula" => "Dracula",
         "nord" => "Nord",
         "monokai-pro" => "Monokai Pro",

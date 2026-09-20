@@ -1,0 +1,18 @@
+{
+  "sessions": [
+    {
+      "id": "tauri-example",
+      "name": "Tauri fixture",
+      "type": "ssh",
+      "host": "tauri.example.invalid",
+      "port": 22,
+      "username": "operator",
+      "auth": { "mode": "agent" },
+      "network": { "host_key_alias": "stable.example.invalid", "future_network": { "enabled": true } },
+      "sftp": { "enabled": true, "cwd_follow_mode": "rc_file", "pipeline_depth": 16, "future_policy": "preserved" },
+      "asset": { "tags": ["production", "test-fixture"] },
+      "future_connection": { "revision": 7 }
+    }
+  ],
+  "groups": []
+}

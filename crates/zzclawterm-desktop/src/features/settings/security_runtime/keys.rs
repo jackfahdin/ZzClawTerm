@@ -451,6 +451,62 @@ impl ZzClawTermApp {
         }
     }
 
+    pub(in crate::features) fn copy_security_public_key(
+        &mut self,
+        key_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.require_security_secrets_unlocked(
+            window,
+            cx,
+            Some(crate::models::SecurityUnlockAction::CopyPublicKey(
+                key_id.clone(),
+            )),
+        ) {
+            return;
+        }
+        let request_id = self.security.begin_public_key_request(key_id.clone());
+        let request_key_id = key_id.clone();
+        let location = SecurityStoreLocation::new(self.store_blocking_client());
+        let scheduler = self.blocking_jobs.clone();
+        cx.spawn(async move |this, cx| {
+            let task = scheduler.submit_task("ssh-public-key-copy", move |_| {
+                let store = location.open()?;
+                let key = store
+                    .load_decrypted_ssh_key_by_id(&key_id)
+                    .map_err(|error| error.to_string())?
+                    .and_then(|key| key.key_data)
+                    .ok_or_else(|| t!("settings.privateKeyEmpty").to_string())?;
+                zzclawterm_core::ssh_keys::derive_public_key_for_copy(key.expose_secret())
+                    .map_err(|_| t!("securityAuth.publicKeyCopyFailed").to_string())
+            });
+            let result = await_blocking_job(task).await.and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if !this
+                    .security
+                    .finish_public_key_request(request_id, &request_key_id)
+                    || !this.security.secrets_unlocked()
+                {
+                    return;
+                }
+                match result {
+                    Ok(public) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(public));
+                        this.security.set_status(t!("common.copied").to_string());
+                        this.shell.set_status(t!("common.copied").to_string());
+                    }
+                    Err(error) => {
+                        this.security.set_status(error.clone());
+                        this.shell.set_status(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::features) fn close_security_private_key_view(&mut self, cx: &mut Context<Self>) {
         self.security.close_private_key_view();
         cx.notify();

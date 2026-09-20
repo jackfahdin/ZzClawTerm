@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use futures::channel::oneshot;
 use gpui::{Context, Window};
+use rust_i18n::t;
 use zzclawterm_core::{
     AiExecutionProfile, ConnectionAuth, ConnectionType, SavedConnection, SftpCwdFollowMode,
     SftpSettings, SshAgentForwardingConfig as CoreSshAgentForwardingConfig, SshAlgorithmMode,
@@ -231,7 +232,28 @@ impl ZzClawTermApp {
             return;
         }
 
+        if matches!(connection.config, ConnectionType::Telnet { .. })
+            && connection.auth.as_ref().is_some_and(|auth| {
+                auth.mode == "password"
+                    && auth.password_source
+                        == Some(
+                            zzclawterm_core::models::credentials::ConnectionPasswordSource::Account,
+                        )
+                    && auth.saved_account_id().is_none()
+            })
+        {
+            let message = account_auth_error_message(
+                zzclawterm_core::models::credentials::AccountAuthError::MissingAccount,
+            );
+            self.complete_mcp_session_open_failure(&connection.id, &message);
+            self.session.start_release_saved_connection(&connection.id);
+            self.shell.set_status(message);
+            cx.notify();
+            return;
+        }
         if let Some(password_id) = saved_connection_password_id(&connection) {
+            let telnet_auth = matches!(connection.config, ConnectionType::Telnet { .. })
+                .then(|| connection.auth.clone().unwrap_or_default());
             let connection_id = connection.id.clone();
             let connection_name = connection.name.clone();
             self.shell
@@ -239,13 +261,46 @@ impl ZzClawTermApp {
             self.submit_store_request(
                 0,
                 store_request(StoreDomain::Security, move |store| {
-                    store.load_decrypted_password_by_id(&password_id)
+                    if let Some(auth) = telnet_auth {
+                        store.load_account_for_auth(&auth)
+                    } else {
+                        store.load_decrypted_password_by_id(&password_id)
+                    }
                 }),
                 move |this, event, cx| {
+                    let mut connection = connection;
                     let password = match event.outcome {
-                        Ok(Some(entry)) => entry
-                            .password
-                            .filter(|password| !password.trim().is_empty()),
+                        Ok(Some(entry)) => {
+                            if let ConnectionType::Telnet { username, .. } = &mut connection.config {
+                                let auth = connection.auth.clone().unwrap_or_default();
+                                match auth.resolve_account_auth(username, Some(&entry)) {
+                                    Ok((account_username, password)) => {
+                                        *username = account_username;
+                                        if let Some(auth) = connection.auth.as_mut() {
+                                            auth.password = password;
+                                            auth.has_password = false;
+                                        }
+                                        this.start_saved_connection_ready(connection, options, cx);
+                                    }
+                                    Err(error) => {
+                                        let error = account_auth_error_message(error);
+                                        this.complete_mcp_session_open_failure(&connection_id, &error);
+                                        this.session.start_release_saved_connection(&connection_id);
+                                        this.shell.set_status(
+                                            t!(
+                                                "savedConnections.startFailed",
+                                                name = connection_name.as_str(),
+                                                error = error.as_str()
+                                            )
+                                            .to_string(),
+                                        );
+                                        cx.notify();
+                                    }
+                                }
+                                return;
+                            }
+                            entry.password.filter(|password| !password.trim().is_empty())
+                        },
                         Ok(None) => {
                             this.complete_mcp_session_open_failure(
                                 &connection_id,
@@ -286,7 +341,6 @@ impl ZzClawTermApp {
                         cx.notify();
                         return;
                     };
-                    let mut connection = connection;
                     if let Some(auth) = connection.auth.as_mut() {
                         auth.password = Some(password);
                         auth.has_password = false;
@@ -1081,7 +1135,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     };
     let auth = connection.auth.clone().unwrap_or_default();
     let allow_none_auth = auth.mode == "none";
-    let password = load_ssh_connection_password_with_context(context, &auth)?;
+    let (username, password) = load_ssh_account_auth_with_context(context, &auth, &username)?;
     let key_auth = load_ssh_key_auth_with_context(context, auth.key_id.as_deref(), &auth.mode)?;
     let proxy_jump = load_proxy_jump_config_with_context(context, connection, visited_proxy_jumps)?;
     let proxy = load_proxy_config_with_context(context, connection)?;
@@ -1090,12 +1144,19 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     } else {
         encoding
     };
+    let host_key_alias = connection.network.as_ref().and_then(|network| {
+        network
+            .host_key_alias
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+    });
 
     Ok(SshSessionConfig {
         attempt: context.attempt.clone(),
         name: connection.name.clone(),
         host,
         port,
+        host_key_alias,
         username,
         password,
         key_auth,
@@ -1164,42 +1225,44 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     })
 }
 
+fn load_ssh_account_auth_with_context(
+    context: &SshSessionConfigBuildContext,
+    auth: &ConnectionAuth,
+    username: &str,
+) -> Result<(String, Option<zzclawterm_core::SecretString>), String> {
+    let account = if auth.saved_account_id().is_some() {
+        let auth = auth.clone();
+        context
+            .store
+            .request_fn(StoreDomain::Security, move |store| {
+                store.load_account_for_auth(&auth)
+            })
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    auth.resolve_account_auth(username, account.as_ref())
+        .map_err(account_auth_error_message)
+}
+
+fn account_auth_error_message(
+    error: zzclawterm_core::models::credentials::AccountAuthError,
+) -> String {
+    use zzclawterm_core::models::credentials::AccountAuthError;
+    let key = match error {
+        AccountAuthError::MissingAccount => "passwordManager.missingAccount",
+        AccountAuthError::EmptyOrLockedAccountPassword => "passwordManager.emptyOrLockedPassword",
+        AccountAuthError::LockedConnectionPassword => "passwordManager.lockedConnectionPassword",
+    };
+    rust_i18n::t!(key).to_string()
+}
+
+#[cfg(test)]
 fn load_ssh_connection_password_with_context(
     context: &SshSessionConfigBuildContext,
     auth: &ConnectionAuth,
 ) -> Result<Option<zzclawterm_core::SecretString>, String> {
-    if let Some(password) = auth
-        .password
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        if auth.has_password {
-            return Err("saved SSH password is locked or could not be decrypted".to_string());
-        }
-        return Ok(Some(password.to_owned().into()));
-    }
-
-    let Some(password_id) = auth
-        .password_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-
-    let password_id = password_id.to_string();
-    let password = context
-        .store
-        .request_fn(StoreDomain::Security, move |store| {
-            store.load_decrypted_password_by_id(&password_id)
-        })
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "saved password was not found".to_string())?
-        .password
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "saved password is empty or locked".to_string())?;
-    Ok(Some(password))
+    load_ssh_account_auth_with_context(context, auth, "root").map(|(_, password)| password)
 }
 
 fn map_agent_forwarding_config(
@@ -1266,6 +1329,13 @@ fn inline_connection_password(
 }
 
 fn saved_connection_password_id(connection: &SavedConnection) -> Option<String> {
+    if matches!(connection.config, ConnectionType::Telnet { .. }) {
+        return connection
+            .auth
+            .as_ref()?
+            .saved_account_id()
+            .map(str::to_string);
+    }
     if !matches!(
         &connection.config,
         ConnectionType::Telnet { .. } | ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. }
@@ -1318,6 +1388,7 @@ fn map_ssh_algorithm_preferences(
 
 fn map_sftp_settings(settings: &SftpSettings) -> zzclawterm_transport::SftpSettings {
     zzclawterm_transport::SftpSettings {
+        compatibility_mode: settings.compatibility_mode,
         pipeline_depth: settings.pipeline_depth,
         enabled: settings.enabled,
         cwd_follow_mode: match settings.cwd_follow_mode {
@@ -1625,6 +1696,7 @@ mod tests {
             .store
             .request_fn(StoreDomain::Security, |store| {
                 store.save_password(zzclawterm_core::SavedPassword {
+                    username: String::new(),
                     id: "pw-1".to_string(),
                     name: "Primary".to_string(),
                     password: Some("stored-secret".to_string().into()),
@@ -1695,6 +1767,7 @@ mod tests {
         context.keep_alive_interval_secs = 45;
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "conn-1".to_string(),
             name: "SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -1745,6 +1818,7 @@ mod tests {
         context.default_encoding = "GB18030".to_string();
         let mut connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "conn-1".to_string(),
             name: "SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -1777,6 +1851,7 @@ mod tests {
             ssh_profile: SshProfile::NetworkDevice,
             terminal_type: None,
             sftp: SftpSettings {
+                compatibility_mode: false,
                 pipeline_depth: None,
                 extra: Default::default(),
                 enabled: true,

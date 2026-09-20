@@ -204,6 +204,7 @@ pub(in crate::features) struct TerminalSurfacePaintChrome {
     pub font_size: f32,
     pub normal_weight: f32,
     pub bold_weight: f32,
+    pub bold_default_foreground: bool,
     pub cell_width: f32,
     pub cell_height: f32,
     pub show_line_numbers: bool,
@@ -307,6 +308,7 @@ pub(in crate::features) struct TerminalSurface {
     font_size: f32,
     normal_weight: f32,
     bold_weight: f32,
+    bold_default_foreground: bool,
     cell_width: f32,
     cell_height: f32,
     show_cursor: bool,
@@ -375,6 +377,7 @@ impl TerminalSurface {
             font_size: 14.0,
             normal_weight: 400.0,
             bold_weight: 700.0,
+            bold_default_foreground: false,
             cell_width: 8.0,
             cell_height: 16.0,
             show_cursor: false,
@@ -1278,6 +1281,7 @@ impl TerminalSurface {
             font_size,
             normal_weight,
             bold_weight,
+            bold_default_foreground,
             cell_width,
             cell_height,
             show_line_numbers,
@@ -1293,6 +1297,7 @@ impl TerminalSurface {
             && (self.font_size - font_size).abs() < f32::EPSILON * 8.0
             && (self.normal_weight - normal_weight).abs() < f32::EPSILON * 8.0
             && (self.bold_weight - bold_weight).abs() < f32::EPSILON * 8.0
+            && self.bold_default_foreground == bold_default_foreground
             && (self.cell_width - cell_width).abs() < f32::EPSILON * 8.0
             && (self.cell_height - cell_height).abs() < f32::EPSILON * 8.0
             && self.show_line_numbers == show_line_numbers
@@ -1308,6 +1313,7 @@ impl TerminalSurface {
         self.font_size = font_size;
         self.normal_weight = normal_weight;
         self.bold_weight = bold_weight;
+        self.bold_default_foreground = bold_default_foreground;
         self.cell_width = cell_width;
         self.cell_height = cell_height;
         self.show_line_numbers = show_line_numbers;
@@ -2527,6 +2533,7 @@ impl Render for TerminalSurface {
             self.bold_weight,
         );
         grid = grid
+            .with_bold_default_foreground(self.bold_default_foreground)
             .with_selection(self.selection_visual.map(|selection| {
                 TerminalGridSelection::new(
                     selection.anchor.line,

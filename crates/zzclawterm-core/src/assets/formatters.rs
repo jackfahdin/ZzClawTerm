@@ -307,15 +307,13 @@ pub fn build_asset_search_text(connection: &SavedConnection, group_path: &str) -
     let (host, username, port_name) = connection_address_fields(connection);
 
     let mut parts: Vec<String> = vec![connection.name.clone(), host, username, port_name];
+    parts.push(connection.tags.join(" "));
     if let Some(asset) = asset {
         parts.push(asset.hostname.clone().unwrap_or_default());
         parts.push(asset.os_name.clone().unwrap_or_default());
         parts.push(asset.os_version.clone().unwrap_or_default());
         parts.push(asset.architecture.clone().unwrap_or_default());
         parts.push(asset.cpu_model.clone().unwrap_or_default());
-        if let Some(tags) = asset.tags.as_ref() {
-            parts.push(tags.join(" "));
-        }
         parts.push(asset.notes.clone().unwrap_or_default());
     }
     parts.push(group_path.to_string());

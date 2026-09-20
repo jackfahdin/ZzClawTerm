@@ -132,7 +132,21 @@ pub(super) fn set_connection_editor_select_value(
             editor.pending_group_parent_id = None;
             editor.focused_field = ConnectionEditorField::Name;
         }
-        ConnectionEditorSelect::SavedPassword => editor.password_id = value,
+        ConnectionEditorSelect::SavedPassword => {
+            if matches!(
+                editor.kind,
+                ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+            ) {
+                editor.account_id = value;
+                editor.password_id = None;
+            } else {
+                editor.password_id = value;
+            }
+        }
+        ConnectionEditorSelect::Account => {
+            editor.account_id = value;
+            editor.password_id = None;
+        }
         ConnectionEditorSelect::SshKey => editor.key_id = value,
         ConnectionEditorSelect::Otp => {
             editor.otp_id = value;
@@ -700,6 +714,9 @@ pub(super) fn toggle_connection_editor_flag(
                 !editor.agent_forwarding_config.sources.stored_keys;
         }
         ConnectionEditorToggle::SftpEnabled => editor.sftp_enabled = !editor.sftp_enabled,
+        ConnectionEditorToggle::SftpCompatibilityMode => {
+            editor.sftp_compatibility_mode = !editor.sftp_compatibility_mode;
+        }
         ConnectionEditorToggle::RawTcp => {
             editor.raw_tcp_cli = !editor.raw_tcp_cli;
             if editor.raw_tcp_cli {
@@ -903,6 +920,12 @@ pub(super) fn editor_field_seeds(
             draft.name.clone(),
             false,
             Empty,
+        ),
+        (
+            ConnectionEditorField::NewTag,
+            draft.new_tag.clone(),
+            false,
+            I18n("dialog.newTag"),
         ),
         (
             ConnectionEditorField::Description,
@@ -1180,6 +1203,7 @@ pub(super) fn set_connection_editor_field_text(
     draft.error = None;
     match field {
         ConnectionEditorField::Name => draft.name = text,
+        ConnectionEditorField::NewTag => draft.new_tag = text,
         ConnectionEditorField::Description => draft.description = text,
         ConnectionEditorField::NewGroupName => draft.new_group_name = text,
         ConnectionEditorField::Host => draft.host = text,

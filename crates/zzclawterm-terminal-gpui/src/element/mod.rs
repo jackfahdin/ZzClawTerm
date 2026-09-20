@@ -21,7 +21,7 @@ use crate::keywords::{
 };
 use crate::paint::{
     apply_search_ranges, flush_bg, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
-    terminal_highlight_spans_compiled, terminal_highlight_spans_with_keyword_ranges,
+    terminal_highlight_spans_compiled, terminal_highlight_spans_with_keyword_ranges_and_options,
     terminal_keyword_exclusion_ranges, terminal_run_font,
 };
 use crate::terminal_font_features;
@@ -407,6 +407,7 @@ pub struct ZzClawTerminalElement {
     font_size: f32,
     normal_weight: f32,
     bold_weight: f32,
+    bold_default_foreground: bool,
     visual_y_offset: f32,
     layout_rows: Option<usize>,
     fill_height: bool,
@@ -491,6 +492,7 @@ impl ZzClawTerminalElement {
             font_size,
             normal_weight,
             bold_weight,
+            bold_default_foreground: false,
             visual_y_offset: 0.0,
             layout_rows: None,
             fill_height: false,
@@ -501,6 +503,11 @@ impl ZzClawTerminalElement {
 
     pub fn with_layout_cache(mut self, cache: Arc<Mutex<ZzClawTerminalLayoutCache>>) -> Self {
         self.layout_cache = Some(cache);
+        self
+    }
+
+    pub fn with_bold_default_foreground(mut self, enabled: bool) -> Self {
+        self.bold_default_foreground = enabled;
         self
     }
 
@@ -629,6 +636,7 @@ impl ZzClawTerminalElement {
         self.font_size.to_bits().hash(&mut hasher);
         self.normal_weight.to_bits().hash(&mut hasher);
         self.bold_weight.to_bits().hash(&mut hasher);
+        self.bold_default_foreground.hash(&mut hasher);
         self.cell_width.max(1.0).to_bits().hash(&mut hasher);
         hasher.finish()
     }
@@ -1563,12 +1571,13 @@ impl Element for ZzClawTerminalElement {
                 // Base spans drive explicit terminal cell backgrounds only (under images).
                 let background_spans = keyword_ranges
                     .map(|ranges| {
-                        terminal_highlight_spans_with_keyword_ranges(
+                        terminal_highlight_spans_with_keyword_ranges_and_options(
                             display_line,
                             ansi,
                             Some(ranges),
                             &keyword_excluded_ranges,
                             self.palette,
+                            self.bold_default_foreground,
                         )
                     })
                     .unwrap_or_else(|| {
@@ -1588,6 +1597,7 @@ impl Element for ZzClawTerminalElement {
                             &[],
                             &keyword_excluded_ranges,
                             self.palette,
+                            self.bold_default_foreground,
                         )
                     });
                 // Glyph spans intentionally exclude search/selection/cursor state so

@@ -149,6 +149,7 @@ struct ConnectionListState {
     /// struct only caches what it last reported so filtering stays synchronous.
     search_field: Entity<ZzClawInputState>,
     search_draft: String,
+    search_overlay_expanded: bool,
     /// Kept alive for as long as the field is, so edits keep arriving.
     _search_subscription: Subscription,
     sort_mode: ConnectionSortMode,
@@ -256,6 +257,7 @@ impl ConnectionFeatureState {
             list: ConnectionListState {
                 search_field,
                 search_draft: String::new(),
+                search_overlay_expanded: false,
                 _search_subscription: search_subscription,
                 sort_mode: ConnectionSortMode::from_setting(
                     &settings.ui_saved_connections_sort_mode,
@@ -521,6 +523,18 @@ impl ConnectionFeatureState {
 
     pub fn list_search_field(&self) -> Entity<ZzClawInputState> {
         self.list.search_field()
+    }
+
+    pub fn list_search_is_expanded(&self) -> bool {
+        self.list.search_is_expanded()
+    }
+
+    pub fn expand_list_search(&mut self) -> bool {
+        self.list.expand_search()
+    }
+
+    pub fn collapse_list_search(&mut self) -> bool {
+        self.list.collapse_search()
     }
 
     pub fn set_list_search_text(&mut self, text: String) {
@@ -989,6 +1003,27 @@ impl ConnectionFeatureState {
         self.editor.toggle_group_select();
     }
 
+    pub fn add_editor_tag(&mut self) -> bool {
+        self.editor
+            .draft
+            .as_mut()
+            .is_some_and(ConnectionEditorState::add_tag)
+    }
+
+    pub fn remove_editor_tag(&mut self, tag: &str) -> bool {
+        self.editor
+            .draft
+            .as_mut()
+            .is_some_and(|draft| draft.remove_tag(tag))
+    }
+
+    pub fn editor_tag_field_is_focused(&self, cx: &App) -> bool {
+        self.editor
+            .fields
+            .get(&ConnectionEditorField::NewTag)
+            .is_some_and(|field| field.read(cx).has_focus())
+    }
+
     pub fn set_editor_icon(&mut self, icon: Option<&str>) -> bool {
         self.editor.set_icon(icon)
     }
@@ -1423,6 +1458,26 @@ impl ConnectionListState {
 
     pub fn search_field(&self) -> Entity<ZzClawInputState> {
         self.search_field.clone()
+    }
+
+    pub fn search_is_expanded(&self) -> bool {
+        self.search_overlay_expanded || !self.search_is_empty()
+    }
+
+    pub fn expand_search(&mut self) -> bool {
+        if self.search_overlay_expanded {
+            return false;
+        }
+        self.search_overlay_expanded = true;
+        true
+    }
+
+    pub fn collapse_search(&mut self) -> bool {
+        if !self.search_is_empty() || !self.search_overlay_expanded {
+            return false;
+        }
+        self.search_overlay_expanded = false;
+        true
     }
 
     /// Cache what the field just reported. Filtering runs on every keystroke and

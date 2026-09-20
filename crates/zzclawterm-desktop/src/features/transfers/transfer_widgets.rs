@@ -13,6 +13,7 @@ pub(in crate::features) fn duplicate_policy_label(policy: SftpDuplicatePolicy) -
 
 pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String {
     match kind {
+        TransferJobKind::ListTree { path, .. } => format!("List tree {}", path.display_path),
         TransferJobKind::ListDir { remote_path, .. } => format!("List {remote_path}"),
         TransferJobKind::ListChildren { remote_path } => {
             format!("List child directories in {remote_path}")
@@ -74,6 +75,18 @@ pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String 
             file_name,
             session_id,
         } => format!("ZMODEM ↑ {file_name} ({session_id})"),
+        TransferJobKind::XmodemUpload {
+            file_name,
+            session_id,
+        } => {
+            format!("XMODEM ↑ {file_name} ({session_id})")
+        }
+        TransferJobKind::YmodemUpload {
+            file_name,
+            session_id,
+        } => {
+            format!("YMODEM ↑ {file_name} ({session_id})")
+        }
         TransferJobKind::ZmodemDownload {
             file_name,
             session_id,

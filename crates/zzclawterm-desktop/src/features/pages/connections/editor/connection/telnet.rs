@@ -111,7 +111,7 @@ pub(super) fn connection_editor_telnet_section(
         .items([
             ZzClawTabItem::new(t!("dialog.askWhenConnecting")),
             ZzClawTabItem::new(t!("dialog.directPassword")),
-            ZzClawTabItem::new(t!("dialog.savedPassword")),
+            ZzClawTabItem::new(t!("dialog.account")),
         ])
         .selected_index(match editor.password_source {
             ConnectionEditorPasswordSource::Ask => 0,
@@ -176,6 +176,12 @@ pub(super) fn connection_editor_telnet_section(
             ConnectionEditorField::Username,
             fields,
             cx,
+        ))
+        .child(connection_editor_select(
+            ConnectionEditorRenderContext { palette, fields, cx },
+            "connection-editor-account",
+            t!("dialog.account"),
+            ConnectionEditorSelect::Account,
         ))
         .child(
             div()

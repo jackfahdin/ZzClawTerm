@@ -12,6 +12,7 @@ mod electerm;
 mod finalshell;
 mod mobaxterm;
 mod securecrt;
+mod ssh_config;
 mod termius;
 mod windterm;
 mod xshell;
@@ -204,6 +205,8 @@ fn prepare_legacy_sessions(imported: Vec<ImportedSession>) -> PreparedSessionImp
             auth: Some(ConnectionAuth {
                 mode: session.auth_type,
                 password_id: None,
+                account_id: None,
+                password_source: None,
                 password: None,
                 key_id: None,
                 otp_id: None,
@@ -258,6 +261,12 @@ pub fn prepare_termius_session_import(
     local_key: &[u8],
 ) -> Result<PreparedSessionImport, SessionImportError> {
     termius::parse_termius_indexed_db(indexed_db_path, local_key)
+}
+
+pub fn prepare_ssh_config_import(
+    config_path: &Path,
+) -> Result<PreparedSessionImport, SessionImportError> {
+    ssh_config::prepare_ssh_config_import(config_path)
 }
 
 #[cfg(test)]

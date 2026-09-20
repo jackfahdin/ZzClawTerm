@@ -93,6 +93,7 @@ pub(super) fn terminal_highlight_spans_compiled(
     link_ranges: &[(usize, usize)],
     keyword_excluded_ranges: &[(usize, usize)],
     palette: zzclawterm_ui::ThemePalette,
+    bold_default_foreground: bool,
 ) -> Vec<TerminalHighlightSpan> {
     let keyword_ranges = (!compiled_keyword_rules.is_empty() && !line.is_empty()).then(|| {
         keyword_matches_compiled(line, compiled_keyword_rules)
@@ -108,24 +109,26 @@ pub(super) fn terminal_highlight_spans_compiled(
         .as_ref()
         .is_some_and(|ranges| !ranges.is_empty())
     {
-        terminal_highlight_spans_with_keyword_ranges(
+        terminal_highlight_spans_with_keyword_ranges_and_options(
             line,
             ansi_spans,
             keyword_ranges.as_deref(),
             keyword_excluded_ranges,
             palette,
+            bold_default_foreground,
         )
     } else if let Some(ansi) = ansi_spans
         && !(ansi.is_empty() || (ansi.len() == 1 && ansi[0].text.is_empty()))
     {
-        ansi_to_highlight_spans_compiled(ansi, palette, &[])
+        ansi_to_highlight_spans_compiled(ansi, palette, &[], bold_default_foreground)
     } else {
-        terminal_highlight_spans_with_keyword_ranges(
+        terminal_highlight_spans_with_keyword_ranges_and_options(
             line,
             ansi_spans,
             None,
             keyword_excluded_ranges,
             palette,
+            bold_default_foreground,
         )
     };
     if !link_ranges.is_empty() {
@@ -267,6 +270,7 @@ pub(super) fn apply_selected_occurrence_ranges(
     compress_flat_cells(flat)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn terminal_highlight_spans_with_keyword_ranges(
     line: &str,
     ansi_spans: Option<&[zzclawterm_terminal::StyledSpan]>,
@@ -274,13 +278,31 @@ pub(super) fn terminal_highlight_spans_with_keyword_ranges(
     keyword_excluded_ranges: &[(usize, usize)],
     palette: zzclawterm_ui::ThemePalette,
 ) -> Vec<TerminalHighlightSpan> {
+    terminal_highlight_spans_with_keyword_ranges_and_options(
+        line,
+        ansi_spans,
+        keyword_ranges,
+        keyword_excluded_ranges,
+        palette,
+        false,
+    )
+}
+
+pub(super) fn terminal_highlight_spans_with_keyword_ranges_and_options(
+    line: &str,
+    ansi_spans: Option<&[zzclawterm_terminal::StyledSpan]>,
+    keyword_ranges: Option<&[TerminalKeywordRange]>,
+    keyword_excluded_ranges: &[(usize, usize)],
+    palette: zzclawterm_ui::ThemePalette,
+    bold_default_foreground: bool,
+) -> Vec<TerminalHighlightSpan> {
     let text = if line.is_empty() { " " } else { line };
     let total_cols = terminal_cell_count(text);
     if total_cols == 0 {
         return vec![plain_terminal_span(" ")];
     }
 
-    let base_runs = terminal_base_style_runs(text, ansi_spans, palette);
+    let base_runs = terminal_base_style_runs(text, ansi_spans, palette, bold_default_foreground);
     let mut boundaries = Vec::with_capacity(
         2 + base_runs.len().saturating_mul(2)
             + keyword_ranges.map_or(0, |ranges| ranges.len().saturating_mul(2))
@@ -383,6 +405,7 @@ fn terminal_base_style_runs(
     line: &str,
     ansi_spans: Option<&[zzclawterm_terminal::StyledSpan]>,
     palette: zzclawterm_ui::ThemePalette,
+    bold_default_foreground: bool,
 ) -> Vec<TerminalStyleRun> {
     let default_style = TerminalSpanStyle {
         color: None,
@@ -426,7 +449,7 @@ fn terminal_base_style_runs(
         let color = if span.style.hidden {
             bg.unwrap_or(palette.terminal_bg)
         } else {
-            crate::resolve_cell_fg(palette, span.style)
+            crate::resolve_cell_fg(palette, span.style, bold_default_foreground)
         };
         let style = TerminalSpanStyle {
             color: Some(color),
@@ -1008,6 +1031,7 @@ mod tests {
             &[],
             &[(6, 11)],
             palette,
+            false,
         );
 
         assert_eq!(spans.len(), 2);
@@ -1033,6 +1057,7 @@ mod tests {
             &link_ranges,
             &keyword_excluded_ranges,
             palette,
+            false,
         );
 
         let flat = flatten_highlight_spans(spans);
@@ -1075,6 +1100,7 @@ mod tests {
             &link_ranges,
             &keyword_excluded_ranges,
             palette,
+            false,
         );
 
         let version = spans

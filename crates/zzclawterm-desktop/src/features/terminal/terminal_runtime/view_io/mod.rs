@@ -723,6 +723,7 @@ impl ZzClawTermApp {
         let font_size = self.settings.summary().terminal_font_size as f32;
         let normal_weight = self.settings.summary().terminal_font_weight as f32;
         let bold_weight = self.settings.summary().terminal_font_weight_bold as f32;
+        let bold_default_foreground = self.settings.summary().bold_default_foreground;
         let show_line_numbers = self.settings.summary().terminal_show_line_numbers;
         let show_timestamps = self.settings.summary().terminal_show_timestamps;
         let timestamp_format = self.settings.summary().terminal_timestamp_format.clone();
@@ -825,6 +826,7 @@ impl ZzClawTermApp {
                 font_size,
                 normal_weight,
                 bold_weight,
+                bold_default_foreground,
                 cell_width: cell_w,
                 cell_height: cell_h,
                 show_line_numbers,
@@ -1029,6 +1031,7 @@ impl ZzClawTermApp {
         let font_size = self.settings.summary().terminal_font_size as f32;
         let normal_weight = self.settings.summary().terminal_font_weight as f32;
         let bold_weight = self.settings.summary().terminal_font_weight_bold as f32;
+        let bold_default_foreground = self.settings.summary().bold_default_foreground;
         let show_line_numbers = self.settings.summary().terminal_show_line_numbers;
         let show_timestamps = self.settings.summary().terminal_show_timestamps;
         let timestamp_format = self.settings.summary().terminal_timestamp_format.clone();
@@ -1091,6 +1094,7 @@ impl ZzClawTermApp {
                     font_size,
                     normal_weight,
                     bold_weight,
+                    bold_default_foreground,
                     cell_width: cell_w,
                     cell_height: cell_h,
                     show_line_numbers,
@@ -1376,6 +1380,7 @@ impl ZzClawTermApp {
                 font_size,
                 normal_weight,
                 bold_weight,
+                bold_default_foreground,
                 cell_width: cell_w,
                 cell_height: cell_h,
                 show_line_numbers,

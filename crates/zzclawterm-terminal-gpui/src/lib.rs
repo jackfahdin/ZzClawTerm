@@ -36,6 +36,7 @@ pub fn terminal_font_features() -> FontFeatures {
 fn resolve_cell_fg(
     palette: zzclawterm_ui::ThemePalette,
     style: zzclawterm_terminal::CellStyle,
+    bold_default_foreground: bool,
 ) -> u32 {
     if style.reverse {
         if let Some(rgb) = style.bg_rgb {
@@ -52,6 +53,7 @@ fn resolve_cell_fg(
     match style.fg {
         Some(index) if style.bold && index < 8 => palette.terminal_ansi_color(index + 8),
         Some(index) => palette.terminal_ansi_color(index),
+        None if style.bold && bold_default_foreground => palette.terminal_ansi_color(15),
         None => palette.terminal_fg,
     }
 }

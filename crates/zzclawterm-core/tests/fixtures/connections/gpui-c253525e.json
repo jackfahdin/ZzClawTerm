@@ -1,0 +1,17 @@
+{
+  "connections": [
+    {
+      "id": "gpui-example",
+      "name": "GPUI fixture",
+      "type": "ssh",
+      "host": "gpui.example.invalid",
+      "port": 2222,
+      "username": "operator",
+      "auth": { "mode": "password", "password_id": "legacy-password" },
+      "network": { "proxy_jump_id": "legacy-jump", "future_network": { "enabled": true } },
+      "sftp": { "enabled": true, "cwd_follow_mode": "shell_integration", "future_policy": "preserved" },
+      "future_connection": { "revision": 7 }
+    }
+  ],
+  "groups": []
+}

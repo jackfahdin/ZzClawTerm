@@ -843,7 +843,35 @@ impl SessionFeatureState {
     }
 
     pub(in crate::features) fn has_protocol_runtime_sessions(&self) -> bool {
-        !self.protocols.zmodem.is_empty() || !self.protocols.trzsz.is_empty()
+        !self.protocols.xymodem.is_empty()
+            || !self.protocols.zmodem.is_empty()
+            || !self.protocols.trzsz.is_empty()
+    }
+
+    pub(super) fn xymodem_state(
+        &self,
+        session_id: &str,
+    ) -> Option<&super::xymodem_runtime::XymodemSessionState> {
+        self.protocols.xymodem.get(session_id)
+    }
+    pub(super) fn xymodem_states(
+        &self,
+    ) -> impl Iterator<Item = (&String, &super::xymodem_runtime::XymodemSessionState)> {
+        self.protocols.xymodem.iter()
+    }
+    pub(super) fn insert_xymodem_state(
+        &mut self,
+        session_id: String,
+        state: super::xymodem_runtime::XymodemSessionState,
+    ) {
+        self.protocols.xymodem.insert(session_id, state);
+    }
+    pub(super) fn remove_xymodem_session_runtime(&mut self, session_id: &str) -> bool {
+        let Some(mut state) = self.protocols.xymodem.remove(session_id) else {
+            return false;
+        };
+        state.stop_worker();
+        true
     }
 
     pub(super) fn has_zmodem_runtime_sessions(&self) -> bool {
@@ -1536,6 +1564,7 @@ impl SessionFeatureState {
         &mut self,
         session_id: &str,
     ) -> Option<String> {
+        self.remove_xymodem_session_runtime(session_id);
         self.remove_zmodem_session_runtime(session_id);
         self.remove_trzsz_session_runtime(session_id);
         self.remove_remote_file_service(session_id);

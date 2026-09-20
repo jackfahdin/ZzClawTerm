@@ -141,6 +141,8 @@ pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) snapshot_password_prompt: Option<SnapshotPasswordPromptState>,
     pub(in crate::features) snapshot_password_prompt_active: bool,
     pub(in crate::features) config_path_prompt_active: bool,
+    pub(in crate::features) local_backup_status: String,
+    pub(in crate::features) local_backup_ready: bool,
     pub(in crate::features) terminal_theme_is_dark: bool,
     pub(in crate::features) panel_multi_open: bool,
 }
@@ -173,6 +175,8 @@ impl SettingsPresentation {
             snapshot_password_prompt: None,
             snapshot_password_prompt_active: false,
             config_path_prompt_active: false,
+            local_backup_status: String::new(),
+            local_backup_ready: true,
             terminal_theme_is_dark: true,
             panel_multi_open: false,
         }
@@ -258,12 +262,6 @@ impl SettingsPresentation {
 
     pub(in crate::features) fn keybinding_focus(&self) -> &gpui::FocusHandle {
         &self.keybinding_focus
-    }
-
-    pub(in crate::features) fn snapshot_password_prompt(
-        &self,
-    ) -> Option<SnapshotPasswordPromptState> {
-        self.snapshot_password_prompt.clone()
     }
 
     pub(in crate::features) fn snapshot_password_prompt_active(&self) -> bool {
@@ -1902,25 +1900,6 @@ impl SettingsPanel {
     ) {
         self.with_app(cx, |app, cx| app.reset_keybinding(shortcut_id, cx));
     }
-
-    pub(in crate::features) fn snapshot_password_prompt_banner(
-        &mut self,
-        prompt: SnapshotPasswordPromptState,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let palette = self.theme_palette();
-        div()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.section_header))
-            .px_3()
-            .py_2()
-            .text_size(px(12.))
-            .text_color(rgb(palette.text_muted))
-            .child(format!("{:?}", prompt.kind))
-            .into_any_element()
-    }
 }
 
 macro_rules! forward_app_action {
@@ -1969,6 +1948,7 @@ forward_app_action!(
     toggle_command_suggestions,
     toggle_confirm_on_close,
     toggle_cursor_blink,
+    toggle_bold_default_foreground,
     toggle_docker_manager_panel,
     toggle_gpu_monitor_panel,
     toggle_interaction_copy_on_select,

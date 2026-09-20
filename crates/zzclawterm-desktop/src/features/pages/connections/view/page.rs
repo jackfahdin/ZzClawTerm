@@ -274,7 +274,7 @@ fn connections_search_bar(
         .expect("the caller returns early without a snapshot");
     let chrome = snapshot.chrome;
     let palette = chrome.palette;
-    let search_empty = snapshot.search_is_empty;
+    let search_expanded = snapshot.search_expanded;
     let search_field = snapshot.search_field.clone();
     // Tauri swaps the glyph, flips it for Z-A and tints it while a name sort is
     // active, so the current mode is readable without hovering for the tooltip.
@@ -304,18 +304,25 @@ fn connections_search_bar(
                 .unwrap_or_default()
         })
         .on_trigger(|_, _, cx| cx.stop_propagation());
-    let mut search_input = ZzClawSearchInput::new("connection-search-input", &search_field)
-        .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
+    let search_key_restore_focus = panel.focus_handle().clone();
+    let search_input = ZzClawSearchInput::new("connection-search-input", &search_field)
+        .on_key_down(cx.listener(move |panel, event: &KeyDownEvent, window, cx| {
             let event = event.clone();
             panel.with_app(cx, |app, cx| {
-                app.handle_connection_search_key_down(&event, window, cx);
+                app.handle_connection_search_key_down(
+                    &event,
+                    &search_key_restore_focus,
+                    window,
+                    cx,
+                );
             });
         }));
-    if !search_empty {
-        search_input = search_input.trailing(
-            div()
+    let (compact_search, expanded_search): (Option<AnyElement>, Option<AnyElement>) =
+        if search_expanded {
+            let close_restore_focus = panel.focus_handle().clone();
+            let close = div()
                 .id(SharedString::from("connection-search-clear"))
-                .size(px(18.))
+                .size(px(20.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -327,9 +334,10 @@ fn connections_search_bar(
                     this.bg(rgb(palette.surface_elevated))
                         .text_color(rgb(palette.text))
                 })
-                .on_click(cx.listener(|panel, _, window, cx| {
+                .on_click(cx.listener(move |panel, _, window, cx| {
+                    cx.stop_propagation();
                     panel.with_app(cx, |app, cx| {
-                        app.clear_connection_search(window, cx);
+                        app.clear_connection_search(&close_restore_focus, window, cx);
                     });
                 }))
                 .child(
@@ -337,12 +345,47 @@ fn connections_search_bar(
                         .size(px(13.))
                         .path("icons/window/close.svg")
                         .text_color(rgb(palette.text_muted)),
-                ),
-        );
-    }
+                );
+            let overlay = div()
+                .id(SharedString::from("connection-search-overlay"))
+                .absolute()
+                .top(px(4.))
+                .bottom(px(4.))
+                .left(px(8.))
+                .right(px(8.))
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(palette.primary))
+                .bg(rgb(palette.surface))
+                .shadow_lg()
+                .occlude()
+                .flex()
+                .items_center()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(search_input.compact().bare().trailing(close));
+            (None, Some(overlay.into_any_element()))
+        } else {
+            let compact = div()
+                .id(SharedString::from("connection-search-expand"))
+                .flex_1()
+                .min_w_0()
+                .h(px(28.))
+                .rounded_md()
+                .bg(rgb(palette.surface_elevated))
+                .flex()
+                .items_center()
+                .on_click(cx.listener(|panel, _, window, cx| {
+                    panel.with_app(cx, |app, cx| {
+                        app.focus_connection_search(window, cx);
+                    });
+                }))
+                .child(search_input.compact().bare());
+            (Some(compact.into_any_element()), None)
+        };
 
     // Tauri search strip: px-2 py-1.5, input h-7.
     div()
+        .relative()
         .h(px(36.))
         .px_2()
         .flex()
@@ -351,7 +394,7 @@ fn connections_search_bar(
         .border_b_1()
         .border_color(rgb(palette.border))
         .bg(chrome.transparent_section_header)
-        .child(div().flex_1().min_w_0().child(search_input))
+        .child(div().flex_1().min_w_0().children(compact_search))
         // Count lives in PanelHeader (Tauri).
         .child(icon_action_button_styled(
             palette,
@@ -400,4 +443,5 @@ fn connections_search_bar(
             }),
         ))
         .child(more_menu)
+        .children(expanded_search)
 }

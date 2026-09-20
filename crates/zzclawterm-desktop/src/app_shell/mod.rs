@@ -796,16 +796,21 @@ fn install_native_app_menus(cx: &mut Context<AppShell>) {
 }
 
 fn native_app_menus() -> Vec<Menu> {
+    native_app_menus_for(zzclawterm_core::app_identity::AppFlavor::current())
+}
+
+fn native_app_menus_for(flavor: zzclawterm_core::app_identity::AppFlavor) -> Vec<Menu> {
+    let name = flavor.display_name();
     vec![
-        Menu::new("ZzClawTerm").items([
-            MenuItem::action("About ZzClawTerm", NativeAbout),
+        Menu::new(name).items([
+            MenuItem::action(format!("About {name}"), NativeAbout),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide ZzClawTerm", NativeHide),
+            MenuItem::action(format!("Hide {name}"), NativeHide),
             MenuItem::action("Hide Others", NativeHideOthers),
             MenuItem::action("Show All", NativeShowAll),
             MenuItem::separator(),
-            MenuItem::action("Quit ZzClawTerm", NativeQuit),
+            MenuItem::action(format!("Quit {name}"), NativeQuit),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Session", NativeNewSession),
@@ -1016,7 +1021,8 @@ impl Render for AppShell {
 mod tests {
     use gpui::{Menu, MenuItem};
 
-    use crate::app_shell::native_app_menus;
+    use crate::app_shell::native_app_menus_for;
+    use zzclawterm_core::app_identity::AppFlavor;
 
     fn menu_names(menus: &[Menu]) -> Vec<&str> {
         menus.iter().map(|menu| menu.name.as_ref()).collect()
@@ -1036,8 +1042,17 @@ mod tests {
     }
 
     #[test]
+    fn preview_native_menu_uses_preview_application_name() {
+        let menus = native_app_menus_for(AppFlavor::Preview);
+        assert_eq!(menus[0].name.as_ref(), "ZzClawTerm Preview");
+        assert!(item_names(&menus[0]).contains(&"About ZzClawTerm Preview"));
+        assert!(item_names(&menus[0]).contains(&"Hide ZzClawTerm Preview"));
+        assert!(item_names(&menus[0]).contains(&"Quit ZzClawTerm Preview"));
+    }
+
+    #[test]
     fn native_menu_keeps_tauri_macos_top_level_order() {
-        let menus = native_app_menus();
+        let menus = native_app_menus_for(AppFlavor::Stable);
 
         assert_eq!(
             menu_names(&menus),
@@ -1047,7 +1062,7 @@ mod tests {
 
     #[test]
     fn native_edit_menu_is_standard_macos_edit_layer() {
-        let menus = native_app_menus();
+        let menus = native_app_menus_for(AppFlavor::Stable);
         let edit = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "Edit")
@@ -1061,7 +1076,7 @@ mod tests {
 
     #[test]
     fn native_about_lives_in_app_menu_not_help_menu() {
-        let menus = native_app_menus();
+        let menus = native_app_menus_for(AppFlavor::Stable);
         let app = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "ZzClawTerm")

@@ -468,6 +468,27 @@ fn connection_list_model_cache_misses_when_search_changes() {
 }
 
 #[test]
+fn connection_search_overlay_only_collapses_after_the_query_is_cleared() {
+    let mut cx = TestAppContext::single();
+    let app = cache_test_app(&mut cx);
+
+    cx.update_entity(&app, |app, _| {
+        assert!(!app.connection_state.list_search_is_expanded());
+        assert!(app.connection_state.expand_list_search());
+        assert!(app.connection_state.list_search_is_expanded());
+
+        app.connection_state
+            .set_list_search_text("prod".to_string());
+        assert!(!app.connection_state.collapse_list_search());
+        assert!(app.connection_state.list_search_is_expanded());
+
+        app.connection_state.set_list_search_text(String::new());
+        assert!(app.connection_state.collapse_list_search());
+        assert!(!app.connection_state.list_search_is_expanded());
+    });
+}
+
+#[test]
 fn connection_list_model_cache_misses_when_expansion_changes() {
     let mut cx = TestAppContext::single();
     let app = cache_test_app(&mut cx);
@@ -1025,6 +1046,25 @@ fn recording_edits_preserve_advanced_compatibility_fields() {
         ConnectionEditorToggle::RecordingUseGlobal,
     ));
     assert_eq!(draft.expect("editor remains open").recording, None);
+}
+
+#[test]
+fn editor_tags_trim_deduplicate_remove_and_keep_draft_fields_independent() {
+    let mut editor = connection_editor_state_with_secret_draft();
+    editor.new_tag = " production ".into();
+    assert!(editor.add_tag());
+    assert_eq!(editor.tags, ["production"]);
+    assert!(editor.new_tag.is_empty());
+    editor.new_tag = "production".into();
+    assert!(!editor.add_tag());
+    editor.new_tag = "  ".into();
+    assert!(!editor.add_tag());
+    editor.new_tag = "gpu".into();
+    assert!(editor.add_tag());
+    assert!(!editor.remove_tag("missing"));
+    assert!(editor.remove_tag("production"));
+    assert_eq!(editor.tags, ["gpu"]);
+    assert_eq!(editor.password.expose_secret(), "draft-secret");
 }
 
 #[test]
@@ -1733,6 +1773,7 @@ fn saved_connection(
 ) -> SavedConnection {
     SavedConnection {
         extensions: Default::default(),
+        tags: Vec::new(),
         id: id.to_string(),
         name: name.to_string(),
         config: ConnectionType::LocalTerminal {
@@ -1780,6 +1821,8 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         kind: ConnectionKindTab::Ssh,
         name: "prod".to_string(),
         description: String::new(),
+        tags: Vec::new(),
+        new_tag: String::new(),
         icon: None,
         icon_auto_detect: true,
         group_id: None,
@@ -1804,6 +1847,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         vnc_view_only: false,
         password_source: ConnectionEditorPasswordSource::Direct,
         password_id: None,
+        account_id: None,
         password: "draft-secret".to_string().into(),
         existing_password: Some("existing-secret".to_string().into()),
         key_id: None,
@@ -1811,6 +1855,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         auto_fill_otp: false,
         proxy_id: None,
         proxy_jump_id: None,
+        host_key_alias: None,
         x11_forwarding: false,
         dynamic_tab_title: false,
         agent_endpoint: Default::default(),
@@ -1824,6 +1869,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         ssh_profile: Default::default(),
         terminal_type: None,
         sftp_enabled: true,
+        sftp_compatibility_mode: false,
         sftp_cwd_follow_mode: "shell_integration".to_string(),
         sftp_shell_detection_timeout_ms: "3000".to_string(),
         sftp_pipeline_depth: None,

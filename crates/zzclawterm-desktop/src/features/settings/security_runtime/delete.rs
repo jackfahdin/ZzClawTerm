@@ -16,6 +16,10 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind == SecurityAuthTab::KnownHosts {
+            self.request_delete_security_known_host(id, label, window, cx);
+            return;
+        }
         let (title_key, description_key) = match kind {
             SecurityAuthTab::Keys => ("settings.deleteKey", "settings.deleteKeyConfirm"),
             SecurityAuthTab::Passwords => (
@@ -27,8 +31,33 @@ impl ZzClawTermApp {
                 "credentialManager.deleteConfirm",
             ),
             SecurityAuthTab::Otp => ("otpManager.deleteTitle", "otpManager.deleteConfirm"),
+            SecurityAuthTab::KnownHosts => (
+                "securityAuth.deleteKnownHost",
+                "securityAuth.deleteKnownHostConfirm",
+            ),
         };
-        let message = t!(description_key, name = label).to_string();
+        let mut message = t!(description_key, name = label).to_string();
+        if kind == SecurityAuthTab::Passwords {
+            let references = self
+                .connection_state
+                .connections()
+                .iter()
+                .filter(|connection| {
+                    connection.auth.as_ref().is_some_and(|auth| {
+                        auth.account_id.as_deref() == Some(id.as_str())
+                            || auth.password_id.as_deref() == Some(id.as_str())
+                    })
+                })
+                .map(|connection| connection.name.as_str())
+                .collect::<Vec<_>>();
+            if !references.is_empty() {
+                message.push_str("\n\n");
+                message.push_str(&t!(
+                    "passwordManager.referencedBy",
+                    names = references.join("\n")
+                ));
+            }
+        }
         self.open_confirm_dialog(
             (
                 t!(title_key).to_string(),
@@ -64,6 +93,7 @@ impl ZzClawTermApp {
                     SecurityAuthTab::Passwords => store.delete_password(&id),
                     SecurityAuthTab::Credentials => store.delete_credential(&id),
                     SecurityAuthTab::Otp => store.delete_otp_entry(&id),
+                    SecurityAuthTab::KnownHosts => store.delete_known_host(&id),
                 }
                 .map_err(|error| error.to_string())?;
                 load_security_catalog(&store)

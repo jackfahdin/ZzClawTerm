@@ -41,6 +41,14 @@ impl ZzClawTermApp {
                 TextInputSetup::default(),
                 cx,
             ))
+            .child(security_editor_field(
+                self,
+                "pw-username",
+                t!("passwordManager.usernameLabel"),
+                editor.username.clone(),
+                TextInputSetup::default(),
+                cx,
+            ))
             .child(
                 div()
                     .flex()

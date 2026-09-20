@@ -927,7 +927,9 @@ impl ZzClawTermApp {
         if let Some(failed) = self.shell.last_connect_failure_name() {
             return failed.to_string();
         }
-        "ZzClawTerm".to_string()
+        zzclawterm_core::app_identity::AppFlavor::current()
+            .display_name()
+            .to_string()
     }
 
     fn title_context_icon(&self) -> Option<IconDef> {

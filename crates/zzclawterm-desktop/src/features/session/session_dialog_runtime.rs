@@ -268,6 +268,7 @@ impl ZzClawTermApp {
         let multiplex_key = self.session.remove_session_catalog(session_id);
         self.session.clear_event_bridge_session(session_id);
         self.terminal.remove_frame_session(session_id);
+        self.terminal.remove_search_session_state(session_id);
         self.remove_terminal_surface(session_id);
         self.terminal.remove_session_surface_bounds(session_id);
         self.transfer.remove_browser_session_cache(session_id);

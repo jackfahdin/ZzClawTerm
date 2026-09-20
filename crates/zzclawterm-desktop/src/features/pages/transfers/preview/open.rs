@@ -280,6 +280,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         let transfer_tx = self.transfer.transfer_event_sender();
         self.submit_transfer_blocking_job(
@@ -350,6 +351,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         let transfer_tx = self.transfer.transfer_event_sender();
         self.submit_transfer_blocking_job(

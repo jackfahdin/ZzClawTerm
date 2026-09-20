@@ -18,12 +18,29 @@ sys.path.insert(0, str(RELEASE_SCRIPTS))
 import verify_native_package  # noqa: E402
 
 
-def fake_pe(machine: int) -> bytes:
-    data = bytearray(512)
+def fake_pe(
+    machine: int, *, subsystem: int = 3, resource_ids: tuple[int, ...] = ()
+) -> bytes:
+    data = bytearray(1024)
     data[:2] = b"MZ"
     struct.pack_into("<I", data, 0x3C, 0x80)
     data[0x80:0x84] = b"PE\0\0"
     struct.pack_into("<H", data, 0x84, machine)
+    struct.pack_into("<H", data, 0x86, 1)
+    struct.pack_into("<H", data, 0x94, 0xF0)
+    optional = 0x98
+    struct.pack_into("<H", data, optional, 0x20B)
+    struct.pack_into("<H", data, optional + 68, subsystem)
+    struct.pack_into("<I", data, optional + 108, 16)
+    if resource_ids:
+        struct.pack_into("<II", data, optional + 112 + 2 * 8, 0x1000, 0x100)
+    section = optional + 0xF0
+    data[section : section + 8] = b".rsrc\0\0\0"
+    struct.pack_into("<IIII", data, section + 8, 0x100, 0x1000, 0x200, 0x200)
+    if resource_ids:
+        struct.pack_into("<HH", data, 0x200 + 12, 0, len(resource_ids))
+        for index, resource_id in enumerate(resource_ids):
+            struct.pack_into("<II", data, 0x210 + index * 8, resource_id, 0)
     return bytes(data)
 
 
@@ -51,7 +68,10 @@ def write_portable(
     """Build a portable zip whose layout matches package_native's output."""
     root = "ZzClawTerm-portable"
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(f"{root}/ZzClawTerm.exe", fake_pe(machine))
+        archive.writestr(
+            f"{root}/ZzClawTerm.exe",
+            fake_pe(machine, subsystem=2, resource_ids=(3, 14, 24)),
+        )
         if helper_machine is not None:
             for name in verify_native_package.helper_filenames(
                 "x86_64-pc-windows-msvc"
@@ -109,6 +129,23 @@ class VerifyNativePackageTests(unittest.TestCase):
             ):
                 verify_native_package.verify_windows_portable(
                     path, "x86_64-pc-windows-msvc", "0.0.1"
+                )
+
+    def test_windows_application_requires_gui_subsystem_and_icon_resources(self) -> None:
+        valid = fake_pe(0x8664, subsystem=2, resource_ids=(3, 14, 24))
+        verify_native_package.verify_windows_application_binary(valid, "test.exe")
+
+        with self.assertRaisesRegex(RuntimeError, "GUI subsystem"):
+            verify_native_package.verify_windows_application_binary(
+                fake_pe(0x8664, subsystem=3, resource_ids=(3, 14)), "test.exe"
+            )
+        for resources in ((14,), (3,), (24,)):
+            with self.subTest(resources=resources), self.assertRaisesRegex(
+                RuntimeError, "icon resources"
+            ):
+                verify_native_package.verify_windows_application_binary(
+                    fake_pe(0x8664, subsystem=2, resource_ids=resources),
+                    "test.exe",
                 )
 
     def test_windows_portable_accepts_a_complete_vcxsrv_tree(self) -> None:

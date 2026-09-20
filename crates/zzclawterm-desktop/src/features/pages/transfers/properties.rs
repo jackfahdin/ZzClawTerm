@@ -202,6 +202,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.transfer
             .set_browser_status(format!("Loading properties for {remote_display_path}"));
@@ -366,6 +367,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.transfer
             .set_browser_status(format!("Updating properties for {remote_display_path}"));

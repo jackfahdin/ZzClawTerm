@@ -1,6 +1,7 @@
-use gpui::{App, IntoElement, RenderOnce, SharedString, Window, div, prelude::*};
+use gpui::{App, IntoElement, RenderOnce, ScrollHandle, SharedString, Window, div, prelude::*};
 use gpui_component::{
     Sizable,
+    scroll::ScrollableElement as _,
     tab::{Tab, TabBar},
 };
 
@@ -42,6 +43,7 @@ pub struct ZzClawTabs {
     selected_index: Option<usize>,
     variant: ZzClawTabsVariant,
     full_width: bool,
+    scroll_handle: Option<ScrollHandle>,
     on_select: Option<ZzClawTabSelectHandler>,
 }
 
@@ -53,6 +55,7 @@ impl ZzClawTabs {
             selected_index: Some(0),
             variant: ZzClawTabsVariant::Segmented,
             full_width: true,
+            scroll_handle: None,
             on_select: None,
         }
     }
@@ -87,6 +90,12 @@ impl ZzClawTabs {
         self
     }
 
+    /// Keep labels at their natural width and expose a scrollbar and overflow menu.
+    pub fn scrollable(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll_handle = Some(handle.clone());
+        self
+    }
+
     pub fn on_select(mut self, handler: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_select = Some(Box::new(handler));
         self
@@ -107,23 +116,82 @@ impl RenderOnce for ZzClawTabs {
         if self.full_width {
             tabs = tabs.w_full();
         }
+        let scrolling = self.scroll_handle.is_some();
+        if let Some(handle) = &self.scroll_handle {
+            tabs = tabs.track_scroll(handle).menu(true);
+        }
         if let Some(on_select) = self.on_select {
             tabs = tabs.on_click(move |index, window, cx| on_select(index, window, cx));
         }
-        tabs.children(self.items.into_iter().map(|item| {
-            Tab::new()
-                .label(item.label)
-                .disabled(item.disabled)
-                .flex_1()
-                .min_w_0()
-        }))
-        .last_empty_space(div())
+        let tabs = tabs
+            .children(self.items.into_iter().map(|item| {
+                Tab::new()
+                    .label(item.label)
+                    .disabled(item.disabled)
+                    .when(!scrolling, |tab| tab.flex_1().min_w_0())
+                    .when(scrolling, |tab| tab.flex_none().whitespace_nowrap())
+            }))
+            .last_empty_space(div());
+        match self.scroll_handle {
+            Some(handle) => div()
+                .relative()
+                .w_full()
+                .child(tabs)
+                .horizontal_scrollbar(&handle)
+                .into_any_element(),
+            None => tabs.into_any_element(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ZzClawTabItem, ZzClawTabs, ZzClawTabsVariant};
+    use gpui::{Context, Render, ScrollHandle, TestAppContext, Window, div, point, prelude::*, px};
+
+    struct ScrollTabsFixture {
+        scroll: ScrollHandle,
+    }
+
+    impl Render for ScrollTabsFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(160.)).child(
+                ZzClawTabs::new("scroll-tabs")
+                    .scrollable(&self.scroll)
+                    .items([
+                        ZzClawTabItem::new("Keys"),
+                        ZzClawTabItem::new("Passwords"),
+                        ZzClawTabItem::new("OTP"),
+                        ZzClawTabItem::new("Credentials"),
+                        ZzClawTabItem::new("Known Hosts"),
+                    ]),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn natural_width_tabs_remain_scrollable_in_a_narrow_panel(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (fixture, cx) = cx.add_window_view(|_, _| ScrollTabsFixture {
+            scroll: ScrollHandle::new(),
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let scroll = fixture.read_with(cx, |fixture, _| fixture.scroll.clone());
+        assert!(
+            scroll.max_offset().x > px(0.),
+            "labels must not shrink to fit"
+        );
+        fixture.update(cx, |_, cx| {
+            scroll.set_offset(point(px(-60.), px(0.)));
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(scroll.offset().x < px(0.));
+    }
 
     #[test]
     fn segmented_tabs_default_to_full_width_equal_segments() {

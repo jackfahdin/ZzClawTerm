@@ -11,6 +11,12 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.mark_user_activity();
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            self.handle_transfer_tree_key_down(event, window, cx);
+            return;
+        }
         let keystroke = &event.keystroke;
         let modified_for_location = (keystroke.modifiers.platform || keystroke.modifiers.control)
             && !keystroke.modifiers.alt
@@ -18,6 +24,13 @@ impl ZzClawTermApp {
         if modified_for_location && keystroke.key.eq_ignore_ascii_case("l") {
             cx.stop_propagation();
             self.begin_transfer_browser_path_edit(window, cx);
+            return;
+        }
+
+        // Once the search field owns focus, editing keys must not fall through to
+        // the browser shortcuts below. In particular, printable keys would
+        // otherwise recreate the field from a one-character seed on every press.
+        if self.transfer.browser_view().search_expanded {
             return;
         }
 

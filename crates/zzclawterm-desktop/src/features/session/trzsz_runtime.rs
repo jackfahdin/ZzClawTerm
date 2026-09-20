@@ -1294,7 +1294,7 @@ impl ZzClawTermApp {
             .as_deref()
             .and_then(|job_id| self.transfer.transfer_job_mut(job_id))
         {
-            job.progress = Some(progress);
+            job.update_progress(progress);
             job.detail = if update.completed {
                 "Complete".to_string()
             } else if let Some(reason) = update.fail_reason.as_deref() {
@@ -1350,6 +1350,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: Some(progress),
             control: None,
+            speed: Default::default(),
         });
         self.defer_transfer_panel_snapshot_flush(cx);
     }
@@ -1390,7 +1391,7 @@ impl ZzClawTermApp {
             .as_deref()
             .and_then(|job_id| self.transfer.transfer_job_mut(job_id))
         {
-            job.progress = Some(progress);
+            job.update_progress(progress);
             job.detail = if update.completed {
                 "Complete".to_string()
             } else if let Some(reason) = update.fail_reason.as_deref() {
@@ -1446,6 +1447,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: Some(progress),
             control: None,
+            speed: Default::default(),
         });
         self.defer_transfer_panel_snapshot_flush(cx);
     }

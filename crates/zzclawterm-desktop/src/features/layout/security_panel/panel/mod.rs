@@ -12,6 +12,7 @@ use crate::theme::ThemePalette;
 
 mod credentials;
 mod keys;
+mod known_hosts;
 mod otp;
 mod passwords;
 
@@ -31,6 +32,7 @@ impl ZzClawTermApp {
             SecurityAuthTab::Passwords => self.security_passwords_body(palette, cx),
             SecurityAuthTab::Credentials => self.security_credentials_body(palette, cx),
             SecurityAuthTab::Otp => self.security_otp_body(palette, cx),
+            SecurityAuthTab::KnownHosts => self.security_known_hosts_body(palette, cx),
         }
         .overflow_y_scrollbar();
 
@@ -42,28 +44,34 @@ impl ZzClawTermApp {
             .bg(self.shell_transparent_color(palette.surface))
             .child(
                 div().px_3().pt_3().pb_0().flex().flex_col().child(
-                    ZzClawTabs::new("security-auth-tabs")
-                        .items([
-                            ZzClawTabItem::new(t!(SecurityAuthTab::Keys.i18n_key())),
-                            ZzClawTabItem::new(t!(SecurityAuthTab::Passwords.i18n_key())),
-                            ZzClawTabItem::new(t!(SecurityAuthTab::Otp.i18n_key())),
-                            ZzClawTabItem::new(t!(SecurityAuthTab::Credentials.i18n_key())),
-                        ])
-                        .selected_index(match active_tab {
-                            SecurityAuthTab::Keys => 0,
-                            SecurityAuthTab::Passwords => 1,
-                            SecurityAuthTab::Otp => 2,
-                            SecurityAuthTab::Credentials => 3,
-                        })
-                        .on_select(cx.listener(|this, index, window, cx| {
-                            let tab = match *index {
-                                0 => SecurityAuthTab::Keys,
-                                1 => SecurityAuthTab::Passwords,
-                                2 => SecurityAuthTab::Otp,
-                                _ => SecurityAuthTab::Credentials,
-                            };
-                            this.set_security_auth_tab(tab, window, cx);
-                        })),
+                    div().id("security-auth-tabs-scroll").w_full().child(
+                        ZzClawTabs::new("security-auth-tabs")
+                            .scrollable(self.security.tabs_scroll())
+                            .items([
+                                ZzClawTabItem::new(t!(SecurityAuthTab::Keys.i18n_key())),
+                                ZzClawTabItem::new(t!(SecurityAuthTab::Passwords.i18n_key())),
+                                ZzClawTabItem::new(t!(SecurityAuthTab::Otp.i18n_key())),
+                                ZzClawTabItem::new(t!(SecurityAuthTab::Credentials.i18n_key())),
+                                ZzClawTabItem::new(t!(SecurityAuthTab::KnownHosts.i18n_key())),
+                            ])
+                            .selected_index(match active_tab {
+                                SecurityAuthTab::Keys => 0,
+                                SecurityAuthTab::Passwords => 1,
+                                SecurityAuthTab::Otp => 2,
+                                SecurityAuthTab::Credentials => 3,
+                                SecurityAuthTab::KnownHosts => 4,
+                            })
+                            .on_select(cx.listener(|this, index, window, cx| {
+                                let tab = match *index {
+                                    0 => SecurityAuthTab::Keys,
+                                    1 => SecurityAuthTab::Passwords,
+                                    2 => SecurityAuthTab::Otp,
+                                    3 => SecurityAuthTab::Credentials,
+                                    _ => SecurityAuthTab::KnownHosts,
+                                };
+                                this.set_security_auth_tab(tab, window, cx);
+                            })),
+                    ),
                 ),
             )
             .child(body)

@@ -74,6 +74,21 @@ impl SettingsPanel {
                     ))
                     .child(settings_form_row(
                         palette,
+                        t!("settings.boldDefaultForeground"),
+                        Some(SharedString::from(t!(
+                            "settings.boldDefaultForegroundDesc"
+                        ))),
+                        settings_switch(
+                            palette,
+                            "appearance-bold-default-foreground",
+                            self.settings.summary().bold_default_foreground,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_bold_default_foreground(cx);
+                            }),
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
                         t!("settings.panelMultiOpen"),
                         Some(SharedString::from(t!("settings.panelMultiOpenDesc"))),
                         settings_switch(

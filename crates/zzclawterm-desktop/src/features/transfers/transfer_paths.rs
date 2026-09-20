@@ -626,7 +626,8 @@ impl ZzClawTermApp {
     }
 
     fn normalized_transfer_browser_upload_target(&self) -> String {
-        let value = self.transfer.browser.path.trim();
+        let target = self.transfer_browser_operation_target_directory();
+        let value = target.trim();
         if value.is_empty() {
             self.transfer.normalized_remote_path()
         } else if value == "/" {

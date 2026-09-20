@@ -4,9 +4,9 @@ use gpui::{
     AnyElement, Context, FontWeight, KeyDownEvent, PathPromptOptions, SharedString, Window, div,
     prelude::*, rgb,
 };
-use zzclawterm_store::ConnectionStore;
-use zzclawterm_store::{BootstrapSnapshot, LoadBootstrap};
+use zzclawterm_store::{BootstrapSnapshot, LoadBootstrap, StoreDomain};
 use zzclawterm_transport::SftpDuplicatePolicy;
+use zzclawterm_ui::ZzClawDialogWindowExt;
 
 use crate::features::{
     ZzClawTermApp, runtime_jobs::await_blocking_job, text_inputs::TextInputSetup,
@@ -16,13 +16,34 @@ use crate::models::{
     TranslationSecretDraft,
 };
 
+fn snapshot_password_prompt_title_key(kind: SnapshotPasswordPromptKind) -> &'static str {
+    match kind {
+        SnapshotPasswordPromptKind::Export => "runtimePrompt.snapshotExport",
+        SnapshotPasswordPromptKind::Import => "runtimePrompt.snapshotImport",
+        SnapshotPasswordPromptKind::CloudForcePush => "runtimePrompt.cloudForcePush",
+        SnapshotPasswordPromptKind::CloudForcePull => "runtimePrompt.cloudForcePull",
+        SnapshotPasswordPromptKind::CloudProviderPush => "runtimePrompt.cloudProviderPush",
+        SnapshotPasswordPromptKind::CloudProviderPull => "runtimePrompt.cloudProviderPull",
+        SnapshotPasswordPromptKind::CloudProviderForcePush => {
+            "runtimePrompt.cloudProviderForcePush"
+        }
+        SnapshotPasswordPromptKind::CloudProviderForcePull => {
+            "runtimePrompt.cloudProviderForcePull"
+        }
+        SnapshotPasswordPromptKind::CloudRecoverCurrent
+        | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
+            "settings.useCurrentRemoteSnapshot"
+        }
+    }
+}
+
 impl ZzClawTermApp {
     pub(in crate::features) fn prompt_encrypted_portable_snapshot_export(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_local_snapshot_password_dialog(SnapshotPasswordPromptKind::Export, window, cx);
+        self.open_snapshot_password_dialog(SnapshotPasswordPromptKind::Export, window, cx);
     }
 
     pub(in crate::features) fn prompt_encrypted_portable_snapshot_import(
@@ -39,10 +60,10 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        self.open_local_snapshot_password_dialog(SnapshotPasswordPromptKind::Import, window, cx);
+        self.open_snapshot_password_dialog(SnapshotPasswordPromptKind::Import, window, cx);
     }
 
-    fn open_local_snapshot_password_dialog(
+    fn open_snapshot_password_dialog(
         &mut self,
         kind: SnapshotPasswordPromptKind,
         window: &mut Window,
@@ -77,28 +98,20 @@ impl ZzClawTermApp {
         );
         self.settings
             .set_store_message("awaiting .zz master password");
-
-        let title = match kind {
-            SnapshotPasswordPromptKind::Export => t!("runtimePrompt.snapshotExport"),
-            SnapshotPasswordPromptKind::Import => t!("runtimePrompt.snapshotImport"),
-            SnapshotPasswordPromptKind::CloudForcePush
-            | SnapshotPasswordPromptKind::CloudForcePull
-            | SnapshotPasswordPromptKind::CloudProviderPush
-            | SnapshotPasswordPromptKind::CloudProviderPull
-            | SnapshotPasswordPromptKind::CloudProviderForcePush
-            | SnapshotPasswordPromptKind::CloudProviderForcePull
-            | SnapshotPasswordPromptKind::CloudRecoverCurrent
-            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                t!("runtimePrompt.cloudPush")
-            }
-        };
+        if !matches!(
+            kind,
+            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
+        ) {
+            self.cloud_sync.set_status("awaiting cloud sync password");
+        }
+        let title = t!(snapshot_password_prompt_title_key(kind));
         self.open_form_dialog(
             (
                 title.to_string(),
                 448.,
                 t!("runtimePrompt.submit").to_string(),
-                |app, _, cx| app.local_snapshot_password_dialog_content(cx),
-                |app, _, cx| app.submit_local_snapshot_password_dialog(cx),
+                |app, _, cx| app.snapshot_password_dialog_content(cx),
+                |app, _, cx| app.submit_snapshot_password_prompt(cx),
                 |app, cx| app.cancel_snapshot_password_prompt(cx),
             ),
             window,
@@ -123,12 +136,19 @@ impl ZzClawTermApp {
         }
     }
 
-    fn local_snapshot_password_dialog_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn snapshot_password_dialog_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(prompt) = self.settings.snapshot_password_prompt() else {
             return div().into_any_element();
         };
         let palette = self.theme_palette();
-        let description = t!("runtimePrompt.localSnapshotDescription");
+        let description = if matches!(
+            prompt.kind,
+            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
+        ) {
+            t!("runtimePrompt.localSnapshotDescription")
+        } else {
+            t!("runtimePrompt.cloudSnapshotDescription")
+        };
         let password_input = self.text_input_box(
             "snapshot-password.value",
             &prompt.value,
@@ -137,11 +157,12 @@ impl ZzClawTermApp {
         );
 
         div()
+            .debug_selector(|| "snapshot-password-dialog-content".to_string())
             .flex()
             .flex_col()
             .gap_3()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if this.handle_snapshot_password_key_down(event, cx) {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.handle_snapshot_password_key_down(event, window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -156,7 +177,16 @@ impl ZzClawTermApp {
             .into_any_element()
     }
 
-    fn submit_local_snapshot_password_dialog(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(in crate::features) fn start_snapshot_password_prompt(
+        &mut self,
+        kind: SnapshotPasswordPromptKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_snapshot_password_dialog(kind, window, cx);
+    }
+
+    fn submit_snapshot_password_prompt(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(state) = self.settings.take_snapshot_password_prompt() else {
             return true;
         };
@@ -168,110 +198,6 @@ impl ZzClawTermApp {
                 .set_status("master password is required for encrypted .zz".to_string());
             cx.notify();
             return false;
-        }
-        self.forget_text_inputs("snapshot-password.");
-
-        match state.kind {
-            SnapshotPasswordPromptKind::Export => {
-                self.prompt_encrypted_portable_snapshot_export_path(password, cx);
-            }
-            SnapshotPasswordPromptKind::Import => {
-                self.prompt_encrypted_portable_snapshot_import_path(password, cx);
-            }
-            SnapshotPasswordPromptKind::CloudForcePush
-            | SnapshotPasswordPromptKind::CloudForcePull
-            | SnapshotPasswordPromptKind::CloudProviderPush
-            | SnapshotPasswordPromptKind::CloudProviderPull
-            | SnapshotPasswordPromptKind::CloudProviderForcePush
-            | SnapshotPasswordPromptKind::CloudProviderForcePull
-            | SnapshotPasswordPromptKind::CloudRecoverCurrent
-            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                self.settings.restore_snapshot_password_prompt(state.kind);
-                self.shell.set_status(
-                    "cloud sync password prompt must be submitted from settings".to_string(),
-                );
-                cx.notify();
-                return false;
-            }
-        }
-        true
-    }
-
-    pub(in crate::features) fn start_snapshot_password_prompt(
-        &mut self,
-        kind: SnapshotPasswordPromptKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.settings.begin_snapshot_password_prompt(kind) {
-            self.shell
-                .set_status("backup or sync prompt is already open".to_string());
-            cx.notify();
-            return;
-        }
-        self.forget_text_inputs("snapshot-password.");
-        let field = self.text_input("snapshot-password.value", "", TextInputSetup::masked(), cx);
-        window.focus(&field.read(cx).focus_handle(), cx);
-        self.shell.set_status(
-            match kind {
-                SnapshotPasswordPromptKind::Export => "enter password for encrypted .zz export",
-                SnapshotPasswordPromptKind::Import => "enter password for encrypted .zz import",
-                SnapshotPasswordPromptKind::CloudForcePush => {
-                    "enter password for forced cloud sync push"
-                }
-                SnapshotPasswordPromptKind::CloudForcePull => {
-                    "enter password for forced cloud sync pull"
-                }
-                SnapshotPasswordPromptKind::CloudProviderPush => {
-                    "enter password for provider cloud sync push"
-                }
-                SnapshotPasswordPromptKind::CloudProviderPull => {
-                    "enter password for provider cloud sync pull"
-                }
-                SnapshotPasswordPromptKind::CloudProviderForcePush => {
-                    "enter password for forced provider cloud sync push"
-                }
-                SnapshotPasswordPromptKind::CloudProviderForcePull => {
-                    "enter password for forced provider cloud sync pull"
-                }
-                SnapshotPasswordPromptKind::CloudRecoverCurrent => {
-                    "enter password to recover cloud sync metadata"
-                }
-                SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                    "enter password to recover provider cloud sync metadata"
-                }
-            }
-            .to_string(),
-        );
-        let store_message = match kind {
-            SnapshotPasswordPromptKind::CloudForcePush
-            | SnapshotPasswordPromptKind::CloudForcePull
-            | SnapshotPasswordPromptKind::CloudProviderPush
-            | SnapshotPasswordPromptKind::CloudProviderPull
-            | SnapshotPasswordPromptKind::CloudProviderForcePush
-            | SnapshotPasswordPromptKind::CloudProviderForcePull
-            | SnapshotPasswordPromptKind::CloudRecoverCurrent
-            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                "awaiting cloud sync password".to_string()
-            }
-            _ => "awaiting .zz master password".to_string(),
-        };
-        self.settings.set_store_message(store_message);
-        cx.notify();
-    }
-
-    pub(in crate::features) fn submit_snapshot_password_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.settings.take_snapshot_password_prompt() else {
-            return;
-        };
-        let password: zzclawterm_core::SecretString = state.value.trim().to_owned().into();
-        if password.is_empty() {
-            self.settings.restore_snapshot_password_prompt(state.kind);
-            self.reset_text_input("snapshot-password.value", "", cx);
-            self.shell
-                .set_status("master password is required for encrypted .zz".to_string());
-            cx.notify();
-            return;
         }
         self.forget_text_inputs("snapshot-password.");
 
@@ -307,6 +233,7 @@ impl ZzClawTermApp {
                 self.run_cloud_sync_recovery(password, true, cx);
             }
         }
+        true
     }
 
     pub(in crate::features) fn cancel_snapshot_password_prompt(&mut self, cx: &mut Context<Self>) {
@@ -314,6 +241,12 @@ impl ZzClawTermApp {
             return;
         };
         self.forget_text_inputs("snapshot-password.");
+        if !matches!(
+            state.kind,
+            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
+        ) {
+            self.cloud_sync.set_status("cloud sync cancelled");
+        }
         self.shell.set_status(match state.kind {
             SnapshotPasswordPromptKind::Export => "encrypted .zz export cancelled".to_string(),
             SnapshotPasswordPromptKind::Import => "encrypted .zz import cancelled".to_string(),
@@ -349,6 +282,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn handle_snapshot_password_key_down(
         &mut self,
         event: &KeyDownEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         self.mark_user_activity();
@@ -361,8 +295,15 @@ impl ZzClawTermApp {
         }
 
         match keystroke.key.as_str() {
-            "enter" => self.submit_snapshot_password_prompt(cx),
-            "escape" => self.cancel_snapshot_password_prompt(cx),
+            "enter" => {
+                if self.submit_snapshot_password_prompt(cx) {
+                    window.close_nya_dialog(cx);
+                }
+            }
+            "escape" => {
+                self.cancel_snapshot_password_prompt(cx);
+                window.close_nya_dialog(cx);
+            }
             _ => return false,
         }
         true
@@ -396,25 +337,31 @@ impl ZzClawTermApp {
         }
         let directory = self.runtime.config_dir().to_path_buf();
         let receiver = cx.prompt_for_new_path(&directory, Some("zzclawterm-encrypted.zz"));
-        let config_dir = self.runtime.config_dir().to_path_buf();
-        let portable_key_path = self.runtime.portable_key_path().map(ToOwned::to_owned);
+        let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
         self.shell
             .set_status("selecting encrypted portable snapshot destination".to_string());
         self.settings
             .set_store_message("selecting encrypted .zz export destination");
+        self.request_settings_panel_refresh(cx);
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(path))) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.settings
+                            .update_store_status("exporting encrypted .zz snapshot", false);
+                        this.request_settings_panel_refresh(cx);
+                    });
+                    tracing::info!(operation = "portable_snapshot_export", "started");
                     let task = scheduler.submit_task("portable-snapshot-export", move |_| {
-                        match ConnectionStore::export_encrypted_portable_snapshot(
-                            &config_dir,
-                            portable_key_path,
-                            &path,
-                            "native-local",
-                            env!("CARGO_PKG_VERSION"),
-                            master_password.expose_secret(),
-                        ) {
+                        match store.request_fn(StoreDomain::Settings, move |database| {
+                            database.export_encrypted_portable_snapshot_from_open_store(
+                                &path,
+                                "native-local",
+                                env!("CARGO_PKG_VERSION"),
+                                master_password.expose_secret(),
+                            )
+                        }) {
                             Ok(info) => ConfigPathPromptResult::Exported(info),
                             Err(error) => ConfigPathPromptResult::Failed(error.to_string()),
                         }
@@ -461,28 +408,34 @@ impl ZzClawTermApp {
             prompt: Some(SharedString::from("Select encrypted .zz snapshot")),
         };
         let receiver = cx.prompt_for_paths(options);
-        let config_dir = self.runtime.config_dir().to_path_buf();
-        let portable_key_path = self.runtime.portable_key_path().map(ToOwned::to_owned);
+        let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
         self.shell
             .set_status("selecting encrypted portable snapshot to import".to_string());
         self.settings
             .set_store_message("selecting encrypted .zz snapshot");
+        self.request_settings_panel_refresh(cx);
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(paths))) => match paths.into_iter().next() {
                     Some(path) => {
-                        let task = scheduler.submit_task("portable-snapshot-import", move |_| {
-                            match ConnectionStore::import_encrypted_portable_snapshot(
-                                &config_dir,
-                                portable_key_path,
-                                &path,
-                                master_password.expose_secret(),
-                            ) {
+                        let _ = this.update(cx, |this, cx| {
+                            this.settings
+                                .update_store_status("importing encrypted .zz snapshot", false);
+                            this.request_settings_panel_refresh(cx);
+                        });
+                        tracing::info!(operation = "portable_snapshot_import", "started");
+                        let task =
+                            scheduler.submit_task("portable-snapshot-import", move |_| match store
+                                .request_fn(StoreDomain::Settings, move |database| {
+                                    database.import_encrypted_portable_snapshot_into_open_store(
+                                        &path,
+                                        master_password.expose_secret(),
+                                    )
+                                }) {
                                 Ok(info) => ConfigPathPromptResult::Imported(info),
                                 Err(error) => ConfigPathPromptResult::Failed(error.to_string()),
-                            }
-                        });
+                            });
                         await_blocking_job(task)
                             .await
                             .unwrap_or_else(ConfigPathPromptResult::Failed)
@@ -517,6 +470,11 @@ impl ZzClawTermApp {
         }
         match result {
             ConfigPathPromptResult::Exported(info) => {
+                tracing::info!(
+                    operation = "portable_snapshot_export",
+                    bytes = info.bytes,
+                    "completed"
+                );
                 let message = match kind {
                     ConfigPathPromptKind::EncryptedPortableExport => {
                         format!("exported {} byte encrypted .zz snapshot", info.bytes)
@@ -546,8 +504,12 @@ impl ZzClawTermApp {
                 });
             }
             ConfigPathPromptResult::Imported(info) => {
-                self.refresh_store_from_runtime_and_sync_theme(cx);
-                self.rebase_open_settings_draft(cx);
+                tracing::info!(
+                    operation = "portable_snapshot_import",
+                    bytes = info.bytes,
+                    safety_backup = info.safety_backup_path.is_some(),
+                    "completed"
+                );
                 let safety = info
                     .safety_backup_path
                     .as_ref()
@@ -567,7 +529,7 @@ impl ZzClawTermApp {
                         )
                     }
                 };
-                self.settings.update_store_status(message, true);
+                self.refresh_store_after_portable_import(message, cx);
                 self.shell.set_status(match kind {
                     ConfigPathPromptKind::EncryptedPortableImport => {
                         format!(
@@ -584,6 +546,7 @@ impl ZzClawTermApp {
                 });
             }
             ConfigPathPromptResult::Cancelled => {
+                tracing::info!(operation = ?kind, "portable snapshot picker cancelled");
                 self.shell.set_status(match kind {
                     ConfigPathPromptKind::EncryptedPortableExport => {
                         "encrypted portable snapshot export cancelled".to_string()
@@ -595,6 +558,7 @@ impl ZzClawTermApp {
                 self.settings.set_store_message("config picker cancelled");
             }
             ConfigPathPromptResult::Failed(error) => {
+                tracing::warn!(operation = ?kind, error = %error, "portable snapshot operation failed");
                 self.shell.set_status(match kind {
                     ConfigPathPromptKind::EncryptedPortableExport => {
                         format!("encrypted portable snapshot export failed: {error}")
@@ -607,11 +571,42 @@ impl ZzClawTermApp {
                     .update_store_status(self.shell.status().to_string(), false);
             }
             ConfigPathPromptResult::Closed => {
+                tracing::warn!(operation = ?kind, "portable snapshot picker closed");
                 self.shell
                     .set_status("config path picker closed before returning".to_string());
                 self.settings.set_store_message("config picker closed");
             }
         }
+        self.request_settings_panel_refresh(cx);
+    }
+
+    fn refresh_store_after_portable_import(
+        &mut self,
+        success_message: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.submit_store_request(
+            0,
+            LoadBootstrap,
+            move |this, event, cx| match event.outcome {
+                Ok(snapshot) => {
+                    this.apply_store_refresh(snapshot, cx);
+                    this.rebase_open_settings_draft(cx);
+                    this.settings.update_store_status(success_message, true);
+                    this.request_settings_panel_refresh(cx);
+                    cx.notify();
+                }
+                Err(error) => {
+                    let message = format!("store refresh after import failed: {error}");
+                    tracing::warn!(error = %error, "portable snapshot import refresh failed");
+                    this.settings.update_store_status(message.clone(), false);
+                    this.shell.set_status(message);
+                    this.request_settings_panel_refresh(cx);
+                    cx.notify();
+                }
+            },
+            cx,
+        );
     }
 
     pub(in crate::features) fn refresh_store_from_runtime_and_sync_theme(

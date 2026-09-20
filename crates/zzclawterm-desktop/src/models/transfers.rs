@@ -2,7 +2,8 @@ use gpui::{Pixels, ScrollHandle, UniformListScrollHandle, px};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use zzclawterm_core::transfer_speed::TransferSpeed;
 use zzclawterm_transport::{
     RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult, SftpFileEntry,
     SftpFileProperties, SftpRemoteTextFile, SftpTransferControl, SftpTransferProgress,
@@ -17,6 +18,10 @@ pub(crate) enum TransferJobKind {
     },
     ListChildren {
         remote_path: String,
+    },
+    ListTree {
+        path: zzclawterm_transport::RemoteFilePath,
+        generation: u64,
     },
     ResolveHome,
     SyncCwd,
@@ -110,6 +115,14 @@ pub(crate) enum TransferJobKind {
         session_id: String,
         file_name: String,
     },
+    XmodemUpload {
+        session_id: String,
+        file_name: String,
+    },
+    YmodemUpload {
+        session_id: String,
+        file_name: String,
+    },
     /// In-band ZMODEM download (remote `sz` -> local directory).
     ZmodemDownload {
         session_id: String,
@@ -155,6 +168,7 @@ pub(crate) struct TransferJobState {
     pub(crate) summary: Option<SftpTransferSummary>,
     pub(crate) progress: Option<SftpTransferProgress>,
     pub(crate) control: Option<SftpTransferControl>,
+    pub(crate) speed: TransferSpeed,
 }
 
 /// What a queue row actually draws.
@@ -162,7 +176,7 @@ pub(crate) struct TransferJobState {
 /// `TransferJobState` carries `entries`, the whole directory listing a navigation
 /// job returned, and the queue used to deep-copy every visible job twice per render
 /// -- once to filter and once to sort. No row reads that field. This carries the
-/// eight it does read, so a snapshot rebuilt on every coalesced progress batch
+/// presentation fields it does read, so a snapshot rebuilt on every coalesced progress batch
 /// costs a handful of small clones instead of the catalog.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TransferJobRowSnapshot {
@@ -174,6 +188,7 @@ pub(crate) struct TransferJobRowSnapshot {
     pub(crate) created_at_ms: u128,
     pub(crate) progress: Option<SftpTransferProgress>,
     pub(crate) summary: Option<SftpTransferSummary>,
+    pub(crate) speed_bytes_per_sec: f64,
 }
 
 impl TransferJobState {
@@ -188,7 +203,16 @@ impl TransferJobState {
             created_at_ms: self.created_at_ms,
             progress: self.progress.clone(),
             summary: self.summary.clone(),
+            speed_bytes_per_sec: self.speed.bytes_per_second(),
         }
+    }
+
+    pub(crate) fn update_progress(&mut self, progress: SftpTransferProgress) {
+        if self.status == TransferJobStatus::Running {
+            self.speed
+                .record(progress.bytes_transferred, Instant::now());
+        }
+        self.progress = Some(progress);
     }
 
     pub(crate) fn now_ms() -> u128 {
@@ -200,6 +224,7 @@ impl TransferJobState {
 
     pub(crate) fn display_name_for_kind(kind: &TransferJobKind) -> String {
         match kind {
+            TransferJobKind::ListTree { path, .. } => remote_file_name(&path.display_path),
             TransferJobKind::Download { remote_path, .. }
             | TransferJobKind::OpenExternal { remote_path, .. }
             | TransferJobKind::LoadEditor { remote_path, .. }
@@ -224,6 +249,8 @@ impl TransferJobState {
             }
             TransferJobKind::SendTo { target_path, .. } => remote_file_name(target_path),
             TransferJobKind::ZmodemUpload { file_name, .. }
+            | TransferJobKind::XmodemUpload { file_name, .. }
+            | TransferJobKind::YmodemUpload { file_name, .. }
             | TransferJobKind::ZmodemDownload { file_name, .. }
             | TransferJobKind::TrzszDownload { file_name, .. }
             | TransferJobKind::TrzszUpload { file_name, .. } => file_name.clone(),
@@ -249,6 +276,8 @@ impl TransferJobState {
                 | TransferJobKind::SendTo { .. }
                 | TransferJobKind::OpenExternal { .. }
                 | TransferJobKind::ZmodemUpload { .. }
+                | TransferJobKind::XmodemUpload { .. }
+                | TransferJobKind::YmodemUpload { .. }
                 | TransferJobKind::ZmodemDownload { .. }
                 | TransferJobKind::TrzszDownload { .. }
                 | TransferJobKind::TrzszUpload { .. }
@@ -297,6 +326,51 @@ mod transfer_job_state_tests {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
+        }
+    }
+
+    #[test]
+    fn progress_updates_seed_speed_and_snapshot_projects_the_sampled_rate() {
+        use std::time::{Duration, Instant};
+
+        use zzclawterm_transport::SftpTransferProgress;
+
+        for kind in [
+            TransferJobKind::Download {
+                remote_path: "/remote/file".to_string(),
+                raw_path_token: None,
+                local_path: PathBuf::from("file"),
+            },
+            TransferJobKind::ZmodemDownload {
+                session_id: "session-a".to_string(),
+                file_name: "file".to_string(),
+            },
+            TransferJobKind::TrzszDownload {
+                session_id: "session-a".to_string(),
+                file_name: "file".to_string(),
+            },
+        ] {
+            let mut job = job(kind, Some("session-a"));
+            job.status = TransferJobStatus::Running;
+            job.update_progress(SftpTransferProgress {
+                remote_path: "/remote/file".to_string(),
+                local_path: PathBuf::from("file"),
+                bytes_transferred: 0,
+                total_bytes: None,
+                item_count_completed: None,
+                item_count_total: None,
+            });
+            assert_eq!(job.row_snapshot().speed_bytes_per_sec, 0.);
+            job.speed
+                .record(2048, Instant::now() + Duration::from_secs(1));
+            assert!(
+                job.speed.bytes_per_second() > 0.,
+                "progress must seed sampling"
+            );
+            let snapshot = job.row_snapshot();
+            assert_eq!(snapshot.speed_bytes_per_sec, job.speed.bytes_per_second());
+            assert_eq!(snapshot.progress, job.progress);
         }
     }
 
@@ -420,6 +494,7 @@ pub(crate) enum TransferJobEvent {
 #[derive(Debug)]
 pub(crate) enum TransferJobOutput {
     Entries(Vec<SftpFileEntry>),
+    TreeEntries(Vec<SftpFileEntry>),
     ChildEntries {
         remote_path: String,
         entries: Vec<SftpFileEntry>,

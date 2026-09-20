@@ -7,12 +7,33 @@ use super::{
     default_otp_type, default_true, uuid_v4,
 };
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionPasswordSource {
+    Account,
+    Connection,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum AccountAuthError {
+    #[error("saved account was not found")]
+    MissingAccount,
+    #[error("saved account password is empty or locked")]
+    EmptyOrLockedAccountPassword,
+    #[error("saved connection password is locked or could not be decrypted")]
+    LockedConnectionPassword,
+}
+
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConnectionAuth {
     #[serde(default = "default_auth_mode")]
     pub mode: String,
     #[serde(default)]
     pub password_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_source: Option<ConnectionPasswordSource>,
     #[serde(default)]
     pub password: Option<SecretString>,
     #[serde(default)]
@@ -23,6 +44,74 @@ pub struct ConnectionAuth {
     pub auto_fill_otp: bool,
     #[serde(default)]
     pub has_password: bool,
+}
+
+impl ConnectionAuth {
+    /// New account references take precedence over legacy password-only references.
+    pub fn saved_account_id(&self) -> Option<&str> {
+        self.account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                self.password_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            })
+    }
+
+    pub fn uses_account_password(&self) -> bool {
+        match self.password_source {
+            Some(ConnectionPasswordSource::Account) => true,
+            Some(ConnectionPasswordSource::Connection) => false,
+            None => self
+                .password
+                .as_deref()
+                .is_none_or(|password| password.trim().is_empty()),
+        }
+    }
+
+    pub fn resolve_account_auth(
+        &self,
+        connection_username: &str,
+        account: Option<&DecryptedSavedPassword>,
+    ) -> Result<(String, Option<SecretString>), AccountAuthError> {
+        if let Some(id) = self.saved_account_id()
+            && account.is_none_or(|entry| entry.id != id)
+        {
+            return Err(AccountAuthError::MissingAccount);
+        }
+        let username = account
+            .map(|entry| entry.username.trim())
+            .filter(|username| !username.is_empty())
+            .unwrap_or(connection_username)
+            .to_string();
+        if self.mode == "none" {
+            return Ok((username, None));
+        }
+        if self.mode == "password" && self.uses_account_password() {
+            if let Some(account) = account {
+                let password = account
+                    .password
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or(AccountAuthError::EmptyOrLockedAccountPassword)?;
+                return Ok((username, Some(password)));
+            }
+            if self.password_source == Some(ConnectionPasswordSource::Account) {
+                return Err(AccountAuthError::MissingAccount);
+            }
+        }
+        let password = self
+            .password
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+        if password.is_some() && self.has_password {
+            return Err(AccountAuthError::LockedConnectionPassword);
+        }
+        Ok((username, password))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +149,8 @@ pub struct SavedPassword {
     #[serde(default = "uuid_v4")]
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
     #[serde(default)]
     pub password: Option<SecretString>,
     #[serde(default, skip_serializing)]
@@ -70,6 +161,7 @@ pub struct SavedPassword {
 pub struct DecryptedSavedPassword {
     pub id: String,
     pub name: String,
+    pub username: String,
     pub password: Option<SecretString>,
 }
 
@@ -163,6 +255,8 @@ impl_redacted_debug!(
     safe {
         mode,
         password_id,
+        account_id,
+        password_source,
         key_id,
         otp_id,
         auto_fill_otp,
@@ -200,13 +294,14 @@ impl_redacted_debug!(
     safe {
         id,
         name,
+        username,
         has_password
     },
     secret { password }
 );
 impl_redacted_debug!(
     DecryptedSavedPassword,
-    safe { id, name },
+    safe { id, name, username },
     secret { password }
 );
 impl_redacted_debug!(

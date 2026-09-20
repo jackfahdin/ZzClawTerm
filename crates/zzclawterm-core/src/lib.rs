@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod agent_capture;
 pub mod ai;
+pub mod app_identity;
 pub mod assets;
 pub mod capabilities;
 pub mod cloud_sync;
@@ -14,11 +15,13 @@ pub mod document_edit;
 pub mod keyword_highlight_presets;
 pub mod models;
 pub mod natural_order;
+pub mod note_export;
 pub mod portable_snapshot;
 pub mod remote_preview;
 pub mod runtime;
 pub mod secret;
 pub mod session_import;
+pub mod ssh_keys;
 pub mod terminal;
 pub mod terminal_file_drop {
     pub use super::terminal::file_drop::*;
@@ -39,6 +42,7 @@ pub mod terminal_wire_write {
     pub use super::terminal::wire_write::*;
 }
 pub mod text_edit;
+pub mod transfer_speed;
 pub mod translation;
 pub mod updater;
 
@@ -169,7 +173,7 @@ pub use runtime::{AppRuntime, RuntimeMode};
 pub use secret::{SecretBytes, SecretString};
 pub use session_import::{
     PreparedSessionConnection, PreparedSessionImport, SessionImportError, prepare_session_import,
-    prepare_termius_session_import,
+    prepare_ssh_config_import, prepare_termius_session_import,
 };
 pub use terminal::file_drop::{
     format_local_terminal_drop_input, quote_local_path, terminal_drop_overlay_copy,
@@ -206,4 +210,4 @@ pub use translation::{
     translation_settings_has_secret, youdao_translate_lang, youdao_translate_signature,
     youdao_truncate_for_sign,
 };
-pub use updater::{NativeUpdateInfo, parse_github_latest_release};
+pub use updater::NativeUpdateInfo;

@@ -1,3 +1,5 @@
+use super::editor::NoteEditorWindow;
+use gpui::{App, WeakEntity};
 use std::collections::{HashMap, HashSet};
 
 use zzclawterm_core::{
@@ -28,6 +30,9 @@ pub(in crate::features) struct NotesFeatureState {
     generation: u64,
     editor_windows: HashMap<String, ZzClawWindowHandle>,
     pending_editor_windows: HashSet<String>,
+    editor_views: HashMap<String, WeakEntity<NoteEditorWindow>>,
+    export_request: u64,
+    exporting: bool,
 }
 
 impl NotesFeatureState {
@@ -43,11 +48,54 @@ impl NotesFeatureState {
             generation: 0,
             editor_windows: HashMap::new(),
             pending_editor_windows: HashSet::new(),
+            editor_views: HashMap::new(),
+            export_request: 0,
+            exporting: false,
         }
     }
 
     pub fn folders(&self) -> &[NoteFolder] {
         &self.folders
+    }
+
+    pub(super) fn register_editor_view(&mut self, id: String, view: WeakEntity<NoteEditorWindow>) {
+        self.editor_views.insert(id, view);
+    }
+
+    pub(super) fn has_unsaved_editors(&self, cx: &App) -> bool {
+        !self.pending_editor_windows.is_empty()
+            || self.editor_views.values().any(|view| {
+                view.upgrade()
+                    .is_some_and(|view| view.read(cx).blocks_export())
+            })
+    }
+
+    pub(super) fn has_stale_editors(
+        &self,
+        snapshot: &zzclawterm_core::NotesSnapshot,
+        cx: &App,
+    ) -> bool {
+        self.editor_views.values().any(|view| {
+            view.upgrade()
+                .is_some_and(|view| !view.read(cx).matches_export_snapshot(snapshot))
+        })
+    }
+
+    pub(super) fn begin_export(&mut self) -> Option<u64> {
+        if self.exporting {
+            return None;
+        }
+        self.export_request = self.export_request.wrapping_add(1).max(1);
+        self.exporting = true;
+        Some(self.export_request)
+    }
+
+    pub(super) fn finish_export(&mut self, request: u64) -> bool {
+        if !self.exporting || request != self.export_request {
+            return false;
+        }
+        self.exporting = false;
+        true
     }
 
     pub fn notes(&self) -> &[NoteSummary] {
@@ -364,20 +412,27 @@ impl NotesFeatureState {
         self.pending_editor_windows.remove(&note_id);
         if let Some(handle) = handle {
             self.editor_windows.insert(note_id, handle);
+        } else {
+            self.editor_views.remove(&note_id);
         }
     }
 
     pub fn remove_editor_window(&mut self, note_id: &str) {
+        self.editor_views.remove(note_id);
         self.pending_editor_windows.remove(note_id);
         self.editor_windows.remove(note_id);
     }
 
     pub fn take_editor_window(&mut self, note_id: &str) -> Option<ZzClawWindowHandle> {
+        self.editor_views.remove(note_id);
         self.pending_editor_windows.remove(note_id);
         self.editor_windows.remove(note_id)
     }
 
     pub fn rekey_editor_window(&mut self, old_note_id: &str, new_note_id: String) {
+        if let Some(view) = self.editor_views.remove(old_note_id) {
+            self.editor_views.insert(new_note_id.clone(), view);
+        }
         self.pending_editor_windows.remove(old_note_id);
         if let Some(handle) = self.editor_windows.remove(old_note_id) {
             self.editor_windows.insert(new_note_id, handle);
@@ -677,5 +732,17 @@ mod tests {
             state.revisions(),
             HashMap::from([("first".to_string(), 3), ("second".to_string(), 7)])
         );
+    }
+
+    #[test]
+    fn export_admission_and_completion_reject_duplicate_or_stale_requests() {
+        let mut state = NotesFeatureState::new();
+        let first = state.begin_export().expect("first");
+        assert!(state.begin_export().is_none());
+        assert!(!state.finish_export(first + 1));
+        assert!(state.finish_export(first));
+        let second = state.begin_export().expect("second");
+        assert!(!state.finish_export(first));
+        assert!(state.finish_export(second));
     }
 }

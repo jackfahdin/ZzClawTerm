@@ -318,12 +318,34 @@ impl ConnectionStore {
         Ok(Some(DecryptedSavedPassword {
             id: entry.id,
             name: entry.name,
+            username: entry.username,
             password: decrypt_optional_secret(
                 &crypto,
                 master_key_token.as_deref(),
                 &entry.password,
             )?,
         }))
+    }
+
+    /// Metadata remains usable without decrypting the account password for connection-source auth.
+    pub fn load_account_for_auth(
+        &self,
+        auth: &zzclawterm_core::models::credentials::ConnectionAuth,
+    ) -> Result<Option<DecryptedSavedPassword>, StorageError> {
+        let Some(id) = auth.saved_account_id() else {
+            return Ok(None);
+        };
+        if auth.uses_account_password() && auth.mode == "password" {
+            return self.load_decrypted_password_by_id(id);
+        }
+        Ok(self
+            .load_password_by_id(id)?
+            .map(|entry| DecryptedSavedPassword {
+                id: entry.id,
+                name: entry.name,
+                username: entry.username,
+                password: None,
+            }))
     }
 
     pub fn save_password(&self, mut entry: SavedPassword) -> Result<String, StorageError> {

@@ -174,6 +174,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: Some(control.clone()),
+            speed: Default::default(),
         });
 
         let source_remote = entry.remote_path();

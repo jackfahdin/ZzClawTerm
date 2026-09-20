@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::FocusHandle;
 use zzclawterm_core::{
     AppSettingsSummary, ExistingFileBehavior, KeywordHighlightConfig, KeywordHighlightRule,
-    RecordingMode, RecordingRotationPolicy, SearchEngineConfig,
+    RecordingMode, RecordingRotationPolicy, SearchEngineConfig, TransferBrowserViewMode,
 };
 
 use crate::models::{
@@ -981,6 +981,11 @@ impl SettingsFeatureState {
         true
     }
 
+    pub(in crate::features) fn toggle_bold_default_foreground(&mut self) -> bool {
+        self.summary.bold_default_foreground = !self.summary.bold_default_foreground;
+        self.summary.bold_default_foreground
+    }
+
     pub(in crate::features) fn select_background_image(&mut self, path: String) {
         self.summary.background_image_path = Some(path);
         if self.summary.background_image_fit.trim().is_empty() {
@@ -1029,6 +1034,16 @@ impl SettingsFeatureState {
         self.summary.ui_file_explorer_show_hidden_files =
             !self.summary.ui_file_explorer_show_hidden_files;
         self.summary.ui_file_explorer_show_hidden_files
+    }
+
+    pub(in crate::features) fn toggle_file_explorer_view_mode(
+        &mut self,
+    ) -> TransferBrowserViewMode {
+        self.summary.ui_file_explorer_view_mode = match self.summary.ui_file_explorer_view_mode {
+            TransferBrowserViewMode::List => TransferBrowserViewMode::Tree,
+            TransferBrowserViewMode::Tree => TransferBrowserViewMode::List,
+        };
+        self.summary.ui_file_explorer_view_mode
     }
 
     pub(in crate::features) fn set_file_explorer_favorites(

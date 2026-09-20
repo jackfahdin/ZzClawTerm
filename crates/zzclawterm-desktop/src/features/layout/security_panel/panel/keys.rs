@@ -40,6 +40,7 @@ impl ZzClawTermApp {
             for (index, key) in entries.into_iter().enumerate() {
                 let key_id = key.id.clone();
                 let view_id = key.id.clone();
+                let public_id = key.id.clone();
                 let edit_id = key.id.clone();
                 let delete_id = key.id.clone();
                 rows = rows.child(
@@ -71,6 +72,22 @@ impl ZzClawTermApp {
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .child(
+                                    zzclawterm_ui::ZzClawIconButton::new(
+                                        format!("security-key-public-{key_id}"),
+                                        "icons/copy.svg",
+                                    )
+                                    .tooltip(t!("securityAuth.copyPublicKey"))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.copy_security_public_key(
+                                                public_id.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
                                 .child(
                                     zzclawterm_ui::ZzClawIconButton::new(
                                         format!("security-key-view-{key_id}"),

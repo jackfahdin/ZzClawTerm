@@ -60,6 +60,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         let transfer_tx = self.transfer.transfer_event_sender();
         submit_transfer_blocking_job(
@@ -132,6 +133,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell
             .set_status(format!("remote file list started for {remote_path}"));
@@ -231,6 +233,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         // A CWD poll also refreshes the listing, but it must not make an unchanged
         // directory look as though it is navigating again. In shell-integration
@@ -361,6 +364,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.transfer.browser.status = "Resolving remote home...".to_string();
         let transfer_tx = self.transfer.transfer_event_sender();
@@ -425,6 +429,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         // Local sessions always expose their CWD. Keep a successfully loaded current
         // directory visible while its periodic listing check is in flight, including

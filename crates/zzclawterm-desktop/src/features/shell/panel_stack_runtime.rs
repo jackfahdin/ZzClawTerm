@@ -805,6 +805,7 @@ impl ZzClawTermApp {
                     SecurityAuthTab::Passwords => self.security.passwords().len(),
                     SecurityAuthTab::Credentials => self.security.credentials().len(),
                     SecurityAuthTab::Otp => self.security.otp_entries().len(),
+                    SecurityAuthTab::KnownHosts => self.security.known_hosts().len(),
                 };
                 SharedString::from(count.to_string())
             }

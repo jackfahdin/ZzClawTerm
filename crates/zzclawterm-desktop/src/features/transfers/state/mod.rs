@@ -7,6 +7,8 @@
 
 mod browser;
 mod browser_logic;
+mod tree;
+pub(in crate::features) use tree::TransferTreePresentation;
 
 use self::browser_logic::BrowserFilterCache;
 pub(in crate::features) use self::browser_logic::natural_compare_ascii;
@@ -43,6 +45,8 @@ use crate::models::{
 use super::external_sync_runtime::ExternalEditorWatcher;
 
 pub(in crate::features) struct TransferFeatureState {
+    tree: tree::TransferTreeState,
+    tree_focus: FocusHandle,
     queue: TransferQueueState,
     paths: TransferPathState,
     pub(super) browser: TransferBrowserState,
@@ -74,6 +78,7 @@ pub(in crate::features) struct TransferFeatureState {
 
 /// Focus handles the transfer feature needs at construction time.
 pub(in crate::features) struct TransferFeatureFocus {
+    pub tree: FocusHandle,
     pub queue: FocusHandle,
     pub browser: FocusHandle,
     pub editor: FocusHandle,
@@ -281,6 +286,8 @@ impl TransferFeatureState {
     ) -> Self {
         let (tx, rx) = unbounded();
         Self {
+            tree: tree::TransferTreeState::default(),
+            tree_focus: focus.tree,
             #[cfg(test)]
             ui_batch_count: 0,
             #[cfg(test)]
@@ -366,8 +373,30 @@ impl TransferFeatureState {
         self.queue.visit_jobs_mut(visit);
     }
 
+    pub(in crate::features) fn transfer_jobs_mut_for_protocol(
+        &mut self,
+        session_id: &str,
+        xymodem: bool,
+    ) -> impl Iterator<Item = &mut TransferJobState> {
+        self.queue.jobs.iter_mut().filter(move |job| {
+            job.session_id.as_deref() == Some(session_id)
+                && if xymodem {
+                    matches!(
+                        job.kind,
+                        crate::models::TransferJobKind::XmodemUpload { .. }
+                            | crate::models::TransferJobKind::YmodemUpload { .. }
+                    )
+                } else {
+                    false
+                }
+        })
+    }
+
     pub(in crate::features) fn enqueue_transfer_job(&mut self, mut job: TransferJobState) {
         job.ensure_presentation_fields();
+        if let Some(progress) = &job.progress {
+            job.speed.record(progress.bytes_transferred, Instant::now());
+        }
         self.queue.enqueue(job);
     }
 
@@ -1118,6 +1147,7 @@ impl TransferFeatureState {
         }
 
         let mut changed = false;
+        self.tree.replace_session(old_id, new_id);
         if let Some(cache) = self.browser.session_cache.remove(old_id) {
             self.browser.session_cache.insert(new_id.to_string(), cache);
             changed = true;
@@ -1136,7 +1166,10 @@ impl TransferFeatureState {
         self.prune_unreferenced_browser_navigation_snapshots();
 
         for job in &mut self.queue.jobs {
-            if job.is_user_transfer() && job.session_id.as_deref() == Some(old_id) {
+            if (job.is_user_transfer()
+                || matches!(job.kind, crate::models::TransferJobKind::ListTree { .. }))
+                && job.session_id.as_deref() == Some(old_id)
+            {
                 job.session_id = Some(new_id.to_string());
                 changed = true;
             }
@@ -1510,6 +1543,7 @@ impl TransferQueueState {
             {
                 control.pause();
                 job.status = TransferJobStatus::Paused;
+                job.speed.reset();
                 job.detail = "Paused".to_string();
                 changed += 1;
             }
@@ -1526,6 +1560,7 @@ impl TransferQueueState {
             {
                 control.resume();
                 job.status = TransferJobStatus::Running;
+                job.speed.reset();
                 job.detail = "Resuming".to_string();
                 changed += 1;
             }

@@ -2,6 +2,7 @@ use gpui::{
     App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, SharedString,
     Window, div, prelude::*, px, rgb, rgba, svg,
 };
+use rust_i18n::t;
 use zzclawterm_core::truncate_preview;
 use zzclawterm_ui::{ZzClawInput, ZzClawScrollable};
 
@@ -491,6 +492,18 @@ impl ZzClawTermApp {
                             this.refresh_terminal_search_state(cx);
                         }),
                     ))
+                    .child(terminal_search_flag_button(
+                        "terminal-search-wrap",
+                        t!("terminalCtx.searchWrapAround"),
+                        self.terminal.search_wrap_around(self.session.active_id()),
+                        self.theme_palette(),
+                        cx.listener(|this, _, _, cx| {
+                            let session_id = this.session.active_id_owned();
+                            this.terminal
+                                .toggle_search_wrap_around(session_id.as_deref());
+                            cx.notify();
+                        }),
+                    ))
                     .when(
                         self.terminal.search.mode == TerminalSearchMode::Buffer,
                         |this| {
@@ -575,11 +588,12 @@ fn terminal_search_icon_button(
 
 fn terminal_search_flag_button(
     id: impl Into<String>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     active: bool,
     palette: ThemePalette,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .id(SharedString::from(id.into()))
         .h(px(24.))

@@ -1,4 +1,8 @@
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use zzclawterm_store::{FlushBarrier, StoreBlockingClient, StoreConfig, StoreRuntime};
 
@@ -103,6 +107,45 @@ pub(crate) fn blocking_test_store(root: &Path) -> StoreBlockingClient {
         .outcome
         .expect("initialize test store");
     store
+}
+
+pub(crate) fn spawn_webdav_service_unavailable_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("mock WebDAV listener");
+    let endpoint = format!("http://{}", listener.local_addr().expect("mock address"));
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "WebDAV request was not sent");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("mock accept failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).expect("request headers");
+            assert!(count > 0, "incomplete request");
+            request.extend_from_slice(&buffer[..count]);
+            assert!(request.len() < 16 * 1024, "oversized mock request");
+        }
+        assert!(request.starts_with(b"MKCOL "));
+        stream
+            .write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("mock response");
+    });
+    (endpoint, server)
 }
 
 #[test]

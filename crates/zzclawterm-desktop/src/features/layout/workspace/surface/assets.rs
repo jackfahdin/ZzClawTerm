@@ -243,23 +243,42 @@ impl ZzClawTermApp {
     }
 
     fn asset_filter_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut row = div().flex().items_center().gap_1();
+        let mut row = div()
+            .id("asset-tag-filters")
+            .min_w_0()
+            .flex_1()
+            .max_h(px(96.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1();
         let all_active = self.start_workspace.filters().is_empty();
         row = row.child(self.asset_filter_button(None, t!("assets.all"), all_active, cx));
-        for (filter, label) in [
-            (AssetFilterKey::Linux, t!("assets.linux")),
-            (AssetFilterKey::Windows, t!("assets.windows")),
-            (AssetFilterKey::Gpu, t!("assets.gpu")),
-            (AssetFilterKey::Npu, t!("assets.npu")),
-        ] {
+        let mut tags = self
+            .connection_state
+            .connections()
+            .iter()
+            .flat_map(|connection| connection.tags.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>();
+        tags.extend(
+            self.start_workspace
+                .filters()
+                .iter()
+                .filter_map(|filter| match filter {
+                    AssetFilterKey::Tag(tag) => Some(tag.clone()),
+                    _ => None,
+                }),
+        );
+        for label in tags {
+            let filter = AssetFilterKey::Tag(label.clone());
             row = row.child(self.asset_filter_button(
-                Some(filter),
+                Some(filter.clone()),
                 label,
                 self.start_workspace.filters().contains(&filter),
                 cx,
             ));
         }
-        row.into_any_element()
+        row.overflow_y_scrollbar().into_any_element()
     }
 
     fn asset_filter_button(
@@ -269,43 +288,24 @@ impl ZzClawTermApp {
         active: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let palette = self.theme_palette();
-        let id = match filter {
-            Some(AssetFilterKey::Linux) => "linux",
-            Some(AssetFilterKey::Windows) => "windows",
-            Some(AssetFilterKey::Gpu) => "gpu",
-            Some(AssetFilterKey::Npu) => "npu",
-            None => "all",
+        let id = match filter.as_ref() {
+            Some(AssetFilterKey::Linux) => "linux".to_string(),
+            Some(AssetFilterKey::Windows) => "windows".to_string(),
+            Some(AssetFilterKey::Gpu) => "gpu".to_string(),
+            Some(AssetFilterKey::Npu) => "npu".to_string(),
+            Some(AssetFilterKey::Tag(tag)) => format!("tag-{tag}"),
+            None => "all".to_string(),
         };
-        div()
-            .id(SharedString::from(format!("asset-filter-{id}")))
-            .h(px(28.))
-            .px_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if active {
-                palette.primary
-            } else {
-                palette.border
-            }))
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .text_size(px(11.))
-            .text_color(rgb(if active {
-                palette.primary
-            } else {
-                palette.text_muted
-            }))
-            .hover(|this| this.bg(rgb(palette.hover)))
+        zzclawterm_ui::ZzClawButton::new(format!("asset-filter-{id}"), label)
+            .small()
+            .selected(active)
             .on_click(cx.listener(move |this, _, _, cx| {
-                match filter {
+                match filter.clone() {
                     Some(filter) => this.start_workspace.toggle_filter(filter),
                     None => this.start_workspace.clear_filters(),
                 }
                 cx.notify();
             }))
-            .child(label.into())
             .into_any_element()
     }
 

@@ -374,6 +374,8 @@ pub fn migrate_legacy_ssh_agent_settings(connection: &mut SavedConnection) -> bo
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SftpSettings {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compatibility_mode: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -398,6 +400,7 @@ pub struct SftpSettings {
 impl Default for SftpSettings {
     fn default() -> Self {
         Self {
+            compatibility_mode: false,
             pipeline_depth: None,
             extra: Default::default(),
             enabled: true,

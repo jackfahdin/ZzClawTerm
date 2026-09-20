@@ -819,6 +819,18 @@ fn ssh_host_identifier_uses_openssh_port_format() {
 }
 
 #[test]
+fn ssh_session_host_key_alias_is_preserved_by_defaults_and_debug() {
+    let config = SshSessionConfig {
+        host: "real.example".into(),
+        port: 2222,
+        host_key_alias: Some("stable-alias".into()),
+        ..Default::default()
+    };
+    assert_eq!(config.host_key_alias.as_deref(), Some("stable-alias"));
+    assert!(format!("{config:?}").contains("stable-alias"));
+}
+
+#[test]
 fn ssh_shell_integration_script_emits_osc7_and_ready_marker() {
     let ready = super::build_ssh_ready_marker("session-1");
     let script = super::ssh_shell_injection_script(

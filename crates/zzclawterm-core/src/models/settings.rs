@@ -4,6 +4,31 @@ use serde::{Deserialize, Serialize};
 
 use super::default_true;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferBrowserViewMode {
+    #[default]
+    List,
+    Tree,
+}
+
+impl TransferBrowserViewMode {
+    pub fn from_compat_value(value: &str) -> Self {
+        if value.trim().eq_ignore_ascii_case("tree") {
+            Self::Tree
+        } else {
+            Self::List
+        }
+    }
+
+    pub const fn compat_value(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Tree => "tree",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionLinksMatcherSettings {
     #[serde(default = "default_true_action_link")]
@@ -139,6 +164,9 @@ pub struct AppSettingsSummary {
     /// Terminal bold font weight (Tauri appearance.font_weight_bold).
     #[serde(default = "default_terminal_font_weight_bold")]
     pub terminal_font_weight_bold: u16,
+    /// Use the intense default foreground for bold cells without an explicit ANSI color.
+    #[serde(default)]
+    pub bold_default_foreground: bool,
     pub x11_display: String,
     /// Automatically ensure an X Server (VcXsrv) is running on app startup.
     #[serde(default = "default_true")]
@@ -218,6 +246,8 @@ pub struct AppSettingsSummary {
     pub ui_header_status_visible: bool,
     #[serde(default = "default_true")]
     pub ui_file_explorer_show_hidden_files: bool,
+    #[serde(default)]
+    pub ui_file_explorer_view_mode: TransferBrowserViewMode,
     #[serde(default)]
     pub ui_file_explorer_auto_sync_cwd_connection_ids: Vec<String>,
     #[serde(default)]
@@ -410,6 +440,7 @@ impl Default for AppSettingsSummary {
             ui_font_size: default_ui_font_size(),
             terminal_font_weight: default_terminal_font_weight(),
             terminal_font_weight_bold: default_terminal_font_weight_bold(),
+            bold_default_foreground: false,
             x11_display: String::new(),
             x11_server_autostart: true,
             x11_server_path: String::new(),
@@ -450,6 +481,7 @@ impl Default for AppSettingsSummary {
             ui_header_status_mode: default_header_status_mode(),
             ui_header_status_visible: true,
             ui_file_explorer_show_hidden_files: true,
+            ui_file_explorer_view_mode: TransferBrowserViewMode::List,
             ui_file_explorer_auto_sync_cwd_connection_ids: Vec::new(),
             ui_file_explorer_favorite_dirs_by_connection_id: HashMap::new(),
             ui_left_panel_width: 256,
@@ -694,7 +726,28 @@ fn default_highlight_color_light() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettingsSummary, default_panel_open_mode, normalize_panel_open_mode};
+    use super::{
+        AppSettingsSummary, TransferBrowserViewMode, default_panel_open_mode,
+        normalize_panel_open_mode,
+    };
+
+    #[test]
+    fn file_explorer_view_mode_uses_tauri_compatible_values() {
+        assert_eq!(
+            TransferBrowserViewMode::from_compat_value("tree"),
+            TransferBrowserViewMode::Tree
+        );
+        assert_eq!(
+            TransferBrowserViewMode::from_compat_value(" TREE "),
+            TransferBrowserViewMode::Tree
+        );
+        assert_eq!(
+            TransferBrowserViewMode::from_compat_value("invalid"),
+            TransferBrowserViewMode::List
+        );
+        assert_eq!(TransferBrowserViewMode::Tree.compat_value(), "tree");
+        assert_eq!(TransferBrowserViewMode::List.compat_value(), "list");
+    }
 
     #[test]
     fn default_panel_open_mode_is_docked() {
@@ -721,6 +774,10 @@ mod tests {
         assert!(summary.ui_activity_bar_hidden_items.is_empty());
         assert_eq!(summary.ui_panel_open_mode, "docked");
         assert!(!summary.ui_panel_multi_open);
+        assert_eq!(
+            summary.ui_file_explorer_view_mode,
+            TransferBrowserViewMode::List
+        );
     }
 
     #[test]

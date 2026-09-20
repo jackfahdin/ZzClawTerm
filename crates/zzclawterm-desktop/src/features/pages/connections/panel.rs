@@ -49,6 +49,7 @@ pub(in crate::features) struct ConnectionListKey {
     keyboard_active: Option<String>,
     hovered_group: Option<String>,
     drop_target: Option<ConnectionDropTarget>,
+    search_expanded: bool,
     chrome: ConnectionChrome,
 }
 
@@ -60,6 +61,7 @@ impl ConnectionListKey {
         keyboard_active: Option<String>,
         hovered_group: Option<String>,
         drop_target: Option<ConnectionDropTarget>,
+        search_expanded: bool,
         chrome: ConnectionChrome,
     ) -> Self {
         Self {
@@ -68,6 +70,7 @@ impl ConnectionListKey {
             keyboard_active,
             hovered_group,
             drop_target,
+            search_expanded,
             chrome,
         }
     }
@@ -91,6 +94,7 @@ impl PartialEq for ConnectionListKey {
             && self.keyboard_active == other.keyboard_active
             && self.hovered_group == other.hovered_group
             && self.drop_target == other.drop_target
+            && self.search_expanded == other.search_expanded
             && self.chrome == other.chrome
     }
 }
@@ -120,7 +124,9 @@ pub(in crate::features) struct ConnectionListSnapshot {
     pub(in crate::features::pages::connections) group_editor_field:
         Option<Entity<ZzClawInputState>>,
     pub(in crate::features::pages::connections) search_field: Entity<ZzClawInputState>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(in crate::features::pages::connections) search_is_empty: bool,
+    pub(in crate::features::pages::connections) search_expanded: bool,
     pub(in crate::features::pages::connections) sort_mode: ConnectionSortMode,
     pub(in crate::features::pages::connections) store_is_empty: bool,
 }
@@ -371,6 +377,7 @@ mod tests {
     fn connection(id: &str, name: &str, group_id: Option<&str>) -> SavedConnection {
         SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: id.to_string(),
             name: name.to_string(),
             config: zzclawterm_core::ConnectionType::LocalTerminal {
@@ -636,6 +643,12 @@ mod tests {
                         });
                 }),
             ),
+            (
+                "search overlay",
+                Box::new(|app: &mut ZzClawTermApp| {
+                    app.connection_state.expand_list_search();
+                }),
+            ),
         ] {
             vcx.update(|_, cx| {
                 app.update(cx, |app, cx| {
@@ -690,6 +703,34 @@ mod tests {
                     .search_is_empty,
                 "the deferred interaction flush must publish the changed search state"
             );
+        });
+    }
+
+    #[test]
+    fn closing_search_from_a_panel_listener_does_not_reenter_the_panel() {
+        let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
+        let mut cx = TestAppContext::single();
+        let (app, vcx) = hosted(
+            &mut cx,
+            test_dir.path(),
+            vec![connection("a", "Alpha", None)],
+            Vec::new(),
+        );
+        let panel = vcx.update(|_, cx| app.read(cx).connection_panel.clone());
+
+        vcx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                let restore_focus = panel.focus_handle().clone();
+                panel.with_app(cx, |app, cx| {
+                    app.connection_state.expand_list_search();
+                    app.clear_connection_search(&restore_focus, window, cx);
+                });
+            });
+        });
+        vcx.run_until_parked();
+
+        vcx.update(|_, cx| {
+            assert!(!app.read(cx).connection_state.list_search_is_expanded());
         });
     }
 

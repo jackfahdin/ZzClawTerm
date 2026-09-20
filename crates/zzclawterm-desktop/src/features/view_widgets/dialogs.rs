@@ -98,8 +98,12 @@ impl ZzClawTermApp {
         window.open_nya_dialog(cx, move |dialog, _, _| {
             let close_app = app.clone();
             let on_close = on_close.clone();
+            let dialog = if title.is_empty() {
+                dialog
+            } else {
+                dialog.title(title.clone())
+            };
             dialog
-                .title(title.clone())
                 .width(width)
                 .content(content.clone())
                 .on_close(move |_, _, cx| {

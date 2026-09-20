@@ -37,6 +37,7 @@ pub struct SavedConnection {
     pub config: ConnectionType,
     pub group_id: Option<String>,
     pub description: Option<String>,
+    pub tags: Vec<String>,
     pub sort_order: i32,
     pub icon: Option<String>,
     /// Whether `icon` may be replaced by one detected from the remote system.
@@ -77,6 +78,8 @@ struct SavedConnectionKnown {
     pub group_id: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(default)]
     pub sort_order: i32,
     #[serde(default)]
@@ -258,6 +261,26 @@ impl Serialize for SavedConnection {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut known = SavedConnectionKnown::serialize(self, serde_json::value::Serializer)
             .map_err(serde::ser::Error::custom)?;
+        // The top-level catalog is authoritative; this is an output-only compatibility mirror.
+        if !self.tags.is_empty()
+            || self
+                .asset
+                .as_ref()
+                .is_some_and(|asset| asset.tags.is_some())
+        {
+            let asset = known
+                .as_object_mut()
+                .expect("connection is an object")
+                .entry("asset")
+                .or_insert_with(|| serde_json::json!({}));
+            if asset.is_null() {
+                *asset = serde_json::json!({});
+            }
+            asset
+                .as_object_mut()
+                .expect("asset is an object")
+                .insert("tags".into(), serde_json::json!(self.tags));
+        }
         merge_extensions(&mut known, &self.extensions.0);
         known.serialize(serializer)
     }
@@ -268,6 +291,13 @@ impl<'de> Deserialize<'de> for SavedConnection {
         let raw = serde_json::Value::deserialize(deserializer)?;
         let mut connection =
             SavedConnectionKnown::deserialize(raw.clone()).map_err(serde::de::Error::custom)?;
+        if connection.tags.is_empty() {
+            connection.tags = connection
+                .asset
+                .as_ref()
+                .and_then(|asset| asset.tags.clone())
+                .unwrap_or_default();
+        }
         let known = SavedConnectionKnown::serialize(&connection, serde_json::value::Serializer)
             .map_err(serde::de::Error::custom)?;
         let mut extensions = unknown_properties(&raw, &known, "");
@@ -286,6 +316,7 @@ impl<'de> Deserialize<'de> for SavedConnection {
 fn omitted_fields(path: &str) -> &'static [&'static str] {
     match path {
         "" => &[
+            "tags",
             "icon_auto_detect",
             "recording",
             "ssh_algorithms",
@@ -304,7 +335,9 @@ fn omitted_fields(path: &str) -> &'static [&'static str] {
             "auto_login",
             "encoding",
         ],
+        "/auth" => &["account_id", "password_source"],
         "/sftp" => &[
+            "compatibility_mode",
             "enabled",
             "cwd_follow_mode",
             "shell_detection_timeout_ms",
@@ -319,6 +352,7 @@ fn omitted_fields(path: &str) -> &'static [&'static str] {
             "rotation",
         ],
         "/ssh_algorithms" => &["mode", "kex", "ciphers", "macs", "host_keys"],
+        "/network" => &["proxy_id", "proxy_jump_id", "host_key_alias"],
         "/agent_forwarding_config/sources" => {
             &["external_agent", "external_agent_endpoints", "stored_keys"]
         }

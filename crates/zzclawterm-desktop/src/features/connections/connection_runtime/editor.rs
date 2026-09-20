@@ -150,6 +150,8 @@ impl ZzClawTermApp {
                 kind: ConnectionKindTab::Ssh,
                 name: String::new(),
                 description: String::new(),
+                tags: Vec::new(),
+                new_tag: String::new(),
                 icon: None,
                 // A new connection has no icon yet, so let the first successful
                 // SSH session fill one in.
@@ -176,6 +178,7 @@ impl ZzClawTermApp {
                 vnc_view_only: false,
                 password_source: ConnectionEditorPasswordSource::Ask,
                 password_id: None,
+                account_id: None,
                 password: zzclawterm_core::SecretString::default(),
                 existing_password: None,
                 key_id: None,
@@ -183,6 +186,7 @@ impl ZzClawTermApp {
                 auto_fill_otp: false,
                 proxy_id: None,
                 proxy_jump_id: None,
+                host_key_alias: None,
                 x11_forwarding: false,
                 dynamic_tab_title: false,
                 agent_endpoint: Default::default(),
@@ -196,6 +200,7 @@ impl ZzClawTermApp {
                 ssh_profile: Default::default(),
                 terminal_type: None,
                 sftp_enabled: true,
+                sftp_compatibility_mode: false,
                 sftp_cwd_follow_mode: "shell_integration".to_string(),
                 sftp_shell_detection_timeout_ms: "3000".to_string(),
                 sftp_pipeline_depth: None,
@@ -388,6 +393,24 @@ impl ZzClawTermApp {
             .connection_state
             .set_editor_group_select_trigger_bounds(bounds)
         {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn add_connection_editor_tag(&mut self, cx: &mut Context<Self>) {
+        if self.connection_state.add_editor_tag() {
+            self.connection_state
+                .reset_editor_field(ConnectionEditorField::NewTag, "", cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn remove_connection_editor_tag(
+        &mut self,
+        tag: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.remove_editor_tag(tag) {
             cx.notify();
         }
     }
@@ -772,6 +795,13 @@ impl ZzClawTermApp {
             "enter" => {
                 if !keystroke.modifiers.platform
                     && !keystroke.modifiers.control
+                    && self.connection_state.editor_tag_field_is_focused(cx)
+                {
+                    self.add_connection_editor_tag(cx);
+                    return true;
+                }
+                if !keystroke.modifiers.platform
+                    && !keystroke.modifiers.control
                     && self.connection_state.editor_description_is_focused()
                 {
                     self.connection_state.insert_editor_description_newline();
@@ -860,6 +890,7 @@ impl ZzClawTermApp {
                 let mut persisted = persisted;
                 if let Some(previous) = store.get_connection(&persisted.id)? {
                     persisted.extensions = previous.extensions;
+                    persisted.asset = previous.asset;
                 }
                 if let Some(group) = &pending_group {
                     store.save_group_and_connection(group, &persisted)?;

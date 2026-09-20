@@ -1,5 +1,7 @@
 use rust_i18n::t;
 
+use std::borrow::Cow;
+
 use gpui::{Context, IntoElement, PathPromptOptions, SharedString, Window};
 use zeroize::Zeroize as _;
 use zzclawterm_store::StoreDomain;
@@ -20,31 +22,33 @@ enum ConnectionImportResult {
 }
 
 impl ConnectionImportSource {
-    fn prompt_label(self) -> &'static str {
+    fn prompt_label(self) -> Cow<'static, str> {
         match self {
-            Self::NyatermBackup => "Import ZzClawTerm backup",
-            Self::Xshell => "Import Xshell .xts sessions",
-            Self::MobaXterm => "Import MobaXterm .mxtsessions sessions",
-            Self::WindTerm => "Import WindTerm .sessions file",
-            Self::SecureCrt => "Import SecureCRT .xml sessions",
-            Self::FinalShell => "Import FinalShell conn directory",
-            Self::Termius => "Import Termius IndexedDB directory",
-            Self::Electerm => "Import Electerm bookmarks JSON",
-            Self::NyatermJson => "Import ZzClawTerm sessions JSON",
+            Self::NyatermBackup => Cow::Borrowed("Import ZzClawTerm backup"),
+            Self::Xshell => Cow::Borrowed("Import Xshell .xts sessions"),
+            Self::MobaXterm => Cow::Borrowed("Import MobaXterm .mxtsessions sessions"),
+            Self::WindTerm => Cow::Borrowed("Import WindTerm .sessions file"),
+            Self::SecureCrt => Cow::Borrowed("Import SecureCRT .xml sessions"),
+            Self::FinalShell => Cow::Borrowed("Import FinalShell conn directory"),
+            Self::Termius => Cow::Borrowed("Import Termius IndexedDB directory"),
+            Self::SshConfig => t!("savedConnections.importSshConfigPrompt"),
+            Self::Electerm => Cow::Borrowed("Import Electerm bookmarks JSON"),
+            Self::NyatermJson => Cow::Borrowed("Import ZzClawTerm sessions JSON"),
         }
     }
 
-    fn selecting_status(self) -> &'static str {
+    fn selecting_status(self) -> Cow<'static, str> {
         match self {
-            Self::NyatermBackup => "selecting ZzClawTerm backup",
-            Self::Xshell => "selecting Xshell session import file",
-            Self::MobaXterm => "selecting MobaXterm session import file",
-            Self::WindTerm => "selecting WindTerm session import file",
-            Self::SecureCrt => "selecting SecureCRT session XML",
-            Self::FinalShell => "selecting FinalShell conn directory",
-            Self::Termius => "selecting Termius IndexedDB directory",
-            Self::Electerm => "selecting Electerm bookmarks JSON",
-            Self::NyatermJson => "selecting ZzClawTerm session JSON",
+            Self::NyatermBackup => Cow::Borrowed("selecting ZzClawTerm backup"),
+            Self::Xshell => Cow::Borrowed("selecting Xshell session import file"),
+            Self::MobaXterm => Cow::Borrowed("selecting MobaXterm session import file"),
+            Self::WindTerm => Cow::Borrowed("selecting WindTerm session import file"),
+            Self::SecureCrt => Cow::Borrowed("selecting SecureCRT session XML"),
+            Self::FinalShell => Cow::Borrowed("selecting FinalShell conn directory"),
+            Self::Termius => Cow::Borrowed("selecting Termius IndexedDB directory"),
+            Self::SshConfig => t!("savedConnections.importSshConfigSelecting"),
+            Self::Electerm => Cow::Borrowed("selecting Electerm bookmarks JSON"),
+            Self::NyatermJson => Cow::Borrowed("selecting ZzClawTerm session JSON"),
         }
     }
 
@@ -115,7 +119,7 @@ impl ZzClawTermApp {
             files: !source.uses_directory_picker(),
             directories: source.uses_directory_picker(),
             multiple: false,
-            prompt: Some(SharedString::from(source.prompt_label())),
+            prompt: Some(SharedString::from(source.prompt_label().to_string())),
         });
         let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
@@ -287,6 +291,11 @@ fn prepare_connection_source(
             local_key.zeroize();
             result
         }
+        ConnectionImportSource::SshConfig => {
+            let path =
+                path.ok_or_else(|| t!("savedConnections.importSshConfigPathMissing").to_string())?;
+            zzclawterm_core::prepare_ssh_config_import(path).map_err(|error| error.to_string())
+        }
         _ => {
             let path = path.ok_or_else(|| "connection import path was not selected".to_string())?;
             zzclawterm_core::prepare_session_import(path).map_err(|error| error.to_string())
@@ -331,6 +340,7 @@ mod tests {
         assert!(!ConnectionImportSource::Xshell.uses_directory_picker());
         assert!(!ConnectionImportSource::SecureCrt.uses_directory_picker());
         assert!(!ConnectionImportSource::Electerm.uses_directory_picker());
+        assert!(!ConnectionImportSource::SshConfig.uses_directory_picker());
         assert!(ConnectionImportSource::FinalShell.uses_directory_picker());
         assert!(ConnectionImportSource::Termius.uses_directory_picker());
         assert_eq!(

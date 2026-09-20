@@ -140,6 +140,7 @@ impl ZzClawTermApp {
         // Bridge encoding/scrollback and per-session routing are updated on the
         // state transitions that need them, not on every runtime tick.
         if drain_sideband_workers {
+            root_chrome_dirty |= self.drain_xymodem_worker_events(cx);
             root_chrome_dirty |= self.drain_zmodem_worker_events(cx);
             root_chrome_dirty |= self.drain_trzsz_download_worker_events(cx);
             root_chrome_dirty |= self.drain_trzsz_upload_prepare_events(cx);
@@ -357,6 +358,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> bool {
         self.note_trzsz_output_discontinuity(&session_id);
+        self.cancel_xymodem_transfer(&session_id);
         let mut root_chrome_dirty = self.note_zmodem_output_discontinuity(&session_id, bytes, cx);
         self.note_ai_agent_output_discontinuity(&session_id, bytes, cx);
         self.session.route_session_events_to_ui(&session_id);
@@ -398,6 +400,7 @@ impl ZzClawTermApp {
             self.append_terminal_log_for_session(Some(&session_id), &log, true);
         }
         self.clear_trzsz_session(&session_id);
+        self.clear_xymodem_session(&session_id);
         self.clear_zmodem_session(&session_id);
         self.session.clear_event_bridge_session(&session_id);
         self.cleanup_recording_for_session(&session_id);
@@ -452,6 +455,17 @@ impl ZzClawTermApp {
         let data = if sideband_bypass {
             data
         } else {
+            if let Some(data) = self.process_xymodem_output(&session_id, &data)
+                && data.is_empty()
+            {
+                let chunk_duration = chunk_started_at.elapsed();
+                drain_timings.output_total += chunk_duration;
+                chunk_timings.output_total += chunk_duration;
+                return SessionOutputDrainStep::SidebandOnly {
+                    chunk_duration,
+                    root_chrome_dirty,
+                };
+            }
             let stage_started_at = Instant::now();
             let (data, zmodem_root_chrome_dirty) =
                 self.process_zmodem_output(&session_id, &data, cx);
@@ -635,7 +649,8 @@ impl ZzClawTermApp {
     }
 
     pub(super) fn session_sideband_detectors_idle(&self, session_id: &str) -> bool {
-        self.zmodem_output_can_bypass_detector(session_id, &[])
+        !self.xymodem_transfer_active(session_id)
+            && self.zmodem_output_can_bypass_detector(session_id, &[])
             && self.trzsz_output_can_bypass_detector(session_id, &[])
     }
 
@@ -644,7 +659,8 @@ impl ZzClawTermApp {
         session_id: &str,
         data: &[u8],
     ) -> bool {
-        self.zmodem_output_can_bypass_detector(session_id, data)
+        !self.xymodem_transfer_active(session_id)
+            && self.zmodem_output_can_bypass_detector(session_id, data)
             && self.trzsz_output_can_bypass_detector(session_id, data)
     }
 }

@@ -65,7 +65,7 @@ impl UpdateFeatureState {
             return None;
         }
         self.pending = true;
-        self.status = "checking GitHub releases...".to_string();
+        self.status = "checking for updates...".to_string();
         self.info = None;
         Some(self.tx.clone())
     }
@@ -130,7 +130,7 @@ mod tests {
 
         assert!(state.begin_check().is_some());
         assert!(state.is_pending());
-        assert_eq!(state.status(), "checking GitHub releases...");
+        assert_eq!(state.status(), "checking for updates...");
         assert!(state.begin_check().is_none());
         assert_eq!(state.status(), "update check already running");
     }

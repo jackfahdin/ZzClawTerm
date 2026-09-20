@@ -52,6 +52,8 @@ pub(super) struct TerminalSearchState {
     pub(super) case_sensitive: bool,
     pub(super) regex: bool,
     pub(super) whole_word: bool,
+    /// Runtime-only per-session preference; missing sessions use the default `true`.
+    wrap_around_by_session: HashMap<String, bool>,
     pub(super) active_index: usize,
     pub(super) history_pending_key: Option<RecordingHistorySearchKey>,
     pub(super) history_result: Option<RecordingHistorySearchEvent>,
@@ -210,6 +212,7 @@ impl TerminalFeatureState {
                 case_sensitive: false,
                 regex: false,
                 whole_word: false,
+                wrap_around_by_session: HashMap::new(),
                 active_index: 0,
                 history_pending_key: None,
                 history_result: None,
@@ -284,6 +287,43 @@ impl TerminalFeatureState {
 
     pub(in crate::features) fn set_search_mode(&mut self, mode: TerminalSearchMode) {
         self.search.mode = mode;
+    }
+
+    pub(in crate::features) fn search_wrap_around(&self, session_id: Option<&str>) -> bool {
+        session_id
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(|session_id| self.search.wrap_around_by_session.get(session_id).copied())
+            .unwrap_or(true)
+    }
+
+    pub(in crate::features) fn toggle_search_wrap_around(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> bool {
+        let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty()) else {
+            return true;
+        };
+        let enabled = !self.search_wrap_around(Some(session_id));
+        if enabled {
+            self.search.wrap_around_by_session.remove(session_id);
+        } else {
+            self.search
+                .wrap_around_by_session
+                .insert(session_id.to_string(), false);
+        }
+        enabled
+    }
+
+    pub(in crate::features) fn move_search_session_state(&mut self, from: &str, to: &str) {
+        if let Some(wrap_around) = self.search.wrap_around_by_session.remove(from) {
+            self.search
+                .wrap_around_by_session
+                .insert(to.to_string(), wrap_around);
+        }
+    }
+
+    pub(in crate::features) fn remove_search_session_state(&mut self, session_id: &str) {
+        self.search.wrap_around_by_session.remove(session_id);
     }
 
     #[cfg(test)]
@@ -729,6 +769,25 @@ mod tests {
 
         state.set_search_mode(TerminalSearchMode::Buffer);
         assert!(state.buffer_search_is_open());
+    }
+
+    #[test]
+    fn terminal_search_wrap_around_is_session_local_and_runtime_only() {
+        let mut state = terminal_state();
+
+        assert!(state.search_wrap_around(Some("session-a")));
+        assert!(state.search_wrap_around(Some("session-b")));
+        assert!(!state.toggle_search_wrap_around(Some("session-a")));
+        assert!(!state.search_wrap_around(Some("session-a")));
+        assert!(state.search_wrap_around(Some("session-b")));
+
+        state.move_search_session_state("session-a", "session-c");
+        assert!(state.search_wrap_around(Some("session-a")));
+        assert!(!state.search_wrap_around(Some("session-c")));
+
+        state.remove_search_session_state("session-c");
+        assert!(state.search_wrap_around(Some("session-c")));
+        assert!(state.search_wrap_around(None));
     }
 
     #[test]

@@ -53,10 +53,10 @@ fn webdav_digest_authorization_matches_rfc_example() {
 #[test]
 fn webdav_digest_parser_handles_quoted_commas() {
     let parsed = parse_digest_challenge(
-        r#"realm="Nya,Term", nonce="abc", algorithm=MD5, qop="auth,auth-int""#,
+        r#"realm="ZzClaw,Term", nonce="abc", algorithm=MD5, qop="auth,auth-int""#,
     );
 
-    assert_eq!(parsed.get("realm").map(String::as_str), Some("Nya,Term"));
+    assert_eq!(parsed.get("realm").map(String::as_str), Some("ZzClaw,Term"));
     assert_eq!(parsed.get("nonce").map(String::as_str), Some("abc"));
     assert_eq!(parsed.get("qop").map(String::as_str), Some("auth,auth-int"));
 }
@@ -160,8 +160,8 @@ fn form_urlencoded_uses_oauth_form_rules() {
 #[test]
 fn onedrive_item_path_joins_root_and_child_segments() {
     assert_eq!(
-        onedrive_item_path("/Nya Term/", "/sync/latest.redb"),
-        "Nya Term/sync/latest.redb"
+        onedrive_item_path("/ZzClaw Term/", "/sync/latest.redb"),
+        "ZzClaw Term/sync/latest.redb"
     );
     assert_eq!(
         onedrive_item_path("", "sync/latest.redb"),
@@ -172,8 +172,8 @@ fn onedrive_item_path_joins_root_and_child_segments() {
 #[test]
 fn percent_encode_path_preserves_separators_and_encodes_segments() {
     assert_eq!(
-        percent_encode_path("Nya Term/sync/latest redb/猫"),
-        "Nya%20Term/sync/latest%20redb/%E7%8C%AB"
+        percent_encode_path("ZzClaw Term/sync/latest redb/猫"),
+        "ZzClaw%20Term/sync/latest%20redb/%E7%8C%AB"
     );
 }
 
@@ -183,7 +183,7 @@ fn onedrive_urls_use_graph_path_addressing_templates() {
         client: zed_reqwest::blocking::Client::builder()
             .build()
             .expect("client"),
-        root: "Nya Term".to_string(),
+        root: "ZzClaw Term".to_string(),
         access_token: Mutex::new("token".to_string().into()),
         refresh_token: None,
         client_id: None,
@@ -191,12 +191,12 @@ fn onedrive_urls_use_graph_path_addressing_templates() {
     };
 
     assert_eq!(
-        remote.children_url("Nya Term/sync"),
-        "https://graph.microsoft.com/v1.0/me/drive/root:/Nya%20Term/sync:/children"
+        remote.children_url("ZzClaw Term/sync"),
+        "https://graph.microsoft.com/v1.0/me/drive/root:/ZzClaw%20Term/sync:/children"
     );
     assert_eq!(
         remote.content_url("sync/latest redb").expect("content url"),
-        "https://graph.microsoft.com/v1.0/me/drive/root:/Nya%20Term/sync/latest%20redb:/content"
+        "https://graph.microsoft.com/v1.0/me/drive/root:/ZzClaw%20Term/sync/latest%20redb:/content"
     );
 }
 
@@ -223,7 +223,7 @@ fn aliyun_drive_item_path_uses_rooted_absolute_path() {
         client: zed_reqwest::blocking::Client::builder()
             .build()
             .expect("client"),
-        root: "Nya Term".to_string(),
+        root: "ZzClaw Term".to_string(),
         drive_type: AliyunDriveType::Resource,
         access_token: Mutex::new("token".to_string().into()),
         refresh_token: Mutex::new(zzclawterm_core::SecretString::default()),
@@ -234,9 +234,9 @@ fn aliyun_drive_item_path_uses_rooted_absolute_path() {
 
     assert_eq!(
         remote.item_path("sync/latest redb"),
-        "/Nya Term/sync/latest redb"
+        "/ZzClaw Term/sync/latest redb"
     );
-    assert_eq!(remote.item_path(""), "/Nya Term");
+    assert_eq!(remote.item_path(""), "/ZzClaw Term");
 }
 
 #[test]

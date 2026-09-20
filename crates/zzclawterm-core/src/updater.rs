@@ -1,6 +1,235 @@
-use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
+use semver::Version;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::app_identity::AppFlavor;
+
+pub const STABLE_MANIFEST_URL: &str =
+    "https://github.com/jackfahdin/ZzClawTerm/releases/latest/download/latest.json";
+pub const PREVIEW_MANIFEST_URL: &str =
+    "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/latest.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    Stable,
+    Preview,
+}
+
+impl UpdateChannel {
+    pub fn for_version(version: &Version) -> Self {
+        AppFlavor::for_version(version).into()
+    }
+
+    pub fn manifest_url(self) -> &'static str {
+        match self {
+            Self::Stable => STABLE_MANIFEST_URL,
+            Self::Preview => PREVIEW_MANIFEST_URL,
+        }
+    }
+}
+
+impl From<AppFlavor> for UpdateChannel {
+    fn from(flavor: AppFlavor) -> Self {
+        match flavor {
+            AppFlavor::Stable => Self::Stable,
+            AppFlavor::Preview => Self::Preview,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateManifest {
+    pub version: Version,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub pub_date: Option<String>,
+    pub platforms: BTreeMap<String, UpdateArtifact>,
+}
+
+impl UpdateManifest {
+    pub fn parse(body: &str) -> Result<Self, UpdaterError> {
+        let manifest: Self = serde_json::from_str(body).map_err(UpdaterError::ManifestParse)?;
+        if manifest.platforms.is_empty() {
+            return Err(UpdaterError::MissingPlatforms);
+        }
+        Ok(manifest)
+    }
+
+    pub fn parse_for_version(body: &str, expected: &Version) -> Result<Self, UpdaterError> {
+        let manifest = Self::parse(body)?;
+        if &manifest.version != expected {
+            return Err(UpdaterError::ManifestVersionMismatch {
+                expected: expected.clone(),
+                actual: manifest.version,
+            });
+        }
+        Ok(manifest)
+    }
+
+    pub fn update_info(&self, current: &Version) -> NativeUpdateInfo {
+        NativeUpdateInfo {
+            current_version: current.to_string(),
+            latest_version: self.version.to_string(),
+            release_date: non_empty(self.pub_date.clone()),
+            release_notes: non_empty(self.notes.clone()),
+            html_url: Some(format!(
+                "https://github.com/jackfahdin/ZzClawTerm/releases/tag/v{}",
+                self.version
+            )),
+            available: self.version > *current,
+        }
+    }
+
+    pub fn select_artifact(
+        &self,
+        expected_version: &Version,
+        target: UpdateTarget,
+    ) -> Result<SelectedUpdateArtifact, UpdaterError> {
+        if &self.version != expected_version {
+            return Err(UpdaterError::ManifestVersionMismatch {
+                expected: expected_version.clone(),
+                actual: self.version.clone(),
+            });
+        }
+
+        let key = target.manifest_key();
+        let artifact = self
+            .platforms
+            .get(&key)
+            .ok_or_else(|| UpdaterError::MissingArtifact(key))?;
+        if artifact.signature.trim().is_empty() {
+            return Err(UpdaterError::MissingSignature);
+        }
+
+        let filename = target.artifact_filename(expected_version);
+        let github_url = format!(
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{expected_version}/{filename}"
+        );
+        let preview_url = format!(
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/{filename}"
+        );
+        if artifact.url != github_url && artifact.url != preview_url {
+            return Err(UpdaterError::InvalidArtifactUrl);
+        }
+
+        Ok(SelectedUpdateArtifact {
+            url: artifact.url.clone(),
+            signature: artifact.signature.clone(),
+            filename,
+        })
+    }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateArtifact {
+    pub url: String,
+    #[serde(default)]
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedUpdateArtifact {
+    pub url: String,
+    pub signature: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePlatform {
+    Windows,
+    MacOs,
+    Linux,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateArchitecture {
+    X86_64,
+    Aarch64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateTarget {
+    pub platform: UpdatePlatform,
+    pub architecture: UpdateArchitecture,
+}
+
+impl UpdateTarget {
+    pub fn from_rust_target(platform: &str, architecture: &str) -> Result<Self, UpdaterError> {
+        let platform = match platform {
+            "windows" => UpdatePlatform::Windows,
+            "macos" | "darwin" => UpdatePlatform::MacOs,
+            "linux" => UpdatePlatform::Linux,
+            other => return Err(UpdaterError::UnsupportedPlatform(other.to_string())),
+        };
+        let architecture = match architecture {
+            "x86_64" => UpdateArchitecture::X86_64,
+            "aarch64" => UpdateArchitecture::Aarch64,
+            other => return Err(UpdaterError::UnsupportedArchitecture(other.to_string())),
+        };
+        Ok(Self {
+            platform,
+            architecture,
+        })
+    }
+
+    fn manifest_key(self) -> String {
+        let platform = match self.platform {
+            UpdatePlatform::Windows => "windows",
+            UpdatePlatform::MacOs => "darwin",
+            UpdatePlatform::Linux => "linux",
+        };
+        let architecture = match self.architecture {
+            UpdateArchitecture::X86_64 => "x86_64",
+            UpdateArchitecture::Aarch64 => "aarch64",
+        };
+        format!("{platform}-{architecture}")
+    }
+
+    fn artifact_filename(self, version: &Version) -> String {
+        let architecture = match self.architecture {
+            UpdateArchitecture::X86_64 => "x64",
+            UpdateArchitecture::Aarch64 => "arm64",
+        };
+        let suffix = match self.platform {
+            UpdatePlatform::Windows => format!("windows_{architecture}-setup.exe"),
+            UpdatePlatform::MacOs => format!("macos_{architecture}.app.tar.gz"),
+            UpdatePlatform::Linux => format!("linux_{architecture}.AppImage"),
+        };
+        format!("ZzClawTerm_{version}_{suffix}")
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum UpdaterError {
+    #[error("invalid application version `{value}`: {source}")]
+    InvalidVersion {
+        value: String,
+        source: semver::Error,
+    },
+    #[error("update manifest is invalid: {0}")]
+    ManifestParse(serde_json::Error),
+    #[error("update manifest does not contain any platforms")]
+    MissingPlatforms,
+    #[error("update manifest version mismatch: expected {expected}, got {actual}")]
+    ManifestVersionMismatch { expected: Version, actual: Version },
+    #[error("unsupported update platform `{0}`")]
+    UnsupportedPlatform(String),
+    #[error("unsupported update architecture `{0}`")]
+    UnsupportedArchitecture(String),
+    #[error("update manifest does not contain artifact `{0}`")]
+    MissingArtifact(String),
+    #[error("update artifact URL does not match the selected platform and version")]
+    InvalidArtifactUrl,
+    #[error("update artifact signature is missing")]
+    MissingSignature,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -16,107 +245,175 @@ pub struct NativeUpdateInfo {
     pub available: bool,
 }
 
-pub fn parse_github_latest_release(
-    body: &str,
-    current_version: &str,
-) -> Result<NativeUpdateInfo, String> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| format!("parse release JSON failed: {error}"))?;
-    let tag = value
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "release JSON is missing tag_name".to_string())?;
-    let latest_version = normalize_version_label(tag);
-    let current_version = normalize_version_label(current_version);
-    Ok(NativeUpdateInfo {
-        available: compare_versions(&latest_version, &current_version) == Ordering::Greater,
-        current_version,
-        latest_version,
-        release_date: value
-            .get("published_at")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned),
-        release_notes: value
-            .get("body")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .filter(|value| !value.trim().is_empty()),
-        html_url: value
-            .get("html_url")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .filter(|value| !value.trim().is_empty()),
+pub fn parse_current_version(value: &str) -> Result<Version, UpdaterError> {
+    let normalized = value.trim().trim_start_matches(['v', 'V']);
+    Version::parse(normalized).map_err(|source| UpdaterError::InvalidVersion {
+        value: value.to_string(),
+        source,
     })
 }
 
-fn normalize_version_label(version: &str) -> String {
-    version
-        .trim()
-        .trim_start_matches(['v', 'V'])
-        .trim()
-        .to_string()
-}
-
-fn compare_versions(left: &str, right: &str) -> Ordering {
-    let left_parts = version_parts(left);
-    let right_parts = version_parts(right);
-    for index in 0..left_parts.len().max(right_parts.len()) {
-        let left = *left_parts.get(index).unwrap_or(&0);
-        let right = *right_parts.get(index).unwrap_or(&0);
-        match left.cmp(&right) {
-            Ordering::Equal => {}
-            ordering => return ordering,
-        }
-    }
-    Ordering::Equal
-}
-
-fn version_parts(version: &str) -> Vec<u64> {
-    version
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect()
+pub fn parse_update_manifest(
+    body: &str,
+    current_version: &str,
+) -> Result<NativeUpdateInfo, UpdaterError> {
+    let current = parse_current_version(current_version)?;
+    Ok(UpdateManifest::parse(body)?.update_info(&current))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_versions, parse_github_latest_release};
-    use std::cmp::Ordering;
+    use semver::Version;
 
-    #[test]
-    fn parses_latest_release_and_detects_available_update() {
-        let body = r#"{
-            "tag_name": "v1.2.0",
-            "published_at": "2026-07-01T00:00:00Z",
-            "body": "release notes",
-            "html_url": "https://github.com/jackfahdin/ZzClawTerm/releases/tag/v0.0.1"
-        }"#;
+    use super::{
+        PREVIEW_MANIFEST_URL, STABLE_MANIFEST_URL, UpdateChannel, UpdateManifest, UpdateTarget,
+        UpdaterError, parse_update_manifest,
+    };
 
-        let update = parse_github_latest_release(body, "1.1.12").expect("parse release");
-
-        assert!(update.available);
-        assert_eq!(update.current_version, "1.1.12");
-        assert_eq!(update.latest_version, "1.2.0");
-        assert_eq!(update.release_date.as_deref(), Some("2026-07-01T00:00:00Z"));
-        assert_eq!(update.release_notes.as_deref(), Some("release notes"));
+    fn manifest(version: &str, platform: &str, url: &str, signature: &str) -> String {
+        serde_json::json!({
+            "version": version,
+            "notes": "release notes",
+            "pub_date": "2026-09-18T00:00:00Z",
+            "platforms": {
+                platform: {
+                    "url": url,
+                    "signature": signature,
+                }
+            }
+        })
+        .to_string()
     }
 
     #[test]
-    fn release_matching_current_version_is_not_available() {
-        let body = r#"{"tag_name":"v1.1.12"}"#;
+    fn release_versions_choose_their_expected_channels() {
+        let stable = Version::parse("2.0.0").unwrap();
+        let preview = Version::parse("2.0.0-preview.1").unwrap();
 
-        let update = parse_github_latest_release(body, "1.1.12").expect("parse release");
-
-        assert!(!update.available);
+        assert_eq!(UpdateChannel::for_version(&stable), UpdateChannel::Stable);
+        assert_eq!(UpdateChannel::for_version(&preview), UpdateChannel::Preview);
+        assert_eq!(UpdateChannel::Stable.manifest_url(), STABLE_MANIFEST_URL);
+        assert_eq!(UpdateChannel::Preview.manifest_url(), PREVIEW_MANIFEST_URL);
     }
 
     #[test]
-    fn version_comparison_is_numeric() {
-        assert_eq!(compare_versions("1.10.0", "1.9.9"), Ordering::Greater);
-        assert_eq!(compare_versions("1.0", "1.0.0"), Ordering::Equal);
-        assert_eq!(compare_versions("2.0.0", "10.0.0"), Ordering::Less);
+    fn semver_prerelease_ordering_is_used_for_update_checks() {
+        for (current, latest) in [
+            ("2.0.0-preview.1", "2.0.0-preview.2"),
+            ("2.0.0-preview.2", "2.0.0-preview.10"),
+            ("2.0.0-preview.10", "2.0.0-rc.1"),
+            ("2.0.0-preview.1", "2.0.0"),
+            ("2.0.0-rc.1", "2.0.0"),
+        ] {
+            let body = manifest(latest, "linux-x86_64", "unused", "signed");
+            let info = parse_update_manifest(&body, current).unwrap();
+            assert!(
+                info.available,
+                "expected {latest} to be newer than {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_or_older_manifest_version_is_not_an_update() {
+        let same = manifest("2.0.0-preview.2", "linux-x86_64", "unused", "signed");
+        let older = manifest("2.0.0-preview.1", "linux-x86_64", "unused", "signed");
+
+        assert!(
+            !parse_update_manifest(&same, "2.0.0-preview.2")
+                .unwrap()
+                .available
+        );
+        assert!(
+            !parse_update_manifest(&older, "2.0.0-preview.2")
+                .unwrap()
+                .available
+        );
+    }
+
+    #[test]
+    fn manifest_version_mismatch_is_rejected() {
+        let body = manifest("2.0.1", "linux-x86_64", "unused", "signed");
+        let expected = Version::parse("2.0.0").unwrap();
+
+        assert!(matches!(
+            UpdateManifest::parse_for_version(&body, &expected),
+            Err(UpdaterError::ManifestVersionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn artifact_selection_rejects_wrong_target_url_and_missing_signature() {
+        let version = Version::parse("2.1.0-preview.1").unwrap();
+        let version_text = version.to_string();
+        let expected_url = "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/ZzClawTerm_2.1.0-preview.1_windows_x64-setup.exe";
+        let target = UpdateTarget::from_rust_target("windows", "x86_64").unwrap();
+        let valid = UpdateManifest::parse(&manifest(
+            &version_text,
+            "windows-x86_64",
+            expected_url,
+            "signed",
+        ))
+        .unwrap();
+        assert_eq!(
+            valid.select_artifact(&version, target).unwrap().url,
+            expected_url
+        );
+
+        assert!(
+            valid
+                .select_artifact(
+                    &version,
+                    UpdateTarget::from_rust_target("windows", "aarch64").unwrap()
+                )
+                .is_err()
+        );
+        assert!(
+            valid
+                .select_artifact(
+                    &version,
+                    UpdateTarget::from_rust_target("linux", "x86_64").unwrap()
+                )
+                .is_err()
+        );
+        let wrong_url = UpdateManifest::parse(&manifest(
+            &version_text,
+            "windows-x86_64",
+            "https://example.com/update.exe",
+            "signed",
+        ))
+        .unwrap();
+        assert!(matches!(
+            wrong_url.select_artifact(&version, target),
+            Err(UpdaterError::InvalidArtifactUrl)
+        ));
+        let unsigned = UpdateManifest::parse(
+            &serde_json::json!({
+                "version": version_text,
+                "platforms": {
+                    "windows-x86_64": {
+                        "url": expected_url,
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            unsigned.select_artifact(&version, target),
+            Err(UpdaterError::MissingSignature)
+        ));
+    }
+
+    #[test]
+    fn unsupported_platform_and_architecture_are_rejected() {
+        assert!(matches!(
+            UpdateTarget::from_rust_target("freebsd", "x86_64"),
+            Err(UpdaterError::UnsupportedPlatform(_))
+        ));
+        assert!(matches!(
+            UpdateTarget::from_rust_target("linux", "riscv64"),
+            Err(UpdaterError::UnsupportedArchitecture(_))
+        ));
     }
 }

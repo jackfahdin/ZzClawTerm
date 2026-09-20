@@ -26,6 +26,7 @@ use super::{
 
 fn transfer_focus(cx: &TestAppContext) -> TransferFeatureFocus {
     cx.update(|cx| TransferFeatureFocus {
+        tree: cx.focus_handle(),
         queue: cx.focus_handle(),
         browser: cx.focus_handle(),
         editor: cx.focus_handle(),
@@ -566,6 +567,7 @@ fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
         summary: None,
         progress: None,
         control: None,
+        speed: Default::default(),
     });
     transfer.enqueue_transfer_job(TransferJobState {
         id: "upload".to_string(),
@@ -582,6 +584,7 @@ fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
         summary: None,
         progress: None,
         control: None,
+        speed: Default::default(),
     });
     transfer.enqueue_transfer_job(TransferJobState {
         id: "list".to_string(),
@@ -598,6 +601,7 @@ fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
         summary: None,
         progress: None,
         control: None,
+        speed: Default::default(),
     });
 
     assert!(transfer.replace_session_id("old-session", "new-session"));
@@ -694,6 +698,7 @@ fn transfer_job(
         summary: None,
         progress: None,
         control: controlled.then(SftpTransferControl::new),
+        speed: Default::default(),
     }
 }
 
@@ -1268,6 +1273,34 @@ fn transfer_queue_owns_admission_events_and_job_removal() {
     let event = rx.try_recv().expect("queue should receive its typed event");
     assert_eq!(event.id, "missing-job");
     assert!(matches!(event.event, TransferJobEvent::Started { .. }));
+}
+
+#[test]
+fn pausing_and_resuming_visible_jobs_discard_old_speed_samples() {
+    use std::time::{Duration, Instant};
+
+    let cx = TestAppContext::single();
+    let mut queue = transfer_queue(&cx);
+    let mut job = transfer_job("running-a", "session-a", TransferJobStatus::Running, true);
+    let start = Instant::now();
+    job.speed.record(0, start);
+    job.speed.record(2048, start + Duration::from_secs(1));
+    assert_eq!(job.speed.bytes_per_second(), 2048.);
+    queue.enqueue(job);
+    assert_eq!(queue.pause_visible_jobs(Some("session-a")), 1);
+    let job = queue.job_mut("running-a").expect("queued");
+    assert_eq!(job.speed.bytes_per_second(), 0.);
+    job.speed.record(2048, start + Duration::from_secs(2));
+    job.speed.record(4096, start + Duration::from_secs(3));
+    assert_eq!(queue.resume_visible_jobs(Some("session-a")), 1);
+    assert_eq!(
+        queue
+            .job("running-a")
+            .expect("queued")
+            .speed
+            .bytes_per_second(),
+        0.
+    );
 }
 
 #[test]

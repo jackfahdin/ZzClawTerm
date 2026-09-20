@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, ClickEvent, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Window, prelude::FluentBuilder as _,
+    Styled as _, Window, prelude::FluentBuilder as _,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, Selectable, Sizable};
@@ -19,10 +19,12 @@ pub enum ZzClawButtonVariant {
 pub struct ZzClawButton {
     id: SharedString,
     label: SharedString,
+    icon_path: Option<SharedString>,
     content: Option<AnyElement>,
     variant: ZzClawButtonVariant,
     small: bool,
     compact: bool,
+    full_width: bool,
     selected: bool,
     disabled: bool,
     loading: bool,
@@ -35,10 +37,12 @@ impl ZzClawButton {
         Self {
             id: id.into(),
             label: label.into(),
+            icon_path: None,
             content: None,
             variant: ZzClawButtonVariant::Secondary,
             small: false,
             compact: false,
+            full_width: false,
             selected: false,
             disabled: false,
             loading: false,
@@ -49,6 +53,11 @@ impl ZzClawButton {
 
     pub fn content(mut self, content: impl IntoElement) -> Self {
         self.content = Some(content.into_any_element());
+        self
+    }
+
+    pub fn icon(mut self, icon_path: impl Into<SharedString>) -> Self {
+        self.icon_path = Some(icon_path.into());
         self
     }
 
@@ -64,6 +73,11 @@ impl ZzClawButton {
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn full_width(mut self) -> Self {
+        self.full_width = true;
         self
     }
 
@@ -99,6 +113,9 @@ impl ZzClawButton {
 impl RenderOnce for ZzClawButton {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let mut button = Button::new(self.id).label(self.label).loading(self.loading);
+        if let Some(icon_path) = self.icon_path {
+            button = button.icon(Icon::default().path(icon_path));
+        }
         if let Some(content) = self.content {
             button = button.child(content);
         }
@@ -107,6 +124,9 @@ impl RenderOnce for ZzClawButton {
         }
         if self.compact {
             button = button.compact();
+        }
+        if self.full_width {
+            button = button.w_full();
         }
         if self.selected {
             button = button.selected(true);
@@ -186,5 +206,35 @@ impl RenderOnce for ZzClawIconButton {
             button = button.on_click(on_click);
         }
         button.disabled(self.disabled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ZzClawButton;
+
+    #[test]
+    fn ordinary_buttons_keep_content_width_and_no_icon_by_default() {
+        let button = ZzClawButton::new("action", "Action");
+
+        assert!(!button.full_width);
+        assert!(button.icon_path.is_none());
+    }
+
+    #[test]
+    fn full_width_is_opt_in_for_equal_width_dialog_actions() {
+        let button = ZzClawButton::new("website", "Website").small().full_width();
+
+        assert!(button.full_width);
+        assert!(button.small);
+        assert_eq!(button.label.as_ref(), "Website");
+    }
+
+    #[test]
+    fn adding_an_icon_preserves_the_accessible_button_label() {
+        let button = ZzClawButton::new("copy", "Copy all").icon("icons/copy.svg");
+
+        assert_eq!(button.icon_path.as_deref(), Some("icons/copy.svg"));
+        assert_eq!(button.label.as_ref(), "Copy all");
     }
 }

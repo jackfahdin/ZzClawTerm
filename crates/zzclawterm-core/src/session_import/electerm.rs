@@ -192,6 +192,8 @@ fn prepare_electerm_bookmark(
         auth: Some(ConnectionAuth {
             mode: auth_mode.to_string(),
             password_id: None,
+            account_id: None,
+            password_source: None,
             password: None,
             key_id: None,
             otp_id: None,

@@ -52,12 +52,91 @@ def verify_tar_paths(archive: tarfile.TarFile) -> set[str]:
 
 
 def pe_machine(data: bytes) -> int:
+    pe_offset = pe_header_offset(data)
+    return struct.unpack_from("<H", data, pe_offset + 4)[0]
+
+
+def pe_header_offset(data: bytes) -> int:
     if len(data) < 64 or data[:2] != b"MZ":
         raise RuntimeError("Windows executable is missing the MZ header")
     pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
     if len(data) < pe_offset + 6 or data[pe_offset : pe_offset + 4] != b"PE\0\0":
         raise RuntimeError("Windows executable is missing the PE header")
-    return struct.unpack_from("<H", data, pe_offset + 4)[0]
+    return pe_offset
+
+
+def pe_optional_header(data: bytes) -> tuple[int, int, int]:
+    pe_offset = pe_header_offset(data)
+    if len(data) < pe_offset + 24:
+        raise RuntimeError("Windows executable has a truncated COFF header")
+    section_count = struct.unpack_from("<H", data, pe_offset + 6)[0]
+    optional_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+    optional_offset = pe_offset + 24
+    if optional_size < 70 or len(data) < optional_offset + optional_size:
+        raise RuntimeError("Windows executable has a truncated optional header")
+    return optional_offset, optional_size, section_count
+
+
+def pe_subsystem(data: bytes) -> int:
+    optional_offset, _, _ = pe_optional_header(data)
+    return struct.unpack_from("<H", data, optional_offset + 68)[0]
+
+
+def pe_resource_type_ids(data: bytes) -> set[int]:
+    optional_offset, optional_size, section_count = pe_optional_header(data)
+    magic = struct.unpack_from("<H", data, optional_offset)[0]
+    if magic == 0x10B:
+        data_directories_offset = optional_offset + 96
+    elif magic == 0x20B:
+        data_directories_offset = optional_offset + 112
+    else:
+        raise RuntimeError(f"Windows executable has unknown optional header 0x{magic:04x}")
+    resource_entry = data_directories_offset + 2 * 8
+    if resource_entry + 8 > optional_offset + optional_size:
+        return set()
+    resource_rva, resource_size = struct.unpack_from("<II", data, resource_entry)
+    if resource_rva == 0 or resource_size < 16:
+        return set()
+
+    section_offset = optional_offset + optional_size
+    resource_offset = None
+    for index in range(section_count):
+        entry = section_offset + index * 40
+        if entry + 40 > len(data):
+            raise RuntimeError("Windows executable has a truncated section table")
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+            "<IIII", data, entry + 8
+        )
+        extent = max(virtual_size, raw_size)
+        if virtual_address <= resource_rva < virtual_address + extent:
+            resource_offset = raw_offset + resource_rva - virtual_address
+            break
+    if resource_offset is None or resource_offset + 16 > len(data):
+        raise RuntimeError("Windows executable resource directory is out of bounds")
+
+    named_count, id_count = struct.unpack_from("<HH", data, resource_offset + 12)
+    entries_offset = resource_offset + 16
+    entries_end = entries_offset + (named_count + id_count) * 8
+    if entries_end > len(data):
+        raise RuntimeError("Windows executable has a truncated resource directory")
+    ids = set()
+    for index in range(named_count, named_count + id_count):
+        resource_id = struct.unpack_from("<I", data, entries_offset + index * 8)[0]
+        if resource_id & 0x8000_0000 == 0:
+            ids.add(resource_id)
+    return ids
+
+
+def verify_windows_application_binary(data: bytes, artifact: str) -> None:
+    if pe_subsystem(data) != 2:
+        raise RuntimeError(f"{artifact} application executable is not Windows GUI subsystem")
+    resource_ids = pe_resource_type_ids(data)
+    missing = {3, 14} - resource_ids
+    if missing:
+        raise RuntimeError(
+            f"{artifact} application executable is missing Windows icon resources: "
+            + ", ".join(str(value) for value in sorted(missing))
+        )
 
 
 def elf_machine(data: bytes) -> int:
@@ -187,9 +266,9 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
         packaged_version = archive.read(f"{root}/VERSION").decode("utf-8").strip()
         if packaged_version != version:
             raise RuntimeError(f"{path.name} contains version {packaged_version}, expected {version}")
-        machines = {
-            name: pe_machine(archive.read(f"{root}/{name}")) for name in executables
-        }
+        binaries = {name: archive.read(f"{root}/{name}") for name in executables}
+        machines = {name: pe_machine(data) for name, data in binaries.items()}
+        verify_windows_application_binary(binaries["ZzClawTerm.exe"], path.name)
     expected_machine = {
         "x86_64-pc-windows-msvc": 0x8664,
         "aarch64-pc-windows-msvc": 0xAA64,

@@ -242,6 +242,11 @@ pub(in crate::features) fn child_window_options(
 ) -> WindowOptions {
     let (display_id, bounds) = child_window_target(parent, spec.size, cx);
     WindowOptions {
+        app_id: Some(
+            zzclawterm_core::app_identity::AppFlavor::current()
+                .desktop_id()
+                .to_string(),
+        ),
         titlebar: child_window_titlebar(spec.title.clone()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: spec.min_size,

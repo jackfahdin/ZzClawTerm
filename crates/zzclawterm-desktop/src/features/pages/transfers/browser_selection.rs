@@ -21,7 +21,60 @@ fn browser_display_path_for_identity(entries: &[SftpFileEntry], identity: &str) 
         .unwrap_or_else(|| identity.to_string())
 }
 
+fn browser_operation_target_directory(
+    backend: zzclawterm_transport::FileBrowserBackendKind,
+    selected: &[SftpFileEntry],
+    current: &str,
+    home: &str,
+    fallback: &str,
+) -> String {
+    if let [entry] = selected {
+        return if entry.is_directory() {
+            entry.path.clone()
+        } else {
+            zzclawterm_transport::file_browser_parent(backend, &entry.path)
+        };
+    }
+    [current, home, fallback]
+        .into_iter()
+        .map(str::trim)
+        .find(|path| !path.is_empty())
+        .unwrap_or(".")
+        .to_string()
+}
+
 impl ZzClawTermApp {
+    pub(in crate::features) fn transfer_browser_operation_target_directory(&self) -> String {
+        let backend = self
+            .session
+            .active_file_browser_backend()
+            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+            && let Some(session) = self.session.active_id()
+        {
+            let selected = self.transfer.selected_tree_entries(session);
+            if selected.len() == 1 {
+                return browser_operation_target_directory(
+                    backend,
+                    &selected,
+                    "",
+                    "",
+                    &self.transfer.normalized_remote_path(),
+                );
+            }
+        }
+        let path = self.transfer.browser_view().path.trim();
+        let home = self.transfer.browser_view().home_dir.trim();
+        browser_operation_target_directory(
+            backend,
+            &[],
+            path,
+            home,
+            &self.transfer.normalized_remote_path(),
+        )
+    }
+
     pub(in crate::features::pages::transfers) fn select_transfer_browser_entry(
         &mut self,
         identity: String,
@@ -369,6 +422,13 @@ impl ZzClawTermApp {
         &self,
         part: TransferPathPart,
     ) -> Option<String> {
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            return self
+                .selected_transfer_entry()
+                .map(|entry| transfer_path_part_value(&entry.path, part));
+        }
         let identity = self
             .transfer
             .browser_view()
@@ -433,6 +493,21 @@ impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn selected_transfer_entry(
         &self,
     ) -> Option<SftpFileEntry> {
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            let session = self.session.active_id()?;
+            return self
+                .transfer
+                .selected_tree_row(session)
+                .and_then(|row| row.entry)
+                .filter(|entry| {
+                    self.transfer
+                        .selected_tree_entries(session)
+                        .iter()
+                        .any(|selected| selected.identity_key() == entry.identity_key())
+                });
+        }
         let selected = self
             .transfer
             .browser_view()
@@ -449,6 +524,15 @@ impl ZzClawTermApp {
     /// Takes `&mut self` now: it reads the memoised listing, and populating a memo
     /// is a mutation even though nothing observable changes.
     pub(in crate::features) fn selected_transfer_entries(&mut self) -> Vec<SftpFileEntry> {
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            return self
+                .session
+                .active_id()
+                .map(|session| self.transfer.selected_tree_entries(session))
+                .unwrap_or_default();
+        }
         if self
             .transfer
             .browser_view()
@@ -514,9 +598,72 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_transport::{RemoteFilePath, SftpFileEntry, SftpFileType};
+    use zzclawterm_transport::{
+        FileBrowserBackendKind, RemoteFilePath, SftpFileEntry, SftpFileType,
+    };
 
-    use super::browser_display_path_for_identity;
+    use super::{browser_display_path_for_identity, browser_operation_target_directory};
+
+    fn entry(name: &str, path: &str, file_type: SftpFileType) -> SftpFileEntry {
+        SftpFileEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            file_type,
+            size: None,
+            permissions: None,
+            owner: String::new(),
+            group: String::new(),
+            modified_at: None,
+            raw_path_token: None,
+            symlink_target_is_directory: false,
+        }
+    }
+
+    #[test]
+    fn operation_target_uses_single_selection_and_falls_back_for_multiple() {
+        let directory = entry("logs", "/srv/logs", SftpFileType::Directory);
+        let file = entry("app.log", "/srv/logs/app.log", SftpFileType::File);
+        assert_eq!(
+            browser_operation_target_directory(
+                FileBrowserBackendKind::Remote,
+                std::slice::from_ref(&directory),
+                "/current",
+                "/home/user",
+                ".",
+            ),
+            "/srv/logs"
+        );
+        assert_eq!(
+            browser_operation_target_directory(
+                FileBrowserBackendKind::Remote,
+                std::slice::from_ref(&file),
+                "/current",
+                "/home/user",
+                ".",
+            ),
+            "/srv/logs"
+        );
+        assert_eq!(
+            browser_operation_target_directory(
+                FileBrowserBackendKind::Remote,
+                &[directory, file],
+                "/current",
+                "/home/user",
+                ".",
+            ),
+            "/current"
+        );
+        assert_eq!(
+            browser_operation_target_directory(
+                FileBrowserBackendKind::Remote,
+                &[],
+                "",
+                "/home/user",
+                ".",
+            ),
+            "/home/user"
+        );
+    }
 
     #[test]
     fn browser_display_path_for_identity_uses_display_path_for_raw_tokens() {

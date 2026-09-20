@@ -2,9 +2,43 @@ use gpui::{KeyDownEvent, KeyUpEvent};
 use zzclawterm_terminal::alternate_scroll_key_bytes;
 
 use crate::{
-    TerminalKeyMode, TerminalSearchFlags, terminal_buffer_matches, terminal_font_features,
-    terminal_key_bytes, terminal_key_bytes_with_mode, terminal_key_release_bytes_with_mode,
+    TerminalKeyMode, TerminalSearchFlags, resolve_cell_fg, terminal_buffer_matches,
+    terminal_font_features, terminal_key_bytes, terminal_key_bytes_with_mode,
+    terminal_key_release_bytes_with_mode,
 };
+
+#[test]
+fn bold_default_foreground_only_brightens_implicit_foreground() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let bold = zzclawterm_terminal::CellStyle {
+        bold: true,
+        ..zzclawterm_terminal::CellStyle::default()
+    };
+
+    assert_eq!(resolve_cell_fg(palette, bold, false), palette.terminal_fg);
+    assert_eq!(
+        resolve_cell_fg(palette, bold, true),
+        palette.terminal_ansi_color(15)
+    );
+
+    let indexed = zzclawterm_terminal::CellStyle {
+        bold: true,
+        fg: Some(2),
+        ..zzclawterm_terminal::CellStyle::default()
+    };
+    assert_eq!(
+        resolve_cell_fg(palette, indexed, false),
+        resolve_cell_fg(palette, indexed, true)
+    );
+
+    let truecolor = zzclawterm_terminal::CellStyle {
+        bold: true,
+        fg_rgb: Some(0x123456),
+        ..zzclawterm_terminal::CellStyle::default()
+    };
+    assert_eq!(resolve_cell_fg(palette, truecolor, false), 0x123456);
+    assert_eq!(resolve_cell_fg(palette, truecolor, true), 0x123456);
+}
 
 #[test]
 fn terminal_font_features_disable_all_ligature_tags() {

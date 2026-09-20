@@ -35,13 +35,28 @@ impl ConnectionStore {
         }
 
         let count = prepared.connections.len();
+        let id_remap = prepared
+            .connections
+            .iter()
+            .filter_map(|connection| connection.saved.as_ref())
+            .map(|saved| (saved.id.clone(), uuid::Uuid::new_v4().to_string()))
+            .collect::<HashMap<_, _>>();
         let mut connections = Vec::with_capacity(count);
         for connection in prepared.connections {
             let group_id = connection.group_path.as_ref().and_then(|segments| {
                 ensure_group_path(&mut groups, &mut path_map, &mut next_sort, segments)
             });
             if let Some(mut saved) = connection.saved {
-                saved.id = uuid::Uuid::new_v4().to_string();
+                saved.id = id_remap
+                    .get(&saved.id)
+                    .cloned()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                if let Some(network) = saved.network.as_mut()
+                    && let Some(proxy_jump_id) = network.proxy_jump_id.as_mut()
+                    && let Some(remapped) = id_remap.get(proxy_jump_id)
+                {
+                    *proxy_jump_id = remapped.clone();
+                }
                 saved.name = connection.name;
                 saved.group_id = group_id;
                 saved.description = connection.description;
@@ -53,6 +68,7 @@ impl ConnectionStore {
             }
             connections.push(SavedConnection {
                 extensions: Default::default(),
+                tags: Vec::new(),
                 id: uuid::Uuid::new_v4().to_string(),
                 name: connection.name,
                 config: connection.config,
@@ -279,8 +295,8 @@ fn ensure_group_path(
 #[cfg(test)]
 mod tests {
     use zzclawterm_core::{
-        AiExecutionProfile, ConnectionType, PreparedSessionConnection, PreparedSessionImport,
-        SavedPassword,
+        AiExecutionProfile, ConnectionAuth, ConnectionNetwork, ConnectionType,
+        PreparedSessionConnection, PreparedSessionImport, SavedConnection, SavedPassword,
     };
 
     use super::{ConnectionStore, META_MASTER_KEY, META_TABLE};
@@ -321,11 +337,51 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn commit_session_import_remaps_proxy_jump_references_atomically() {
+        let dir = crate::storage::tests::unique_temp_dir("session-import-id-remap");
+        let store = ConnectionStore::open(&dir).expect("open store");
+        let jump = prepared_saved_ssh("source-jump", "Jump", None);
+        let target = prepared_saved_ssh("source-target", "Target", Some("source-jump"));
+        let prepared = PreparedSessionImport {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            passwords: Vec::new(),
+            ssh_keys: Vec::new(),
+            connections: vec![jump, target],
+        };
+
+        store
+            .commit_session_import(prepared)
+            .expect("commit routed import");
+
+        let connections = store.list_connections().expect("connections");
+        let jump = connections
+            .iter()
+            .find(|value| value.name == "Jump")
+            .unwrap();
+        let target = connections
+            .iter()
+            .find(|value| value.name == "Target")
+            .unwrap();
+        assert_ne!(jump.id, "source-jump");
+        assert_ne!(target.id, "source-target");
+        assert_eq!(
+            target
+                .network
+                .as_ref()
+                .and_then(|network| network.proxy_jump_id.as_deref()),
+            Some(jump.id.as_str())
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     fn prepared_import() -> PreparedSessionImport {
         PreparedSessionImport {
             custom_icons: Vec::new(),
             groups: vec![vec!["Imported".to_string()]],
             passwords: vec![SavedPassword {
+                username: String::new(),
                 id: "password-1".to_string(),
                 name: "Imported password".to_string(),
                 password: Some("secret-value".to_string().into()),
@@ -349,6 +405,69 @@ mod tests {
                 icon: None,
                 auth: None,
             }],
+        }
+    }
+
+    fn prepared_saved_ssh(
+        id: &str,
+        name: &str,
+        proxy_jump_id: Option<&str>,
+    ) -> PreparedSessionConnection {
+        let config = ConnectionType::Ssh {
+            host: format!("{}.example", name.to_ascii_lowercase()),
+            port: 22,
+            username: "user".to_string(),
+            backspace_mode: "del".to_string(),
+            ai_execution_profile: AiExecutionProfile::Auto,
+            x11_forwarding: false,
+            auth_agent_endpoint: None,
+            agent_forwarding_config: None,
+            legacy_agent_forwarding: None,
+            encoding: String::new(),
+            dynamic_tab_title: false,
+        };
+        let auth = ConnectionAuth {
+            mode: "agent".to_string(),
+            ..ConnectionAuth::default()
+        };
+        let network = proxy_jump_id.map(|proxy_jump_id| ConnectionNetwork {
+            proxy_id: None,
+            proxy_jump_id: Some(proxy_jump_id.to_string()),
+            host_key_alias: None,
+        });
+        let saved = SavedConnection {
+            id: id.to_string(),
+            name: name.to_string(),
+            config: config.clone(),
+            group_id: None,
+            description: None,
+            sort_order: 0,
+            icon: None,
+            icon_auto_detect: None,
+            auth: Some(auth.clone()),
+            network,
+            post_login: None,
+            recording: None,
+            ssh_algorithms: None,
+            ssh_profile: Default::default(),
+            terminal_type: None,
+            sftp: Default::default(),
+            asset: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            last_used_at_ms: None,
+            extensions: Default::default(),
+            tags: Vec::new(),
+        };
+        PreparedSessionConnection {
+            saved: Some(saved),
+            name: name.to_string(),
+            config,
+            group_path: None,
+            description: None,
+            sort_order: 0,
+            icon: None,
+            auth: Some(auth),
         }
     }
 }

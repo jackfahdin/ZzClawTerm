@@ -538,6 +538,7 @@ pub(crate) enum ConnectionImportSource {
     SecureCrt,
     FinalShell,
     Termius,
+    SshConfig,
     Electerm,
     NyatermJson,
 }

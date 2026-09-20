@@ -363,7 +363,7 @@ pub(super) fn connection_editor_ssh_section(
         .items([
             ZzClawTabItem::new(t!("dialog.askWhenConnecting")),
             ZzClawTabItem::new(t!("dialog.directPassword")),
-            ZzClawTabItem::new(t!("dialog.savedPassword")),
+            ZzClawTabItem::new(t!("dialog.account")),
         ])
         .selected_index(match editor.password_source {
             ConnectionEditorPasswordSource::Ask => 0,
@@ -411,6 +411,12 @@ pub(super) fn connection_editor_ssh_section(
             ConnectionEditorField::Username,
             fields,
             cx,
+        ))
+        .child(connection_editor_select(
+            ConnectionEditorRenderContext { palette, fields, cx },
+            "connection-editor-account",
+            t!("dialog.account"),
+            ConnectionEditorSelect::Account,
         ))
         .child(
             div()
@@ -505,7 +511,7 @@ pub(super) fn connection_editor_ssh_section(
                                                 cx,
                                             },
                                             "connection-editor-saved-password",
-                                            t!("dialog.savedPassword"),
+                                            t!("dialog.account"),
                                             ConnectionEditorSelect::SavedPassword,
                                         ),
                                     ))
@@ -1321,6 +1327,17 @@ pub(super) fn connection_editor_ssh_section(
                                         cx.listener(|this, _, _, cx| {
                                             this.toggle_connection_editor_flag(
                                                 ConnectionEditorToggle::SftpEnabled,
+                                                cx,
+                                            );
+                                        }),
+                                    ))
+                                    .child(toggle_chip(
+                                        palette,
+                                        t!("dialog.sftpCompatibilityMode"),
+                                        editor.sftp_compatibility_mode,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.toggle_connection_editor_flag(
+                                                ConnectionEditorToggle::SftpCompatibilityMode,
                                                 cx,
                                             );
                                         }),

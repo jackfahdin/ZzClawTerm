@@ -971,6 +971,7 @@ mod tests {
     ) -> SavedConnection {
         SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: id.to_string(),
             name: name.to_string(),
             config: ConnectionType::LocalTerminal {

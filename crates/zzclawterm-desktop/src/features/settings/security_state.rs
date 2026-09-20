@@ -8,8 +8,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use gpui::FocusHandle;
+use gpui::{FocusHandle, ScrollHandle};
 use zzclawterm_core::{OtpEntry, SavedCredential, SavedPassword, SecretString, SshKey};
+use zzclawterm_store::KnownHostEntry;
 
 use crate::models::{
     SecurityAuthTab, SecurityCredentialDropTarget, SecurityCredentialEditorState,
@@ -26,6 +27,11 @@ pub(in crate::features) struct SecurityFeatureState {
     status: String,
     unlock: SecurityUnlockState,
     screen_lock: SecurityScreenLockState,
+    known_hosts: Vec<KnownHostEntry>,
+    known_hosts_generation: u64,
+    known_hosts_loading: bool,
+    known_hosts_pending: Option<(u64, Option<String>)>,
+    tabs_scroll: ScrollHandle,
 }
 
 /// Persisted secret-adjacent catalogs loaded through `ConnectionStore`.
@@ -112,6 +118,7 @@ enum SecurityPanelRequestKind {
     Credential,
     Delete,
     Reorder,
+    PublicKey,
 }
 
 struct SecurityPanelRequest {
@@ -202,7 +209,56 @@ impl SecurityFeatureState {
                 focus: focus.screen_lock,
                 last_user_activity_at: Instant::now(),
             },
+            known_hosts: Vec::new(),
+            known_hosts_generation: 0,
+            known_hosts_loading: false,
+            known_hosts_pending: None,
+            tabs_scroll: ScrollHandle::new(),
         }
+    }
+
+    pub(in crate::features) fn known_hosts(&self) -> &[KnownHostEntry] {
+        &self.known_hosts
+    }
+
+    pub(in crate::features) fn tabs_scroll(&self) -> &ScrollHandle {
+        &self.tabs_scroll
+    }
+
+    pub(in crate::features) fn known_hosts_loading(&self) -> bool {
+        self.known_hosts_loading
+    }
+
+    pub(in crate::features) fn begin_known_hosts_load(&mut self) -> u64 {
+        self.known_hosts_generation = self.known_hosts_generation.wrapping_add(1).max(1);
+        self.known_hosts_loading = true;
+        self.known_hosts_generation
+    }
+
+    pub(in crate::features) fn apply_known_hosts_load(
+        &mut self,
+        generation: u64,
+        entries: Vec<KnownHostEntry>,
+    ) -> bool {
+        if generation != self.known_hosts_generation {
+            return false;
+        }
+        self.known_hosts_loading = false;
+        self.known_hosts = entries;
+        true
+    }
+
+    pub(in crate::features) fn fail_known_hosts_load(
+        &mut self,
+        generation: u64,
+        error: String,
+    ) -> bool {
+        if generation != self.known_hosts_generation {
+            return false;
+        }
+        self.known_hosts_loading = false;
+        self.status = error;
+        true
     }
 
     pub(in crate::features) fn ssh_keys(&self) -> &[SshKey] {
@@ -601,6 +657,64 @@ impl SecurityFeatureState {
         self.begin_panel_request(SecurityPanelRequestKind::Reorder, String::new())
     }
 
+    pub(in crate::features) fn begin_known_host_delete(&mut self, item_id: String) -> Option<u64> {
+        self.begin_known_hosts_mutation(Some(item_id))
+    }
+
+    pub(in crate::features) fn finish_known_host_delete(
+        &mut self,
+        request_id: u64,
+        item_id: &str,
+    ) -> bool {
+        self.finish_known_hosts_mutation(request_id, Some(item_id))
+    }
+
+    pub(in crate::features) fn begin_known_hosts_clear(&mut self) -> Option<u64> {
+        self.begin_known_hosts_mutation(None)
+    }
+
+    pub(in crate::features) fn finish_known_hosts_clear(&mut self, request_id: u64) -> bool {
+        self.finish_known_hosts_mutation(request_id, None)
+    }
+
+    pub(in crate::features) fn known_hosts_busy(&self) -> bool {
+        self.known_hosts_pending.is_some()
+    }
+
+    fn begin_known_hosts_mutation(&mut self, item: Option<String>) -> Option<u64> {
+        if self.known_hosts_busy() || self.known_hosts_loading {
+            return None;
+        }
+        // Invalidate any older read before the write is submitted.
+        self.known_hosts_generation = self.known_hosts_generation.wrapping_add(1).max(1);
+        let request = self.known_hosts_generation;
+        self.known_hosts_pending = Some((request, item));
+        Some(request)
+    }
+
+    fn finish_known_hosts_mutation(&mut self, request: u64, item: Option<&str>) -> bool {
+        let matches = self
+            .known_hosts_pending
+            .as_ref()
+            .is_some_and(|(id, pending)| *id == request && pending.as_deref() == item);
+        if matches {
+            self.known_hosts_pending = None;
+        }
+        matches
+    }
+
+    pub(in crate::features) fn begin_public_key_request(&mut self, item_id: String) -> u64 {
+        self.begin_panel_request(SecurityPanelRequestKind::PublicKey, item_id)
+    }
+
+    pub(in crate::features) fn finish_public_key_request(
+        &mut self,
+        request_id: u64,
+        item_id: &str,
+    ) -> bool {
+        self.finish_panel_request(request_id, SecurityPanelRequestKind::PublicKey, item_id)
+    }
+
     pub(in crate::features) fn finish_password_request(
         &mut self,
         request_id: u64,
@@ -715,7 +829,7 @@ impl SecurityFeatureState {
             SecurityAuthTab::Credentials => {
                 self.revealed.credentials.remove(id);
             }
-            SecurityAuthTab::Keys => {}
+            SecurityAuthTab::Keys | SecurityAuthTab::KnownHosts => {}
         }
     }
 
@@ -889,12 +1003,13 @@ impl SecurityFeatureState {
                     _ => editor.passphrase = text.into(),
                 }
             }
-            "pw-name" | "pw-value" => {
+            "pw-name" | "pw-username" | "pw-value" => {
                 let Some(editor) = self.password_editor_mut() else {
                     return false;
                 };
                 match id {
                     "pw-name" => editor.name = text,
+                    "pw-username" => editor.username = text,
                     _ => editor.password = text.into(),
                 }
             }
@@ -1071,6 +1186,7 @@ mod tests {
                 has_secret: false,
             }],
             vec![SavedPassword {
+                username: String::new(),
                 id: "password-id".to_string(),
                 name: "password".to_string(),
                 password: None,
@@ -1104,6 +1220,43 @@ mod tests {
     }
 
     #[test]
+    fn known_hosts_reject_stale_reads_and_serialize_mutations_across_tabs() {
+        let mut state = security_state();
+        let first = state.begin_known_hosts_load();
+        let second = state.begin_known_hosts_load();
+        assert!(!state.apply_known_hosts_load(first, Vec::new()));
+        assert!(!state.fail_known_hosts_load(first, "stale".into()));
+        assert!(state.known_hosts_loading());
+        assert!(state.begin_known_hosts_clear().is_none());
+        assert!(state.apply_known_hosts_load(second, Vec::new()));
+        let delete = state
+            .begin_known_host_delete("host".into())
+            .expect("delete");
+        assert!(state.known_hosts_busy());
+        assert!(state.begin_known_hosts_clear().is_none());
+        assert!(state.begin_known_host_delete("other".into()).is_none());
+        assert!(!state.apply_known_hosts_load(second, Vec::new()));
+        state.set_auth_tab(crate::models::SecurityAuthTab::Keys);
+        assert!(!state.finish_known_host_delete(delete, "other"));
+        assert!(state.finish_known_host_delete(delete, "host"));
+        let clear = state.begin_known_hosts_clear().expect("clear");
+        assert!(!state.finish_known_hosts_clear(delete));
+        assert!(state.finish_known_hosts_clear(clear));
+        assert!(!state.known_hosts_busy());
+    }
+
+    #[test]
+    fn public_key_clipboard_completion_is_invalidated_by_lock_or_tab_change() {
+        let mut state = security_state();
+        let first = state.begin_public_key_request("key".into());
+        state.lock_secrets();
+        assert!(!state.finish_public_key_request(first, "key"));
+        let second = state.begin_public_key_request("key".into());
+        state.set_auth_tab(crate::models::SecurityAuthTab::KnownHosts);
+        assert!(!state.finish_public_key_request(second, "key"));
+    }
+
+    #[test]
     fn opening_an_editor_replaces_the_previous_editor() {
         let mut security = security_state();
 
@@ -1111,6 +1264,7 @@ mod tests {
             SecurityPasswordEditorState {
                 id: None,
                 name: String::new(),
+                username: String::new(),
                 password: zzclawterm_core::SecretString::default(),
                 has_password: false,
                 show_password: false,
@@ -1264,6 +1418,7 @@ mod tests {
             SecurityPasswordEditorState {
                 id: None,
                 name: "draft".to_string(),
+                username: String::new(),
                 password: "secret".to_string().into(),
                 has_password: false,
                 show_password: true,

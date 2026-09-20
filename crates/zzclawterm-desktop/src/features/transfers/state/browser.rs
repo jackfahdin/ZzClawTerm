@@ -123,6 +123,7 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn remove_browser_session_cache(&mut self, session_id: &str) {
+        self.tree.remove_session(session_id);
         self.browser.session_cache.remove(session_id);
     }
 

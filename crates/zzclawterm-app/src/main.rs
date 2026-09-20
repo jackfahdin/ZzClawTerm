@@ -10,6 +10,7 @@ use gpui::{App, AppContext, TitlebarOptions, WindowOptions, point, px};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use zzclawterm_app::assets;
+use zzclawterm_core::app_identity::AppFlavor;
 use zzclawterm_core::{ActivationRequest, AppRuntime, LOG_FILE_PREFIX, LOG_FILE_SUFFIX};
 use zzclawterm_desktop::{AppShell, AppShellStartup};
 use zzclawterm_ui::zzclaw_root;
@@ -53,6 +54,8 @@ fn main() -> anyhow::Result<()> {
     });
 
     application.run(move |cx: &mut App| {
+        let flavor = AppFlavor::current();
+        cx.set_app_identity(flavor.application_identifier(), flavor.display_name());
         gpui_component::init(cx);
         zzclawterm_desktop::init(cx);
         let startup = AppShellStartup::prepare(&runtime);
@@ -61,11 +64,12 @@ fn main() -> anyhow::Result<()> {
 
         cx.open_window(
             WindowOptions {
+                app_id: Some(flavor.desktop_id().to_string()),
                 titlebar: Some(TitlebarOptions {
+                    title: Some(flavor.display_name().into()),
                     appears_transparent: true,
                     traffic_light_position: cfg!(target_os = "macos")
                         .then(|| point(px(9.), px(11.))),
-                    ..Default::default()
                 }),
                 #[cfg(target_os = "linux")]
                 window_decorations: Some(gpui::WindowDecorations::Client),

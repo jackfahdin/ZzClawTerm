@@ -358,6 +358,34 @@ mod tests {
     }
 
     #[test]
+    fn stable_and_preview_can_own_instances_simultaneously() {
+        let root = temporary_root("flavor-isolation");
+        let stable = zzclawterm_core::runtime::AppRuntime::installed_config_dir(
+            &root,
+            zzclawterm_core::app_identity::AppFlavor::Stable,
+        );
+        let preview = zzclawterm_core::runtime::AppRuntime::installed_config_dir(
+            &root,
+            zzclawterm_core::app_identity::AppFlavor::Preview,
+        );
+        let stable_owner = acquire(&stable, request(1)).unwrap();
+        let preview_owner = acquire(&preview, request(2)).unwrap();
+        assert!(matches!(stable_owner, SingleInstanceOutcome::Owner(_)));
+        assert!(matches!(preview_owner, SingleInstanceOutcome::Owner(_)));
+        assert!(matches!(
+            acquire(&stable, request(3)).unwrap(),
+            SingleInstanceOutcome::Forwarded
+        ));
+        assert!(matches!(
+            acquire(&preview, request(4)).unwrap(),
+            SingleInstanceOutcome::Forwarded
+        ));
+        drop(stable_owner);
+        drop(preview_owner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn secondary_forwards_to_owner_and_lock_recovers_after_drop() {
         let root = temporary_root("handoff");
 

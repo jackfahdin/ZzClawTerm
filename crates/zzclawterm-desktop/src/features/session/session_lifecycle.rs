@@ -462,6 +462,7 @@ impl ZzClawTermApp {
         self.session.start.clear_reconnect_failure(old_id);
         self.terminal
             .move_session_surface_bounds(old_id, new_id.to_string());
+        self.terminal.move_search_session_state(old_id, new_id);
         self.session.migrate_session_presentation(old_id, new_id);
 
         self.shell.replace_workspace_session_id(old_id, new_id);

@@ -306,6 +306,36 @@ pub fn file_browser_join(kind: FileBrowserBackendKind, parent: &str, child: &str
     }
 }
 
+pub fn file_browser_root(kind: FileBrowserBackendKind, path: &str) -> String {
+    match kind {
+        FileBrowserBackendKind::Remote => if path.starts_with('/') { "/" } else { "." }.to_string(),
+        FileBrowserBackendKind::Local => {
+            let path = Path::new(path);
+            path.ancestors()
+                .last()
+                .filter(|root| !root.as_os_str().is_empty())
+                .map(|root| root.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        }
+    }
+}
+
+pub fn file_browser_identity(kind: FileBrowserBackendKind, path: &str) -> String {
+    if kind == FileBrowserBackendKind::Local && cfg!(windows) {
+        path.replace('/', "\\").to_lowercase()
+    } else {
+        path.to_string()
+    }
+}
+
+pub fn file_browser_path_eq(kind: FileBrowserBackendKind, left: &str, right: &str) -> bool {
+    file_browser_identity(kind, left) == file_browser_identity(kind, right)
+}
+
+pub fn file_browser_path_is_root(kind: FileBrowserBackendKind, path: &str) -> bool {
+    file_browser_path_eq(kind, path, &file_browser_root(kind, path))
+}
+
 pub fn valid_file_browser_child_name(kind: FileBrowserBackendKind, name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -316,9 +346,11 @@ pub fn valid_file_browser_child_name(kind: FileBrowserBackendKind, name: &str) -
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::file_browser_identity;
     use super::{
         FileBrowserBackendKind, file_browser_join, file_browser_name, file_browser_parent,
-        valid_file_browser_child_name,
+        file_browser_path_is_root, file_browser_root, valid_file_browser_child_name,
     };
 
     #[test]
@@ -338,6 +370,14 @@ mod tests {
         assert!(valid_file_browser_child_name(
             FileBrowserBackendKind::Remote,
             "a\\b"
+        ));
+        assert_eq!(
+            file_browser_root(FileBrowserBackendKind::Remote, "/tmp/a"),
+            "/"
+        );
+        assert!(file_browser_path_is_root(
+            FileBrowserBackendKind::Remote,
+            "/"
         ));
     }
 
@@ -360,5 +400,24 @@ mod tests {
             FileBrowserBackendKind::Local,
             "a\\b"
         ));
+        assert_eq!(
+            file_browser_root(FileBrowserBackendKind::Local, r"C:\tmp\a"),
+            r"C:\"
+        );
+        assert!(file_browser_path_is_root(
+            FileBrowserBackendKind::Local,
+            r"C:\"
+        ));
+        assert_eq!(
+            file_browser_identity(FileBrowserBackendKind::Local, r"C:\TMP\A"),
+            file_browser_identity(FileBrowserBackendKind::Local, r"c:/tmp/a")
+        );
+        assert_eq!(
+            file_browser_root(
+                FileBrowserBackendKind::Local,
+                r"\\server\share\folder\file.txt"
+            ),
+            r"\\server\share\"
+        );
     }
 }

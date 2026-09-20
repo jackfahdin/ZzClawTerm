@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{Context, Window};
+use rust_i18n::t;
 use zzclawterm_core::{AiAction, truncate_preview};
 use zzclawterm_transport::{
     SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType, SftpTransferProgress,
@@ -235,6 +236,27 @@ impl ZzClawTermApp {
         let mut dirty = false;
         let event_id = event.id.clone();
         let job_session_id = job.session_id.clone();
+        let reveal_tree_after_navigation = matches!(&job.kind, TransferJobKind::ListDir { .. })
+            || matches!(&event.event, TransferJobEvent::Finished(Ok(TransferJobOutput::CwdSynced { remote_path, .. })) if remote_path != &self.transfer.browser.path)
+            || job_session_id
+                .as_deref()
+                .is_some_and(|id| !self.transfer.tree_is_initialized(id));
+        if let TransferJobKind::ListTree { path, generation } = &job.kind {
+            if let TransferJobEvent::Finished(result) = event.event {
+                let result = match result {
+                    Ok(TransferJobOutput::TreeEntries(entries)) => Ok(entries),
+                    Err(error) => Err(error),
+                    _ => Err(t!("fileExplorer.treeUnexpectedResult").to_string()),
+                };
+                return job_session_id.as_deref().is_some_and(|session| {
+                    self.transfer
+                        .complete_tree_request(session, path, *generation, result)
+                });
+            }
+            self.transfer
+                .restore_transfer_job_after_event((job_index, job));
+            return false;
+        }
         let navigation_job_key = matches!(
             &job.kind,
             TransferJobKind::ListDir { .. } | TransferJobKind::SyncCwd
@@ -253,6 +275,11 @@ impl ZzClawTermApp {
             job_session_id.as_deref(),
             &event.event,
         );
+        if let (Some(session), TransferJobEvent::Finished(Ok(output))) =
+            (job_session_id.as_deref(), &event.event)
+        {
+            self.update_transfer_tree_from_output(session, output);
+        }
         let inactive_browser_snapshot = job_session_id
             .as_deref()
             .filter(|session_id| self.session.active_id() != Some(*session_id))
@@ -283,6 +310,7 @@ impl ZzClawTermApp {
                 job.status = TransferJobStatus::Running;
                 job.detail = detail;
                 job.progress = None;
+                job.speed.reset();
                 job.summary = None;
             }
             TransferJobEvent::ExternalModified {
@@ -321,7 +349,7 @@ impl ZzClawTermApp {
                 if job.status == TransferJobStatus::Running {
                     job.detail = format_transfer_progress(&progress);
                 }
-                job.progress = Some(progress);
+                job.update_progress(progress);
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Entries(entries))) => {
                 browser_listing_completed = true;
@@ -363,6 +391,7 @@ impl ZzClawTermApp {
                 self.shell
                     .set_status(format!("remote file list completed: {}", job.detail));
             }
+            TransferJobEvent::Finished(Ok(TransferJobOutput::TreeEntries(_))) => {}
             TransferJobEvent::Finished(Ok(TransferJobOutput::ChildEntries {
                 remote_path,
                 mut entries,
@@ -1120,6 +1149,9 @@ impl ZzClawTermApp {
                 job.control = None;
             }
         }
+        if event_finished {
+            job.speed.reset();
+        }
         if !cleanup_internal_job {
             self.transfer
                 .restore_transfer_job_after_event((job_index, job));
@@ -1175,11 +1207,28 @@ impl ZzClawTermApp {
         {
             self.open_transfer_default(entry, window, cx);
         }
-        if browser_listing_completed && let Some(session_id) = job_session_id.as_deref() {
+        if browser_listing_completed
+            && let Some(session_id) = job_session_id.as_deref()
+            && let Some(backend) = self
+                .session
+                .file_browser_backend_support_for_session(session_id)
+        {
+            self.transfer.seed_tree_listing(
+                session_id,
+                backend,
+                self.transfer.browser_remote_file_path(),
+                self.transfer.browser.entries.clone(),
+            );
             self.cache_transfer_browser_session(session_id);
         }
         if let Some(snapshot) = inactive_browser_snapshot {
             self.transfer.restore_browser_event_snapshot(snapshot);
+        }
+        if event_succeeded && self.session.active_id() == job_session_id.as_deref() {
+            if reveal_tree_after_navigation {
+                self.reveal_transfer_tree_current_path(cx);
+            }
+            self.request_missing_expanded_tree_listings(cx);
         }
         if event_finished
             && let Some(key) = navigation_job_key
@@ -1211,7 +1260,10 @@ fn transfer_event_paths_match(left: &str, right: &str) -> bool {
 
 fn transfer_event_needs_browser_context(kind: &TransferJobKind, event: &TransferJobEvent) -> bool {
     matches!(event, TransferJobEvent::Finished(_))
-        && !matches!(kind, TransferJobKind::ListChildren { .. })
+        && !matches!(
+            kind,
+            TransferJobKind::ListChildren { .. } | TransferJobKind::ListTree { .. }
+        )
 }
 
 fn transfer_event_needs_ui_refresh(
@@ -1366,6 +1418,7 @@ mod tests {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         }
     }
 
@@ -1382,6 +1435,7 @@ mod tests {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         }
     }
 

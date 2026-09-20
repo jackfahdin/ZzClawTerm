@@ -27,49 +27,26 @@ impl ZzClawTermApp {
         let provider = configured_cloud_sync_provider(self.cloud_sync.settings());
         let provider_label = format_cloud_provider(&provider);
         let enabled = self.cloud_sync.settings().enabled;
+        let status_message = self.cloud_sync.status().to_string();
+        let message = status_message.to_ascii_lowercase();
         let state = if !enabled {
             "disabled"
         } else if self.cloud_sync.conflict().is_some() {
             "conflict"
-        } else if self
-            .cloud_sync
-            .status()
-            .to_ascii_lowercase()
-            .contains("fail")
-        {
-            "failed"
-        } else if self
-            .cloud_sync
-            .status()
-            .to_ascii_lowercase()
-            .contains("push")
-            || self
-                .cloud_sync
-                .status()
-                .to_ascii_lowercase()
-                .contains("pull")
-            || self
-                .cloud_sync
-                .status()
-                .to_ascii_lowercase()
-                .contains("running")
-        {
+        } else if self.cloud_sync.job_running() {
             "running"
-        } else if self
-            .cloud_sync
-            .status()
-            .to_ascii_lowercase()
-            .contains("success")
-            || self
-                .cloud_sync
-                .status()
-                .to_ascii_lowercase()
-                .contains("synced")
-            || self
-                .cloud_sync
-                .status()
-                .to_ascii_lowercase()
-                .contains("ready")
+        } else if message.contains("fail") || message.contains("error") {
+            "failed"
+        } else if [
+            "success",
+            "synced",
+            "uploaded",
+            "downloaded",
+            "up to date",
+            "recovered",
+        ]
+        .iter()
+        .any(|word| message.contains(word))
         {
             "success"
         } else {
@@ -83,7 +60,6 @@ impl ZzClawTermApp {
             "success" => t!("settings.syncState.success"),
             _ => t!("settings.syncState.idle"),
         };
-        let status_message = self.cloud_sync.status().to_string();
         let history = self.cloud_sync.history().to_vec();
         let expanded = self.cloud_sync.history_expanded().clone();
         let conflict = self.cloud_sync.conflict().cloned();
@@ -457,8 +433,11 @@ fn sync_history_action_button(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let tooltip: SharedString = tooltip.into();
+    let id: SharedString = id.into().into();
+    let selector = id.clone();
     div()
-        .id(SharedString::from(id.into()))
+        .id(id)
+        .debug_selector(move || selector.to_string())
         .size(px(24.))
         .flex()
         .items_center()
@@ -482,4 +461,270 @@ fn sync_history_action_button(
                 .text_color(rgb(palette.text_muted)),
         )
         .on_click(on_click)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use zzclawterm_core::cloud_sync::{CloudSyncSettings, SYNC_CURRENT_FILE};
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
+    use zzclawterm_store::ConnectionStore;
+    use zzclawterm_ui::{ZzClawDialogWindowExt, zzclaw_root};
+
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+    use crate::models::SnapshotPasswordPromptKind;
+    use crate::test_support::{TestConfigDir, spawn_webdav_service_unavailable_server};
+
+    struct SidebarHost {
+        app: Entity<ZzClawTermApp>,
+    }
+
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(320.))
+                .h(px(720.))
+                .child(self.app.update(cx, |app, cx| {
+                    app.sync_backup_history_panel(cx).into_any_element()
+                }))
+        }
+    }
+
+    fn test_app(cx: &mut TestAppContext, root: &Path) -> Entity<ZzClawTermApp> {
+        let store = ConnectionStore::open(root.join("config")).expect("test store");
+        store
+            .save_master_password(Some("synthetic-password"))
+            .expect("test master password");
+        store
+            .save_cloud_sync_settings(CloudSyncSettings {
+                enabled: true,
+                provider: "local_directory".to_string(),
+                ..CloudSyncSettings::default()
+            })
+            .expect("test sync settings");
+        drop(store);
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.to_path_buf(),
+            root.join("config"),
+            root.join("logs"),
+            root.join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+        cx.update_entity(&app, |app, cx| app.sync_component_theme(cx));
+        app
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn click_action(cx: &mut VisualTestContext, id: &'static str) {
+        draw(cx);
+        let bounds = cx.debug_bounds(id).expect("sync action should render");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        draw(cx);
+    }
+
+    #[test]
+    fn sync_sidebar_actions_open_visible_password_dialogs_and_cancel_cleanly() {
+        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar");
+        let mut cx = TestAppContext::single();
+        let app = test_app(&mut cx, test_dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        for (id, kind) in [
+            (
+                "sync-history-push-now",
+                SnapshotPasswordPromptKind::CloudProviderPush,
+            ),
+            (
+                "sync-history-pull-now",
+                SnapshotPasswordPromptKind::CloudProviderPull,
+            ),
+        ] {
+            click_action(cx, id);
+            assert!(
+                cx.debug_bounds("snapshot-password-dialog-content")
+                    .is_some()
+            );
+            assert!(cx.debug_bounds("nya-dialog-action-button").is_some());
+            cx.update(|window, cx| {
+                assert!(window.has_active_nya_dialog(cx));
+                let state = app.read(cx);
+                assert_eq!(
+                    state
+                        .settings
+                        .snapshot_password_prompt()
+                        .expect("prompt")
+                        .kind,
+                    kind
+                );
+                assert!(!state.cloud_sync.job_running());
+            });
+            cx.simulate_keystrokes("enter");
+            draw(cx);
+            cx.update(|window, cx| {
+                assert!(
+                    window.has_active_nya_dialog(cx),
+                    "empty passwords must keep the dialog open"
+                );
+                assert!(app.read(cx).settings.snapshot_password_prompt_active());
+                assert!(!app.read(cx).cloud_sync.job_running());
+            });
+            cx.simulate_keystrokes("escape");
+            draw(cx);
+            cx.update(|window, cx| {
+                assert!(!window.has_active_nya_dialog(cx));
+                assert!(!app.read(cx).settings.snapshot_password_prompt_active());
+                assert!(app.read(cx).cloud_sync.history().is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn sync_sidebar_webdav_submission_reports_http_failure() {
+        let (endpoint, server) = spawn_webdav_service_unavailable_server();
+        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-webdav");
+        let mut cx = TestAppContext::single();
+        let app = test_app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, _| {
+            let mut settings = app.cloud_sync.settings().clone();
+            settings.provider = "webdav".to_string();
+            settings.webdav.endpoint = endpoint;
+            app.cloud_sync
+                .replace_settings(settings, Default::default());
+        });
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        click_action(cx, "sync-history-push-now");
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.reset_text_input("snapshot-password.value", "synthetic-password", cx);
+                app.apply_snapshot_password_input("synthetic-password".to_string(), cx);
+            })
+        });
+        draw(cx);
+        cx.simulate_keystrokes("enter");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            draw(cx);
+            let recorded = cx.update(|_, cx| {
+                let state = app.read(cx);
+                state
+                    .cloud_sync
+                    .history()
+                    .iter()
+                    .find(|entry| entry.trigger == "manual_provider_push")
+                    .map(|entry| {
+                        assert_ne!(entry.status, "success");
+                        assert!(state.cloud_sync.status().contains("503"));
+                        assert!(!state.cloud_sync.job_running());
+                    })
+                    .is_some()
+            });
+            if recorded {
+                break;
+            }
+            assert!(Instant::now() < deadline, "WebDAV failure was not recorded");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        server.join().expect("mock WebDAV server");
+    }
+
+    #[test]
+    fn sync_sidebar_password_submission_runs_push_and_pull_and_records_history() {
+        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-roundtrip");
+        let mut cx = TestAppContext::single();
+        let app = test_app(&mut cx, test_dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        for (id, trigger, keyboard_submit) in [
+            ("sync-history-push-now", "manual_provider_push", true),
+            ("sync-history-pull-now", "manual_provider_pull", false),
+        ] {
+            click_action(cx, id);
+            cx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.reset_text_input("snapshot-password.value", "synthetic-password", cx);
+                    app.apply_snapshot_password_input("synthetic-password".to_string(), cx);
+                })
+            });
+            draw(cx);
+            if keyboard_submit {
+                cx.simulate_keystrokes("enter");
+            } else {
+                let submit = cx
+                    .debug_bounds("nya-dialog-action-button")
+                    .expect("submit button");
+                cx.simulate_click(submit.center(), Modifiers::default());
+            }
+            draw(cx);
+            cx.update(|window, cx| {
+                assert!(
+                    !window.has_active_nya_dialog(cx),
+                    "submission must close the password dialog"
+                );
+                assert!(!app.read(cx).settings.snapshot_password_prompt_active());
+            });
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                draw(cx);
+                let recorded = cx.update(|_, cx| {
+                    app.read(cx)
+                        .cloud_sync
+                        .history()
+                        .iter()
+                        .find(|entry| entry.trigger == trigger)
+                        .map(|entry| entry.status.clone())
+                });
+                if let Some(status) = recorded {
+                    assert_eq!(status, "success");
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "sync submission did not record an operation"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                test_dir
+                    .path()
+                    .join("config/cloud-sync-local/zzclawterm")
+                    .join(SYNC_CURRENT_FILE)
+                    .is_file(),
+                "push must produce an encrypted remote snapshot"
+            );
+        }
+    }
 }

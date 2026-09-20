@@ -126,6 +126,7 @@ pub trait RemoteFileBackendPreferenceStore: Send + Sync {
 pub struct RemoteFileService {
     config: SshSessionConfig,
     multiplex: Option<SshMultiplexHandle>,
+    sftp_service: SftpService,
     preference_store: Option<Arc<dyn RemoteFileBackendPreferenceStore>>,
     selected: Arc<Mutex<Option<RemoteFileBackendKind>>>,
 }
@@ -169,9 +170,15 @@ impl RemoteFileService {
         multiplex: Option<SshMultiplexHandle>,
         preference_store: Option<Arc<dyn RemoteFileBackendPreferenceStore>>,
     ) -> Self {
+        let sftp_service = match multiplex.clone() {
+            Some(handle) => SftpService::with_multiplex(config.clone(), handle)
+                .expect("multiplex compatibility was validated by the constructor"),
+            None => SftpService::new(config.clone()),
+        };
         Self {
             config,
             multiplex,
+            sftp_service,
             preference_store,
             selected: Arc::new(Mutex::new(None)),
         }
@@ -276,10 +283,7 @@ impl RemoteFileService {
     }
 
     fn sftp(&self) -> anyhow::Result<SftpService> {
-        match self.multiplex.clone() {
-            Some(multiplex) => SftpService::with_multiplex(self.config.clone(), multiplex),
-            None => Ok(SftpService::new(self.config.clone())),
-        }
+        Ok(self.sftp_service.clone())
     }
 
     fn shell(&self, kind: RemoteFileBackendKind) -> ShellRemote {

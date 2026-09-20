@@ -29,6 +29,7 @@ fn test_config() -> SshSessionConfig {
         port: required_env("ZZCLAWTERM_TEST_SFTP_PORT")
             .parse()
             .expect("ZZCLAWTERM_TEST_SFTP_PORT must be a valid port"),
+        host_key_alias: None,
         username: required_env("ZZCLAWTERM_TEST_SFTP_USERNAME"),
         password: Some(required_env("ZZCLAWTERM_TEST_SFTP_PASSWORD").into()),
         key_auth: None,

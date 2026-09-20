@@ -9,10 +9,13 @@ use super::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConnectionNetwork {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump_id: Option<String>,
+    /// OpenSSH lookup identity used instead of the network destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_alias: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

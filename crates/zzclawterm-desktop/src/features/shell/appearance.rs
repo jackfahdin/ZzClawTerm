@@ -34,6 +34,7 @@ impl ZzClawTermApp {
                 || current.terminal_font_size != settings.terminal_font_size
                 || current.terminal_font_weight != settings.terminal_font_weight
                 || current.terminal_font_weight_bold != settings.terminal_font_weight_bold
+                || current.bold_default_foreground != settings.bold_default_foreground
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
         self.settings.replace_summary(settings);
@@ -772,6 +773,21 @@ impl ZzClawTermApp {
         }
         self.invalidate_terminal_cell_metrics(cx);
         self.save_appearance_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_bold_default_foreground(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.settings.toggle_bold_default_foreground();
+        self.invalidate_paint_theme_caches();
+        self.notify_active_terminal_surface(cx);
+        self.save_appearance_settings(cx);
+        self.shell.set_status(
+            if enabled {
+                t!("settings.boldDefaultForegroundEnabled")
+            } else {
+                t!("settings.boldDefaultForegroundDisabled")
+            }
+            .to_string(),
+        );
     }
 
     pub(in crate::features) fn zoom_terminal_in(&mut self, cx: &mut Context<Self>) {

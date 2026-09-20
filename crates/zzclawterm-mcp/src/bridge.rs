@@ -350,22 +350,33 @@ fn discovery_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = std::env::var_os("ZZCLAWTERM_MCP_DISCOVERY") {
         return Ok(path.into());
     }
-    let executable = std::env::current_exe()?;
+    discovery_path_from(
+        &std::env::current_exe()?,
+        dirs::home_dir().as_deref(),
+        zzclawterm_core::app_identity::AppFlavor::current(),
+    )
+}
+
+fn discovery_path_from(
+    executable: &std::path::Path,
+    home: Option<&std::path::Path>,
+    flavor: zzclawterm_core::app_identity::AppFlavor,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let directory = executable
         .parent()
         .ok_or("Cannot resolve sidecar directory")?;
-    if directory.join("portable.flag").is_file() {
-        return Ok(directory
-            .join("data")
-            .join("config")
-            .join("mcp")
-            .join("discovery.json"));
-    }
-    Ok(dirs::home_dir()
-        .ok_or("Cannot resolve home directory")?
-        .join(".zzclawterm")
-        .join("mcp")
-        .join("discovery.json"))
+    let config = if ["zzclawterm-portable", "portable.flag"]
+        .into_iter()
+        .any(|marker| directory.join(marker).is_file())
+    {
+        directory.join("data/config")
+    } else {
+        zzclawterm_core::runtime::AppRuntime::installed_config_dir(
+            home.ok_or("Cannot resolve home directory")?,
+            flavor,
+        )
+    };
+    Ok(config.join("mcp/discovery.json"))
 }
 
 fn io_error(error: std::io::Error) -> RpcError {
@@ -380,6 +391,34 @@ fn bridge_error(code: &str, message: &str) -> RpcError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discovery_is_flavor_local_and_portable_markers_take_priority() {
+        use zzclawterm_core::app_identity::AppFlavor;
+        let root =
+            std::env::temp_dir().join(format!("zzclawterm-mcp-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("zzclawterm-mcp");
+        let home = root.join("home");
+        for flavor in [AppFlavor::Stable, AppFlavor::Preview] {
+            assert_eq!(
+                super::discovery_path_from(&executable, Some(&home), flavor).unwrap(),
+                home.join(flavor.config_directory_name())
+                    .join("mcp/discovery.json")
+            );
+        }
+        for marker in ["zzclawterm-portable", "portable.flag"] {
+            std::fs::write(root.join(marker), b"").unwrap();
+            for flavor in [AppFlavor::Stable, AppFlavor::Preview] {
+                assert_eq!(
+                    super::discovery_path_from(&executable, None, flavor).unwrap(),
+                    root.join("data/config/mcp/discovery.json")
+                );
+            }
+            std::fs::remove_file(root.join(marker)).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

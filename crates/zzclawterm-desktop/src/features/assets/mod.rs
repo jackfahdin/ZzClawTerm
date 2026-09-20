@@ -318,7 +318,7 @@ impl StartWorkspaceFeatureState {
             self.selected_group_id.as_deref(),
         );
         let query = self.search.trim().to_lowercase();
-        let filters = self.filters.iter().copied().collect::<Vec<_>>();
+        let filters = self.filters.iter().cloned().collect::<Vec<_>>();
         records.retain(|record| {
             (query.is_empty() || record.search_text.contains(&query))
                 && connection_matches_filters(&record.connection, &filters)

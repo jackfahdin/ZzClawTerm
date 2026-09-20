@@ -51,6 +51,7 @@ impl ZzClawTermApp {
             )
         });
         let draft_dirty = self.settings_draft_dirty();
+        let store_status = self.settings.store_status();
         SettingsSnapshot {
             chrome: SettingsChrome {
                 palette: self.theme_palette(),
@@ -81,6 +82,8 @@ impl ZzClawTermApp {
                 snapshot_password_prompt: self.settings.snapshot_password_prompt(),
                 snapshot_password_prompt_active: self.settings.snapshot_password_prompt_active(),
                 config_path_prompt_active: self.settings.config_path_prompt_active(),
+                local_backup_status: store_status.message.to_string(),
+                local_backup_ready: store_status.ready,
                 terminal_theme_is_dark: self.terminal_theme_is_dark(),
                 panel_multi_open: self.shell.panel_multi_open(),
             },

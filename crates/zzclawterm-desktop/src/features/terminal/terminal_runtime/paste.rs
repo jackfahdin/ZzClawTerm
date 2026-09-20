@@ -17,7 +17,7 @@ impl ZzClawTermApp {
                 _ => None,
             }) {
                 if let Some(id) = self.session.active_id_owned() {
-                    self.handle_terminal_external_file_drop(id, paths.paths().to_vec(), cx);
+                    self.handle_terminal_external_file_drop(id, paths.paths().to_vec(), window, cx);
                 }
                 return;
             }

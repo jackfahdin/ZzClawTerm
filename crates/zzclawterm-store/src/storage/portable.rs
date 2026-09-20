@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
 
+use super::cloud_sync::{cloud_sync_settings_has_secret, encrypt_cloud_sync_settings_secrets};
 use super::notes::replace_notes_snapshot_in_txn;
 use super::vault::bump_ssh_key_revision;
 use super::{
@@ -19,19 +20,22 @@ use super::{
     PASSWORD_PREFIX, PORTABLE_OPAQUE_ENTITIES_TABLE, PROXIES_TABLE, PROXY_PREFIX, SETTINGS_DEFAULT,
     SETTINGS_PROXY_GROUPS, SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SETTINGS_TUNNEL_GROUPS,
     SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE, TUNNEL_PREFIX, TUNNELS_TABLE,
-    clear_prefix_in_txn, copy_config_database, current_time_ms, ensure_not_same_existing_file,
-    ensure_parent_dir, entity_key, replace_command_history_in_txn, replace_known_hosts_text_in_txn,
-    replace_sessions_in_txn, set_nested_json_value, validate_config_backup_file,
-    validate_config_backup_source, write_json_in_txn, write_portable_snapshot_file,
+    clear_prefix_in_txn, copy_config_database, current_time_ms, encrypt_ai_settings_secrets,
+    ensure_not_same_existing_file, ensure_parent_dir, entity_key, merge_unknown_json,
+    replace_command_history_in_txn, replace_known_hosts_text_in_txn, replace_sessions_in_txn,
+    set_nested_json_value, validate_config_backup_file, validate_config_backup_source,
+    write_json_in_txn, write_portable_snapshot_file,
 };
 use crate::{
     decode_encrypted_raw_portable_snapshot, decode_raw_portable_snapshot,
     encode_encrypted_raw_portable_snapshot, encode_raw_portable_snapshot,
 };
+use semver::Version;
 use zzclawterm_core::portable_snapshot::validate_raw_snapshot;
 use zzclawterm_core::{
-    CommandHistoryEntry, ConnectionType, NotesSnapshot, PortableSnapshotKind, RawPortableSnapshot,
-    SessionsConfig, SshAgentEndpoint, TunnelGroup, migrate_legacy_ssh_agent_settings,
+    AiSettings, CloudSyncSettings, CommandHistoryEntry, ConnectionType, CredentialCrypto,
+    NotesSnapshot, PortableSnapshotKind, RawPortableSnapshot, SessionsConfig, SshAgentEndpoint,
+    TunnelGroup, ai_settings_has_secret, migrate_legacy_ssh_agent_settings,
     ssh_agent_endpoint_supported_on_current_platform, validate_ssh_agent_endpoint,
     validate_ssh_agent_forwarding_config,
 };
@@ -198,12 +202,23 @@ impl ConnectionStore {
         master_password: &str,
     ) -> Result<ConfigBackupInfo, StorageError> {
         let store = Self::open_with_portable_key_path(config_dir, portable_key_path)?;
-        let database_path = store.db_path().to_path_buf();
-        let mut snapshot = store.build_raw_portable_snapshot(
-            PortableSnapshotKind::Backup,
+        store.export_encrypted_portable_snapshot_from_open_store(
+            output_path,
             device_id,
             app_version,
-        )?;
+            master_password,
+        )
+    }
+    pub fn export_encrypted_portable_snapshot_from_open_store(
+        &self,
+        output_path: impl AsRef<Path>,
+        device_id: impl Into<String>,
+        app_version: impl Into<String>,
+        master_password: &str,
+    ) -> Result<ConfigBackupInfo, StorageError> {
+        let database_path = self.db_path().to_path_buf();
+        let mut snapshot =
+            self.build_raw_portable_snapshot(PortableSnapshotKind::Backup, device_id, app_version)?;
         snapshot.recalculate_hash()?;
         let encoded = encode_encrypted_raw_portable_snapshot(&snapshot, master_password)?;
         write_portable_snapshot_file(database_path, output_path, &encoded)
@@ -264,63 +279,57 @@ impl ConnectionStore {
         input_path: impl AsRef<Path>,
         master_password: &str,
     ) -> Result<ConfigBackupInfo, StorageError> {
-        let config_dir = config_dir.as_ref();
+        let store = Self::open_with_portable_key_path(config_dir, portable_key_path)?;
+        store.import_encrypted_portable_snapshot_into_open_store(input_path, master_password)
+    }
+    pub fn import_encrypted_portable_snapshot_into_open_store(
+        &self,
+        input_path: impl AsRef<Path>,
+        master_password: &str,
+    ) -> Result<ConfigBackupInfo, StorageError> {
         let input_path = input_path.as_ref().to_path_buf();
         validate_config_backup_source(&input_path)?;
-        std::fs::create_dir_all(config_dir).map_err(|source| StorageError::CreateDir {
-            path: config_dir.to_path_buf(),
-            source,
-        })?;
         let bytes =
             std::fs::read(&input_path).map_err(|source| StorageError::ConfigBackupCopy {
                 from: input_path.clone(),
-                to: config_dir.join(DATABASE_FILE),
+                to: self.db_path().to_path_buf(),
                 source,
             })?;
         let snapshot = decode_encrypted_raw_portable_snapshot(&bytes, master_password)?;
-        Self::apply_portable_snapshot_to_config_dir(
-            config_dir,
-            portable_key_path,
-            input_path,
-            bytes.len().try_into().unwrap_or(u64::MAX),
-            snapshot,
-        )
-    }
-    fn apply_portable_snapshot_to_config_dir(
-        config_dir: &Path,
-        portable_key_path: Option<PathBuf>,
-        input_path: PathBuf,
-        bytes: u64,
-        snapshot: RawPortableSnapshot,
-    ) -> Result<ConfigBackupInfo, StorageError> {
-        let database_path = config_dir.join(DATABASE_FILE);
-        let safety_backup_path = if database_path.exists() {
-            let backup_path = config_dir.join(format!(
-                "{DATABASE_FILE}.portable-import-backup-{}.redb",
-                current_time_ms()
-            ));
-            copy_config_database(&database_path, &backup_path)?;
-            Some(backup_path)
-        } else {
-            None
-        };
 
-        let store = Self::open_with_portable_key_path(config_dir, portable_key_path)?;
-        if let Err(error) = store.apply_raw_portable_snapshot(&snapshot) {
-            if let Some(safety_backup_path) = &safety_backup_path {
-                let _ = std::fs::copy(safety_backup_path, &database_path);
+        let mut current = self.build_raw_portable_snapshot(
+            PortableSnapshotKind::Backup,
+            "portable-import-safety-backup",
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        current.recalculate_hash()?;
+        let safety_bytes = encode_encrypted_raw_portable_snapshot(&current, master_password)?;
+        let config_dir = self.db_path().parent().ok_or_else(|| {
+            StorageError::InvalidData("configuration database has no parent directory".to_string())
+        })?;
+        let safety_backup_path = config_dir.join(format!(
+            "zzclawterm.portable-import-backup-{}.nya",
+            current_time_ms()
+        ));
+        ensure_parent_dir(&safety_backup_path)?;
+        std::fs::write(&safety_backup_path, safety_bytes).map_err(|source| {
+            StorageError::ConfigBackupCopy {
+                from: self.db_path().to_path_buf(),
+                to: safety_backup_path.clone(),
+                source,
             }
-            return Err(error);
-        }
-        store.load_sessions()?;
-        store.load_app_settings_summary()?;
-        store.list_tunnels()?;
+        })?;
+
+        self.apply_raw_portable_snapshot_with_password(&snapshot, Some(master_password))?;
+        self.load_sessions()?;
+        self.load_app_settings_summary()?;
+        self.list_tunnels()?;
 
         Ok(ConfigBackupInfo {
-            database_path,
+            database_path: self.db_path().to_path_buf(),
             backup_path: input_path,
-            bytes,
-            safety_backup_path,
+            bytes: bytes.len().try_into().unwrap_or(u64::MAX),
+            safety_backup_path: Some(safety_backup_path),
         })
     }
     pub(crate) fn build_raw_portable_snapshot(
@@ -452,6 +461,14 @@ impl ConnectionStore {
         &self,
         snapshot: &RawPortableSnapshot,
     ) -> Result<(), StorageError> {
+        self.apply_raw_portable_snapshot_with_password(snapshot, None)
+    }
+
+    fn apply_raw_portable_snapshot_with_password(
+        &self,
+        snapshot: &RawPortableSnapshot,
+        snapshot_password: Option<&str>,
+    ) -> Result<(), StorageError> {
         validate_raw_snapshot(snapshot)?;
         for (entity, raw) in &snapshot.entities {
             serde_json::from_str::<serde_json::Value>(raw).map_err(|error| {
@@ -468,9 +485,10 @@ impl ConnectionStore {
             .map(|(entity, raw)| (entity.clone(), raw.clone()))
             .collect::<BTreeMap<_, _>>();
         let mut sessions: SessionsConfig = read_snapshot_entity(snapshot, "sessions")?;
-        let settings: serde_json::Value = read_snapshot_entity(snapshot, "settings")?;
+        let mut settings: serde_json::Value = read_snapshot_entity(snapshot, "settings")?;
         let known_hosts: String = read_snapshot_entity(snapshot, "known_hosts")?;
-        let master_key_token: Option<String> = read_snapshot_entity(snapshot, "master_key_token")?;
+        let mut master_key_token: Option<String> =
+            read_snapshot_entity(snapshot, "master_key_token")?;
         let tunnel_groups: Vec<TunnelGroup> = read_snapshot_entity(snapshot, "tunnel_groups")?;
         let notes = snapshot
             .entities
@@ -486,6 +504,15 @@ impl ConnectionStore {
             .transpose()?
             .unwrap_or_default();
         let current_settings = self.load_settings_value()?;
+        if is_legacy_tauri_snapshot(snapshot)
+            && let Some(snapshot_password) = snapshot_password
+        {
+            self.migrate_legacy_tauri_snapshot_secrets(
+                &mut settings,
+                &mut master_key_token,
+                snapshot_password,
+            )?;
+        }
         validate_and_migrate_agent_settings(&mut sessions)?;
         match snapshot.meta.snapshot_kind {
             PortableSnapshotKind::Sync => {
@@ -614,6 +641,74 @@ impl ConnectionStore {
         bump_ssh_key_revision();
         Ok(())
     }
+
+    fn migrate_legacy_tauri_snapshot_secrets(
+        &self,
+        settings: &mut serde_json::Value,
+        master_key_token: &mut Option<String>,
+        snapshot_password: &str,
+    ) -> Result<(), StorageError> {
+        let mut ai_settings = settings
+            .get("ai")
+            .cloned()
+            .map(serde_json::from_value::<AiSettings>)
+            .transpose()?;
+        let mut cloud_sync_settings = settings
+            .get("cloud_sync")
+            .cloned()
+            .map(serde_json::from_value::<CloudSyncSettings>)
+            .transpose()?;
+        let has_plaintext_secrets = ai_settings.as_ref().is_some_and(ai_settings_has_secret)
+            || cloud_sync_settings
+                .as_ref()
+                .is_some_and(cloud_sync_settings_has_secret);
+
+        let target_crypto = self.credential_crypto()?;
+        *master_key_token = match master_key_token.take() {
+            Some(token) if !token.trim().is_empty() => {
+                let source_crypto = CredentialCrypto::new(
+                    self.portable_key_path.clone(),
+                    Some(snapshot_password.to_owned().into()),
+                );
+                Some(source_crypto.rewrap_master_key_token_for(&token, &target_crypto)?)
+            }
+            _ if has_plaintext_secrets => Some(target_crypto.generate_master_key_token()?),
+            _ => None,
+        };
+        let master_key_token = master_key_token.as_deref();
+
+        if let Some(ai_settings) = &mut ai_settings {
+            encrypt_ai_settings_secrets(ai_settings, &target_crypto, master_key_token)?;
+            replace_settings_field_preserving_unknown(settings, "ai", ai_settings)?;
+        }
+        if let Some(cloud_sync_settings) = &mut cloud_sync_settings {
+            encrypt_cloud_sync_settings_secrets(
+                cloud_sync_settings,
+                &target_crypto,
+                master_key_token,
+            )?;
+            replace_settings_field_preserving_unknown(settings, "cloud_sync", cloud_sync_settings)?;
+        }
+        Ok(())
+    }
+}
+
+fn is_legacy_tauri_snapshot(snapshot: &RawPortableSnapshot) -> bool {
+    Version::parse(snapshot.meta.app_version.trim_start_matches('v'))
+        .is_ok_and(|version| version.major < 2)
+}
+
+fn replace_settings_field_preserving_unknown<T: serde::Serialize>(
+    settings: &mut serde_json::Value,
+    field: &'static str,
+    value: &T,
+) -> Result<(), StorageError> {
+    let mut replacement = serde_json::to_value(value)?;
+    if let Some(current) = settings.get(field) {
+        merge_unknown_json(current, &mut replacement);
+    }
+    set_nested_json_value(settings, &[field], replacement);
+    Ok(())
 }
 
 fn is_known_portable_entity(entity: &str) -> bool {

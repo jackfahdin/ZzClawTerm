@@ -17,10 +17,13 @@ mod startup_restore_runtime;
 mod state;
 mod temporary_ssh_link;
 mod trzsz_runtime;
+mod xymodem_runtime;
+pub(in crate::features) use xymodem_runtime::SerialUploadProtocol;
 mod zmodem_runtime;
 
 #[derive(Default)]
 struct SessionProtocolRuntimeState {
+    xymodem: HashMap<String, xymodem_runtime::XymodemSessionState>,
     zmodem: HashMap<String, zmodem_runtime::ZmodemSessionState>,
     trzsz: HashMap<String, trzsz_runtime::TrzszSessionState>,
     remote_files: HashMap<String, RemoteFileService>,
@@ -30,6 +33,9 @@ struct SessionProtocolRuntimeState {
 
 impl SessionProtocolRuntimeState {
     fn shutdown_workers(&mut self) {
+        for state in self.xymodem.values_mut() {
+            state.stop_worker();
+        }
         for state in self.zmodem.values_mut() {
             state.stop_worker();
         }

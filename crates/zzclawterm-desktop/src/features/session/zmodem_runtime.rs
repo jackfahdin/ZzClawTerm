@@ -121,6 +121,12 @@ impl Default for ZmodemSessionState {
 }
 
 impl ZmodemSessionState {
+    pub(super) fn is_active(&self) -> bool {
+        self.transfer.is_some()
+            || self.worker.is_some()
+            || self.pending_upload.is_some()
+            || self.pending_download
+    }
     pub(super) fn stop_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
             worker.stop();
@@ -252,6 +258,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: None,
             control: None,
+            speed: Default::default(),
         });
         self.shell.set_status(format!(
             "ZMODEM preparing upload ({} file(s)) — probing remote conflicts",
@@ -701,7 +708,7 @@ impl ZzClawTermApp {
             .as_deref()
             .and_then(|job_id| self.transfer.transfer_job_mut(job_id))
         {
-            job.progress = Some(progress);
+            job.update_progress(progress);
             job.detail = if completed {
                 "Complete".to_string()
             } else if let Some(reason) = fail_reason {
@@ -752,6 +759,7 @@ impl ZzClawTermApp {
             summary: None,
             progress: Some(progress),
             control: None,
+            speed: Default::default(),
         });
         self.defer_transfer_panel_snapshot_flush(cx);
     }

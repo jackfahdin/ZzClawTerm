@@ -44,6 +44,7 @@ pub(super) fn connection_editor_from_saved(
     let network = connection.network.clone().unwrap_or(ConnectionNetwork {
         proxy_id: None,
         proxy_jump_id: None,
+        host_key_alias: None,
     });
     let post_login = connection
         .post_login
@@ -59,7 +60,20 @@ pub(super) fn connection_editor_from_saved(
         ConnectionType::Telnet { auto_login, .. } => auto_login.clone(),
         _ => TelnetAutoLoginConfig::default(),
     };
-    let password_source = if auth.password_id.is_some() {
+    let uses_accounts = matches!(
+        connection.config,
+        ConnectionType::Ssh { .. } | ConnectionType::Telnet { .. }
+    );
+    let password_source = if uses_accounts
+        && auth.password_source
+            == Some(zzclawterm_core::models::credentials::ConnectionPasswordSource::Connection)
+    {
+        if auth.password.is_some() || auth.has_password {
+            ConnectionEditorPasswordSource::Direct
+        } else {
+            ConnectionEditorPasswordSource::Ask
+        }
+    } else if (uses_accounts && auth.account_id.is_some()) || auth.password_id.is_some() {
         ConnectionEditorPasswordSource::Saved
     } else if auth.password.is_some() || auth.has_password {
         ConnectionEditorPasswordSource::Direct
@@ -72,6 +86,8 @@ pub(super) fn connection_editor_from_saved(
         kind: ConnectionKindTab::from_connection_type(&connection.config),
         name: connection.name,
         description: connection.description.unwrap_or_default(),
+        tags: connection.tags,
+        new_tag: String::new(),
         icon: connection.icon,
         icon_auto_detect,
         group_id: connection.group_id,
@@ -95,6 +111,11 @@ pub(super) fn connection_editor_from_saved(
         vnc_shared: true,
         vnc_view_only: false,
         password_source,
+        account_id: if uses_accounts {
+            auth.account_id.clone().or_else(|| auth.password_id.clone())
+        } else {
+            auth.account_id.clone()
+        },
         password_id: auth.password_id,
         password: zzclawterm_core::SecretString::default(),
         existing_password: auth.password.filter(|value| !value.is_empty()),
@@ -103,6 +124,7 @@ pub(super) fn connection_editor_from_saved(
         auto_fill_otp: auth.auto_fill_otp,
         proxy_id: network.proxy_id,
         proxy_jump_id: network.proxy_jump_id,
+        host_key_alias: network.host_key_alias,
         x11_forwarding: false,
         dynamic_tab_title: false,
         agent_endpoint: Default::default(),
@@ -116,6 +138,7 @@ pub(super) fn connection_editor_from_saved(
         ssh_profile: connection.ssh_profile,
         terminal_type: connection.terminal_type,
         sftp_enabled: sftp.enabled,
+        sftp_compatibility_mode: sftp.compatibility_mode,
         sftp_cwd_follow_mode: sftp_cwd_follow_mode_value(sftp.cwd_follow_mode),
         sftp_shell_detection_timeout_ms: sftp.shell_detection_timeout_ms.to_string(),
         sftp_pipeline_depth: sftp.pipeline_depth,
@@ -366,7 +389,7 @@ pub(super) fn build_saved_connection_from_editor(
             }
             let port = parse_port(&editor.port)?;
             let username = editor.username.trim().to_string();
-            if username.is_empty() {
+            if username.is_empty() && editor.account_id.is_none() {
                 return Err(ConnectionEditorValidationError::UsernameRequired);
             }
             ConnectionType::Ssh {
@@ -615,6 +638,20 @@ pub(super) fn build_saved_connection_from_editor(
                 _ => "none".to_string(),
             };
             Some(ConnectionAuth {
+                account_id: editor.account_id.clone(),
+                password_source: matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                )
+                .then_some(
+                    if mode == "password"
+                        && editor.password_source == ConnectionEditorPasswordSource::Saved
+                    {
+                        zzclawterm_core::models::credentials::ConnectionPasswordSource::Account
+                    } else {
+                        zzclawterm_core::models::credentials::ConnectionPasswordSource::Connection
+                    },
+                ),
                 password_id: (mode == "password"
                     && editor.password_source == ConnectionEditorPasswordSource::Saved)
                     .then(|| editor.password_id.clone())
@@ -664,10 +701,15 @@ pub(super) fn build_saved_connection_from_editor(
                 .proxy_jump_id
                 .clone()
                 .filter(|value| !value.trim().is_empty());
-            if proxy_id.is_some() || proxy_jump_id.is_some() {
+            let host_key_alias = editor
+                .host_key_alias
+                .clone()
+                .filter(|value| !value.trim().is_empty());
+            if proxy_id.is_some() || proxy_jump_id.is_some() || host_key_alias.is_some() {
                 Some(ConnectionNetwork {
                     proxy_id,
                     proxy_jump_id,
+                    host_key_alias,
                 })
             } else {
                 None
@@ -727,6 +769,7 @@ pub(super) fn build_saved_connection_from_editor(
     };
     let sftp = if editor.kind == ConnectionKindTab::Ssh {
         SftpSettings {
+            compatibility_mode: editor.sftp_compatibility_mode,
             pipeline_depth: editor.sftp_pipeline_depth,
             extra: editor.sftp_extra.clone(),
             enabled: editor.sftp_enabled,
@@ -748,6 +791,7 @@ pub(super) fn build_saved_connection_from_editor(
 
     Ok(SavedConnection {
         extensions: Default::default(),
+        tags: editor.tags.clone(),
         id: editor.id.clone().unwrap_or_else(uuid),
         name,
         config,
@@ -830,6 +874,7 @@ mod tests {
     fn connection_editor_round_trip_preserves_icon() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-1".to_string(),
             name: "Local".to_string(),
             config: ConnectionType::LocalTerminal {
@@ -869,6 +914,7 @@ mod tests {
     fn connection_editor_round_trip_preserves_saved_password_reference() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-ssh".to_string(),
             name: "SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -930,6 +976,7 @@ mod tests {
         };
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-agent".to_string(),
             name: "Agent SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -994,6 +1041,7 @@ mod tests {
     fn connection_editor_rejects_invalid_ssh_agent_endpoint_before_save() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-agent-invalid".to_string(),
             name: "Agent SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -1048,6 +1096,7 @@ mod tests {
     fn connection_editor_round_trip_preserves_ssh_encoding_sftp_and_algorithms() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-ssh".to_string(),
             name: "SSH".to_string(),
             config: ConnectionType::Ssh {
@@ -1080,6 +1129,7 @@ mod tests {
             ssh_profile: SshProfile::NetworkDevice,
             terminal_type: Some(SshTerminalType::Vt220),
             sftp: SftpSettings {
+                compatibility_mode: false,
                 pipeline_depth: None,
                 extra: Default::default(),
                 enabled: false,
@@ -1136,6 +1186,7 @@ mod tests {
     fn connection_editor_round_trip_preserves_telnet_behavior() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-telnet".to_string(),
             name: "Telnet".to_string(),
             config: ConnectionType::Telnet {
@@ -1221,6 +1272,7 @@ mod tests {
         };
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-rdp".to_string(),
             name: "RDP".to_string(),
             config: ConnectionType::Rdp {
@@ -1327,6 +1379,7 @@ mod tests {
         };
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-vnc".to_string(),
             name: "VNC".to_string(),
             config: ConnectionType::Vnc {
@@ -1420,6 +1473,7 @@ mod tests {
     fn connection_editor_saves_telnet_username_password_and_encoding() {
         let connection = SavedConnection {
             extensions: Default::default(),
+            tags: Vec::new(),
             id: "connection-telnet".to_string(),
             name: "Telnet".to_string(),
             config: ConnectionType::Telnet {
@@ -1585,6 +1639,7 @@ pub(in crate::features) enum ConnectionEditorToggle {
     AgentExternal,
     AgentStoredKeys,
     SftpEnabled,
+    SftpCompatibilityMode,
     RawTcp,
     LocalEcho,
     LocalLineEdit,

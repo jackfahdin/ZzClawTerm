@@ -80,6 +80,7 @@ impl ZzClawTermApp {
                 .map(str::to_string),
             self.connection_state.list_hovered_group_id(),
             self.connection_state.list_drop_target(),
+            self.connection_state.list_search_is_expanded(),
             self.connection_chrome(),
         );
 
@@ -132,6 +133,7 @@ impl ZzClawTermApp {
             group_editor_field: self.connection_state.group_editor_field(),
             search_field: self.connection_state.list_search_field(),
             search_is_empty: self.connection_state.list_search_is_empty(),
+            search_expanded: self.connection_state.list_search_is_expanded(),
             sort_mode: self.connection_state.list_sort_mode(),
             store_is_empty,
             key,

@@ -147,6 +147,20 @@ impl ZzClawTermApp {
                     ))
                     .child(import_source_card(
                         palette,
+                        "connection-import-ssh-config",
+                        "icons/conn/terminal.svg",
+                        "OpenSSH",
+                        "~/.ssh/config",
+                        cx.listener(|this, _, window, cx| {
+                            this.select_connection_import_source(
+                                ConnectionImportSource::SshConfig,
+                                window,
+                                cx,
+                            );
+                        }),
+                    ))
+                    .child(import_source_card(
+                        palette,
                         "connection-import-electerm",
                         "color/brand/electerm.png",
                         "Electerm",

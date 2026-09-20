@@ -2,6 +2,7 @@ use zzclawterm_core::{
     DecryptedOtpEntry, DecryptedSavedCredential, DecryptedSavedPassword, DecryptedSshKey, OtpEntry,
     SavedCredential, SavedPassword, SshKey,
 };
+use zzclawterm_store::KnownHostEntry;
 use zzclawterm_store::{StoreBlockingClient, StoreClientError, StoreDomain};
 
 use crate::features::settings::SecurityCatalogState;
@@ -55,6 +56,19 @@ impl SecurityStoreProxy {
 
     pub(super) fn list_credentials(&self) -> Result<Vec<SavedCredential>, StoreClientError> {
         self.request(|store| store.list_credentials())
+    }
+
+    pub(super) fn list_known_hosts(&self) -> Result<Vec<KnownHostEntry>, StoreClientError> {
+        self.request(|store| store.list_known_hosts())
+    }
+
+    pub(super) fn delete_known_host(&self, id: &str) -> Result<(), StoreClientError> {
+        let id = id.to_string();
+        self.request(move |store| store.delete_known_host(&id))
+    }
+
+    pub(super) fn clear_known_hosts(&self) -> Result<(), StoreClientError> {
+        self.request(|store| store.clear_known_hosts())
     }
 
     pub(super) fn save_ssh_key(&self, key: SshKey) -> Result<String, StoreClientError> {

@@ -326,6 +326,7 @@ fn tauri_ssh_algorithm_sftp_and_encoding_fields_round_trip() {
     assert_eq!(
         connection.sftp,
         SftpSettings {
+            compatibility_mode: false,
             pipeline_depth: None,
             extra: Default::default(),
             enabled: false,
@@ -417,9 +418,29 @@ fn validates_sftp_shell_detection_timeout_range() {
 }
 
 #[test]
+fn sftp_compatibility_mode_defaults_off_and_is_omitted() {
+    let default = SftpSettings::default();
+    let value = serde_json::to_value(&default).expect("serialize SFTP settings");
+    assert_eq!(value.get("compatibility_mode"), None);
+
+    let parsed: SftpSettings = serde_json::from_value(serde_json::json!({
+        "compatibility_mode": true
+    }))
+    .expect("parse compatibility mode");
+    assert!(parsed.compatibility_mode);
+    assert!(
+        serde_json::to_value(parsed)
+            .expect("round trip compatibility mode")
+            .get("compatibility_mode")
+            .is_some_and(|value| value == true)
+    );
+}
+
+#[test]
 fn local_terminal_endpoint_uses_shell_and_working_dir() {
     let connection = SavedConnection {
         extensions: Default::default(),
+        tags: Vec::new(),
         id: "local-1".to_string(),
         name: "Local".to_string(),
         config: ConnectionType::LocalTerminal {
