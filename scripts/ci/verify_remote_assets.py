@@ -201,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     local = local_assets(directory)
+    if not local:
+        # 空目录会让比对"全部通过"（0 个本地文件对 0 个远端资产），而发布流程会
+        # 因此公开一个没有任何附件的 release——下游同步才会发现。
+        print(f"no artifacts to verify in {directory}", file=sys.stderr)
+        return 1
     problems, prunable = compare_assets(
         local, remote_assets(release), prune_unexpected=args.prune_unexpected
     )

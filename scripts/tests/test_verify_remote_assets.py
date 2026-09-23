@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -199,6 +200,38 @@ class FindReleaseTests(unittest.TestCase):
         release, error = self.run_find([(0, "<html>", "")])
         self.assertIsNone(release)
         self.assertIn("is not JSON", error)
+
+
+class EmptyDirectoryTests(unittest.TestCase):
+    """An empty artifact directory must not verify.
+
+    Zero local files against zero remote assets compares clean, yet publishing
+    from it produces a release with no attachments that only the downstream
+    mirror notices.
+    """
+
+    def test_empty_directory_is_rejected_before_publishing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.object(
+                    verify_remote_assets,
+                    "run_gh",
+                    return_value=("{\"assets\": []}", ""),
+                ),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                code = verify_remote_assets.main(
+                    [
+                        "--tag",
+                        "v0.0.5",
+                        "--directory",
+                        temporary,
+                        "--repository",
+                        "owner/repo",
+                    ]
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("no artifacts to verify", stderr.getvalue())
 
 
 if __name__ == "__main__":

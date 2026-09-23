@@ -291,6 +291,22 @@ jobs:
             -f name="${TAG}" -F draft=false -F prerelease="${PRERELEASE}" \
             -f make_latest="${make_latest}" >/dev/null
           echo "published ${TAG}"
+      # 公开之后再数一次资产。少了任何一步上传都会变成"已发布但空附件"，而这种
+      # 情况只有下游同步（GitCode）才会暴露，事后离线排查成本很高。
+      - name: Confirm published assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected="$(find dist-release -maxdepth 1 -type f | wc -l)"
+          actual="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets | length')"
+          if [[ "${expected}" != "${actual}" ]]; then
+            echo "release ${TAG} was published with ${actual} assets, expected ${expected}" >&2
+            exit 1
+          fi
+          echo "published ${TAG} with ${actual} assets"
 
   # The Cloudflare R2 download-mirror job was removed: the bucket and public
   # base URL belonged to the original project. Manifests point at GitHub
