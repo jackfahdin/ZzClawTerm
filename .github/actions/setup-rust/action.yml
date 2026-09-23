@@ -45,5 +45,4 @@ runs:
         save-if: >-
           ${{ inputs.save-cache == 'always'
           || (inputs.save-cache == 'auto'
-          && (github.ref == 'refs/heads/main'
-          || github.ref == 'refs/heads/migration/gpui')) }}
+          && github.ref == 'refs/heads/master') }}

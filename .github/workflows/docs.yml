@@ -2,11 +2,13 @@ name: Docs
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
 
+# Master pushes are deliberately not built here, for the same reason as rust.yml.
+# This workflow does not deploy the site, so skipping push runs only defers the
+# docs build to review time.
+#
 # No paths filter, for the same reason as rust.yml: a filtered-out workflow never
 # reports its gate, which blocks any pull request that requires it.
 

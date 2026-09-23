@@ -190,7 +190,7 @@ jobs:
           existing = request("GET", f"{releases_path}/tags/{tag_q}", expected=(200,), allow_404=True)
           payload = {
               "tag_name": tag,
-              "name": github.get("name") or f"ZzClawTerm {tag}",
+              "name": github.get("name") or tag,
               "body": (github.get("body") or "") + "\n\n---\n\n正在同步发行版附件。\n",
               "prerelease": str(bool(github.get("isPrerelease"))).lower(),
           }

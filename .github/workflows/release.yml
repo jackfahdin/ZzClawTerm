@@ -329,9 +329,9 @@ jobs:
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             release_id="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq '.databaseId')"
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-              -f name="ZzClawTerm ${TAG}" -F prerelease="${PRERELEASE}" >/dev/null
+              -f name="${TAG}" -F prerelease="${PRERELEASE}" >/dev/null
           else
-            args=(release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "ZzClawTerm ${TAG}" --notes-file release-notes.md)
+            args=(release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "${TAG}" --notes-file release-notes.md)
             [[ "${PRERELEASE}" == 'true' ]] && args+=(--prerelease)
             gh "${args[@]}"
           fi

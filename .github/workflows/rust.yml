@@ -2,11 +2,13 @@ name: Rust
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
 
+# Master pushes are deliberately not built here: the tag release and the nightly
+# continuous build run these same checks, so building on every push only
+# duplicates them. Pull requests still run so this workflow's gate reports.
+#
 # No paths filter on purpose. A workflow filtered out by `paths` never runs, so its
 # gate job never reports either, which leaves a pull request waiting forever on a
 # required status check that will never arrive. The repository is public, so the
