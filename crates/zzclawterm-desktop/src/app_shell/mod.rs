@@ -645,8 +645,19 @@ impl AppShell {
     }
 
     fn quit_after_worker_shutdown(&mut self, launch_update: bool, cx: &mut Context<Self>) {
-        self.controller
-            .update(cx, |controller, cx| controller.shutdown_all_workspaces(cx));
+        // This shell is the one being updated right now, so the controller must
+        // not re-enter it. Shut its workers down here and let the controller
+        // handle the remaining workspace windows.
+        if let Some(app) = &self.app {
+            app.update(cx, |app, _| {
+                app.shutdown_workspace_sessions();
+                app.shutdown_blocking_jobs();
+            });
+        }
+        let current_shell = cx.entity().entity_id();
+        self.controller.update(cx, |controller, cx| {
+            controller.shutdown_other_workspaces(current_shell, cx)
+        });
         if launch_update && let Some(app) = &self.app {
             let update_result =
                 app.update(cx, |app, cx| app.launch_pending_update_after_shutdown(cx));

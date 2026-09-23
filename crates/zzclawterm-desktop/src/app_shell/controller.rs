@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    AnyWindowHandle, AppContext as _, Context, TitlebarOptions, WeakEntity, WindowOptions, point,
-    px,
+    AnyWindowHandle, AppContext as _, Context, EntityId, TitlebarOptions, WeakEntity,
+    WindowOptions, point, px,
 };
 use zzclawterm_core::{
     ACTIVATION_QUEUE_CAPACITY, ActivationOpenBehavior, ActivationReceiver, ActivationRequest,
@@ -1343,7 +1343,25 @@ impl DesktopController {
     }
 
     pub fn shutdown_all_workspaces(&mut self, cx: &mut Context<Self>) {
+        self.shutdown_workspaces(None, cx);
+    }
+
+    /// Shuts down every workspace window except the shell named by
+    /// `already_updating`, which is inside its own quit path and mid-update;
+    /// updating it again from here would trip gpui's double-lease panic.
+    pub fn shutdown_other_workspaces(
+        &mut self,
+        already_updating: EntityId,
+        cx: &mut Context<Self>,
+    ) {
+        self.shutdown_workspaces(Some(already_updating), cx);
+    }
+
+    fn shutdown_workspaces(&mut self, skip: Option<EntityId>, cx: &mut Context<Self>) {
         for entry in self.windows.values() {
+            if skip == Some(entry.shell.entity_id()) {
+                continue;
+            }
             let _ = entry.shell.update(cx, |shell, cx| {
                 if let Some(app) = &shell.app {
                     app.update(cx, |app, _| {
