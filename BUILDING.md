@@ -369,6 +369,8 @@ git push origin v0.0.1
 可选变量：`GITCODE_API_BASE`（默认 `https://gitcode.com/api/v5`）、
 `MAX_GITCODE_ASSET_MB`（默认 `99`，超过该大小的附件不上传到 GitCode，
 改在 Release 说明中放 GitHub 备用链接）。
+大小上限内的附件上传失败时，同样保留 GitHub 备用链接，但同步任务会报错；
+排查 Actions 日志后可手动指定同一 tag 重跑。
 
 发布 tag 不存在于 GitCode 时，工作流会用令牌自行推送该 tag，不依赖
 GitCode 的镜像同步功能。

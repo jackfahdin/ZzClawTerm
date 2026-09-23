@@ -37,6 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Resolve release tag
         id: release
         shell: bash
@@ -149,7 +154,6 @@ jobs:
           set -euo pipefail
           "${RUNNER_TEMP}/gitcode-release-venv/bin/python" <<'PY'
           import json
-          import mimetypes
           import os
           import pathlib
           import sys
@@ -157,6 +161,7 @@ jobs:
           import urllib.parse
 
           import requests
+          from scripts.ci.gitcode_release_upload import upload_asset
 
           tag = os.environ["TAG"]
           owner = os.environ["GITCODE_OWNER"]
@@ -208,72 +213,30 @@ jobs:
                   f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name)}"
               )
 
-          def upload_asset(asset, content_type):
-              # GitCode 不支持 Gitee 的 POST /releases/{id}/attach_files，而是
-              # 两步式：先按文件名取预签名上传地址，再把文件 PUT/POST 过去。
-              info = request(
-                  "GET",
-                  f"{release_path}/upload_url",
-                  params={"file_name": asset.name},
-              )
-              if not isinstance(info, dict):
-                  raise RuntimeError(f"unexpected upload_url response: {info!r}")
-              url = info.get("upload_url") or info.get("url") or (info.get("data") or {}).get("upload_url")
-              if not url:
-                  raise RuntimeError(f"upload_url response carries no url: {info!r}")
-              fields = (
-                  info.get("fields")
-                  or info.get("form_data")
-                  or info.get("formData")
-                  or (info.get("data") or {}).get("fields")
-                  or {}
-              )
-              # 预签名 URL 里可能带临时签名，日志里只记录主机与路径。
-              safe_url = url.split("?")[0]
-              with asset.open("rb") as handle:
-                  if fields:
-                      form = {key: (None, str(value)) for key, value in fields.items()}
-                      form["file"] = (asset.name, handle, content_type)
-                      response = session.post(url, files=form, timeout=300)
-                  else:
-                      response = session.put(
-                          url,
-                          data=handle,
-                          headers={"Content-Type": content_type},
-                          timeout=300,
-                      )
-              if response.status_code in (200, 201, 204):
-                  return True, ""
-              lowered = response.text.lower()
-              if response.status_code in (400, 409, 422) and any(
-                  word in lowered for word in ("already", "exist", "duplicate", "已存在", "重复")
-              ):
-                  return True, ""
-              return False, f"HTTP {response.status_code} via {safe_url}: {response.text[:300]}"
-
           uploaded = []
           fallbacks = []
+          failed = []
 
           for asset in assets:
               if not upload_small or asset.stat().st_size > max_bytes:
                   fallbacks.append((asset.name, github_asset_url(asset.name), "附件过大，从 GitHub Releases 下载"))
                   continue
-              content_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
               success = False
               reason = ""
               for attempt in range(1, 4):
                   try:
-                      success, reason = upload_asset(asset, content_type)
+                      success, reason = upload_asset(session, request, release_path, asset)
                       if success:
                           break
                   except Exception as error:
-                      reason = str(error)
+                      reason = f"{type(error).__name__} while requesting a GitCode upload URL"
                   if attempt < 3:
                       time.sleep(5 * attempt)
               if success:
                   uploaded.append(asset.name)
               else:
                   print(f"::warning::GitCode attachment failed for {asset.name}: {reason}")
+                  failed.append(asset.name)
                   fallbacks.append((asset.name, github_asset_url(asset.name), "GitCode 附件同步失败"))
 
           body = (github.get("body") or "").rstrip() + "\n\n---\n\n## 下载\n\n"
@@ -286,6 +249,8 @@ jobs:
           payload["body"] = body
           request("PATCH", release_path, data=payload)
           print(f"GitCode release {tag}: {len(uploaded)} attachments, {len(fallbacks)} GitHub links")
+          if failed:
+              sys.exit(f"{len(failed)} GitCode attachments failed to upload")
           PY
 
       - name: Cleanup
