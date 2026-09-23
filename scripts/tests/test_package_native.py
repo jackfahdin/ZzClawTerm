@@ -54,6 +54,32 @@ def make_app_bundle(root: Path) -> Path:
 
 
 class PackageNativeTests(unittest.TestCase):
+    def test_inno_setup_7_compiler_is_found_in_program_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler = Path(temporary) / "Inno Setup 7" / "ISCC.exe"
+            compiler.parent.mkdir()
+            compiler.touch()
+            with (
+                mock.patch.object(package_native.shutil, "which", return_value=None),
+                mock.patch.dict(os.environ, {"ProgramFiles": temporary}),
+            ):
+                self.assertEqual(package_native.find_iscc(), str(compiler))
+
+    def test_inno_setup_6_does_not_satisfy_the_packaging_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler = Path(temporary) / "Inno Setup 6" / "ISCC.exe"
+            compiler.parent.mkdir()
+            compiler.touch()
+            with (
+                mock.patch.object(package_native.shutil, "which", return_value=None),
+                mock.patch.dict(
+                    os.environ,
+                    {"ProgramFiles": temporary, "ProgramFiles(x86)": temporary},
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Inno Setup 7"):
+                    package_native.find_iscc()
+
     def test_release_tag_is_normalized(self) -> None:
         self.assertEqual(package_native.validate_version("v0.0.1"), "0.0.1")
         self.assertEqual(

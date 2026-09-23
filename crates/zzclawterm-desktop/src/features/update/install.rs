@@ -1,13 +1,22 @@
+#[cfg(any(windows, test))]
 use std::ffi::OsString;
+#[cfg(windows)]
 use std::io::Read as _;
-use std::path::{Component, Path, PathBuf};
+#[cfg(windows)]
+use std::path::Component;
+#[cfg(any(windows, target_os = "macos", test))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const PORTABLE_HELPER_FLAG: &str = "--zzclawterm-portable-update-helper";
 const INSTALLED_HELPER_FLAG: &str = "--zzclawterm-installed-update-helper";
 const UPDATE_CLEANUP_ENV: &str = "ZZCLAWTERM_UPDATE_CLEANUP";
+#[cfg(windows)]
 const PORTABLE_ROOT: &str = "ZzClawTerm-portable";
+#[cfg(windows)]
 const PORTABLE_MARKER: &str = "zzclawterm-portable";
+#[cfg(windows)]
 const PORTABLE_FILES: [&str; 7] = [
     "ZzClawTerm.exe",
     "zzclawterm-rdp-helper.exe",
@@ -17,6 +26,7 @@ const PORTABLE_FILES: [&str; 7] = [
     "LICENSE",
     "VERSION",
 ];
+#[cfg(windows)]
 const MAX_PORTABLE_ENTRIES: usize = 128;
 
 /// True when `directory` holds an installed copy the updater is allowed to replace.
@@ -40,6 +50,7 @@ pub(in crate::features) fn is_installed_copy(directory: &Path) -> bool {
         })
     })
 }
+#[cfg(windows)]
 const MAX_PORTABLE_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -462,8 +473,7 @@ fn run_windows_installed_helper(args: &[OsString]) -> Result<(), String> {
     let backup = target_dir.with_extension(format!("previous-{}", zzclawterm_core::uuid()));
     copy_directory(target_dir, &backup)?;
     let status = Command::new(&installer)
-        .arg("/S")
-        .arg(format!("/D={}", target_dir.display()))
+        .args(installed_setup_arguments(target_dir))
         .creation_flags(0x08000000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -485,6 +495,17 @@ fn run_windows_installed_helper(args: &[OsString]) -> Result<(), String> {
     rollback_installed_directory(target_dir, &backup)
         .map_err(|rollback| format!("{install_error}; rollback failed: {rollback}"))?;
     Err(install_error)
+}
+
+#[cfg(any(windows, test))]
+fn installed_setup_arguments(target_dir: &Path) -> [OsString; 5] {
+    [
+        "/VERYSILENT".into(),
+        "/SUPPRESSMSGBOXES".into(),
+        "/NORESTART".into(),
+        "/SP-".into(),
+        format!("/DIR={}", target_dir.display()).into(),
+    ]
 }
 
 #[cfg(windows)]
@@ -676,6 +697,19 @@ mod tests {
     use std::io::Write as _;
     #[cfg(windows)]
     use std::path::Path;
+
+    #[test]
+    fn installed_update_uses_silent_inno_setup_arguments() {
+        let target_dir = std::path::Path::new("C:\\Users\\Jane Doe\\ZzClawTerm");
+        let expected: [std::ffi::OsString; 5] = [
+            "/VERYSILENT".into(),
+            "/SUPPRESSMSGBOXES".into(),
+            "/NORESTART".into(),
+            "/SP-".into(),
+            "/DIR=C:\\Users\\Jane Doe\\ZzClawTerm".into(),
+        ];
+        assert_eq!(super::installed_setup_arguments(target_dir), expected);
+    }
 
     #[cfg(windows)]
     #[test]

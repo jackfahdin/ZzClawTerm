@@ -1,4 +1,4 @@
-; ZzClawTerm Windows installer (Inno Setup 6)
+; ZzClawTerm Windows installer (Inno Setup 7)
 ;
 ; Built by scripts/release/package_native.py, which stages the payload into a
 ; directory and passes it here through iscc /D defines. The defaults below

@@ -436,13 +436,18 @@ def find_iscc() -> str:
     found = shutil.which("iscc") or shutil.which("iscc.exe") or shutil.which("ISCC.exe")
     if found:
         return found
-    program_files = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    default = Path(program_files) / "Inno Setup 6" / "ISCC.exe"
-    if default.is_file():
-        return str(default)
-    raise RuntimeError(
-        "iscc not found; install Inno Setup 6 before packaging Windows"
+    candidates = (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "Inno Setup 7"
+        / "ISCC.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "Inno Setup 7"
+        / "ISCC.exe",
     )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("iscc not found; install Inno Setup 7 before packaging Windows")
 
 
 def create_windows_packages(
