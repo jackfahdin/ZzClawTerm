@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import gzip
 import os
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -57,6 +59,14 @@ MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
 LINUX_PACKAGE = "zzclawterm"
 URL_SCHEME = "zzclawterm"
 PORTABLE_MARKER = "zzclawterm-portable"
+# Archives must not record anything about the packaging host. Downloading a CI
+# artifact resets file mtimes, so a leaked timestamp makes a rerun of a failed
+# job produce different bytes for unchanged sources: the sha256 published in
+# latest.json no longer matches and the artifacts already uploaded for this
+# version cannot be reused.
+ARCHIVE_DATE_TIME = (1980, 1, 1, 0, 0, 0)  # ZIP cannot encode an earlier time
+ARCHIVE_MTIME = 0
+ARCHIVE_COMPRESS_LEVEL = 9
 
 
 @dataclass(frozen=True)
@@ -279,12 +289,121 @@ def reset_output() -> None:
     WORK_DIR.mkdir(parents=True)
 
 
+def archive_entries(source: Path, *, include_root: bool) -> list[tuple[Path, str]]:
+    """Pair every part of source with its archive name, in a fixed order.
+
+    Entries are ordered by archive name because Path comparison follows the
+    host filesystem's case sensitivity and would otherwise hand a different
+    order (and so different bytes) to a Windows and a macOS run.
+    """
+    paths = [source] if include_root else []
+    paths.extend(source.rglob("*"))
+    entries = [(path, path.relative_to(source.parent).as_posix()) for path in paths]
+    entries.sort(key=lambda entry: entry[1])
+    return entries
+
+
+def archive_file_mode(mode: int) -> int:
+    """Reduce a host mode to 0o755 or 0o644.
+
+    Keeping only the executable bit preserves the mode an unpacked helper needs
+    to launch while dropping the packaging machine's umask from the archive.
+    """
+    return 0o755 if mode & 0o111 else 0o644
+
+
+def zip_member_info(arcname: str, mode: int) -> zipfile.ZipInfo:
+    """Build the ZipInfo for one entry from its name and source mode."""
+    info = zipfile.ZipInfo(arcname, date_time=ARCHIVE_DATE_TIME)
+    # ZipInfo derives create_system from the host platform, which would make
+    # the same tree produce different bytes on Windows and on macOS.
+    info.create_system = 3  # Unix, so external_attr is read as a file mode
+    if stat.S_ISDIR(mode):
+        info.compress_type = zipfile.ZIP_STORED
+        info.external_attr = (0o40755 << 16) | 0x10  # MS-DOS directory flag
+    else:
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = (0o100000 | archive_file_mode(mode)) << 16
+        # zipfile renamed the per-entry deflate level attribute in 3.13.
+        attribute = next(
+            name for name in ("compress_level", "_compresslevel") if hasattr(info, name)
+        )
+        setattr(info, attribute, ARCHIVE_COMPRESS_LEVEL)
+    return info
+
+
 def archive_zip(source: Path, destination: Path) -> None:
+    """Archive source so the same tree always yields the same bytes.
+
+    A rerun of a failed job has to reproduce the published artifact exactly,
+    otherwise latest.json's sha256 changes for unchanged sources and the files
+    already uploaded for this version are wasted.
+    """
     with zipfile.ZipFile(
-        destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        destination,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=ARCHIVE_COMPRESS_LEVEL,
     ) as archive:
-        for path in sorted(source.rglob("*")):
-            archive.write(path, path.relative_to(source.parent))
+        for path, arcname in archive_entries(source, include_root=False):
+            mode = path.stat().st_mode
+            is_directory = stat.S_ISDIR(mode)
+            # ZIP marks an entry as a directory by its trailing slash.
+            info = zip_member_info(f"{arcname}/" if is_directory else arcname, mode)
+            if is_directory:
+                archive.open(info, "w").close()
+                continue
+            with path.open("rb") as data, archive.open(info, "w") as target:
+                shutil.copyfileobj(data, target)
+
+
+def tar_info_without_host_state(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Strip packaging-host metadata from a tar entry.
+
+    Ownership is normalized to root and permissions to an executable/plain
+    pair, while the entry type and any link target are left untouched so an
+    .app bundle's symlinks stay symlinks.
+    """
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    info.mtime = ARCHIVE_MTIME
+    if info.issym():
+        info.mode = 0o777  # Symlink modes are neither defined nor extracted
+    elif info.isdir():
+        info.mode = 0o755
+    else:
+        info.mode = archive_file_mode(info.mode)
+    return info
+
+
+def archive_tar_gz(source: Path, destination: Path) -> None:
+    """Archive source as a gzip tar whose bytes depend only on the tree.
+
+    Same reason as archive_zip: the updater archives must be reusable across
+    runs of one source revision, so nothing from the packaging host may leak
+    into an entry header or the gzip header.
+    """
+    # A raw tarfile write would stamp the gzip header with the current time.
+    with destination.open("wb") as handle:
+        with gzip.GzipFile(
+            filename="",
+            mode="wb",
+            fileobj=handle,
+            mtime=ARCHIVE_MTIME,
+            compresslevel=ARCHIVE_COMPRESS_LEVEL,
+        ) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w") as archive:
+                # add() would walk os.listdir(), whose order is undefined, so
+                # every path is added explicitly in the sorted order instead.
+                for path, arcname in archive_entries(source, include_root=True):
+                    archive.add(
+                        path,
+                        arcname=arcname,
+                        recursive=False,
+                        filter=tar_info_without_host_state,
+                    )
 
 
 def windows_numeric_version(version: str) -> str:
@@ -406,8 +525,7 @@ def create_macos_packages(
     run([codesign, "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)])
 
     tar_output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.app.tar.gz"
-    with tarfile.open(tar_output, "w:gz", compresslevel=9) as archive:
-        archive.add(bundle, arcname="ZzClawTerm.app")
+    archive_tar_gz(bundle, tar_output)
 
     dmg_root = WORK_DIR / "dmg"
     dmg_root.mkdir()

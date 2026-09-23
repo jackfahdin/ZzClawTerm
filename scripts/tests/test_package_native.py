@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import struct
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -13,6 +15,42 @@ RELEASE_SCRIPTS = Path(__file__).resolve().parents[1] / "release"
 sys.path.insert(0, str(RELEASE_SCRIPTS))
 
 import package_native  # noqa: E402
+
+
+def restamp_tree(root: Path, timestamp: float) -> None:
+    """Give every path in root one mtime, as a fresh checkout would."""
+    for path in [root, *root.rglob("*")]:
+        os.utime(path, (timestamp, timestamp))
+
+
+def make_portable_package(root: Path) -> Path:
+    package = root / "ZzClawTerm-portable"
+    (package / "data").mkdir(parents=True)
+    (package / "vcxsrv" / "fonts").mkdir(parents=True)
+    executable = package / "ZzClawTerm.exe"
+    executable.write_bytes(b"MZ" + b"payload" * 128)
+    package_native.make_executable(executable)
+    (package / "LICENSE").write_bytes(b"Apache-2.0\n")
+    (package / "VERSION").write_text("0.0.1\n", encoding="utf-8")
+    (package / "data" / ".keep").touch()
+    (package / "zzclawterm-portable").touch()
+    (package / "vcxsrv" / "vcxsrv.exe").write_bytes(b"MZ")
+    (package / "vcxsrv" / "fonts" / "fonts.dir").write_text("1\n", encoding="utf-8")
+    return package
+
+
+def make_app_bundle(root: Path) -> Path:
+    bundle = root / "ZzClawTerm.app"
+    macos_dir = bundle / "Contents" / "MacOS"
+    resources_dir = bundle / "Contents" / "Resources"
+    macos_dir.mkdir(parents=True)
+    resources_dir.mkdir(parents=True)
+    binary = macos_dir / "ZzClawTerm"
+    binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"code" * 256)
+    package_native.make_executable(binary)
+    (bundle / "Contents" / "Info.plist").write_bytes(b"<plist/>")
+    (resources_dir / "VERSION").write_text("0.0.1\n", encoding="utf-8")
+    return bundle
 
 
 class PackageNativeTests(unittest.TestCase):
@@ -336,6 +374,175 @@ class PackageNativeTests(unittest.TestCase):
         self.assertIn("ZzClawTerm-portable/vcxsrv/vcxsrv.exe", names)
         self.assertIn("ZzClawTerm-portable/vcxsrv/NOTICE.txt", names)
         self.assertIn("ZzClawTerm-portable/vcxsrv/fonts/fonts.dir", names)
+
+    def test_zip_entries_keep_the_executable_bit_without_host_state(self) -> None:
+        self.assertEqual(package_native.archive_file_mode(0o100755), 0o755)
+        self.assertEqual(package_native.archive_file_mode(0o100600), 0o644)
+
+        executable = package_native.zip_member_info(
+            "ZzClawTerm-portable/zzclawterm", 0o100755
+        )
+        self.assertEqual(executable.date_time, (1980, 1, 1, 0, 0, 0))
+        # Pinned so the same tree hashes identically on Windows and on macOS.
+        self.assertEqual(executable.create_system, 3)
+        self.assertEqual(executable.external_attr >> 16, 0o100755)
+        self.assertEqual(executable.compress_type, zipfile.ZIP_DEFLATED)
+
+        plain = package_native.zip_member_info(
+            "ZzClawTerm-portable/zzclawterm-portable", 0o100644
+        )
+        self.assertEqual(plain.external_attr >> 16, 0o100644)
+
+        directory = package_native.zip_member_info("ZzClawTerm-portable/data/", 0o40755)
+        self.assertTrue(directory.is_dir())
+        self.assertEqual(directory.external_attr >> 16, 0o40755)
+        self.assertEqual(directory.external_attr & 0x10, 0x10)
+        self.assertEqual(directory.compress_type, zipfile.ZIP_STORED)
+
+    def test_portable_zip_is_byte_reproducible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = make_portable_package(root)
+            restamp_tree(package, 1_000_000_000)
+            first = root / "first-portable.zip"
+            package_native.archive_zip(package, first)
+            # A rerun unpacks a fresh artifact whose mtimes differ; the pinned
+            # timestamps have to absorb that or latest.json's sha256 changes.
+            restamp_tree(package, 1_600_000_000)
+            second = root / "second-portable.zip"
+            package_native.archive_zip(package, second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with zipfile.ZipFile(first) as archive:
+                names = archive.namelist()
+                infos = archive.infolist()
+                payload = archive.read("ZzClawTerm-portable/ZzClawTerm.exe")
+        self.assertEqual(
+            names,
+            [
+                "ZzClawTerm-portable/LICENSE",
+                "ZzClawTerm-portable/VERSION",
+                "ZzClawTerm-portable/ZzClawTerm.exe",
+                "ZzClawTerm-portable/data/",
+                "ZzClawTerm-portable/data/.keep",
+                "ZzClawTerm-portable/vcxsrv/",
+                "ZzClawTerm-portable/vcxsrv/fonts/",
+                "ZzClawTerm-portable/vcxsrv/fonts/fonts.dir",
+                "ZzClawTerm-portable/vcxsrv/vcxsrv.exe",
+                "ZzClawTerm-portable/zzclawterm-portable",
+            ],
+        )
+        self.assertEqual(payload, (b"MZ" + b"payload" * 128))
+        for info in infos:
+            with self.subTest(name=info.filename):
+                self.assertEqual(info.date_time, package_native.ARCHIVE_DATE_TIME)
+                self.assertEqual(info.create_system, 3)
+                self.assertEqual(info.extra, b"")
+                if info.is_dir():
+                    self.assertEqual(info.external_attr >> 16, 0o40755)
+                else:
+                    self.assertIn(info.external_attr >> 16, (0o100644, 0o100755))
+        # make_executable() cannot set a bit on Windows, where stat() reports
+        # one from the .exe extension instead.
+        executable = next(
+            info for info in infos if info.filename.endswith("ZzClawTerm.exe")
+        )
+        self.assertEqual(executable.external_attr >> 16, 0o100755)
+
+    def test_tar_entries_lose_host_state_but_keep_their_type(self) -> None:
+        cases = [
+            (tarfile.REGTYPE, 0o100755, 0o755),
+            (tarfile.REGTYPE, 0o100644, 0o644),
+            (tarfile.DIRTYPE, 0o40700, 0o755),
+        ]
+        for type_, mode, expected in cases:
+            with self.subTest(type=type_, mode=oct(mode)):
+                info = tarfile.TarInfo("ZzClawTerm.app/entry")
+                info.type = type_
+                info.mode = mode
+                info.uid, info.gid = 501, 20
+                info.uname, info.gname = "runner", "staff"
+                info.mtime = 1_600_000_000
+                normalized = package_native.tar_info_without_host_state(info)
+                self.assertIs(normalized, info)
+                self.assertEqual(normalized.mode, expected)
+                self.assertEqual((normalized.uid, normalized.gid), (0, 0))
+                self.assertEqual((normalized.uname, normalized.gname), ("", ""))
+                self.assertEqual(normalized.mtime, package_native.ARCHIVE_MTIME)
+
+        link = tarfile.TarInfo("ZzClawTerm.app/Contents/Frameworks/Current")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "Versions/A"
+        link.mode = 0o755
+        link.uid, link.gid = 501, 20
+        link.mtime = 1_600_000_000
+        normalized_link = package_native.tar_info_without_host_state(link)
+        self.assertTrue(normalized_link.issym())
+        self.assertEqual(normalized_link.linkname, "Versions/A")
+        self.assertEqual(normalized_link.mode, 0o777)
+        self.assertEqual(normalized_link.mtime, package_native.ARCHIVE_MTIME)
+
+    def test_macos_tar_gz_is_byte_reproducible(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = make_app_bundle(root)
+            restamp_tree(bundle, 1_000_000_000)
+            first = root / "first.app.tar.gz"
+            package_native.archive_tar_gz(bundle, first)
+            restamp_tree(bundle, 1_600_000_000)
+            second = root / "second.app.tar.gz"
+            package_native.archive_tar_gz(bundle, second)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            compressed = first.read_bytes()
+            with tarfile.open(first, "r:gz") as archive:
+                members = archive.getmembers()
+                names = [member.name for member in members]
+                binary = archive.extractfile(
+                    f"{bundle.name}/Contents/MacOS/ZzClawTerm"
+                ).read()
+            expected_binary = (bundle / "Contents" / "MacOS" / "ZzClawTerm").read_bytes()
+        # gzip stores an FNAME flag and an MTIME of its own next to the tar
+        # headers; both must be absent or zero for the bytes to be reusable.
+        self.assertEqual(compressed[3], 0)
+        self.assertEqual(compressed[4:8], b"\0\0\0\0")
+        self.assertEqual(binary, expected_binary)
+        self.assertEqual(
+            names,
+            [
+                "ZzClawTerm.app",
+                "ZzClawTerm.app/Contents",
+                "ZzClawTerm.app/Contents/Info.plist",
+                "ZzClawTerm.app/Contents/MacOS",
+                "ZzClawTerm.app/Contents/MacOS/ZzClawTerm",
+                "ZzClawTerm.app/Contents/Resources",
+                "ZzClawTerm.app/Contents/Resources/VERSION",
+            ],
+        )
+        for member in members:
+            with self.subTest(name=member.name):
+                self.assertEqual(member.mtime, package_native.ARCHIVE_MTIME)
+                self.assertEqual((member.uid, member.gid), (0, 0))
+                self.assertEqual((member.uname, member.gname), ("", ""))
+                self.assertIn(member.mode, (0o644, 0o755))
+
+    def test_macos_tar_gz_keeps_symlinks_and_their_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = make_app_bundle(root)
+            current = bundle / "Contents" / "Frameworks" / "Current"
+            current.parent.mkdir(parents=True)
+            try:
+                current.symlink_to("Versions/A")
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"cannot create a symlink here: {error}")
+            archive_path = root / "bundle.app.tar.gz"
+            package_native.archive_tar_gz(bundle, archive_path)
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = {member.name: member for member in archive.getmembers()}
+        link = members[f"{bundle.name}/Contents/Frameworks/Current"]
+        self.assertEqual(link.type, tarfile.SYMTYPE)
+        self.assertTrue(link.issym())
+        self.assertEqual(link.linkname, "Versions/A")
+        self.assertEqual(link.size, 0)
 
     def test_linux_desktop_registers_only_zzclawterm_url_scheme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
