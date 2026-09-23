@@ -41,26 +41,41 @@ pub(super) struct SftpLocalDownloadTargetContext<'a> {
 pub(super) fn resolve_local_download_target(
     context: SftpLocalDownloadTargetContext<'_>,
 ) -> anyhow::Result<Option<PathBuf>> {
-    if !context.local_path.exists() {
+    let key = SftpDuplicateCacheKey::Download {
+        remote_path: context.remote_path_raw.to_vec(),
+        local_path: context.local_path.to_path_buf(),
+        is_directory: context.is_directory,
+    };
+    if !crate::download_path::target_exists(context.local_path)?
+        && context
+            .path_options
+            .reserve_download_target(context.local_path, &key)?
+    {
         return Ok(Some(context.local_path.to_path_buf()));
     }
 
     let decision = resolve_duplicate_decision_for_path(
         context.path_options,
-        SftpDuplicateCacheKey::Download {
-            remote_path: context.remote_path_raw.to_vec(),
-            local_path: context.local_path.to_path_buf(),
-            is_directory: context.is_directory,
-        },
+        key.clone(),
         SftpTransferDirection::Download,
         context.remote_path,
         &context.local_path.display().to_string(),
         context.is_directory,
     )?;
     match decision {
-        SftpDuplicateDecision::Overwrite => Ok(Some(context.local_path.to_path_buf())),
+        SftpDuplicateDecision::Overwrite => {
+            anyhow::ensure!(
+                context
+                    .path_options
+                    .reserve_download_target(context.local_path, &key)?,
+                "download target is reserved by another item in this batch"
+            );
+            Ok(Some(context.local_path.to_path_buf()))
+        }
         SftpDuplicateDecision::Skip => Ok(None),
-        SftpDuplicateDecision::Rename => resolve_renamed_local_target(context.local_path).map(Some),
+        SftpDuplicateDecision::Rename => {
+            resolve_renamed_local_target(context.local_path, context.path_options, &key).map(Some)
+        }
     }
 }
 
@@ -166,7 +181,11 @@ pub(super) fn resolve_duplicate_decision(
     }
 }
 
-fn resolve_renamed_local_target(local_path: &Path) -> anyhow::Result<PathBuf> {
+fn resolve_renamed_local_target(
+    local_path: &Path,
+    options: &SftpPathTransferOptions,
+    key: &SftpDuplicateCacheKey,
+) -> anyhow::Result<PathBuf> {
     let stem = local_path
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
@@ -179,7 +198,9 @@ fn resolve_renamed_local_target(local_path: &Path) -> anyhow::Result<PathBuf> {
     let parent = local_path.parent().unwrap_or_else(|| Path::new("."));
     for index in 1..=999 {
         let candidate = parent.join(format!("{stem}({index}){extension}"));
-        if !candidate.exists() {
+        if !crate::download_path::target_exists(&candidate)?
+            && options.reserve_download_target(&candidate, key)?
+        {
             return Ok(candidate);
         }
     }
@@ -233,5 +254,165 @@ pub(super) fn remote_join(base: &str, child: &str) -> String {
         format!("{base}{child}")
     } else {
         format!("{base}/{child}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SftpLocalDownloadTargetContext, resolve_local_download_target};
+    use crate::{SftpDuplicatePolicy, SftpPathTransferOptions, SftpTransferOptions};
+
+    #[test]
+    fn renamed_downloads_reserve_final_targets_before_writing() -> anyhow::Result<()> {
+        for names in [["foo", "foo(1)"], ["foo(1)", "foo"]] {
+            let root = std::env::temp_dir()
+                .join(format!("zzclawterm-reserved-{}", zzclawterm_core::uuid()));
+            std::fs::create_dir(&root)?;
+            std::fs::write(root.join("foo"), b"existing")?;
+            let options = SftpPathTransferOptions::new(
+                SftpDuplicatePolicy::Rename,
+                None,
+                SftpTransferOptions::default(),
+            );
+            let mut targets = Vec::new();
+            for name in names {
+                let target = resolve_local_download_target(SftpLocalDownloadTargetContext {
+                    remote_path: name,
+                    remote_path_raw: name.as_bytes(),
+                    local_path: &root.join(name),
+                    is_directory: false,
+                    path_options: &options,
+                })?
+                .expect("selected target");
+                targets.push((name, target));
+            }
+            assert_ne!(targets[0].1, targets[1].1);
+            for (name, target) in &targets {
+                crate::download_path::staged_write_file(&root, target, name.as_bytes())?;
+            }
+            assert_eq!(std::fs::read(root.join("foo"))?, b"existing");
+            for (name, target) in &targets {
+                assert_eq!(std::fs::read(target)?, name.as_bytes());
+            }
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn normalized_names_use_reserved_rename_targets() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "zzclawterm-normalized-reserved-{}",
+            zzclawterm_core::uuid()
+        ));
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("Readme"), b"existing")?;
+        let options = SftpPathTransferOptions::new(
+            SftpDuplicatePolicy::Rename,
+            None,
+            SftpTransferOptions::default(),
+        );
+        let first = resolve_local_download_target(SftpLocalDownloadTargetContext {
+            remote_path: "/Readme",
+            remote_path_raw: b"/Readme",
+            local_path: &root.join("Readme"),
+            is_directory: false,
+            path_options: &options,
+        })?
+        .expect("first selected target");
+        let second = resolve_local_download_target(SftpLocalDownloadTargetContext {
+            remote_path: "/README",
+            remote_path_raw: b"/README",
+            local_path: &root.join("README"),
+            is_directory: false,
+            path_options: &options,
+        })?
+        .expect("second selected target");
+        assert_ne!(first, second);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_batch_jobs_reserve_distinct_rename_candidates() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "zzclawterm-concurrent-targets-{}",
+            zzclawterm_core::uuid()
+        ));
+        std::fs::create_dir(&root)?;
+        let target = root.join("foo");
+        std::fs::write(&target, b"existing")?;
+        let options = SftpPathTransferOptions::new(
+            SftpDuplicatePolicy::Rename,
+            None,
+            SftpTransferOptions::default(),
+        );
+        let barrier = std::sync::Barrier::new(4);
+        let targets = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let options = options.clone_for_download_batch();
+                    let target = &target;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        resolve_local_download_target(SftpLocalDownloadTargetContext {
+                            remote_path: "/foo",
+                            remote_path_raw: b"/foo",
+                            local_path: target,
+                            is_directory: false,
+                            path_options: &options,
+                        })
+                        .unwrap()
+                        .unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        assert_eq!(targets.len(), 4);
+        assert!(!targets.contains(&target));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn batch_reservations_reject_overwrite_allow_skip_and_preserve_retry_identity()
+    -> anyhow::Result<()> {
+        for policy in [SftpDuplicatePolicy::Overwrite, SftpDuplicatePolicy::Skip] {
+            let root = std::env::temp_dir().join(format!(
+                "zzclawterm-reservation-policy-{}",
+                zzclawterm_core::uuid()
+            ));
+            std::fs::create_dir(&root)?;
+            let target = root.join("entry");
+            let options =
+                SftpPathTransferOptions::new(policy, None, SftpTransferOptions::default());
+            let resolve = |options: &SftpPathTransferOptions, is_directory| {
+                resolve_local_download_target(SftpLocalDownloadTargetContext {
+                    remote_path: "/entry",
+                    remote_path_raw: b"/entry",
+                    local_path: &target,
+                    is_directory,
+                    path_options: options,
+                })
+            };
+            assert_eq!(resolve(&options, true)?, Some(target.clone()));
+            let sibling = options.clone_for_download_batch();
+            match policy {
+                SftpDuplicatePolicy::Overwrite => assert!(resolve(&sibling, false).is_err()),
+                SftpDuplicatePolicy::Skip => assert!(resolve(&sibling, false)?.is_none()),
+                _ => unreachable!(),
+            }
+            let retry = options.with_transfer_options(SftpTransferOptions::default());
+            assert_eq!(resolve(&retry, true)?, Some(target.clone()));
+            assert_eq!(resolve(&options.clone(), true)?, Some(target));
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
     }
 }

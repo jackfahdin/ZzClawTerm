@@ -51,8 +51,21 @@ pub fn preload_i18n() -> Result<(), String> {
         .clone()
 }
 
-pub use app_shell::{AppShell, AppShellStartup, MainWindowPlacement};
+pub use app_shell::{
+    AppShell, AppShellStartup, DesktopController, DesktopControllerGlobal, MainWindowPlacement,
+};
 
 pub fn init(cx: &mut gpui::App) {
+    app_shell::init(cx);
     features::init(cx);
+}
+
+/// Runs the detached portable updater helper before normal application startup.
+pub fn run_update_helper_if_requested() -> bool {
+    features::update::install::run_update_helper_if_requested()
+}
+
+/// Removes a completed updater work directory after the relaunched app is running.
+pub fn schedule_update_cleanup() {
+    features::update::install::schedule_update_cleanup();
 }

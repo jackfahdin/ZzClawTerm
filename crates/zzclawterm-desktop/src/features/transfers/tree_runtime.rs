@@ -201,6 +201,21 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        if modified_for_select_all {
+            match event.keystroke.key.to_ascii_lowercase().as_str() {
+                "c" => self.capture_transfer_file_clipboard(false, cx),
+                "x" => self.capture_transfer_file_clipboard(true, cx),
+                "v" => self.paste_transfer_file_clipboard(window, cx),
+                _ => {}
+            }
+            if matches!(
+                event.keystroke.key.to_ascii_lowercase().as_str(),
+                "c" | "x" | "v"
+            ) {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let unmodified = !event.keystroke.modifiers.alt
             && !event.keystroke.modifiers.control
             && !event.keystroke.modifiers.platform
@@ -338,11 +353,29 @@ impl ZzClawTermApp {
                 ..
             } => seed(self, parent_path, entries),
             TransferJobOutput::Sent {
+                source_path,
+                source_parent_path,
+                source_entries,
                 target_session_id,
                 target_parent_path,
                 entries,
                 ..
             } => {
+                if let Some(parent) = source_parent_path {
+                    self.transfer.invalidate_tree_path(
+                        session,
+                        &RemoteFilePath::new(source_path),
+                        true,
+                    );
+                    self.transfer.invalidate_tree_path(
+                        session,
+                        &RemoteFilePath::new(parent),
+                        false,
+                    );
+                    if let Some(source_entries) = source_entries {
+                        seed(self, parent, source_entries);
+                    }
+                }
                 let Some(target_backend) = self
                     .session
                     .file_browser_backend_support_for_session(target_session_id)

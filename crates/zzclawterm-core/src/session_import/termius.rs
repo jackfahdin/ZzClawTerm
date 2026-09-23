@@ -279,9 +279,10 @@ fn read_leveldb_records(db_path: &Path) -> AppResult<Vec<u8>> {
         "zzclawterm-termius-leveldb-{}",
         uuid::Uuid::new_v4()
     ));
-    copy_leveldb_dir(db_path, &tmp_path)?;
-
-    let result = read_copied_leveldb_records(&tmp_path);
+    let result = (|| {
+        copy_leveldb_dir(db_path, &tmp_path)?;
+        read_copied_leveldb_records(&tmp_path)
+    })();
     let _ = std::fs::remove_dir_all(&tmp_path);
     result
 }

@@ -13,6 +13,7 @@ dirs.workspace = true
 futures.workspace = true
 hmac.workspace = true
 zzclawterm-core.workspace = true
+rand.workspace = true
 redb.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -22,3 +23,6 @@ sha2.workspace = true
 ssh-key.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }

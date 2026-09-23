@@ -289,11 +289,8 @@ mod tests {
 
     #[test]
     fn applies_current_user_only_acl_to_directory_and_file() {
-        let root = std::env::temp_dir().join(format!(
-            "zzclawterm-windows-acl-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-windows-acl-test");
+        std::fs::create_dir_all(root.path()).unwrap();
         set_current_user_only(&root, true).unwrap();
 
         let file = root.join("discovery.json");
@@ -302,7 +299,6 @@ mod tests {
 
         assert_current_user_only(&root, true);
         assert_current_user_only(&file, false);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

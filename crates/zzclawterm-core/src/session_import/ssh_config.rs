@@ -793,18 +793,12 @@ e+JpiSq66Z6GIt0801skPh20jxOO3F52SoX1IeO5D5PXfZrfSZlw6S8c7bwyp2FHxDewRx\n\
 7/wNsnDM0T7nLv/Q==\n\
 -----END OPENSSH PRIVATE KEY-----";
 
-    struct Temp(std::path::PathBuf);
+    struct Temp(crate::test_support::TestTempDir);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("zzclawterm-ssh-config-{}", uuid::Uuid::new_v4()));
-            fs::create_dir(&path).unwrap();
+            let path = crate::test_support::TestTempDir::new("zzclawterm-ssh-config");
+            fs::create_dir(path.path()).unwrap();
             Self(path)
-        }
-    }
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

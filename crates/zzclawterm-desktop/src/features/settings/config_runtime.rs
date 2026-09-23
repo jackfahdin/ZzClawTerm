@@ -56,7 +56,7 @@ impl ZzClawTermApp {
         }
         if self.session.active_id().is_some() || self.session.start_has_pending() {
             self.shell
-                .set_status("close active session before importing config".to_string());
+                .set_status(t!("settings.closeActiveSessionBeforeImport"));
             cx.notify();
             return;
         }
@@ -71,38 +71,35 @@ impl ZzClawTermApp {
     ) {
         self.clear_stale_local_snapshot_password_prompt(cx);
         if !self.settings.begin_snapshot_password_prompt(kind) {
-            self.shell
-                .set_status("backup or sync prompt is already open".to_string());
+            self.shell.set_status(t!("settings.backupOrSyncPromptOpen"));
             cx.notify();
             return;
         }
 
         self.forget_text_inputs("snapshot-password.");
         let field = self.text_input("snapshot-password.value", "", TextInputSetup::masked(), cx);
-        self.shell.set_status(
-            match kind {
-                SnapshotPasswordPromptKind::Export => "enter password for encrypted .zz export",
-                SnapshotPasswordPromptKind::Import => "enter password for encrypted .zz import",
-                SnapshotPasswordPromptKind::CloudForcePush
-                | SnapshotPasswordPromptKind::CloudForcePull
-                | SnapshotPasswordPromptKind::CloudProviderPush
-                | SnapshotPasswordPromptKind::CloudProviderPull
-                | SnapshotPasswordPromptKind::CloudProviderForcePush
-                | SnapshotPasswordPromptKind::CloudProviderForcePull
-                | SnapshotPasswordPromptKind::CloudRecoverCurrent
-                | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                    "enter password for encrypted cloud sync snapshot"
-                }
+        self.shell.set_status(match kind {
+            SnapshotPasswordPromptKind::Export => t!("settings.nyaExportPassword"),
+            SnapshotPasswordPromptKind::Import => t!("settings.nyaImportPassword"),
+            SnapshotPasswordPromptKind::CloudForcePush
+            | SnapshotPasswordPromptKind::CloudForcePull
+            | SnapshotPasswordPromptKind::CloudProviderPush
+            | SnapshotPasswordPromptKind::CloudProviderPull
+            | SnapshotPasswordPromptKind::CloudProviderForcePush
+            | SnapshotPasswordPromptKind::CloudProviderForcePull
+            | SnapshotPasswordPromptKind::CloudRecoverCurrent
+            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
+                t!("settings.syncSnapshotPassword")
             }
-            .to_string(),
-        );
+        });
         self.settings
-            .set_store_message("awaiting .zz master password");
+            .set_store_message(t!("settings.nyaAwaitingMasterPassword"));
         if !matches!(
             kind,
             SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
         ) {
-            self.cloud_sync.set_status("awaiting cloud sync password");
+            self.cloud_sync
+                .set_status(t!("settings.syncAwaitingPassword"));
         }
         let title = t!(snapshot_password_prompt_title_key(kind));
         self.open_form_dialog(
@@ -195,7 +192,7 @@ impl ZzClawTermApp {
             self.settings.restore_snapshot_password_prompt(state.kind);
             self.reset_text_input("snapshot-password.value", "", cx);
             self.shell
-                .set_status("master password is required for encrypted .zz".to_string());
+                .set_status(t!("settings.nyaMasterPasswordRequired"));
             cx.notify();
             return false;
         }
@@ -245,37 +242,28 @@ impl ZzClawTermApp {
             state.kind,
             SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
         ) {
-            self.cloud_sync.set_status("cloud sync cancelled");
+            self.cloud_sync.set_status(t!("settings.syncCancelled"));
         }
         self.shell.set_status(match state.kind {
-            SnapshotPasswordPromptKind::Export => "encrypted .zz export cancelled".to_string(),
-            SnapshotPasswordPromptKind::Import => "encrypted .zz import cancelled".to_string(),
-            SnapshotPasswordPromptKind::CloudForcePush => {
-                "forced cloud sync push cancelled".to_string()
+            SnapshotPasswordPromptKind::Export => t!("settings.nyaExportCancelled"),
+            SnapshotPasswordPromptKind::Import => t!("settings.nyaImportCancelled"),
+            SnapshotPasswordPromptKind::CloudForcePush
+            | SnapshotPasswordPromptKind::CloudProviderPush
+            | SnapshotPasswordPromptKind::CloudProviderForcePush => {
+                t!("settings.syncPushCancelled")
             }
-            SnapshotPasswordPromptKind::CloudForcePull => {
-                "forced cloud sync pull cancelled".to_string()
+            SnapshotPasswordPromptKind::CloudForcePull
+            | SnapshotPasswordPromptKind::CloudProviderPull
+            | SnapshotPasswordPromptKind::CloudProviderForcePull => {
+                t!("settings.syncPullCancelled")
             }
-            SnapshotPasswordPromptKind::CloudProviderPush => {
-                "provider cloud sync push cancelled".to_string()
-            }
-            SnapshotPasswordPromptKind::CloudProviderPull => {
-                "provider cloud sync pull cancelled".to_string()
-            }
-            SnapshotPasswordPromptKind::CloudProviderForcePush => {
-                "forced provider cloud sync push cancelled".to_string()
-            }
-            SnapshotPasswordPromptKind::CloudProviderForcePull => {
-                "forced provider cloud sync pull cancelled".to_string()
-            }
-            SnapshotPasswordPromptKind::CloudRecoverCurrent => {
-                "cloud sync metadata recovery cancelled".to_string()
-            }
-            SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                "provider cloud sync metadata recovery cancelled".to_string()
+            SnapshotPasswordPromptKind::CloudRecoverCurrent
+            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
+                t!("settings.syncRecoveryCancelled")
             }
         });
-        self.settings.set_store_message("config picker cancelled");
+        self.settings
+            .set_store_message(t!("settings.configPathPickerClosed"));
         cx.notify();
     }
 
@@ -330,8 +318,7 @@ impl ZzClawTermApp {
             .settings
             .begin_config_path_prompt(ConfigPathPromptKind::EncryptedPortableExport)
         {
-            self.shell
-                .set_status("config path picker is already open".to_string());
+            self.shell.set_status(t!("settings.configPathPickerOpen"));
             cx.notify();
             return;
         }
@@ -340,16 +327,16 @@ impl ZzClawTermApp {
         let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
         self.shell
-            .set_status("selecting encrypted portable snapshot destination".to_string());
+            .set_status(t!("settings.nyaSelectingDestination"));
         self.settings
-            .set_store_message("selecting encrypted .zz export destination");
+            .set_store_message(t!("settings.nyaSelectingDestination"));
         self.request_settings_panel_refresh(cx);
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(path))) => {
                     let _ = this.update(cx, |this, cx| {
                         this.settings
-                            .update_store_status("exporting encrypted .zz snapshot", false);
+                            .update_store_status(t!("settings.nyaExporting").to_string(), false);
                         this.request_settings_panel_refresh(cx);
                     });
                     tracing::info!(operation = "portable_snapshot_export", "started");
@@ -396,8 +383,7 @@ impl ZzClawTermApp {
             .settings
             .begin_config_path_prompt(ConfigPathPromptKind::EncryptedPortableImport)
         {
-            self.shell
-                .set_status("config path picker is already open".to_string());
+            self.shell.set_status(t!("settings.configPathPickerOpen"));
             cx.notify();
             return;
         }
@@ -410,18 +396,19 @@ impl ZzClawTermApp {
         let receiver = cx.prompt_for_paths(options);
         let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
-        self.shell
-            .set_status("selecting encrypted portable snapshot to import".to_string());
+        self.shell.set_status(t!("settings.nyaSelectingSnapshot"));
         self.settings
-            .set_store_message("selecting encrypted .zz snapshot");
+            .set_store_message(t!("settings.nyaSelectingSnapshot"));
         self.request_settings_panel_refresh(cx);
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(paths))) => match paths.into_iter().next() {
                     Some(path) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.settings
-                                .update_store_status("importing encrypted .zz snapshot", false);
+                            this.settings.update_store_status(
+                                t!("settings.nyaImporting").to_string(),
+                                false,
+                            );
                             this.request_settings_panel_refresh(cx);
                         });
                         tracing::info!(operation = "portable_snapshot_import", "started");
@@ -475,33 +462,16 @@ impl ZzClawTermApp {
                     bytes = info.bytes,
                     "completed"
                 );
-                let message = match kind {
-                    ConfigPathPromptKind::EncryptedPortableExport => {
-                        format!("exported {} byte encrypted .zz snapshot", info.bytes)
-                    }
-                    ConfigPathPromptKind::EncryptedPortableImport => {
-                        format!("exported {} byte encrypted .zz snapshot", info.bytes)
-                    }
-                };
+                let message = t!("settings.nyaExportedCount", count = info.bytes).to_string();
                 self.settings.replace_store_status(
                     info.database_path.display().to_string(),
                     message,
                     true,
                 );
-                self.shell.set_status(match kind {
-                    ConfigPathPromptKind::EncryptedPortableExport => {
-                        format!(
-                            "encrypted portable snapshot exported to {}",
-                            info.backup_path.display()
-                        )
-                    }
-                    ConfigPathPromptKind::EncryptedPortableImport => {
-                        format!(
-                            "encrypted portable snapshot exported to {}",
-                            info.backup_path.display()
-                        )
-                    }
-                });
+                self.shell.set_status(t!(
+                    "settings.nyaExportedTo",
+                    path = info.backup_path.display().to_string()
+                ));
             }
             ConfigPathPromptResult::Imported(info) => {
                 tracing::info!(
@@ -513,58 +483,48 @@ impl ZzClawTermApp {
                 let safety = info
                     .safety_backup_path
                     .as_ref()
-                    .map(|path| format!("; previous db saved to {}", path.display()))
+                    .map(|path| {
+                        format!(
+                            "; {}",
+                            t!(
+                                "settings.nyaPreviousDbSavedTo",
+                                path = path.display().to_string()
+                            )
+                        )
+                    })
                     .unwrap_or_default();
-                let message = match kind {
-                    ConfigPathPromptKind::EncryptedPortableImport => {
-                        format!(
-                            "imported {} byte encrypted .zz snapshot{safety}",
-                            info.bytes
-                        )
-                    }
-                    ConfigPathPromptKind::EncryptedPortableExport => {
-                        format!(
-                            "imported {} byte encrypted .zz snapshot{safety}",
-                            info.bytes
-                        )
-                    }
-                };
+                let message = format!(
+                    "{}{}",
+                    t!("settings.nyaImportedCount", count = info.bytes),
+                    safety
+                );
                 self.refresh_store_after_portable_import(message, cx);
-                self.shell.set_status(match kind {
-                    ConfigPathPromptKind::EncryptedPortableImport => {
-                        format!(
-                            "encrypted portable snapshot imported from {}",
-                            info.backup_path.display()
-                        )
-                    }
-                    ConfigPathPromptKind::EncryptedPortableExport => {
-                        format!(
-                            "encrypted portable snapshot imported from {}",
-                            info.backup_path.display()
-                        )
-                    }
-                });
+                self.shell.set_status(t!(
+                    "settings.nyaImportedFrom",
+                    path = info.backup_path.display().to_string()
+                ));
             }
             ConfigPathPromptResult::Cancelled => {
                 tracing::info!(operation = ?kind, "portable snapshot picker cancelled");
                 self.shell.set_status(match kind {
                     ConfigPathPromptKind::EncryptedPortableExport => {
-                        "encrypted portable snapshot export cancelled".to_string()
+                        t!("settings.nyaExportCancelled")
                     }
                     ConfigPathPromptKind::EncryptedPortableImport => {
-                        "encrypted portable snapshot import cancelled".to_string()
+                        t!("settings.nyaImportCancelled")
                     }
                 });
-                self.settings.set_store_message("config picker cancelled");
+                self.settings
+                    .set_store_message(t!("settings.configPathPickerClosed"));
             }
             ConfigPathPromptResult::Failed(error) => {
                 tracing::warn!(operation = ?kind, error = %error, "portable snapshot operation failed");
                 self.shell.set_status(match kind {
                     ConfigPathPromptKind::EncryptedPortableExport => {
-                        format!("encrypted portable snapshot export failed: {error}")
+                        format!("{}: {error}", t!("settings.nyaExportFailed"))
                     }
                     ConfigPathPromptKind::EncryptedPortableImport => {
-                        format!("encrypted portable snapshot import failed: {error}")
+                        format!("{}: {error}", t!("settings.nyaImportFailed"))
                     }
                 });
                 self.settings
@@ -572,9 +532,9 @@ impl ZzClawTermApp {
             }
             ConfigPathPromptResult::Closed => {
                 tracing::warn!(operation = ?kind, "portable snapshot picker closed");
-                self.shell
-                    .set_status("config path picker closed before returning".to_string());
-                self.settings.set_store_message("config picker closed");
+                self.shell.set_status(t!("settings.configPathPickerClosed"));
+                self.settings
+                    .set_store_message(t!("settings.configPathPickerClosed"));
             }
         }
         self.request_settings_panel_refresh(cx);
@@ -590,7 +550,12 @@ impl ZzClawTermApp {
             LoadBootstrap,
             move |this, event, cx| match event.outcome {
                 Ok(snapshot) => {
-                    this.apply_store_refresh(snapshot, cx);
+                    this.apply_store_refresh(snapshot.clone(), cx);
+                    this.replace_shared_snapshot(
+                        snapshot,
+                        crate::app_shell::SharedStateDomain::All,
+                        cx,
+                    );
                     this.rebase_open_settings_draft(cx);
                     this.settings.update_store_status(success_message, true);
                     this.request_settings_panel_refresh(cx);
@@ -618,7 +583,12 @@ impl ZzClawTermApp {
             LoadBootstrap,
             |this, event, cx| match event.outcome {
                 Ok(snapshot) => {
-                    this.apply_store_refresh(snapshot, cx);
+                    this.apply_store_refresh(snapshot.clone(), cx);
+                    this.replace_shared_snapshot(
+                        snapshot,
+                        crate::app_shell::SharedStateDomain::All,
+                        cx,
+                    );
                     cx.notify();
                 }
                 Err(error) => {
@@ -633,6 +603,16 @@ impl ZzClawTermApp {
     }
 
     fn apply_store_refresh(&mut self, snapshot: BootstrapSnapshot, cx: &mut Context<Self>) {
+        let mut shared_settings = snapshot.settings;
+        let local_settings = self.settings.summary();
+        shared_settings.ui_left_panel_width = local_settings.ui_left_panel_width;
+        shared_settings.ui_right_panel_width = local_settings.ui_right_panel_width;
+        shared_settings.ui_quick_cmd_height = local_settings.ui_quick_cmd_height;
+        shared_settings.ui_active_left_panel = local_settings.ui_active_left_panel.clone();
+        shared_settings.ui_active_right_panel = local_settings.ui_active_right_panel.clone();
+        shared_settings.ui_left_panel_collapsed = local_settings.ui_left_panel_collapsed;
+        shared_settings.ui_right_panel_collapsed = local_settings.ui_right_panel_collapsed;
+        self.update_custom_icons(snapshot.custom_icons, cx);
         self.connection_state
             .replace_loaded(snapshot.connections, snapshot.connection_groups);
         self.security.replace_catalog(
@@ -654,8 +634,7 @@ impl ZzClawTermApp {
         );
         self.settings
             .replace_keyword_config(snapshot.keyword_highlights);
-        self.apply_gpui_settings(snapshot.settings, cx);
-        self.apply_ui_layout_from_settings();
+        self.apply_gpui_settings(shared_settings, cx);
         self.translation.replace_settings(
             snapshot.translation_settings,
             TranslationSecretDraft::default(),
@@ -673,7 +652,7 @@ impl ZzClawTermApp {
             ));
         self.settings.replace_store_status(
             snapshot.database_path.display().to_string(),
-            "redb connection store online".to_string(),
+            t!("settings.redbStoreOnline").to_string(),
             true,
         );
         // Notes are not part of BootstrapSnapshot because their Markdown bodies
@@ -681,5 +660,149 @@ impl ZzClawTermApp {
         // the entire catalog, so refresh its lightweight tree explicitly.
         self.refresh_notes(cx);
         self.request_settings_panel_refresh(cx);
+    }
+
+    pub(crate) fn apply_shared_state(
+        &mut self,
+        snapshot: BootstrapSnapshot,
+        event: crate::app_shell::SharedStateEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::app_shell::SharedStateDomain;
+
+        let has_clean_settings_draft =
+            self.shell.has_settings_draft() && !self.settings_draft_dirty();
+        let settings_blocked = self.settings_draft_dirty()
+            && matches!(
+                event.domain,
+                SharedStateDomain::Settings
+                    | SharedStateDomain::Ai
+                    | SharedStateDomain::Translation
+                    | SharedStateDomain::CloudSync
+                    | SharedStateDomain::All
+            );
+        if settings_blocked {
+            self.shell.set_status(format!(
+                "shared settings changed at revision {}; reload before applying",
+                event.revision
+            ));
+        }
+
+        if matches!(
+            event.domain,
+            SharedStateDomain::Connections | SharedStateDomain::All
+        ) {
+            self.update_custom_icons(snapshot.custom_icons.clone(), cx);
+            self.connection_state.replace_loaded(
+                snapshot.connections.clone(),
+                snapshot.connection_groups.clone(),
+            );
+            self.start_workspace
+                .sync_group_options(&snapshot.connection_groups, cx);
+        }
+        if matches!(
+            event.domain,
+            SharedStateDomain::Security | SharedStateDomain::All
+        ) {
+            self.security.replace_catalog(
+                snapshot.ssh_keys.clone(),
+                snapshot.otp_entries.clone(),
+                snapshot.saved_passwords.clone(),
+                snapshot.saved_credentials.clone(),
+            );
+        }
+        if matches!(
+            event.domain,
+            SharedStateDomain::Tunnels | SharedStateDomain::All
+        ) {
+            self.tunnel_state.replace_loaded_catalog(
+                snapshot.tunnels.clone(),
+                snapshot.tunnel_groups.clone(),
+                snapshot.proxies.clone(),
+                snapshot.proxy_groups.clone(),
+            );
+        }
+        if matches!(
+            event.domain,
+            SharedStateDomain::Commands | SharedStateDomain::All
+        ) {
+            self.commands.replace_loaded(
+                snapshot.quick_commands.clone(),
+                snapshot.quick_command_categories.clone(),
+                snapshot.command_history.clone(),
+            );
+        }
+        if !settings_blocked
+            && matches!(
+                event.domain,
+                SharedStateDomain::Settings | SharedStateDomain::All
+            )
+        {
+            let mut settings = snapshot.settings.clone();
+            let local = self.settings.summary();
+            settings.ui_left_panel_width = local.ui_left_panel_width;
+            settings.ui_right_panel_width = local.ui_right_panel_width;
+            settings.ui_quick_cmd_height = local.ui_quick_cmd_height;
+            settings.ui_active_left_panel = local.ui_active_left_panel.clone();
+            settings.ui_active_right_panel = local.ui_active_right_panel.clone();
+            settings.ui_left_panel_collapsed = local.ui_left_panel_collapsed;
+            settings.ui_right_panel_collapsed = local.ui_right_panel_collapsed;
+            self.settings
+                .replace_keyword_config(snapshot.keyword_highlights.clone());
+            self.apply_gpui_settings(settings, cx);
+            self.recording
+                .set_memory_limit(self.settings.summary().recording_memory_limit_bytes as usize);
+            self.transfer
+                .set_duplicate_policy(SftpDuplicatePolicy::from_legacy_value(
+                    &self.settings.summary().transfer_duplicate_strategy,
+                ));
+        }
+        if matches!(
+            event.domain,
+            SharedStateDomain::Commands | SharedStateDomain::All
+        ) {
+            self.sync_quick_command_selected_category(cx);
+        }
+        if !settings_blocked
+            && matches!(event.domain, SharedStateDomain::Ai | SharedStateDomain::All)
+        {
+            self.ai.replace_settings_config(snapshot.ai_settings, true);
+            self.sync_ai_drafts_from_active_profile();
+        }
+        if !settings_blocked
+            && matches!(
+                event.domain,
+                SharedStateDomain::Translation | SharedStateDomain::All
+            )
+        {
+            self.translation.replace_settings(
+                snapshot.translation_settings,
+                TranslationSecretDraft::default(),
+            );
+        }
+        if !settings_blocked
+            && matches!(
+                event.domain,
+                SharedStateDomain::CloudSync | SharedStateDomain::All
+            )
+        {
+            self.cloud_sync
+                .replace_loaded(snapshot.cloud_sync_settings, snapshot.cloud_sync_state);
+        }
+        if has_clean_settings_draft
+            && matches!(
+                event.domain,
+                SharedStateDomain::Settings
+                    | SharedStateDomain::Ai
+                    | SharedStateDomain::Translation
+                    | SharedStateDomain::CloudSync
+                    | SharedStateDomain::All
+            )
+        {
+            self.rebase_open_settings_draft(cx);
+        }
+        self.flush_connection_panel_snapshot(cx);
+        self.request_settings_panel_refresh(cx);
+        cx.notify();
     }
 }

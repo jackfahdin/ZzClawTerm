@@ -286,7 +286,19 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let open_sessions = self.session.ordered_sessions().len();
+        self.handle_window_close_request_with_count(
+            self.session.ordered_sessions().len(),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn handle_window_close_request_with_count(
+        &mut self,
+        open_sessions: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.settings.summary().confirm_on_close && open_sessions > 0 {
             // Reuse the close-all confirmation as the quit-with-sessions gate.
             // A title-bar close control can also produce the native window-close
@@ -359,7 +371,8 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        self.update.install_requested = false;
+        self.update
+            .update(cx, |update, _| update.install_requested = false);
         self.session.dialog_cancel_close_all_sessions_confirm();
         self.shell
             .set_status("close all sessions cancelled".to_string());
@@ -462,15 +475,16 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn clear_terminal(&mut self, cx: &mut Context<Self>) {
         self.clear_terminal_selection(cx);
-        if let Some(session_id) = self.session.active_id()
-            && let Some(view) = self.terminal.view.views.get_mut(session_id)
-        {
-            view.clear();
+        self.terminal.menus.actions_open = false;
+        if let Some(session_id) = self.session.active_id() {
+            self.terminal
+                .view
+                .frame_pipeline
+                .clear_session_except_input(session_id.to_string());
+            self.terminal.view.frame_pipeline.arm_event_wakes();
+            self.shell
+                .set_status("terminal clear requested".to_string());
         }
-        self.terminal.view.output.clear();
-        self.terminal.view.output_decoder.reset_decoder();
-        self.terminal.view.screen.clear();
-        self.shell.set_status("terminal cleared".to_string());
         cx.notify();
     }
 

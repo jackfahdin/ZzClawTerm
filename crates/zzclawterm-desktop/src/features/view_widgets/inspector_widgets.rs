@@ -89,7 +89,6 @@ pub(in crate::features) fn tab_menu_item_enabled(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let id = id.into();
-    let label = label.into();
     let icon_path = match id.as_str() {
         "tab-ctx-rename" => Some("icons/session/rename.svg"),
         "tab-ctx-lock" => Some("icons/lock.svg"),
@@ -117,6 +116,29 @@ pub(in crate::features) fn tab_menu_item_enabled(
         "tab-ctx-info" => Some("icons/menu/info.svg"),
         _ => None,
     };
+    tab_menu_item_enabled_with_icon(palette, id, label, icon_path, enabled, on_click)
+}
+
+pub(in crate::features) fn tab_menu_item_with_icon(
+    palette: ThemePalette,
+    id: impl Into<String>,
+    label: impl Into<String>,
+    icon_path: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    tab_menu_item_enabled_with_icon(palette, id, label, Some(icon_path), true, on_click)
+}
+
+fn tab_menu_item_enabled_with_icon(
+    palette: ThemePalette,
+    id: impl Into<String>,
+    label: impl Into<String>,
+    icon_path: Option<&'static str>,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let id = id.into();
+    let label = label.into();
     let text_color = rgb(palette.text);
     let icon_color = rgb(palette.text_muted);
     div()

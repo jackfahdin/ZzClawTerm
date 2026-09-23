@@ -1,3 +1,4 @@
+mod clipboard;
 mod mkdir_file;
 mod move_delete;
 mod send_to;

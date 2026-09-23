@@ -61,6 +61,7 @@ impl ZzClawTermApp {
                 {
                     this.ai.accept_saved_settings(saved.clone());
                     this.refresh_ai_usage_counts(cx);
+                    this.request_shared_state_refresh(crate::app_shell::SharedStateDomain::Ai, cx);
                 }
                 if completion.report_result {
                     match event.outcome {

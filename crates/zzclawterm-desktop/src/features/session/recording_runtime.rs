@@ -615,7 +615,6 @@ fn map_recording_rotation(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
     use zzclawterm_core::{AppSettingsSummary, Group};
@@ -655,15 +654,9 @@ mod tests {
 
     #[test]
     fn first_available_path_never_overwrites_an_existing_log() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time after epoch")
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "zzclawterm-recording-path-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&directory).expect("create test directory");
+        let directory =
+            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-recording-path");
+        fs::create_dir_all(directory.path()).expect("create test directory");
         let path = directory.join("session-demo.log");
         fs::write(&path, b"existing").expect("write existing log");
         fs::write(directory.join("session-demo-1.log"), b"existing")
@@ -673,8 +666,6 @@ mod tests {
             first_available_path(&path),
             directory.join("session-demo-2.log")
         );
-
-        fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

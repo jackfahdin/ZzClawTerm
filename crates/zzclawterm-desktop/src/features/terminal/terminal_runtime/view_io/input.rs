@@ -786,6 +786,9 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if self.security.screen_locked() {
+            return Err("screen locked".to_string());
+        }
         // Charset-encode paste/typed text; pure ASCII CSI/mouse reports pass through.
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::LogicalInput);
         let encoded = if disposition.encode_session_charset {
@@ -816,6 +819,9 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if self.security.screen_locked() {
+            return Err("screen locked".to_string());
+        }
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::RawInput);
         debug_assert!(!disposition.encode_session_charset);
         if let Err(error) = self
@@ -841,6 +847,9 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if self.security.screen_locked() {
+            return Err("screen locked".to_string());
+        }
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::SensitiveInput);
         debug_assert!(disposition.encode_session_charset);
         debug_assert!(!disposition.record_logical_input);
@@ -903,6 +912,9 @@ impl ZzClawTermApp {
         wire_bytes: &[u8],
         recording_bytes: &[u8],
     ) -> Result<(), String> {
+        if self.security.screen_locked() {
+            return Err("screen locked".to_string());
+        }
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::FramedInput);
         debug_assert!(!disposition.encode_session_charset);
         if let Err(error) = self
@@ -1031,6 +1043,9 @@ impl ZzClawTermApp {
         focused: bool,
         cx: &mut Context<Self>,
     ) {
+        if focused && self.security.screen_locked() {
+            return;
+        }
         self.terminal.input.focus_active = focused;
         let Some(session_id) = self.session.active_id_owned() else {
             return;
@@ -1047,6 +1062,9 @@ impl ZzClawTermApp {
         session_id: &str,
         focused: bool,
     ) -> bool {
+        if focused && self.security.screen_locked() {
+            return false;
+        }
         if self.session.is_disconnected(session_id) {
             return false;
         }

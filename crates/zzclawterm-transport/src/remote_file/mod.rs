@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -642,10 +643,14 @@ impl RemoteFileService {
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self.sftp()?.download_file(&remote_path, local_path),
             kind => {
+                let download_root = crate::download_path::root_for_target(&local_path);
+                let properties =
+                    shell_properties(&self.shell(kind), &RemoteFilePath::new(&remote_path))?;
+                ensure_supported_download_source(properties.file_type)?;
                 let bytes = self
                     .shell(kind)
                     .exec_ok(format!("cat -- {}", shell_quote(&remote_path)), None)?;
-                fs::write(&local_path, &bytes)?;
+                crate::download_path::staged_write_file(download_root, &local_path, &bytes)?;
                 Ok(SftpTransferSummary {
                     remote_path,
                     local_path,
@@ -701,12 +706,15 @@ impl RemoteFileService {
                 ),
             kind => {
                 control.wait_if_paused_blocking()?;
+                let download_root = crate::download_path::root_for_target(&local_path);
+                let properties = shell_properties(&self.shell(kind), &remote_path)?;
+                ensure_supported_download_source(properties.file_type)?;
                 let bytes = self.shell(kind).exec_ok(
                     format!("cat -- {}", shell_quote(&remote_path.display_path)),
                     None,
                 )?;
                 control.wait_if_paused_blocking()?;
-                fs::write(&local_path, &bytes)?;
+                crate::download_path::staged_write_file(download_root, &local_path, &bytes)?;
                 progress(SftpTransferProgress {
                     remote_path: remote_path.display_path.clone(),
                     local_path: local_path.clone(),
@@ -769,11 +777,14 @@ impl RemoteFileService {
                     progress,
                 ),
             kind => {
+                let download_root = crate::download_path::root_for_target(&local_path);
+                let properties = shell_properties(&self.shell(kind), &remote_path)?;
+                ensure_supported_download_source(properties.file_type)?;
                 let target = resolve_shell_download_target(
                     &remote_path.display_path,
                     &local_path,
-                    options.duplicate_policy(),
-                    options.duplicate_resolver(),
+                    properties.is_directory(),
+                    &options,
                 )?;
                 let Some(target) = target else {
                     return Ok(SftpTransferSummary {
@@ -790,6 +801,7 @@ impl RemoteFileService {
                     &target,
                     &control,
                     &mut progress,
+                    download_root,
                 )?;
                 Ok(SftpTransferSummary {
                     remote_path: remote_path.display_path,
@@ -1001,6 +1013,8 @@ pub struct FileCopySummary {
     pub bytes: u64,
     pub used_local_staging: bool,
     pub destination_path: String,
+    /// A conflict policy can return successfully without copying anything.
+    pub copied: bool,
 }
 
 impl FileCopyRequest {
@@ -1021,6 +1035,7 @@ impl FileCopyRequest {
                         bytes: 0,
                         used_local_staging: false,
                         destination_path: destination.to_string_lossy().into_owned(),
+                        copied: false,
                     });
                 };
                 control.wait_if_paused_blocking()?;
@@ -1028,6 +1043,7 @@ impl FileCopyRequest {
                     bytes: copy_local_path(&source, &destination, &control)?,
                     used_local_staging: false,
                     destination_path: destination.to_string_lossy().into_owned(),
+                    copied: true,
                 })
             }
             (
@@ -1048,6 +1064,7 @@ impl FileCopyRequest {
                         bytes: 0,
                         used_local_staging: false,
                         destination_path: path.display_path,
+                        copied: false,
                     });
                 };
                 let summary = if source.is_dir() {
@@ -1075,6 +1092,7 @@ impl FileCopyRequest {
                     bytes: summary.bytes,
                     used_local_staging: false,
                     destination_path: path.display_path,
+                    copied: true,
                 })
             }
             (
@@ -1092,6 +1110,7 @@ impl FileCopyRequest {
                     bytes: summary.bytes,
                     used_local_staging: false,
                     destination_path: summary.local_path.to_string_lossy().into_owned(),
+                    copied: true,
                 })
             }
             (
@@ -1119,6 +1138,7 @@ impl FileCopyRequest {
                         bytes: 0,
                         used_local_staging: false,
                         destination_path: destination_path.display_path,
+                        copied: false,
                     });
                 };
                 if source.backend()? == RemoteFileBackendKind::Sftp
@@ -1135,6 +1155,7 @@ impl FileCopyRequest {
                         bytes,
                         used_local_staging: false,
                         destination_path: destination_path.display_path,
+                        copied: true,
                     });
                 }
                 let staging = RemoteCopyStaging::new()?;
@@ -1171,6 +1192,7 @@ impl FileCopyRequest {
                     bytes: downloaded.bytes.min(uploaded.bytes),
                     used_local_staging: true,
                     destination_path: destination_path.display_path,
+                    copied: true,
                 })
             }
         }
@@ -1305,23 +1327,30 @@ fn download_shell_path<F>(
     local_path: &Path,
     control: &SftpTransferControl,
     progress: &mut F,
+    download_root: &Path,
 ) -> anyhow::Result<u64>
 where
     F: FnMut(SftpTransferProgress),
 {
     control.wait_if_paused_blocking()?;
+    crate::download_path::ensure_no_symlink(download_root, local_path)?;
     let properties = shell_properties(&service.shell(kind), &RemoteFilePath::new(remote_path))?;
+    ensure_supported_download_source(properties.file_type)?;
     if properties.is_directory() {
         fs::create_dir_all(local_path)?;
+        crate::download_path::ensure_no_symlink(download_root, local_path)?;
         let mut bytes = 0;
+        let mut target_keys = HashSet::new();
         for entry in list_shell_dir(
             &service.shell(kind),
             &RemoteFilePath::new(remote_path),
             kind,
         )? {
-            if entry.is_symlink() {
+            if !crate::download_path::validate_directory_entry(&entry.name, entry.file_type)? {
                 continue;
             }
+            ensure_unique_download_name(&mut target_keys, &entry.name)?;
+            ensure_supported_download_source(entry.file_type)?;
             bytes += download_shell_path(
                 service,
                 kind,
@@ -1329,6 +1358,7 @@ where
                 &local_path.join(&entry.name),
                 control,
                 progress,
+                download_root,
             )?;
         }
         Ok(bytes)
@@ -1340,7 +1370,7 @@ where
         if let Some(parent) = local_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(local_path, &bytes)?;
+        crate::download_path::staged_write_file(download_root, local_path, &bytes)?;
         progress(SftpTransferProgress {
             remote_path: remote_path.to_string(),
             local_path: local_path.to_path_buf(),
@@ -1351,6 +1381,25 @@ where
         });
         Ok(bytes.len() as u64)
     }
+}
+
+fn ensure_supported_download_source(file_type: SftpFileType) -> anyhow::Result<()> {
+    match file_type {
+        SftpFileType::File | SftpFileType::Directory => Ok(()),
+        SftpFileType::Symlink => anyhow::bail!("symbolic links are not supported in downloads"),
+        SftpFileType::Other => anyhow::bail!("remote source is not a regular file or directory"),
+    }
+}
+
+fn ensure_unique_download_name(
+    target_keys: &mut HashSet<String>,
+    name: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        target_keys.insert(crate::download_path::target_key(name)),
+        "recursive download contains conflicting local names"
+    );
+    Ok(())
 }
 
 fn upload_shell_path<F>(
@@ -1407,23 +1456,46 @@ where
 fn resolve_shell_download_target(
     remote_path: &str,
     requested: &Path,
-    policy: SftpDuplicatePolicy,
-    resolver: Option<&dyn crate::SftpDuplicateResolver>,
+    is_directory: bool,
+    options: &SftpPathTransferOptions,
 ) -> anyhow::Result<Option<PathBuf>> {
-    if !requested.exists() {
+    let key = crate::sftp_transfer_types::SftpDuplicateCacheKey::Download {
+        remote_path: remote_path.as_bytes().to_vec(),
+        local_path: requested.to_path_buf(),
+        is_directory,
+    };
+    if !crate::download_path::target_exists(requested)?
+        && options.reserve_download_target(requested, &key)?
+    {
         return Ok(Some(requested.to_path_buf()));
     }
     match duplicate_decision(
-        policy,
-        resolver,
+        options.duplicate_policy(),
+        options.duplicate_resolver(),
         SftpTransferDirection::Download,
         remote_path,
         &requested.to_string_lossy(),
-        requested.is_dir(),
+        is_directory,
     )? {
-        SftpDuplicateDecision::Overwrite => Ok(Some(requested.to_path_buf())),
+        SftpDuplicateDecision::Overwrite => {
+            anyhow::ensure!(
+                options.reserve_download_target(requested, &key)?,
+                "download target is reserved by another item in this batch"
+            );
+            Ok(Some(requested.to_path_buf()))
+        }
         SftpDuplicateDecision::Skip => Ok(None),
-        SftpDuplicateDecision::Rename => Ok(Some(unique_local_path(requested))),
+        SftpDuplicateDecision::Rename => {
+            for index in 1..=999 {
+                let candidate = local_conflict_candidate(requested, index);
+                if !crate::download_path::target_exists(&candidate)?
+                    && options.reserve_download_target(&candidate, &key)?
+                {
+                    return Ok(Some(candidate));
+                }
+            }
+            anyhow::bail!("unable to find a non-conflicting local download path")
+        }
     }
 }
 
@@ -1479,20 +1551,24 @@ fn duplicate_decision(
 
 fn unique_local_path(path: &Path) -> PathBuf {
     for index in 1.. {
-        let candidate = path.with_file_name(format!(
-            "{} ({index}){}",
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("file"),
-            path.extension()
-                .and_then(|value| value.to_str())
-                .map_or(String::new(), |value| format!(".{value}"))
-        ));
+        let candidate = local_conflict_candidate(path, index);
         if !candidate.exists() {
             return candidate;
         }
     }
     unreachable!()
+}
+
+fn local_conflict_candidate(path: &Path, index: usize) -> PathBuf {
+    path.with_file_name(format!(
+        "{} ({index}){}",
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("file"),
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map_or(String::new(), |value| format!(".{value}"))
+    ))
 }
 
 fn unique_remote_path(
@@ -2073,7 +2149,8 @@ mod tests {
     };
 
     use super::{
-        BackendProbeStage, RemoteFileBackendKind, ensure_safe_delete_target, format_permissions,
+        BackendProbeStage, RemoteFileBackendKind, ensure_safe_delete_target,
+        ensure_supported_download_source, ensure_unique_download_name, format_permissions,
         parse_enhanced_listing, parse_normal_listing, select_backend_with_probe,
         symbolic_permissions_to_mode,
     };
@@ -2105,10 +2182,61 @@ mod tests {
     }
 
     #[test]
+    fn downloads_reject_symlink_sources_and_conflicting_names() {
+        assert!(ensure_supported_download_source(SftpFileType::File).is_ok());
+        assert!(ensure_supported_download_source(SftpFileType::Directory).is_ok());
+        assert!(ensure_supported_download_source(SftpFileType::Symlink).is_err());
+        assert!(ensure_supported_download_source(SftpFileType::Other).is_err());
+
+        let mut target_keys = std::collections::HashSet::new();
+        assert!(ensure_unique_download_name(&mut target_keys, "report.txt").is_ok());
+        assert!(ensure_unique_download_name(&mut target_keys, "report.txt").is_err());
+        #[cfg(any(target_os = "macos", windows))]
+        assert!(ensure_unique_download_name(&mut target_keys, "REPORT.TXT").is_err());
+    }
+
+    #[test]
+    fn shell_download_jobs_reserve_renamed_targets_before_commit() -> anyhow::Result<()> {
+        for names in [["foo", "foo (1)"], ["foo (1)", "foo"]] {
+            let root = std::env::temp_dir().join(format!(
+                "zzclawterm-shell-reserved-{}",
+                zzclawterm_core::uuid()
+            ));
+            std::fs::create_dir(&root)?;
+            std::fs::write(root.join("foo"), b"existing")?;
+            let options = crate::SftpPathTransferOptions::new(
+                crate::SftpDuplicatePolicy::Rename,
+                None,
+                crate::SftpTransferOptions::default(),
+            );
+            let mut targets = Vec::new();
+            for name in names {
+                let target = super::resolve_shell_download_target(
+                    name,
+                    &root.join(name),
+                    false,
+                    &options.clone_for_download_batch(),
+                )?
+                .expect("selected target");
+                targets.push((name, target));
+            }
+            assert_ne!(targets[0].1, targets[1].1);
+            for (name, target) in &targets {
+                crate::download_path::staged_write_file(&root, target, name.as_bytes())?;
+            }
+            assert_eq!(std::fs::read(root.join("foo"))?, b"existing");
+            for (name, target) in targets {
+                assert_eq!(std::fs::read(target)?, name.as_bytes());
+            }
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn local_copy_applies_skip_and_rename_duplicate_policies() {
-        let root =
-            std::env::temp_dir().join(format!("zzclawterm-file-copy-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-file-copy");
+        std::fs::create_dir_all(root.path()).unwrap();
         let source = root.join("source.txt");
         let target = root.join("target.txt");
         std::fs::write(&source, "source").unwrap();
@@ -2121,10 +2249,12 @@ mod tests {
             options: SftpPathTransferOptions::new(policy, None, SftpTransferOptions::default()),
         };
         let skipped = request(SftpDuplicatePolicy::Skip).execute().unwrap();
+        assert!(!skipped.copied);
         assert_eq!(skipped.bytes, 0);
         assert_eq!(skipped.destination_path, target.to_string_lossy());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "target");
         let renamed = request(SftpDuplicatePolicy::Rename).execute().unwrap();
+        assert!(renamed.copied);
         assert_eq!(
             renamed.destination_path,
             root.join("target (1).txt").to_string_lossy()
@@ -2133,7 +2263,6 @@ mod tests {
             std::fs::read_to_string(root.join("target (1).txt")).unwrap(),
             "source"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

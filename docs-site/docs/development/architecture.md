@@ -28,7 +28,7 @@ zzclawterm-app
 |------|------|
 | `zzclawterm-app` | 可执行入口、日志、嵌入资源和根窗口创建 |
 | `zzclawterm-desktop` | GPUI 应用组合、状态、视图、平台适配和后台任务协调 |
-| `zzclawterm-ui` | 共享控件、主题 token 和 `gpui-component` 集成边界 |
+| `zzclawterm-ui` | 共享控件、主题 token 和 `gpui-kit` 集成边界 |
 | `zzclawterm-terminal` | 与 UI 无关的终端状态机、控制序列、编码和图形协议 |
 | `zzclawterm-terminal-gpui` | GPUI 终端输入、布局、选区、高亮、图片和绘制 |
 | `zzclawterm-transport` | PTY、SSH、Telnet、串口、SFTP、隧道、远程操作和传输协议 |

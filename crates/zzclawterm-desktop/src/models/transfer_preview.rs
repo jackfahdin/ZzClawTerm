@@ -523,11 +523,15 @@ impl TransferPreviewWorkspaceState {
             return false;
         };
         let removed_active = self.active_tab_id == tab_id;
+        let session_id = self.tabs[index].session_id.clone();
         self.tabs.remove(index);
         if removed_active {
             self.active_tab_id = self
                 .tabs
-                .get(index.min(self.tabs.len().saturating_sub(1)))
+                .get(index.saturating_sub(1))
+                .filter(|tab| tab.session_id == session_id)
+                .or_else(|| self.tabs.iter().find(|tab| tab.session_id == session_id))
+                .or_else(|| self.tabs.get(index.min(self.tabs.len().saturating_sub(1))))
                 .map(|tab| tab.id.clone())
                 .unwrap_or_default();
         }
@@ -607,21 +611,21 @@ mod tests {
     }
 
     #[test]
-    fn removing_active_preview_tab_selects_nearest_remaining_tab() {
+    fn removing_active_preview_tab_prefers_left_same_session_tab() {
         let first = preview_tab("session", "/one.txt");
+        let first_id = first.id.clone();
         let second = preview_tab("session", "/two.txt");
         let third = preview_tab("session", "/three.txt");
         let second_id = second.id.clone();
-        let third_id = third.id.clone();
         let mut workspace = TransferPreviewWorkspaceState::new(first);
         workspace.tabs.extend([second, third]);
         workspace.active_tab_id = second_id.clone();
 
         assert!(workspace.remove_tab(&second_id));
-        assert_eq!(workspace.active_tab_id, third_id);
+        assert_eq!(workspace.active_tab_id, first_id);
         assert_eq!(
             workspace.active_tab().map(|tab| tab.remote_path.as_str()),
-            Some("/three.txt")
+            Some("/one.txt")
         );
     }
 

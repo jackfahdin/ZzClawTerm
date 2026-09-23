@@ -257,12 +257,14 @@ fn docker_compose_project_row(
                                 }),
                             ))
                             .when(menu_open, |this| {
-                                this.child(docker_compose_project_action_menu(
-                                    context.clone(),
-                                    project_name.clone(),
-                                    config_files.clone(),
-                                    &key_for_toggle,
-                                    cx,
+                                this.child(super::super::docker_menu_layer(
+                                    docker_compose_project_action_menu(
+                                        context.clone(),
+                                        project_name.clone(),
+                                        config_files.clone(),
+                                        &key_for_toggle,
+                                        cx,
+                                    ),
                                 ))
                             }),
                     ),

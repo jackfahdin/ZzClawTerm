@@ -559,6 +559,7 @@ mod tests {
     fn shell() -> ShellFeatureState {
         ShellFeatureState::new(ShellFeatureInit {
             status: String::new(),
+            selected_nav: crate::models::NavItem::Workspace,
             bottom_panel_mode: BottomPanelMode::Hidden,
             quick_commands_height: 120.,
             command_send_height: 180.,

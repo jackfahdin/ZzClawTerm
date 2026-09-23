@@ -137,6 +137,45 @@ fn docker_environment(command: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerProbeClassification {
+    Success,
+    SocketPermissionDenied,
+    Unavailable,
+}
+
+impl DockerProbeClassification {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::SocketPermissionDenied => "socket_permission_denied",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+fn remote_command_succeeded(output: &RemoteCommandOutput) -> bool {
+    matches!(output.exit_status, Some(0) | None)
+}
+
+fn classify_docker_probe(output: &RemoteCommandOutput) -> DockerProbeClassification {
+    let combined = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+    let socket_permission_denied = combined.contains("permission denied")
+        && (combined.contains("docker daemon socket")
+            || combined.contains("docker api at unix")
+            || combined.contains("/var/run/docker.sock")
+            || combined.contains("docker.sock")
+            || combined.contains("connect to the docker daemon"));
+
+    if socket_permission_denied {
+        DockerProbeClassification::SocketPermissionDenied
+    } else if remote_command_succeeded(output) {
+        DockerProbeClassification::Success
+    } else {
+        DockerProbeClassification::Unavailable
+    }
+}
+
 pub const DOCKER_OVERVIEW_SCRIPT: &str = r#"sh -c '
 if ! command -v docker >/dev/null 2>&1; then
   printf "DOCKER_AVAILABLE\t0\n"
@@ -159,7 +198,11 @@ docker ps -a --no-trunc --format "CONTAINER\t{{.ID}}\t{{.Names}}\t{{.Image}}\t{{
 if docker compose version >/dev/null 2>&1; then
   printf "COMPOSE_AVAILABLE\t1\n"
 else
-  printf "COMPOSE_AVAILABLE\t0\n"
+  compose_version=$(docker-compose version --short 2>/dev/null || true)
+  case "$compose_version" in
+    2.*|v2.*) printf "COMPOSE_AVAILABLE\t1\n" ;;
+    *) printf "COMPOSE_AVAILABLE\t0\n" ;;
+  esac
 fi
 '"#;
 
@@ -168,11 +211,17 @@ pub const DOCKER_VOLUMES_SCRIPT: &str =
     r#"docker volume ls --format "VOLUME\t{{.Driver}}\t{{.Name}}" 2>/dev/null"#;
 pub const DOCKER_NETWORKS_SCRIPT: &str = r#"docker network ls --no-trunc --format "NETWORK\t{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}" 2>/dev/null"#;
 pub const DOCKER_COMPOSE_PROJECTS_SCRIPT: &str = r#"sh -c '
-if ! docker compose version >/dev/null 2>&1; then
+if docker compose version >/dev/null 2>&1; then
+  docker compose ls --format json 2>/dev/null || true
   exit 0
 fi
-docker compose ls --format json 2>/dev/null || true
+compose_version=$(docker-compose version --short 2>/dev/null || true)
+case "$compose_version" in
+  2.*|v2.*) docker-compose ls --format json 2>/dev/null || true ;;
+esac
 '"#;
+
+const COMPOSE_COMMAND_SETUP: &str = "compose() { if docker compose version >/dev/null 2>&1; then docker compose \"$@\"; else case \"$(docker-compose version --short 2>/dev/null)\" in 2.*|v2.*) docker-compose \"$@\" ;; *) return 127 ;; esac; fi; }; ";
 
 pub const DOCKER_CONTAINER_DETAILS_INSPECT_BEGIN: &str = "INSPECT_JSON_BEGIN";
 pub const DOCKER_CONTAINER_DETAILS_INSPECT_END: &str = "INSPECT_JSON_END";
@@ -202,14 +251,7 @@ impl DockerService {
 
     pub fn overview(&self) -> anyhow::Result<RemoteDockerOverview> {
         let output = self.exec(DOCKER_OVERVIEW_SCRIPT, DOCKER_TIMEOUT)?;
-        let mut overview = parse_docker_overview_output(&output.stdout);
-        if overview.available {
-            overview.images = self.images().unwrap_or_default();
-            overview.volumes = self.volumes().unwrap_or_default();
-            overview.networks = self.networks().unwrap_or_default();
-            overview.compose_projects = self.compose_projects().unwrap_or_default();
-        }
-        Ok(overview)
+        Ok(parse_docker_overview_output(&output.stdout))
     }
 
     pub fn images(&self) -> anyhow::Result<Vec<DockerImage>> {
@@ -330,7 +372,11 @@ impl DockerService {
         if action == "up" {
             command.push_str(" -d");
         }
-        self.exec_success(&command, DOCKER_TIMEOUT, "Docker compose action failed")
+        self.exec_success(
+            &format!("{COMPOSE_COMMAND_SETUP}{command}"),
+            DOCKER_TIMEOUT,
+            "Docker compose action failed",
+        )
     }
 
     pub fn compose_services(
@@ -340,7 +386,7 @@ impl DockerService {
     ) -> anyhow::Result<Vec<DockerComposeService>> {
         let base = build_compose_base_command(project_name, config_files);
         let command = format!(
-            "services_output=$({base} config --services) || exit $?; \
+            "{COMPOSE_COMMAND_SETUP}services_output=$({base} config --services) || exit $?; \
              printf '%s\\n' \"$services_output\"; \
              printf '\\n{COMPOSE_PS_JSON_BEGIN}\\n'; \
              {base} ps --all --format json 2>/dev/null || true; \
@@ -369,7 +415,7 @@ impl DockerService {
         command.push(' ');
         command.push_str(&sh_quote(service_name));
         self.exec_success(
-            &command,
+            &format!("{COMPOSE_COMMAND_SETUP}{command}"),
             DOCKER_TIMEOUT,
             "Docker compose service action failed",
         )
@@ -396,25 +442,52 @@ impl DockerService {
             None,
             DOCKER_TIMEOUT,
         )?;
-        if exists.exit_status != Some(0) {
+        tracing::debug!(
+            stage = "executable",
+            exit_status = ?exists.exit_status,
+            "Docker capability probe completed"
+        );
+        if !remote_command_succeeded(&exists) {
+            tracing::warn!(
+                stage = "executable",
+                exit_status = ?exists.exit_status,
+                "Docker executable is unavailable"
+            );
             anyhow::bail!("Docker is not installed or its executable is unavailable");
         }
         let probe = self.raw_exec(docker_environment("docker info"), None, DOCKER_TIMEOUT)?;
-        if probe.exit_status == Some(0) {
-            return Ok(DockerElevation::Plain);
+        let classification = classify_docker_probe(&probe);
+        tracing::debug!(
+            stage = "plain",
+            exit_status = ?probe.exit_status,
+            classification = classification.as_str(),
+            "Docker capability probe completed"
+        );
+        match classification {
+            DockerProbeClassification::Success => return Ok(DockerElevation::Plain),
+            DockerProbeClassification::Unavailable => {
+                tracing::info!(
+                    exit_status = ?probe.exit_status,
+                    "Docker daemon is unavailable"
+                );
+                // Keep plain mode so the overview script can report an unavailable
+                // daemon without turning the whole background job into an error.
+                return Ok(DockerElevation::Plain);
+            }
+            DockerProbeClassification::SocketPermissionDenied => {}
         }
-        if !probe
-            .stderr
-            .to_ascii_lowercase()
-            .contains("permission denied")
-        {
-            anyhow::bail!("Docker daemon is unavailable");
-        }
+        tracing::info!("Docker socket access requires sudo fallback");
         let privileged = format!(
             "sudo -n -- sh -c {}",
             sh_quote(&docker_environment("docker info"))
         );
-        if self.raw_exec(privileged, None, DOCKER_TIMEOUT)?.exit_status == Some(0) {
+        let sudo_probe = self.raw_exec(privileged, None, DOCKER_TIMEOUT)?;
+        tracing::debug!(
+            stage = "sudo_non_interactive",
+            exit_status = ?sudo_probe.exit_status,
+            "Docker capability probe completed"
+        );
+        if remote_command_succeeded(&sudo_probe) {
             return Ok(DockerElevation::Sudo);
         }
         let probe = format!(
@@ -422,10 +495,11 @@ impl DockerService {
             sh_quote(&docker_environment("docker info"))
         );
         if let Some(password) = self.config.password.clone()
-            && self
-                .raw_exec(probe.clone(), Some(password.clone()), DOCKER_TIMEOUT)?
-                .exit_status
-                == Some(0)
+            && remote_command_succeeded(&self.raw_exec(
+                probe.clone(),
+                Some(password.clone()),
+                DOCKER_TIMEOUT,
+            )?)
         {
             return Ok(DockerElevation::Password(password));
         }
@@ -451,11 +525,13 @@ impl DockerService {
         let password: zzclawterm_core::SecretString = response
             .ok_or_else(|| anyhow::anyhow!("Docker authorization cancelled"))?
             .into();
-        if self
-            .raw_exec(probe, Some(password.clone()), DOCKER_TIMEOUT)?
-            .exit_status
-            != Some(0)
-        {
+        let password_probe = self.raw_exec(probe, Some(password.clone()), DOCKER_TIMEOUT)?;
+        if !remote_command_succeeded(&password_probe) {
+            tracing::warn!(
+                stage = "sudo_password",
+                exit_status = ?password_probe.exit_status,
+                "Docker sudo authorization failed"
+            );
             anyhow::bail!("Docker sudo authorization failed");
         }
         Ok(DockerElevation::Password(password))
@@ -939,7 +1015,7 @@ fn compose_service_status(containers: &[DockerComposeServiceContainer]) -> Strin
 }
 
 fn build_compose_base_command(project_name: &str, config_files: Option<&str>) -> String {
-    let mut command = String::from("docker compose");
+    let mut command = String::from("compose");
     if let Some(config_files) = config_files.filter(|value| !value.trim().is_empty()) {
         for file in config_files
             .split(',')
@@ -1024,11 +1100,41 @@ fn sh_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        COMPOSE_COMMAND_SETUP, DOCKER_COMPOSE_PROJECTS_SCRIPT, DOCKER_OVERVIEW_SCRIPT,
+        DockerProbeClassification, build_compose_base_command, classify_docker_probe,
         normalize_compose_action, normalize_compose_service_action, normalize_container_action,
         parse_compose_projects, parse_compose_services_output,
         parse_docker_container_details_output, parse_docker_images_output,
         parse_docker_networks_output, parse_docker_overview_output, parse_docker_volumes_output,
     };
+    use crate::RemoteCommandOutput;
+
+    #[test]
+    fn standalone_compose_v2_is_available_for_listing_and_actions() {
+        assert!(DOCKER_OVERVIEW_SCRIPT.contains("docker-compose version --short"));
+        assert!(DOCKER_OVERVIEW_SCRIPT.contains("2.*|v2.*"));
+        assert!(DOCKER_COMPOSE_PROJECTS_SCRIPT.contains("docker-compose ls --format json"));
+        assert!(COMPOSE_COMMAND_SETUP.contains("docker-compose \"$@\""));
+        assert!(COMPOSE_COMMAND_SETUP.contains("*) return 127"));
+        assert_eq!(
+            build_compose_base_command("my project", Some("/a.yml,/b.yml")),
+            "compose -f '/a.yml' -f '/b.yml' -p 'my project'"
+        );
+    }
+
+    #[test]
+    fn overview_script_only_lists_containers() {
+        assert!(DOCKER_OVERVIEW_SCRIPT.contains("docker ps -a"));
+        for resource_command in [
+            "docker images",
+            "docker volume ls",
+            "docker network ls",
+            "docker compose ls",
+            "docker-compose ls",
+        ] {
+            assert!(!DOCKER_OVERVIEW_SCRIPT.contains(resource_command));
+        }
+    }
 
     #[test]
     fn parses_docker_overview_rows() {
@@ -1053,6 +1159,54 @@ mod tests {
         let overview = parse_docker_overview_output("DOCKER_AVAILABLE\t0\n");
         assert!(!overview.available);
         assert!(overview.containers.is_empty());
+    }
+
+    #[test]
+    fn classifies_docker_socket_permission_from_both_output_streams() {
+        for (stdout, stderr) in [
+            (
+                "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+                "",
+            ),
+            (
+                "",
+                "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+            ),
+        ] {
+            let output = RemoteCommandOutput {
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                exit_status: Some(1),
+            };
+
+            assert_eq!(
+                classify_docker_probe(&output),
+                DockerProbeClassification::SocketPermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_missing_exit_status_and_separates_daemon_unavailability() {
+        let success = RemoteCommandOutput {
+            stdout: "Server Version: 26.1.0".to_string(),
+            stderr: String::new(),
+            exit_status: None,
+        };
+        let unavailable = RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: "Cannot connect to the Docker daemon".to_string(),
+            exit_status: Some(1),
+        };
+
+        assert_eq!(
+            classify_docker_probe(&success),
+            DockerProbeClassification::Success
+        );
+        assert_eq!(
+            classify_docker_probe(&unavailable),
+            DockerProbeClassification::Unavailable
+        );
     }
 
     #[test]

@@ -130,6 +130,47 @@ fn file_entry(path: &str) -> SftpFileEntry {
 }
 
 #[test]
+fn cut_clipboard_only_settles_successful_jobs_from_the_current_generation() {
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    transfer.set_file_clipboard(
+        "session-a".into(),
+        vec![file_entry("/old")],
+        true,
+        Vec::new(),
+    );
+    let old_generation = transfer.file_clipboard().unwrap().generation;
+    transfer.track_cut_job("old".into(), old_generation, "/old".into());
+    transfer.set_file_clipboard(
+        "session-b".into(),
+        vec![file_entry("/new")],
+        true,
+        Vec::new(),
+    );
+    transfer.settle_cut_job("old", true);
+    assert_eq!(transfer.file_clipboard().unwrap().entries[0].path, "/new");
+
+    let generation = transfer.file_clipboard().unwrap().generation;
+    transfer.track_cut_job("failed".into(), generation, "/new".into());
+    transfer.settle_cut_job("failed", false);
+    assert!(transfer.file_clipboard().is_some());
+    transfer.track_cut_job("succeeded".into(), generation, "/new".into());
+    transfer.settle_cut_job("succeeded", true);
+    assert!(transfer.file_clipboard().is_none());
+
+    transfer.set_file_clipboard(
+        "session-a".into(),
+        vec![file_entry("/stale")],
+        false,
+        Vec::new(),
+    );
+    transfer.clear_file_clipboard_for_session("session-b");
+    assert!(transfer.file_clipboard().is_some());
+    transfer.clear_file_clipboard_for_session("session-a");
+    assert!(transfer.file_clipboard().is_none());
+}
+
+#[test]
 fn browser_rename_click_requires_selection_before_mouse_down() {
     let cx = TestAppContext::single();
     let mut transfer = transfer_state(&cx);
@@ -403,6 +444,43 @@ fn browser_session_restore_preserves_the_raw_directory_token() {
     transfer.restore_browser_session_cache("session-a").unwrap();
 
     assert_eq!(transfer.browser_remote_file_path(), remote);
+}
+
+#[test]
+fn transfer_moves_sftp_cache_and_invalidates_source_navigation() {
+    let cx = TestAppContext::single();
+    let mut source = transfer_state(&cx);
+    let mut target = transfer_state(&cx);
+    source.store_browser_session_cache(
+        "moved".to_string(),
+        TransferBrowserSessionCacheState {
+            entries: Arc::new(vec![file_entry("/srv/file.txt")]),
+            current_path: "/srv".to_string(),
+            current_raw_path_token: Some("raw-path".to_string()),
+            home_dir: "/home".to_string(),
+            history: VecDeque::from(["/srv".to_string()]),
+            history_index: 0,
+            visited_history: VecDeque::new(),
+        },
+    );
+    source
+        .browser
+        .navigation_jobs
+        .insert("moved".to_string(), "old-job".to_string());
+    let pending = source.prepare_browser_navigation("other", "/srv".to_string());
+    source
+        .browser
+        .pending_navigations
+        .insert("old-job".to_string(), pending);
+
+    let bundle = source.detach_sessions_for_transfer(&["moved".to_string()]);
+    assert!(!source.retains_transfer_session("moved"));
+    assert!(!source.browser.pending_navigations.contains_key("old-job"));
+    target.attach_sessions_from_transfer(bundle);
+    let cache = target.browser_session_cache("moved").expect("cache moved");
+    assert_eq!(cache.current_path, "/srv");
+    assert_eq!(cache.current_raw_path_token.as_deref(), Some("raw-path"));
+    assert_eq!(cache.entries.len(), 1);
 }
 
 #[test]
@@ -1019,6 +1097,35 @@ fn transfer_editor_owns_tab_activation_and_close_confirmation() {
 }
 
 #[test]
+fn editor_file_tabs_group_by_session_and_close_back_to_related_tab() {
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    let a1 = editor_tab("session-a", "/a1.txt");
+    let a2 = editor_tab("session-a", "/a2.txt");
+    let b = editor_tab("session-b", "/b.txt");
+    let (a1_id, a2_id) = (a1.id.clone(), a2.id.clone());
+    transfer.open_editor_tab(a1);
+    transfer.open_editor_tab(b);
+    transfer.open_editor_tab(a2);
+    let workspace = transfer.editor_workspace().unwrap();
+    assert_eq!(
+        workspace
+            .tabs
+            .iter()
+            .map(|tab| tab.session_id.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("session-a"), Some("session-a"), Some("session-b")]
+    );
+    // An older interleaved workspace still returns to the same session.
+    transfer.editor.workspace.as_mut().unwrap().tabs.swap(1, 2);
+    assert_eq!(
+        transfer.request_editor_tab_close(&a2_id),
+        TransferEditorCloseOutcome::Closed
+    );
+    assert_eq!(transfer.active_editor_tab().unwrap().id, a1_id);
+}
+
+#[test]
 fn transfer_editor_save_completion_closes_requested_tab_atomically() {
     let cx = TestAppContext::single();
     let mut transfer = transfer_state(&cx);
@@ -1539,6 +1646,34 @@ fn preview_workspace_opens_activates_and_closes_tabs() {
         super::TransferPreviewCloseOutcome::Closed
     );
     assert!(!transfer.preview_has_workspace());
+}
+
+#[test]
+fn preview_file_tabs_group_by_session_and_close_back_to_related_tab() {
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    let a1 = preview_tab("session-a", "/a1.txt");
+    let a2 = preview_tab("session-a", "/a2.txt");
+    let b = preview_tab("session-b", "/b.txt");
+    let (a1_id, a2_id) = (a1.id.clone(), a2.id.clone());
+    transfer.open_preview_tab(a1);
+    transfer.open_preview_tab(b);
+    transfer.open_preview_tab(a2);
+    let workspace = transfer.preview_workspace().unwrap();
+    assert_eq!(
+        workspace
+            .tabs
+            .iter()
+            .map(|tab| tab.session_id.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("session-a"), Some("session-a"), Some("session-b")]
+    );
+    transfer.preview.workspace.as_mut().unwrap().tabs.swap(1, 2);
+    assert_eq!(
+        transfer.close_preview_tab(&a2_id),
+        super::TransferPreviewCloseOutcome::Closed
+    );
+    assert_eq!(transfer.active_preview_tab().unwrap().id, a1_id);
 }
 
 #[test]

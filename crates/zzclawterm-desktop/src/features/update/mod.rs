@@ -1,8 +1,8 @@
 //! Native application update state and runtime.
 
 pub(in crate::features) mod download;
-mod install;
+pub(crate) mod install;
 mod state;
 mod update_runtime;
 
-pub(in crate::features) use state::UpdateFeatureState;
+pub(crate) use state::{UpdateCheckKind, UpdateEvent, UpdatePhase, UpdateStore};

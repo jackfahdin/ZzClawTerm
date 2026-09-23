@@ -3,7 +3,7 @@ use crate::{AppRuntime, RuntimeMode};
 
 #[test]
 fn exports_diagnostics_archive_with_manifest_runtime_and_logs() {
-    let runtime = test_runtime("diagnostics-export");
+    let (_temp_dir, runtime) = test_runtime("diagnostics-export");
     std::fs::create_dir_all(runtime.log_dir()).expect("log dir");
     std::fs::write(
         runtime.log_dir().join("zzclawterm-diagnostics.test.jsonl"),
@@ -32,7 +32,7 @@ fn exports_diagnostics_archive_with_manifest_runtime_and_logs() {
 
 #[test]
 fn diagnostics_archive_ignores_non_matching_logs() {
-    let runtime = test_runtime("diagnostics-filter");
+    let (_temp_dir, runtime) = test_runtime("diagnostics-filter");
     std::fs::create_dir_all(runtime.log_dir()).expect("log dir");
     std::fs::write(runtime.log_dir().join("other.jsonl"), b"skip").expect("write other");
     let output_path = runtime.data_dir().join("diagnostics.zip");
@@ -48,18 +48,17 @@ fn diagnostics_archive_ignores_non_matching_logs() {
     std::fs::remove_dir_all(runtime.data_dir()).ok();
 }
 
-fn test_runtime(name: &str) -> AppRuntime {
-    let data_dir =
-        std::env::temp_dir().join(format!("zzclawterm-core-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&data_dir).ok();
-    AppRuntime::from_parts_for_test(
+fn test_runtime(name: &str) -> (crate::test_support::TestTempDir, AppRuntime) {
+    let data_dir = crate::test_support::TestTempDir::new(&format!("zzclawterm-core-{name}"));
+    let runtime = AppRuntime::from_parts_for_test(
         RuntimeMode::Installed,
-        data_dir.clone(),
+        data_dir.path().to_path_buf(),
         data_dir.join("config"),
         data_dir.join("logs"),
         data_dir.join("cache"),
         None,
-    )
+    );
+    (data_dir, runtime)
 }
 
 fn test_options() -> DiagnosticsExportOptions {

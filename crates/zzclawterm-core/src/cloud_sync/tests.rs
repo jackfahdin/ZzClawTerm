@@ -17,8 +17,8 @@ use super::{
     snippet_remote_filename, snippet_remote_path,
 };
 use crate::{
-    AiExecutionProfile, CloudLocalStore, CloudSyncBackupInfo, CloudSyncResult, ConnectionType,
-    PortableSnapshotKind, RawPortableSnapshot, SavedConnection, SessionsConfig,
+    AiExecutionProfile, CloudLocalStore, CloudSyncBackupInfo, CloudSyncOutcome, CloudSyncResult,
+    ConnectionType, PortableSnapshotKind, RawPortableSnapshot, SavedConnection, SessionsConfig,
 };
 
 #[derive(Default, Clone)]
@@ -840,6 +840,7 @@ fn local_cloud_sync_push_and_forced_pull_round_trip() {
     let push = push_local_snapshot(&source_options, &CloudSyncState::default(), false)
         .expect("push snapshot");
     assert_eq!(push.status.message, "Cloud sync snapshot uploaded");
+    assert_eq!(push.outcome, CloudSyncOutcome::Uploaded);
     assert!(remote_dir.join("zzclawterm/sync/current.redb.enc").exists());
     assert!(remote_dir.join("zzclawterm/sync/latest.redb").exists());
     let saved_source_state = ConnectionStore::open(&source_dir)
@@ -854,6 +855,7 @@ fn local_cloud_sync_push_and_forced_pull_round_trip() {
     let pull = pull_local_snapshot(&target_options, &CloudSyncState::default(), true)
         .expect("pull snapshot");
     assert_eq!(pull.status.message, "Cloud sync snapshot downloaded");
+    assert_eq!(pull.outcome, CloudSyncOutcome::Downloaded);
     assert!(pull.backup.is_some());
     let saved_target_state = ConnectionStore::open(&target_dir)
         .expect("target reopen")
@@ -873,6 +875,46 @@ fn local_cloud_sync_push_and_forced_pull_round_trip() {
         pull.state.last_synced_payload_hash,
         push.state.last_synced_payload_hash
     );
+
+    std::fs::remove_dir_all(source_dir).ok();
+    std::fs::remove_dir_all(target_dir).ok();
+    std::fs::remove_dir_all(remote_dir).ok();
+}
+
+#[test]
+fn equal_payload_without_prior_hash_is_up_to_date_for_push_and_pull() {
+    let source_dir = unique_temp_dir("cloud-up-to-date-source");
+    let target_dir = unique_temp_dir("cloud-up-to-date-target");
+    let remote_dir = unique_temp_dir("cloud-up-to-date-remote");
+    let source_options = options(&source_dir, &remote_dir, "source-device");
+    let target_options = options(&target_dir, &remote_dir, "target-device");
+    let sessions = SessionsConfig {
+        custom_icons: Vec::new(),
+        groups: Vec::new(),
+        connections: vec![local_connection("conn-1", "Synced Shell", "bash")],
+    };
+    ConnectionStore::open(&source_dir)
+        .expect("source store")
+        .replace_sessions(&sessions)
+        .expect("seed source");
+    ConnectionStore::open(&target_dir)
+        .expect("target store")
+        .replace_sessions(&sessions)
+        .expect("seed target");
+
+    let uploaded = push_local_snapshot(&source_options, &CloudSyncState::default(), false)
+        .expect("upload initial snapshot");
+    assert_eq!(uploaded.outcome, CloudSyncOutcome::Uploaded);
+
+    let push = push_local_snapshot(&source_options, &CloudSyncState::default(), false)
+        .expect("equal push");
+    assert_eq!(push.outcome, CloudSyncOutcome::UpToDate);
+    assert!(push.state.last_synced_payload_hash.is_some());
+
+    let pull = pull_local_snapshot(&target_options, &CloudSyncState::default(), false)
+        .expect("equal pull");
+    assert_eq!(pull.outcome, CloudSyncOutcome::UpToDate);
+    assert!(pull.state.last_synced_payload_hash.is_some());
 
     std::fs::remove_dir_all(source_dir).ok();
     std::fs::remove_dir_all(target_dir).ok();
@@ -901,6 +943,13 @@ fn cloud_sync_algorithm_uses_remote_backend_abstraction() {
         push_snapshot_with_remote(&source_options, &remote, &CloudSyncState::default(), false)
             .expect("push through memory remote");
     assert_eq!(push.status.provider, "memory");
+    assert_eq!(
+        push.state.last_validated_remote_revision,
+        push.pointer
+            .as_ref()
+            .map(|pointer| pointer.revision_id.clone())
+    );
+    assert!(push.state.last_full_validation_at_ms.is_some());
     assert!(
         remote
             .read_if_exists("zzclawterm/sync/latest.redb")
@@ -912,6 +961,13 @@ fn cloud_sync_algorithm_uses_remote_backend_abstraction() {
         pull_snapshot_with_remote(&target_options, &remote, &CloudSyncState::default(), true)
             .expect("pull through memory remote");
     assert_eq!(pull.status.provider, "memory");
+    assert_eq!(
+        pull.state.last_validated_remote_revision,
+        pull.pointer
+            .as_ref()
+            .map(|pointer| pointer.revision_id.clone())
+    );
+    assert!(pull.state.last_full_validation_at_ms.is_some());
 
     let loaded = ConnectionStore::open(&target_dir)
         .expect("target store")
@@ -1709,6 +1765,7 @@ fn synced_state(revision_id: &str, payload_hash: &str) -> CloudSyncState {
         last_applied_remote_revision: Some(revision_id.to_string()),
         last_checked_at_ms: None,
         last_synced_at_ms: None,
+        ..CloudSyncState::default()
     }
 }
 
@@ -1719,6 +1776,28 @@ fn cloud_sync_settings_default_auto_pull_remote_changes_to_enabled() {
 
     assert!(settings.auto_pull_remote_changes);
     assert!(CloudSyncSettings::default().auto_pull_remote_changes);
+    assert_eq!(settings.sync_debounce_seconds, 60);
+    let explicit: CloudSyncSettings =
+        serde_json::from_str(r#"{"enabled":true,"sync_debounce_seconds":15}"#)
+            .expect("existing debounce setting deserialize");
+    assert_eq!(explicit.sync_debounce_seconds, 15);
+}
+
+#[test]
+fn legacy_cloud_sync_state_defaults_maintenance_fields() {
+    let state: CloudSyncState = serde_json::from_value(serde_json::json!({
+        "device_id": "device", "last_synced_payload_hash": "hash",
+        "last_applied_remote_revision": "revision",
+        "last_checked_at_ms": 10, "last_synced_at_ms": 20
+    }))
+    .expect("legacy cloud sync state");
+    assert!(state.last_validated_remote_revision.is_none());
+    assert!(state.last_full_validation_at_ms.is_none());
+    assert!(state.last_gc_attempt_at_ms.is_none());
+    assert_eq!(
+        serde_json::from_value::<CloudSyncState>(serde_json::to_value(&state).unwrap()).unwrap(),
+        state
+    );
 }
 
 #[test]
@@ -1823,14 +1902,9 @@ fn local_connection(id: &str, name: &str, shell: &str) -> SavedConnection {
     }
 }
 
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "zzclawterm-cloud-sync-{name}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+fn unique_temp_dir(name: &str) -> crate::test_support::TestTempDir {
+    let dir = crate::test_support::TestTempDir::new(&format!("zzclawterm-cloud-sync-{name}"));
+    std::fs::create_dir_all(dir.path()).expect("create temp dir");
     dir
 }
 

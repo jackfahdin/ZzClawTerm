@@ -11,6 +11,12 @@ use crate::shortcuts::{
     TerminalSelectAll, ToggleLeftSidebar, ToggleRecording, ToggleRightSidebar, ZoomIn, ZoomOut,
 };
 
+fn shortcut_interceptor_dispatches(id: ShortcutId) -> bool {
+    // GPUI still delivers KeyDown after an interceptor stops propagation.
+    // This action must run in the keymap instead, or the terminal sends ^L twice.
+    id != ShortcutId::TerminalClear
+}
+
 impl ZzClawTermApp {
     pub(in crate::features) fn ensure_shortcut_interceptor(&mut self, cx: &mut Context<Self>) {
         if self.shell.runtime.shortcut_interceptor.is_some() || self.shell.main_window().is_none() {
@@ -34,6 +40,9 @@ impl ZzClawTermApp {
                     ) else {
                         return false;
                     };
+                    if !shortcut_interceptor_dispatches(invocation.id) {
+                        return false;
+                    }
                     this.execute_shortcut_invocation(invocation, window, cx)
                 })
                 .unwrap_or(false);
@@ -59,7 +68,7 @@ impl ZzClawTermApp {
                 }
             }
             ShortcutId::TerminalFind => self.open_terminal_search(window, cx),
-            ShortcutId::TerminalClear => self.clear_terminal(cx),
+            ShortcutId::TerminalClear => self.send_terminal_clear_screen(cx),
             ShortcutId::TerminalSelectAll => self.select_all_terminal(cx),
             ShortcutId::ManageSyncGroups => self.open_sync_groups(window, cx),
             ShortcutId::ShowCommandSuggestions => self.show_manual_command_suggestions(cx),
@@ -199,5 +208,18 @@ impl ZzClawTermApp {
                 CopySelectedConnections
             ))
             .on_action(direct_handler!(LockScreen, LockScreen))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shortcuts::ShortcutId;
+
+    use super::shortcut_interceptor_dispatches;
+
+    #[test]
+    fn terminal_clear_is_dispatched_only_by_the_keymap() {
+        assert!(!shortcut_interceptor_dispatches(ShortcutId::TerminalClear));
+        assert!(shortcut_interceptor_dispatches(ShortcutId::TerminalFind));
     }
 }

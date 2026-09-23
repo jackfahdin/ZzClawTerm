@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn fake_claude_cli_streams_resumes_and_cancels() {
-        let script = fake_claude_script(false);
+        let (_script_dir, script) = fake_claude_script(false);
         let (settings, request) = fixture_request(&script);
         let cancel = Arc::new(AtomicBool::new(false));
         let result = run_claude_code_with_environment(
@@ -243,9 +243,8 @@ mod tests {
             result.external_session_id.as_deref(),
             Some("claude-session-1")
         );
-        let _ = std::fs::remove_dir_all(script.parent().unwrap());
 
-        let hanging = fake_claude_script(true);
+        let (_hanging_dir, hanging) = fake_claude_script(true);
         let (settings, request) = fixture_request(&hanging);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_worker = cancel.clone();
@@ -268,7 +267,6 @@ mod tests {
             .unwrap_err()
         });
         assert!(error.contains("cancelled"));
-        let _ = std::fs::remove_dir_all(hanging.parent().unwrap());
     }
 
     fn fixture_request(path: &std::path::Path) -> (AiSettings, AiChatRequest) {
@@ -312,10 +310,14 @@ mod tests {
         ])
     }
 
-    fn fake_claude_script(hang: bool) -> std::path::PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("zzclawterm-fake-claude-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
+    fn fake_claude_script(
+        hang: bool,
+    ) -> (
+        zzclawterm_core::test_support::TestTempDir,
+        std::path::PathBuf,
+    ) {
+        let directory = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-fake-claude");
+        std::fs::create_dir_all(directory.path()).unwrap();
         #[cfg(windows)]
         let path = directory.join("claude.cmd");
         #[cfg(not(windows))]
@@ -338,6 +340,6 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        path
+        (directory, path)
     }
 }

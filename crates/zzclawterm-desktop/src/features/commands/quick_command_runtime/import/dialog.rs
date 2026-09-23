@@ -197,6 +197,10 @@ impl ZzClawTermApp {
                 total_categories,
             } => {
                 self.refresh_quick_commands(cx);
+                self.request_shared_state_refresh(
+                    crate::app_shell::SharedStateDomain::Commands,
+                    cx,
+                );
                 self.shell.set_status(format!(
                     "imported {imported_commands} quick command(s), updated {updated_commands}, categories +{imported_categories}, total {total_commands}/{total_categories}"
                 ));

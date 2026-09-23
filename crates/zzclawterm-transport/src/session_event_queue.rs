@@ -1,8 +1,8 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{SessionDrain, SessionDrainStats, SessionEvent};
+use crate::{SessionDrain, SessionDrainStats, SessionEvent, SessionEventConsumerId};
 
 pub(super) const SESSION_EVENT_QUEUE_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 pub(super) const SESSION_EVENT_QUEUE_OUTPUT_LOW_WATERMARK: usize =
@@ -35,6 +35,7 @@ struct SessionEventQueueInner {
     producer_active: bool,
     closed: bool,
     cancelled_sessions: HashSet<String>,
+    consumers: HashMap<String, SessionEventConsumerId>,
     #[cfg(test)]
     waiting_output_producers: usize,
     #[cfg(test)]
@@ -157,6 +158,7 @@ impl SessionEventQueue {
             return;
         };
         inner.cancelled_sessions.insert(session_id.to_string());
+        inner.consumers.remove(session_id);
         let removed_output_bytes = inner
             .events
             .iter()
@@ -178,6 +180,29 @@ impl SessionEventQueue {
         drop(inner);
         self.shared.producer_order.notify_all();
         self.shared.output_space.notify_all();
+        self.shared.ready.notify_all();
+    }
+
+    pub(super) fn assign_consumer(&self, session_id: &str, consumer_id: SessionEventConsumerId) {
+        if session_id.is_empty() {
+            return;
+        }
+        let Ok(mut inner) = self.shared.inner.lock() else {
+            return;
+        };
+        inner.consumers.insert(session_id.to_string(), consumer_id);
+        drop(inner);
+        self.shared.ready.notify_all();
+    }
+
+    pub(super) fn clear_consumer(&self, session_id: &str, consumer_id: SessionEventConsumerId) {
+        let Ok(mut inner) = self.shared.inner.lock() else {
+            return;
+        };
+        if inner.consumers.get(session_id) == Some(&consumer_id) {
+            inner.consumers.remove(session_id);
+        }
+        drop(inner);
         self.shared.ready.notify_all();
     }
 
@@ -255,6 +280,42 @@ impl SessionEventQueue {
         drain
     }
 
+    pub(super) fn drain_blocking_for_consumer_with_output_budget(
+        &self,
+        consumer_id: SessionEventConsumerId,
+        max_events: usize,
+        max_output_bytes: Option<usize>,
+        timeout: Duration,
+    ) -> SessionDrain {
+        let wait_started = Instant::now();
+        let Ok(mut inner) = self.shared.inner.lock() else {
+            return SessionDrain::default();
+        };
+        while !inner.has_event_for_consumer(consumer_id) && !inner.closed {
+            let remaining = timeout.saturating_sub(wait_started.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            inner.consumer_wait_started();
+            let waited = self.shared.ready.wait_timeout(inner, remaining);
+            let Ok((mut waited, wait_result)) = waited else {
+                return SessionDrain::default();
+            };
+            waited.consumer_wait_finished();
+            inner = waited;
+            if wait_result.timed_out() {
+                break;
+            }
+        }
+        let drain = inner.drain_for_consumer(consumer_id, max_events, max_output_bytes);
+        let resumed = inner.resume_output_if_below_low_watermark();
+        drop(inner);
+        if resumed {
+            self.shared.output_space.notify_all();
+        }
+        drain
+    }
+
     #[cfg(test)]
     pub(super) fn waiting_output_producers(&self) -> usize {
         self.shared
@@ -275,6 +336,20 @@ impl SessionEventQueue {
 }
 
 impl SessionEventQueueInner {
+    fn event_belongs_to_consumer(
+        &self,
+        event: &SessionEvent,
+        consumer_id: SessionEventConsumerId,
+    ) -> bool {
+        self.consumers.get(event_session_id(event)) == Some(&consumer_id)
+    }
+
+    fn has_event_for_consumer(&self, consumer_id: SessionEventConsumerId) -> bool {
+        self.events
+            .iter()
+            .any(|event| self.event_belongs_to_consumer(event, consumer_id))
+    }
+
     fn output_wait_started(&mut self) {
         #[cfg(test)]
         {
@@ -377,6 +452,85 @@ impl SessionEventQueueInner {
         }
         stats.queued_events = self.events.len();
         stats.queued_output_bytes = self.queued_output_bytes;
+        SessionDrain { events, stats }
+    }
+
+    fn drain_for_consumer(
+        &mut self,
+        consumer_id: SessionEventConsumerId,
+        max_events: usize,
+        max_output_bytes: Option<usize>,
+    ) -> SessionDrain {
+        let mut events = Vec::new();
+        let mut stats = SessionDrainStats::default();
+        while events.len() < max_events {
+            let Some(index) = self
+                .events
+                .iter()
+                .position(|event| self.event_belongs_to_consumer(event, consumer_id))
+            else {
+                break;
+            };
+            if let Some(max_output_bytes) = max_output_bytes {
+                let remaining = max_output_bytes.saturating_sub(stats.drained_output_bytes);
+                let is_output = matches!(self.events.get(index), Some(SessionEvent::Output { .. }));
+                if remaining == 0 && is_output {
+                    break;
+                }
+                if let Some(SessionEvent::Output { session_id, data }) = self.events.get_mut(index)
+                {
+                    let take = data.len().min(remaining);
+                    if data.len() > take {
+                        let remaining_data = data.split_off(take);
+                        let chunk = std::mem::replace(data, remaining_data);
+                        let session_id = session_id.clone();
+                        stats.drained_events = stats.drained_events.saturating_add(1);
+                        stats.drained_output_bytes =
+                            stats.drained_output_bytes.saturating_add(chunk.len());
+                        self.queued_output_bytes =
+                            self.queued_output_bytes.saturating_sub(chunk.len());
+                        events.push(SessionEvent::Output {
+                            session_id,
+                            data: chunk,
+                        });
+                        continue;
+                    }
+                }
+            }
+            let Some(event) = self.events.remove(index) else {
+                break;
+            };
+            stats.drained_events = stats.drained_events.saturating_add(1);
+            match &event {
+                SessionEvent::Output { data, .. } => {
+                    stats.drained_output_bytes =
+                        stats.drained_output_bytes.saturating_add(data.len());
+                    self.queued_output_bytes = self.queued_output_bytes.saturating_sub(data.len());
+                }
+                SessionEvent::OutputDropped { bytes, .. } => {
+                    stats.dropped_output_bytes = stats.dropped_output_bytes.saturating_add(*bytes);
+                }
+                SessionEvent::CwdChanged { .. }
+                | SessionEvent::CommandAccepted { .. }
+                | SessionEvent::Exited { .. }
+                | SessionEvent::Error { .. } => {}
+            }
+            events.push(event);
+        }
+        stats.queued_events = self
+            .events
+            .iter()
+            .filter(|event| self.event_belongs_to_consumer(event, consumer_id))
+            .count();
+        stats.queued_output_bytes = self
+            .events
+            .iter()
+            .filter(|event| self.event_belongs_to_consumer(event, consumer_id))
+            .filter_map(|event| match event {
+                SessionEvent::Output { data, .. } => Some(data.len()),
+                _ => None,
+            })
+            .sum();
         SessionDrain { events, stats }
     }
 }

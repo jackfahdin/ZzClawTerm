@@ -992,6 +992,62 @@ impl TerminalCore {
         self.set_cell_metrics(cell_metrics.0, cell_metrics.1);
     }
 
+    /// Discard history and completed output while retaining the editable input rows.
+    pub fn clear_except_input(&mut self) {
+        let cursor = self.term.renderable_content().cursor.point;
+        let cursor_row = cursor.line.0.clamp(0, self.rows.saturating_sub(1) as i32) as usize;
+        let state = self.active_line_state();
+        let mut start = state
+            .active_input_start
+            .map(|line| line.saturating_sub(state.logical_origin))
+            .filter(|line| *line >= 0 && *line <= cursor_row as i64)
+            .map_or(cursor_row, |line| line as usize);
+        let end = state
+            .active_input_end
+            .map(|line| line.saturating_sub(state.logical_origin))
+            .filter(|line| *line >= cursor_row as i64)
+            .map_or(cursor_row, |line| (line as usize).min(self.rows - 1));
+        if state.active_input_start.is_none() {
+            while start > 0
+                && self.term.grid()[Line(start as i32 - 1)][Column(self.cols - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+            {
+                start -= 1;
+            }
+        }
+
+        // Clear through the terminal handler without changing the shell's
+        // saved cursor slot or its origin/scroll-region modes.
+        self.clear_scrollback();
+        let cursor = self.term.grid().cursor.clone();
+        for row in 0..self.rows {
+            if row < start || row > end {
+                self.term.grid_mut().cursor.point.line = Line(row as i32);
+                ansi::Handler::clear_line(&mut self.term, ansi::LineClearMode::All);
+            }
+        }
+        self.term.grid_mut().cursor = cursor;
+        if start > 0 {
+            self.term
+                .grid_mut()
+                .scroll_up(&(Line(0)..Line(end as i32 + 1)), start);
+            self.term.grid_mut().cursor.point.line -= start as i32;
+            // Moving blank rows into history must not make them scrollable again.
+            self.clear_scrollback();
+        }
+        self.drain_alacritty_events();
+        self.sync_presentation_state();
+        let origin = self.active_line_state().logical_origin;
+        self.active_line_state_mut().metadata.retain(|line, _| {
+            *line >= origin && *line <= origin.saturating_add((end - start) as i64)
+        });
+        self.graphics.clear_screen(self.active_graphics_screen());
+        self.clear_snapshot_row_cache();
+        self.stamp_changed_lines();
+        self.retain_active_presentation_range();
+    }
+
     /// Set session charset used for output decode and input encode.
     /// No-op when the resolved label is unchanged so multi-byte decoder state
     /// survives across output chunks.

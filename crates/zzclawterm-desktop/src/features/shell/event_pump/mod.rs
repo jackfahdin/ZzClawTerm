@@ -465,6 +465,7 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.security.remember_screen_lock_focus(window.focused(cx));
         let lock_status = if self.settings.summary().has_master_password {
             "Enter the master password to unlock.".to_string()
         } else {

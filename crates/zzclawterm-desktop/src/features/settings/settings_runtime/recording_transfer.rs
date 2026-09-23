@@ -13,7 +13,10 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_host_key_policy(policy);
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::HostKey,
+            cx,
+        ) {
             self.shell
                 .set_status(format!("host key policy staged as {policy}"));
             return;
@@ -109,7 +112,10 @@ impl ZzClawTermApp {
     pub(in crate::features) fn save_recording_settings(&mut self, cx: &mut Context<Self>) {
         self.recording
             .set_memory_limit(self.settings.summary().recording_memory_limit_bytes as usize);
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::Recording,
+            cx,
+        ) {
             return;
         }
         self.queue_settings_save(SettingsSaveKind::Recording, cx);
@@ -220,7 +226,10 @@ impl ZzClawTermApp {
         success_status: &'static str,
         cx: &mut Context<Self>,
     ) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::Transfer,
+            cx,
+        ) {
             return;
         }
         let _ = success_status;

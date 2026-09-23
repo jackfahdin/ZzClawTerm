@@ -146,6 +146,7 @@ struct SecurityUnlockState {
 /// secrets while the rest of the application remains usable.
 struct SecurityScreenLockState {
     locked: bool,
+    restore_focus: Option<FocusHandle>,
     password_draft: SecretString,
     status: String,
     focus: FocusHandle,
@@ -204,6 +205,7 @@ impl SecurityFeatureState {
             },
             screen_lock: SecurityScreenLockState {
                 locked: false,
+                restore_focus: None,
                 password_draft: SecretString::default(),
                 status: String::new(),
                 focus: focus.screen_lock,
@@ -393,10 +395,6 @@ impl SecurityFeatureState {
         self.unlock.error = None;
     }
 
-    pub(in crate::features) fn unlock_without_master_password(&mut self) {
-        self.unlock.secrets_unlocked = true;
-    }
-
     pub(in crate::features) fn begin_unlock_request(&mut self) -> Option<(u64, SecretString)> {
         if self.unlock.busy || !self.unlock.prompt_open {
             return None;
@@ -439,6 +437,16 @@ impl SecurityFeatureState {
         self.screen_lock.locked = true;
         self.screen_lock.password_draft.expose_secret_mut().clear();
         self.screen_lock.status = status;
+    }
+
+    pub(in crate::features) fn remember_screen_lock_focus(&mut self, focus: Option<FocusHandle>) {
+        if !self.screen_lock.locked {
+            self.screen_lock.restore_focus = focus;
+        }
+    }
+
+    pub(in crate::features) fn take_screen_lock_restore_focus(&mut self) -> Option<FocusHandle> {
+        self.screen_lock.restore_focus.take()
     }
 
     pub(in crate::features) fn deactivate_screen_lock(&mut self) {
@@ -1514,12 +1522,17 @@ mod tests {
     #[test]
     fn screen_lock_lifecycle_clears_password_and_resets_activity() {
         let mut security = security_state();
+        let cx = TestAppContext::single();
+        let previous_focus = cx.update(|cx| cx.focus_handle());
+        security.remember_screen_lock_focus(Some(previous_focus.clone()));
         security.set_screen_lock_password_draft("secret".to_string(), "ready".to_string());
         security.screen_lock.last_user_activity_at =
             std::time::Instant::now() - Duration::from_secs(60);
         let stale_activity = security.screen_lock.last_user_activity_at;
 
         security.activate_screen_lock("locked".to_string());
+        security.remember_screen_lock_focus(None);
+        assert!(security.take_screen_lock_restore_focus().is_some());
         assert!(security.screen_locked());
         assert!(security.screen_lock_password_draft().is_empty());
         assert_eq!(security.screen_lock_status(), "locked");

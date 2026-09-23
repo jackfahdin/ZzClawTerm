@@ -111,6 +111,10 @@ impl ZzClawTermApp {
                         this.security
                             .clear_revealed_for_deleted(kind, &request_item_id);
                         this.security.replace_catalog_state(catalog);
+                        this.request_shared_state_refresh(
+                            crate::app_shell::SharedStateDomain::Security,
+                            cx,
+                        );
                         let status = format!("{label} deleted");
                         this.security.set_status(status.clone());
                         this.shell.set_status(status);

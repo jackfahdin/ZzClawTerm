@@ -112,7 +112,10 @@ impl ZzClawTermApp {
     ) {
         crate::shortcuts::rebuild_keymap(&keybindings, cx);
         self.settings.set_keybindings(keybindings.clone());
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::Keybindings,
+            cx,
+        ) {
             self.settings.finish_keybinding_recording();
             self.shell
                 .set_status(success_message.replace("saved", "staged"));

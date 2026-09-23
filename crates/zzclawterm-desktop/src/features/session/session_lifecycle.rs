@@ -254,6 +254,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.clear_terminal_mouse_report_for_session(session_id);
+        self.transfer.clear_file_clipboard_for_session(session_id);
         self.session.remove_remote_file_service(session_id);
         let Some(update) = self.session.mark_session_disconnected(session_id) else {
             return;
@@ -352,6 +353,7 @@ impl ZzClawTermApp {
         }
         self.cleanup_recording_for_session(&old_id);
         self.clear_terminal_mouse_report_for_session(&old_id);
+        self.transfer.clear_file_clipboard_for_session(&old_id);
         let Some(metadata) = self.session.metadata(&old_id).cloned() else {
             self.session.finish_busy_action(&old_id);
             self.shell

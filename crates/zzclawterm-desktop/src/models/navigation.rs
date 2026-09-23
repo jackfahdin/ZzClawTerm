@@ -573,6 +573,7 @@ pub(crate) enum TitleMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TabActionsSubmenu {
     Color,
+    MoveWindow,
     SshAdvanced,
     Ai,
 }

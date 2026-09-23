@@ -82,6 +82,25 @@ fn imports_windterm_quickbar_json() {
 }
 
 #[test]
+fn windterm_import_preserves_trailing_command_whitespace_through_merge() {
+    let import_config = parse_windterm_quickbar(
+        r#"[{
+            "quick.label": "Prompt",
+            "quick.text": "echo ready ",
+            "quick.type": "Send Text"
+        }]"#,
+    )
+    .expect("windterm quickbar parses");
+    assert_eq!(import_config.commands[0].command, "echo ready ");
+
+    let mut config = QuickCommandsConfig::default();
+    merge_import(&mut config, import_config).expect("merge succeeds");
+
+    assert_eq!(config.commands[0].command, "echo ready ");
+    assert_eq!(config.commands[0].execution_mode.as_deref(), Some("append"));
+}
+
+#[test]
 fn windterm_defaults_execute_and_skips_empty_entries() {
     let import_config = parse_windterm_quickbar(
         r#"[

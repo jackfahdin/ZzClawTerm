@@ -10,6 +10,13 @@ pub(super) fn require_text(value: &str, field: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+pub(super) fn require_preserved_text(value: &str, field: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} cannot be empty"));
+    }
+    Ok(value.to_string())
+}
+
 pub(super) fn normalize_id(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

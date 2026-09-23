@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserContextTarget, TransferBrowserDragSelectionState};
 
-use super::{TransferPathPart, remote_file_name, transfer_path_part_value};
+use super::{TransferPathPart, transfer_path_part_value};
 
 /// Converts a selection identity key to its display path so raw-path-token is not
 /// treated as a user-facing path.
@@ -576,23 +576,48 @@ impl ZzClawTermApp {
             return;
         }
         let total = entries.len();
-        let base_local_path = if total == 1 {
-            self.normalized_transfer_local_path(&entries[0].path)
-        } else {
-            self.resolved_transfer_download_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        let remote_paths = entries
+            .into_iter()
+            .map(|entry| entry.remote_path())
+            .collect();
+        let targets = match self.resolve_transfer_download_targets(remote_paths, None) {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.shell.set_status(error.to_string());
+                cx.notify();
+                return;
+            }
         };
-        for entry in entries {
-            let local_path = if total == 1 {
-                base_local_path.clone()
-            } else {
-                base_local_path.join(remote_file_name(&entry.path))
-            };
-            self.start_sftp_download_job_for_target(entry.remote_path(), local_path, window, cx);
+        let mut started = 0;
+        let path_options = self.sftp_download_path_options();
+        for (remote_path, local_path) in targets {
+            if self.start_sftp_download_job_for_target(
+                remote_path,
+                local_path,
+                path_options.clone_for_download_batch(),
+                cx,
+            ) {
+                started += 1;
+            }
         }
-        self.shell
-            .set_status(format!("{total} remote download job(s) started"));
+        if started > 0 {
+            self.shell
+                .set_status(format!("{started}/{total} remote download job(s) started"));
+        }
         cx.notify();
+    }
+
+    pub(in crate::features::pages::transfers) fn start_selected_sftp_download_to_directory(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remote_paths = self
+            .selected_transfer_entries()
+            .into_iter()
+            .map(|entry| entry.remote_path())
+            .collect();
+        self.prompt_transfer_download_directory_and_start(remote_paths, window, cx);
     }
 }
 

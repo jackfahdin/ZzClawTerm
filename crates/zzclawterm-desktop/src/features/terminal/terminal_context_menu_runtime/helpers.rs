@@ -64,38 +64,6 @@ pub(super) fn terminal_ctx_item_with_icon(
     row
 }
 
-pub(super) fn open_external_url(url: &str) -> Result<(), String> {
-    let url = url.trim();
-    if url.is_empty() {
-        return Err("empty url".to_string());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to open url: {error}"))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to open url: {error}"))
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|error| format!("failed to open url: {error}"))
-    }
-}
-
 pub(super) fn search_engine_url(template: &str, query: &str) -> String {
     let encoded = urlencoding_minimal(query);
     if template.is_empty() {

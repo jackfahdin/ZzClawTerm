@@ -1,7 +1,7 @@
 use rust_i18n::t;
 
 use gpui::{Context, KeyDownEvent, Window};
-use zzclawterm_core::QuickCommandsConfig;
+use zzclawterm_core::{QuickCommand, QuickCommandCategory, QuickCommandsConfig};
 use zzclawterm_store::{StoreDomain, store_request};
 
 use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
@@ -91,9 +91,9 @@ impl ZzClawTermApp {
             store_request(StoreDomain::Commands, |store| store.load_quick_commands()),
             |this, event, cx| {
                 match event.outcome {
-                    Ok(config) => this
-                        .commands
-                        .replace_quick_command_catalog(config.commands, config.categories),
+                    Ok(config) => {
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx)
+                    }
                     Err(error) => this.settings.update_store_status(
                         format!("quick command refresh failed: {error}"),
                         false,
@@ -103,6 +103,40 @@ impl ZzClawTermApp {
             },
             cx,
         );
+    }
+
+    pub(in crate::features) fn replace_quick_command_catalog(
+        &mut self,
+        commands: Vec<QuickCommand>,
+        categories: Vec<QuickCommandCategory>,
+        cx: &mut Context<Self>,
+    ) {
+        self.commands
+            .replace_quick_command_catalog(commands, categories);
+        self.sync_quick_command_selected_category(cx);
+    }
+
+    pub(in crate::features) fn sync_quick_command_selected_category(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self.commands.quick_selected_category();
+        if self.settings.summary().ui_quick_cmd_selected_category == selected {
+            return;
+        }
+        self.settings
+            .set_quick_command_selected_category(selected.to_string());
+        self.save_quick_command_ui_settings(cx);
+    }
+
+    pub(in crate::features) fn select_quick_command_category(
+        &mut self,
+        category_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.commands.select_quick_category(category_id);
+        self.sync_quick_command_selected_category(cx);
+        cx.notify();
     }
 
     pub(in crate::features) fn set_quick_command_view_mode(

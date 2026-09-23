@@ -994,15 +994,10 @@ fn invalid(message: impl Into<String>) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        ops::Deref,
-        path::{Path, PathBuf},
-        thread,
-        time::{Duration, Instant},
-    };
+    use std::{fs, ops::Deref, path::Path};
 
     use redb::ReadableDatabase;
+    use zzclawterm_core::test_support::TestTempDir;
 
     use super::{
         ConnectionStore, META_NOTE_SUMMARY_INDEX_VERSION, META_TABLE, NOTE_DOCUMENT_PREFIX,
@@ -1012,17 +1007,13 @@ mod tests {
 
     struct TempStore {
         store: Option<ConnectionStore>,
-        dir: PathBuf,
+        dir: TestTempDir,
     }
 
     impl TempStore {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "zzclawterm-notes-test-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            fs::create_dir_all(&dir).expect("create temp directory");
+            let dir = TestTempDir::new("zzclawterm-notes-test");
+            fs::create_dir_all(dir.path()).expect("create temp directory");
             let store = ConnectionStore::open(&dir).expect("open store");
             Self {
                 store: Some(store),
@@ -1031,7 +1022,7 @@ mod tests {
         }
 
         fn path(&self) -> &Path {
-            &self.dir
+            self.dir.path()
         }
     }
 
@@ -1046,24 +1037,6 @@ mod tests {
     impl Drop for TempStore {
         fn drop(&mut self) {
             drop(self.store.take());
-
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                match fs::remove_dir_all(&self.dir) {
-                    Ok(()) if !self.dir.exists() => return,
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-                    Err(error) if Instant::now() >= deadline => {
-                        eprintln!(
-                            "failed to clean temporary notes store {}: {error}",
-                            self.dir.display()
-                        );
-                        return;
-                    }
-                    Err(_) => {}
-                }
-                thread::sleep(Duration::from_millis(25));
-            }
         }
     }
 

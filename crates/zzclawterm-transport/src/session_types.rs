@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionEventConsumerId(pub(crate) u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: String,

@@ -2,13 +2,9 @@ use rust_i18n::t;
 
 use std::borrow::Cow;
 
-use gpui::{
-    Context, IntoElement, ScrollDelta, ScrollWheelEvent, SharedString, div, prelude::*, px, rgb,
-    rgba,
-};
+use gpui::{Context, IntoElement, ListState, SharedString, div, list, prelude::*, px, rgb, rgba};
 use zzclawterm_transport::{PROCESS_LIST_UNSUPPORTED_ERROR, RemoteProcess};
 
-use crate::features::remote::PROCESS_VIEWPORT_ROWS;
 use std::sync::Arc;
 
 use super::panels::{PanelChrome, RemoteMonitorPanel};
@@ -17,12 +13,14 @@ use crate::features::text_inputs::number_input_box_from_state;
 use crate::models::RemoteProcessSortKey;
 use crate::widgets::empty_panel_with_icon;
 use gpui::Entity;
-use zzclawterm_ui::{ZzClawInputState, ZzClawNumberInputState, ZzClawSearchInput};
+use zzclawterm_ui::{
+    ZzClawInputState, ZzClawNumberInputState, ZzClawScrollable, ZzClawSearchInput,
+};
 
 use super::process::{
     ProcessDetailLabels, ProcessDisplayMode, ProcessTableLabels, ProcessTableRowActions,
-    ProcessTableRowPresentation, process_details, process_details_height_px, process_display_mode,
-    process_row_height_px, process_sort_button, process_table_row,
+    ProcessTableRowPresentation, process_details, process_display_mode, process_sort_button,
+    process_table_row,
 };
 
 /// The Processes panel, rendered from a snapshot.
@@ -39,6 +37,7 @@ pub(in crate::features::pages::remote) fn processes_panel(
     panel_width: f32,
     search: Entity<ZzClawInputState>,
     nice: Option<Entity<ZzClawNumberInputState>>,
+    process_list: ListState,
     cx: &mut Context<RemoteMonitorPanel>,
 ) -> gpui::AnyElement {
     let palette = chrome.palette;
@@ -103,87 +102,69 @@ pub(in crate::features::pages::remote) fn processes_panel(
     // both when the data, the query, the sort or the panel width changes. This pass
     // only reads them.
 
-    // Tauri-like virtual list: base row + expanded details height, spacer padding.
-    let process_row_px = process_row_height_px(mode);
-    let process_details_px = process_details_height_px(mode);
-    const PROCESS_OVERSCAN: usize = 8;
-    let selected_pid = process_state.selected_pid;
-    let row_height = |process: &RemoteProcess| -> f32 {
-        if selected_pid == Some(process.pid) {
-            process_row_px + process_details_px
-        } else {
-            process_row_px
-        }
-    };
     let total_filtered = filtered_processes.len();
-    let window_capacity = PROCESS_VIEWPORT_ROWS + PROCESS_OVERSCAN * 2;
-    let scroll_row = process_state.list_offset;
-    let window_start = scroll_row.saturating_sub(PROCESS_OVERSCAN);
-    let window_end = (window_start + window_capacity).min(total_filtered);
-    let visible_processes = filtered_processes
-        .get(window_start..window_end)
-        .unwrap_or(&[])
-        .to_vec();
-    let pad_top = filtered_processes
-        .iter()
-        .take(window_start)
-        .map(row_height)
-        .sum::<f32>();
-    let pad_bottom = filtered_processes
-        .iter()
-        .skip(window_end)
-        .map(row_height)
-        .sum::<f32>();
-
-    let selected_process = process_state
-        .selected_pid
-        .and_then(|pid| {
-            process_state
-                .items
-                .iter()
-                .find(|process| process.pid == pid)
-        })
-        .cloned();
-    // The snapshot carries the field entity, keyed per pid, and only while a
-    // process is selected. Zipped so a selected pid that is no longer in the list
-    // still shows no box, matching what the inline version did.
-    let mut nice_input = selected_process
-        .as_ref()
-        .zip(nice.as_ref())
-        .map(|(process, field)| {
-            number_input_box_from_state(
-                SharedString::from(format!("remote.process.{}.nice", process.pid)),
-                palette,
-                field.clone(),
-            )
-            .into_any_element()
-        });
-
-    let mut rows = div().flex().flex_col();
-    if filtered_processes.is_empty() {
-        rows = rows.child(empty_panel_with_icon(
+    let rows = if filtered_processes.is_empty() {
+        empty_panel_with_icon(
             t!("processManager.noMatches"),
             palette,
             "icons/processes.svg",
-        ));
+        )
+        .into_any_element()
     } else {
-        if pad_top > 0. {
-            rows = rows.child(div().h(px(pad_top)).w_full().flex_none());
-        }
-        for process in visible_processes.iter() {
-            let pid = process.pid;
-            let selected = process_state.selected_pid == Some(pid);
-            rows = rows.child(
+        let rows_processes = filtered_processes.clone();
+        let rows_state = process_state.clone();
+        let rows_table_labels = table_labels.clone();
+        let rows_detail_labels = detail_labels.clone();
+        let rows_nice = nice.clone();
+        list(
+            process_list.clone(),
+            cx.processor(move |_panel, index: usize, _, cx| {
+                let Some(process) = rows_processes.get(index).cloned() else {
+                    return div().into_any_element();
+                };
+                let pid = process.pid;
+                let selected = rows_state.selected_pid == Some(pid);
+                let nice_input = selected.then(|| rows_nice.clone()).flatten().map(|field| {
+                    number_input_box_from_state(
+                        SharedString::from(format!("remote.process.{pid}.nice")),
+                        palette,
+                        field,
+                    )
+                    .into_any_element()
+                });
+                let details = if selected {
+                    let value = if process.command_line.trim().is_empty() {
+                        process.command.clone()
+                    } else {
+                        process.command_line.clone()
+                    };
+                    process_details(
+                        palette,
+                        &process,
+                        mode,
+                        rows_detail_labels.clone(),
+                        nice_input,
+                        cx.listener(move |panel, _, _, cx| {
+                            panel.with_app(cx, |this, cx| {
+                                this.copy_process_text(value.clone(), "command", cx);
+                            });
+                        }),
+                        cx,
+                    )
+                } else {
+                    div().into_any_element()
+                };
+
                 process_table_row(
                     ProcessTableRowPresentation {
                         palette,
                         menu_bg,
                         mode,
-                        labels: table_labels.clone(),
+                        labels: rows_table_labels.clone(),
                         selected,
-                        menu_open: process_state.menu_pid == Some(pid),
+                        menu_open: rows_state.menu_pid == Some(pid),
                     },
-                    process,
+                    &process,
                     ProcessTableRowActions {
                         on_select: cx.listener(move |panel, _, _, cx| {
                             panel.with_app(cx, |this, cx| {
@@ -252,40 +233,13 @@ pub(in crate::features::pages::remote) fn processes_panel(
                         }),
                     },
                 )
-                .child(
-                    selected_process
-                        .as_ref()
-                        .filter(|selected_process| selected_process.pid == pid)
-                        .map(|selected_process| {
-                            process_details(
-                                palette,
-                                selected_process,
-                                mode,
-                                detail_labels.clone(),
-                                nice_input.take(),
-                                cx.listener({
-                                    let value = if selected_process.command_line.trim().is_empty() {
-                                        selected_process.command.clone()
-                                    } else {
-                                        selected_process.command_line.clone()
-                                    };
-                                    move |panel, _, _, cx| {
-                                        panel.with_app(cx, |this, cx| {
-                                            this.copy_process_text(value.clone(), "command", cx);
-                                        });
-                                    }
-                                }),
-                                cx,
-                            )
-                        })
-                        .unwrap_or_else(|| div().into_any_element()),
-                ),
-            );
-        }
-        if pad_bottom > 0. {
-            rows = rows.child(div().h(px(pad_bottom)).w_full().flex_none());
-        }
-    }
+                .child(details)
+                .into_any_element()
+            }),
+        )
+        .size_full()
+        .into_any_element()
+    };
 
     // Tauri ProcessManager shell: dense search toolbar + sort strip + scrollable table.
     let count_label = process_state.items.len().to_string();
@@ -440,40 +394,14 @@ pub(in crate::features::pages::remote) fn processes_panel(
                 .child(
                     div()
                         .id(SharedString::from("process-list-scroll"))
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .flex()
-                        .flex_col()
-                        .on_scroll_wheel(cx.listener(
-                            move |panel, event: &ScrollWheelEvent, _, cx| {
-                                panel.with_app(cx, |this, cx| {
-                                    let max_offset = total_filtered
-                                        .saturating_sub(PROCESS_VIEWPORT_ROWS.min(total_filtered));
-                                    if max_offset == 0 {
-                                        return;
-                                    }
-                                    let delta_rows = match event.delta {
-                                        ScrollDelta::Lines(delta) => delta.y,
-                                        ScrollDelta::Pixels(delta) => {
-                                            f32::from(delta.y) / process_row_px
-                                        }
-                                    };
-                                    // Match GPUI list semantics: scroll_top -= delta.y
-                                    let current =
-                                        this.remote_ops.process_presentation().list_offset;
-                                    let next = (current as f32 - delta_rows)
-                                        .round()
-                                        .clamp(0., max_offset as f32)
-                                        as usize;
-                                    if this.remote_ops.set_process_list_offset(next) {
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }
-                                });
-                            },
-                        ))
-                        .child(rows),
+                        .child(rows)
+                        .when(total_filtered > 0, |this| {
+                            this.vertical_scrollbar(&process_list)
+                        }),
                 ),
         )
         .into_any_element()

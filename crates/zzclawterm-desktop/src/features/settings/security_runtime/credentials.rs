@@ -204,6 +204,10 @@ impl ZzClawTermApp {
                 match result {
                     Ok((name, enabled, catalog)) => {
                         this.security.replace_catalog_state(catalog);
+                        this.request_shared_state_refresh(
+                            crate::app_shell::SharedStateDomain::Security,
+                            cx,
+                        );
                         this.security.set_status(format!(
                             "credential {name} {}",
                             if enabled { "enabled" } else { "disabled" }
@@ -320,6 +324,10 @@ impl ZzClawTermApp {
                 match result {
                     Ok((id, catalog)) => {
                         this.security.replace_catalog_state(catalog);
+                        this.request_shared_state_refresh(
+                            crate::app_shell::SharedStateDomain::Security,
+                            cx,
+                        );
                         this.security.finish_credential_editor(format!(
                             "credential saved ({})",
                             compact_id(&id)
@@ -509,6 +517,10 @@ impl ZzClawTermApp {
                 let status = match result {
                     Ok(catalog) => {
                         this.security.replace_catalog_state(catalog);
+                        this.request_shared_state_refresh(
+                            crate::app_shell::SharedStateDomain::Security,
+                            cx,
+                        );
                         t!("credentialManager.reorderSuccess").to_string()
                     }
                     Err(error) => {

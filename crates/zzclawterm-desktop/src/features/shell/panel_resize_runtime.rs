@@ -8,9 +8,7 @@ use crate::features::{
     ZzClawTermApp, settings::UiLayoutSettingsUpdate, shell::state::RESIZE_HANDLE_HOVER_DELAY,
     view_widgets::horizontal_resize_handle_visual, view_widgets::vertical_resize_handle_visual,
 };
-use crate::models::{
-    BottomPanelMode, NavItem, PanelResizeSide, PanelSide, panel_collapsed_from_persistence,
-};
+use crate::models::{BottomPanelMode, PanelResizeSide};
 
 const QUICK_CMD_HEIGHT_MIN: f32 = 36.;
 const SERIAL_SEND_HEIGHT_MIN: f32 = 60.;
@@ -118,49 +116,6 @@ impl ZzClawTermApp {
 
     fn persist_panel_widths(&mut self) {
         self.persist_ui_layout();
-    }
-
-    pub(in crate::features) fn apply_ui_layout_from_settings(&mut self) {
-        self.shell.panels.left_width = self.settings.summary().ui_left_panel_width as f32;
-        self.shell.panels.right_width = self.settings.summary().ui_right_panel_width as f32;
-        self.reconcile_remote_process_sort_columns();
-        self.transfer
-            .set_panel_height(self.settings.summary().ui_transfer_height as f32);
-        self.shell.bottom_panel.quick_commands_height =
-            self.settings.summary().ui_quick_cmd_height as f32;
-        self.shell.bottom_panel.command_send_height =
-            self.settings.summary().ui_serial_send_height as f32;
-        self.apply_activity_layout_from_settings();
-        self.shell.panels.active_left = self
-            .settings
-            .summary()
-            .ui_active_left_panel
-            .as_deref()
-            .and_then(NavItem::from_persistence_id)
-            .filter(|item| self.panel_side_for_item(*item) == Some(PanelSide::Left));
-        self.shell.panels.active_right = self
-            .settings
-            .summary()
-            .ui_active_right_panel
-            .as_deref()
-            .and_then(NavItem::from_persistence_id)
-            .filter(|item| self.panel_side_for_item(*item) == Some(PanelSide::Right));
-        self.shell.panels.left_collapsed = panel_collapsed_from_persistence(
-            self.settings.summary().ui_left_panel_collapsed,
-            self.settings.summary().ui_panel_multi_open,
-            self.shell.panels.active_left.is_some(),
-            !self.settings.summary().ui_left_open_panels.is_empty(),
-        );
-        self.shell.panels.right_collapsed = panel_collapsed_from_persistence(
-            self.settings.summary().ui_right_panel_collapsed,
-            self.settings.summary().ui_panel_multi_open,
-            self.shell.panels.active_right.is_some(),
-            !self.settings.summary().ui_right_open_panels.is_empty(),
-        );
-        self.apply_panel_stack_from_settings();
-        if !self.settings.summary().has_master_password {
-            self.security.unlock_without_master_password();
-        }
     }
 
     pub(in crate::features) fn persist_ui_layout(&mut self) {

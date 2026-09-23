@@ -23,6 +23,8 @@ pub mod secret;
 pub mod session_import;
 pub mod ssh_keys;
 pub mod terminal;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod terminal_file_drop {
     pub use super::terminal::file_drop::*;
 }
@@ -119,8 +121,8 @@ pub use cloud_sync::{
     AliyunDriveSyncSettings, CLOUD_SYNC_HISTORY_DOMAIN, CLOUD_SYNC_HISTORY_EVENT,
     CLOUD_SYNC_HISTORY_LIMIT, CloudConflictKind, CloudConflictPreview, CloudLocalStore,
     CloudRemoteCheckDecision, CloudSyncBackupInfo, CloudSyncError, CloudSyncHistoryEntry,
-    CloudSyncRemote, CloudSyncResult, CloudSyncSettings, CloudSyncState, CloudSyncStatus,
-    GiteeSnippetHttpBackend, GiteeSnippetSyncSettings, GithubGistHttpBackend,
+    CloudSyncOutcome, CloudSyncRemote, CloudSyncResult, CloudSyncSettings, CloudSyncState,
+    CloudSyncStatus, GiteeSnippetHttpBackend, GiteeSnippetSyncSettings, GithubGistHttpBackend,
     GithubGistSyncSettings, LocalCloudSyncOptions, LocalDirectoryRemote, MASKED_SECRET_VALUE,
     OAuthDriveSyncSettings, REMOTE_SYNC_POINTER_SCHEMA_VERSION, RemoteSyncPointer, S3HttpMethod,
     S3SignedRequest, S3SyncSettings, SNIPPET_REMOTE_FILE_PREFIX, SNIPPET_REMOTE_FILE_SUFFIX,

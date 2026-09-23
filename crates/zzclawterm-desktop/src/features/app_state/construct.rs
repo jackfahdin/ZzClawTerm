@@ -8,14 +8,14 @@ use crate::terminal::initial_terminal_screen;
 use gpui::{AppContext as _, Context};
 use std::collections::HashMap;
 use std::sync::Arc;
-use zzclawterm_core::{AppRuntime, uuid};
-use zzclawterm_store::{BootstrapSnapshot, StoreBlockingClient, StoreUiClient};
+use zzclawterm_core::{AppRuntime, WorkspaceUiState, uuid};
+use zzclawterm_store::BootstrapSnapshot;
 #[cfg(test)]
 use zzclawterm_store::{LoadBootstrap, StoreConfig, StoreRuntime};
 use zzclawterm_terminal::TerminalOutputDecoder;
 use zzclawterm_transport::{SessionManager, SftpDuplicatePolicy};
 
-use super::ZzClawTermApp;
+use super::{ZzClawTermApp, ZzClawTermProcessEntities, ZzClawTermStoreClients};
 use crate::features::ai::{
     AiFeatureFocus, AiFeatureInit, AiFeatureState, AiPanel, ai_active_profile_drafts,
 };
@@ -48,19 +48,40 @@ use crate::features::text_inputs::TextInputRegistry;
 use crate::features::transfers::{TransferFeatureFocus, TransferFeatureState};
 use crate::features::translation::TranslationFeatureState;
 use crate::features::tunnels::{TunnelCatalogState, TunnelFeatureState};
-use crate::features::update::UpdateFeatureState;
 use crate::models::panel_collapsed_from_persistence;
 use crate::terminal::INITIAL_TERMINAL_BANNER;
 impl ZzClawTermApp {
-    pub fn from_bootstrap(
+    pub(crate) fn from_bootstrap(
         runtime: AppRuntime,
         stores: crate::entities::UiStoreHandles,
-        bootstrap: BootstrapSnapshot,
-        store_ui: StoreUiClient,
-        store_blocking: StoreBlockingClient,
+        process_entities: ZzClawTermProcessEntities,
+        workspace_init: crate::app_shell::WorkspaceInitSnapshot,
+        store_clients: ZzClawTermStoreClients,
+        session_manager: Arc<SessionManager>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let ZzClawTermProcessEntities {
+            process_state,
+            update,
+        } = process_entities;
         zzclawterm_core::warm_terminal_input_tracker();
+        let ZzClawTermStoreClients {
+            ui: store_ui,
+            blocking: store_blocking,
+        } = store_clients;
+        let workspace_id = workspace_init.workspace_id;
+        let mut bootstrap = process_state.read(cx).snapshot().clone();
+        let workspace_ui = workspace_init
+            .state
+            .as_ref()
+            .map(|workspace| workspace.ui.clone())
+            .unwrap_or_default();
+        if let Some(workspace) = workspace_init.state.as_ref() {
+            bootstrap.open_tabs = workspace.sessions.open_tabs.clone();
+        } else {
+            bootstrap.open_tabs.clear();
+        }
+        apply_workspace_ui_to_settings(&mut bootstrap.settings, &workspace_ui);
         let BootstrapSnapshot {
             database_path,
             custom_icons,
@@ -87,6 +108,7 @@ impl ZzClawTermApp {
             ai_message_count,
             ai_audit_count,
             open_tabs,
+            ..
         } = bootstrap;
         let mut settings = settings;
         // Localized child views cache placeholders while they are constructed, so
@@ -111,7 +133,7 @@ impl ZzClawTermApp {
         }
         let store_status = (
             database_path.display().to_string(),
-            "redb connection store online".to_string(),
+            t!("settings.redbStoreOnline").to_string(),
             true,
         );
         let otp_provider = Arc::new(NativeOtpProvider::new(store_blocking.clone()));
@@ -172,6 +194,9 @@ impl ZzClawTermApp {
         let panel_multi_open = settings.ui_panel_multi_open;
         let panel_open_mode =
             crate::models::PanelOpenMode::from_setting(&settings.ui_panel_open_mode);
+        let selected_nav = NavItem::from_persistence_id(&workspace_ui.current_page)
+            .filter(|item| !item.opens_settings())
+            .unwrap_or(NavItem::Workspace);
         if panel_open_mode.is_floating() {
             active_left_panel = None;
             active_right_panel = None;
@@ -184,7 +209,6 @@ impl ZzClawTermApp {
         terminal_output_decoder.set_encoding(&settings.interaction_default_encoding);
         let mut terminal_screen = initial_terminal_screen();
         terminal_screen.set_encoding(&settings.interaction_default_encoding);
-        let session_manager = Arc::new(SessionManager::new());
         let terminal_frame_pipeline = TerminalFramePipeline::spawn(recording_writer);
         let session_event_bridge = SessionEventBridge::spawn(
             Arc::clone(&session_manager),
@@ -210,12 +234,16 @@ impl ZzClawTermApp {
         let ai_panel = cx.new(|_| AiPanel::new(app_entity.downgrade()));
         let start_workspace = StartWorkspaceFeatureState::new(&connection_groups, &settings, cx);
 
-        // Settings are loaded after gpui-component initialization, so this is the
+        // Settings are loaded after gpui-kit initialization, so this is the
         // first point at which the persisted shortcut map can replace the defaults.
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
 
         let blocking_jobs = crate::blocking_jobs::BlockingJobScheduler::new();
         let mut app = Self {
+            workspace_id,
+            workspace_revision: 0,
+            desktop_controller: None,
+            process_state,
             blocking_jobs: blocking_jobs.clone(),
             stores,
             store_ui,
@@ -244,6 +272,7 @@ impl ZzClawTermApp {
                 history: command_history,
                 sort_mode: quick_command_sort_mode_from_setting(&settings.ui_quick_cmd_sort_mode),
                 view_mode: quick_command_view_mode_from_setting(&settings.ui_quick_cmd_view_mode),
+                selected_category: settings.ui_quick_cmd_selected_category.clone(),
                 focus: QuickCommandFeatureFocus {
                     editor: cx.focus_handle(),
                     details: cx.focus_handle(),
@@ -264,7 +293,6 @@ impl ZzClawTermApp {
                 TerminalFeatureFocus {
                     actions: cx.focus_handle(),
                     terminal: cx.focus_handle(),
-                    paste: cx.focus_handle(),
                 },
             ),
             ai: AiFeatureState::new(
@@ -322,7 +350,7 @@ impl ZzClawTermApp {
             remote_panels,
             remote_desktop: RemoteDesktopFeatureState::new(cx.focus_handle()),
             translation: TranslationFeatureState::new(translation_settings),
-            update: UpdateFeatureState::new(),
+            update,
             cloud_sync: CloudSyncFeatureState::new(
                 cloud_sync_settings,
                 cloud_sync_state,
@@ -343,6 +371,7 @@ impl ZzClawTermApp {
             selects: SelectRegistry::default(),
             shell: ShellFeatureState::new(ShellFeatureInit {
                 status: "idle".to_string(),
+                selected_nav,
                 bottom_panel_mode: if settings.ui_serial_send_visible {
                     BottomPanelMode::CommandSend
                 } else if settings.ui_quick_cmd_visible {
@@ -393,6 +422,7 @@ impl ZzClawTermApp {
             _test_config_dir: None,
         };
         app.update_custom_icons(custom_icons, cx);
+        app.sync_quick_command_selected_category(cx);
         app
     }
 
@@ -431,9 +461,46 @@ impl ZzClawTermApp {
             .expect("receive test bootstrap")
             .outcome
             .expect("load test bootstrap");
-        let mut app =
-            Self::from_bootstrap(runtime, stores, bootstrap, store_ui, store_blocking, cx);
+        let workspace_id = bootstrap
+            .workspace_restore
+            .most_recent()
+            .map(|workspace| workspace.id)
+            .unwrap_or_default();
+        let process_state = cx.new(|_| crate::app_shell::ProcessStateStore::new(bootstrap));
+        let workspace_init = process_state.read(cx).workspace_init(workspace_id);
+        let update = cx.new(|_| crate::features::update::UpdateStore::new());
+        let mut app = Self::from_bootstrap(
+            runtime,
+            stores,
+            ZzClawTermProcessEntities::new(process_state, update),
+            workspace_init,
+            ZzClawTermStoreClients::new(store_ui, store_blocking),
+            Arc::new(SessionManager::new()),
+            cx,
+        );
         app._test_config_dir = Some(test_config_dir);
         app
     }
+}
+
+fn apply_workspace_ui_to_settings(
+    settings: &mut zzclawterm_core::AppSettingsSummary,
+    ui: &WorkspaceUiState,
+) {
+    settings.ui_left_panel_width = ui.left_panel_width;
+    settings.ui_right_panel_width = ui.right_panel_width;
+    settings.ui_transfer_height = ui.transfer_panel_height;
+    settings.ui_quick_cmd_height = ui.bottom_panel_height;
+    settings.ui_serial_send_height = ui.serial_send_panel_height;
+    settings.ui_quick_cmd_visible = ui.bottom_panel_mode == "quick_commands";
+    settings.ui_serial_send_visible = ui.bottom_panel_mode == "command_send";
+    settings.ui_active_left_panel = ui.active_left_panel.clone();
+    settings.ui_active_right_panel = ui.active_right_panel.clone();
+    settings.ui_left_panel_collapsed = ui.left_panel_collapsed;
+    settings.ui_right_panel_collapsed = ui.right_panel_collapsed;
+    settings.ui_panel_multi_open = ui.panel_multi_open;
+    settings.ui_panel_open_mode = ui.panel_open_mode.clone();
+    settings.ui_left_open_panels = ui.left_open_panels.clone();
+    settings.ui_right_open_panels = ui.right_open_panels.clone();
+    settings.ui_panel_stack_sizes = ui.panel_stack_sizes.clone().into_iter().collect();
 }

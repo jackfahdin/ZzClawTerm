@@ -113,8 +113,7 @@ impl ZzClawTermApp {
                         .child(option.count.to_string()),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.commands.select_quick_category(id.clone());
-                    cx.notify();
+                    this.select_quick_command_category(id.clone(), cx);
                 }))
                 .when(manageable, |this| {
                     let drag_id = drag_option_id.clone();
@@ -355,6 +354,63 @@ mod tests {
 
     fn labels(items: &[ZzClawMenuItem]) -> Vec<&str> {
         items.iter().map(ZzClawMenuItem::test_label).collect()
+    }
+
+    fn stored_selected_category(
+        app: &gpui::Entity<ZzClawTermApp>,
+        cx: &mut TestAppContext,
+    ) -> String {
+        cx.update_entity(app, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .expect("load stored settings")
+                .ui_quick_cmd_selected_category
+        })
+    }
+
+    #[test]
+    fn selecting_and_deleting_a_category_updates_and_persists_settings() {
+        let mut cx = TestAppContext::single();
+        let app = menu_app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.replace_quick_command_catalog(Vec::new(), vec![category("category-a", 0)], cx);
+            app.select_quick_command_category("category-a".to_string(), cx);
+            assert_eq!(app.commands.quick_selected_category(), "category-a");
+            assert_eq!(
+                app.settings.summary().ui_quick_cmd_selected_category,
+                "category-a"
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_selected_category(&app, &mut cx), "category-a");
+
+        cx.update_entity(&app, |app, cx| {
+            app.replace_quick_command_catalog(Vec::new(), Vec::new(), cx);
+            app.commands.finish_quick_category_delete("category-a");
+            app.sync_quick_command_selected_category(cx);
+            assert_eq!(app.commands.quick_selected_category(), "all");
+            assert_eq!(app.settings.summary().ui_quick_cmd_selected_category, "all");
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_selected_category(&app, &mut cx), "all");
+
+        cx.update_entity(&app, |app, cx| {
+            app.select_quick_command_category("uncategorized".to_string(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_selected_category(&app, &mut cx), "uncategorized");
+
+        cx.update_entity(&app, |app, cx| {
+            let mut settings = app.settings.summary().clone();
+            settings.ui_quick_cmd_selected_category = "removed-category".to_string();
+            app.apply_gpui_settings(settings, cx);
+            assert_eq!(app.commands.quick_selected_category(), "all");
+            assert_eq!(app.settings.summary().ui_quick_cmd_selected_category, "all");
+        });
+        cx.run_until_parked();
+        assert_eq!(stored_selected_category(&app, &mut cx), "all");
     }
 
     /// Mirrors Tauri's category `ContextMenuContent`: two add actions, the reorder

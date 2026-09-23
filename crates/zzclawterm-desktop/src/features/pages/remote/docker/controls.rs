@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use gpui::{
     App, ClickEvent, Context, FontWeight, IntoElement, MouseButton, Window, div, prelude::*, px,
     rgb,
@@ -10,16 +12,31 @@ use crate::features::shell::gpui_code_font_family;
 use crate::models::DockerTab;
 use crate::theme::ThemePalette;
 
-use super::DockerRenderContext;
+use super::{DockerRenderContext, docker_tab_menu_layer};
+
+fn tab_label(label: String, count: usize, loaded: bool) -> String {
+    if loaded {
+        format!("{label} {count}")
+    } else {
+        label
+    }
+}
 
 pub(in crate::features::pages::remote) struct DockerTabBarLabels {
     pub tabs: [String; 5],
     pub more: String,
 }
 
+pub(in crate::features::pages::remote) struct DockerTabBarState<'a> {
+    pub active_tab: DockerTab,
+    pub overview: &'a RemoteDockerOverview,
+    pub loaded_resources: &'a HashSet<DockerTab>,
+}
+
 pub(in crate::features::pages::remote) fn docker_overview_strip(
     palette: ThemePalette,
     overview: &RemoteDockerOverview,
+    images_loaded: bool,
     labels: [String; 3],
 ) -> impl IntoElement {
     let [running_label, stopped_label, images_label] = labels;
@@ -31,36 +48,32 @@ pub(in crate::features::pages::remote) fn docker_overview_strip(
     let stopped = overview.containers.len().saturating_sub(running);
 
     div()
-        .h(px(32.))
+        .h(px(30.))
         .flex_none()
-        .mx_2()
-        .mt_2()
-        .mb_2()
-        .rounded_md()
+        .rounded_sm()
         .border_1()
         .border_color(rgb(palette.border))
         .bg(rgb(palette.section_header))
-        .px_2()
+        .px_1()
         .flex()
         .items_center()
-        .justify_between()
-        .gap_1()
+        .gap(px(2.))
         .child(docker_overview_stat(
             palette,
             running_label,
-            running,
+            Some(running),
             Some(0x86efac),
         ))
         .child(docker_overview_stat(
             palette,
             stopped_label,
-            stopped,
+            Some(stopped),
             Some(0xcbd5e1),
         ))
         .child(docker_overview_stat(
             palette,
             images_label,
-            overview.images.len(),
+            images_loaded.then_some(overview.images.len()),
             None,
         ))
 }
@@ -68,13 +81,15 @@ pub(in crate::features::pages::remote) fn docker_overview_strip(
 fn docker_overview_stat(
     palette: ThemePalette,
     label: String,
-    value: usize,
+    value: Option<usize>,
     accent: Option<u32>,
 ) -> impl IntoElement {
     div()
         .min_w_0()
+        .flex_1()
         .flex()
         .items_center()
+        .justify_center()
         .gap_1()
         .text_size(px(10.))
         .text_color(accent.map(rgb).unwrap_or_else(|| rgb(palette.text_muted)))
@@ -90,19 +105,23 @@ fn docker_overview_stat(
                 .font_family(gpui_code_font_family())
                 .text_size(px(11.))
                 .font_weight(FontWeight(600.))
-                .child(value.to_string()),
+                .child(value.map_or_else(|| "-".to_string(), |value| value.to_string())),
         )
 }
 
 pub(in crate::features::pages::remote) fn docker_tab_bar(
     context: DockerRenderContext,
-    active_tab: DockerTab,
-    overview: &RemoteDockerOverview,
+    state: DockerTabBarState<'_>,
     labels: DockerTabBarLabels,
     panel_width: f32,
     menu_open: bool,
     cx: &mut Context<RemoteMonitorPanel>,
 ) -> impl IntoElement {
+    let DockerTabBarState {
+        active_tab,
+        overview,
+        loaded_resources,
+    } = state;
     let DockerRenderContext {
         palette, menu_bg, ..
     } = context;
@@ -120,25 +139,41 @@ pub(in crate::features::pages::remote) fn docker_tab_bar(
     let mut tabs = vec![
         (
             DockerTab::Containers,
-            format!("{} {}", containers_label, overview.containers.len()),
+            tab_label(containers_label, overview.containers.len(), true),
         ),
         (
             DockerTab::Images,
-            format!("{} {}", images_label, overview.images.len()),
+            tab_label(
+                images_label,
+                overview.images.len(),
+                loaded_resources.contains(&DockerTab::Images),
+            ),
         ),
         (
             DockerTab::Volumes,
-            format!("{} {}", volumes_label, overview.volumes.len()),
+            tab_label(
+                volumes_label,
+                overview.volumes.len(),
+                loaded_resources.contains(&DockerTab::Volumes),
+            ),
         ),
         (
             DockerTab::Networks,
-            format!("{} {}", networks_label, overview.networks.len()),
+            tab_label(
+                networks_label,
+                overview.networks.len(),
+                loaded_resources.contains(&DockerTab::Networks),
+            ),
         ),
     ];
     if overview.compose_available {
         tabs.push((
             DockerTab::Compose,
-            format!("{} {}", compose_label, overview.compose_projects.len()),
+            tab_label(
+                compose_label,
+                overview.compose_projects.len(),
+                loaded_resources.contains(&DockerTab::Compose),
+            ),
         ));
     }
     // Tauri switches overflowed tabs into a More menu. These thresholds keep
@@ -164,10 +199,6 @@ pub(in crate::features::pages::remote) fn docker_tab_bar(
         .relative()
         .h(px(32.))
         .flex_none()
-        .px_2()
-        .border_b_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.section_header))
         .flex()
         .items_center()
         .gap_1();
@@ -193,27 +224,23 @@ pub(in crate::features::pages::remote) fn docker_tab_bar(
         ),
     );
     if !hidden_tabs.is_empty() {
-        bar = bar.child(
-            div()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(docker_tab_button(
-                    palette,
-                    "docker-tab-more",
-                    more_label,
-                    menu_open || more_active,
-                    cx.listener(|panel, _, _, cx| {
-                        panel.with_app(cx, |this, cx| {
-                            this.toggle_docker_tab_menu(cx);
-                        });
-                    }),
-                )),
-        );
+        let mut more = div()
+            .relative()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(docker_tab_button(
+                palette,
+                "docker-tab-more",
+                more_label,
+                menu_open || more_active,
+                cx.listener(|panel, _, _, cx| {
+                    panel.with_app(cx, |this, cx| {
+                        this.toggle_docker_tab_menu(cx);
+                    });
+                }),
+            ));
         if menu_open {
             let mut menu = div()
                 .id("docker-tab-more-menu")
-                .absolute()
-                .top(px(30.))
-                .right(px(4.))
                 .w(px(160.))
                 .rounded_md()
                 .border_1()
@@ -223,6 +250,7 @@ pub(in crate::features::pages::remote) fn docker_tab_bar(
                 .py_1()
                 .flex()
                 .flex_col()
+                .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
             for (index, (tab, label)) in hidden_tabs.iter().enumerate() {
                 let tab = *tab;
@@ -240,8 +268,9 @@ pub(in crate::features::pages::remote) fn docker_tab_bar(
                     }),
                 ));
             }
-            bar = bar.child(menu);
+            more = more.child(docker_tab_menu_layer(menu));
         }
+        bar = bar.child(more);
     }
     bar
 }

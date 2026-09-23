@@ -13,8 +13,6 @@ use crate::models::{
 };
 use crate::terminal::terminal_byte_index_for_cell_col;
 
-use super::helpers::open_external_url_for_action;
-
 fn action_link_hover_should_yield_to_terminal_latency(
     last_input_at: Option<Instant>,
     last_user_scroll_at: Option<Instant>,
@@ -416,13 +414,7 @@ impl ZzClawTermApp {
             cx.notify();
             return true;
         }
-        match open_external_url_for_action(&url) {
-            Ok(()) => self.shell.set_status(format!("opened OSC 8 link: {url}")),
-            Err(error) => self
-                .shell
-                .set_status(format!("open OSC 8 link failed: {error}")),
-        }
-        cx.notify();
+        self.open_external_url_for_ui(&url, cx);
         true
     }
 
@@ -434,7 +426,7 @@ impl ZzClawTermApp {
         if self.try_activate_osc8_hyperlink_at_click(event, cx) {
             return true;
         }
-        let Some((item, actions)) = self.action_link_at_click(event, cx) else {
+        let Some((_item, actions)) = self.action_link_at_click(event, cx) else {
             return false;
         };
         self.terminal.menus.action_link_tooltip = None;
@@ -447,13 +439,7 @@ impl ZzClawTermApp {
             return false;
         };
         if let Some(url) = default.open_url {
-            match open_external_url_for_action(&url) {
-                Ok(()) => self
-                    .shell
-                    .set_status(format!("opened {}: {url}", item.kind.label())),
-                Err(error) => self.shell.set_status(format!("open link failed: {error}")),
-            }
-            cx.notify();
+            self.open_external_url_for_ui(&url, cx);
             return true;
         }
         if let Some(command) = default.command {

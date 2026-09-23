@@ -11,7 +11,6 @@ use zzclawterm_transport::{
 };
 
 use crate::features::ZzClawTermApp;
-use crate::features::formatting::download_file_name_from_remote_path;
 use crate::features::transfers::SftpJobSession;
 use crate::models::{NavItem, TransferPathPromptKind, TransferPathPromptResult};
 
@@ -176,18 +175,22 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    /// Builds a single-file download target from an explicit remote display path; the
-    /// selection identity key must not participate in naming.
-    pub(in crate::features) fn normalized_transfer_local_path(&self, remote_path: &str) -> PathBuf {
-        let value = self.transfer.local_path().trim();
-        if value.is_empty() {
-            let file_name = download_file_name_from_remote_path(remote_path);
-            self.resolved_transfer_download_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(file_name)
-        } else {
-            PathBuf::from(value)
-        }
+    /// Resolve targets for both download entry points; an explicit directory bypasses
+    /// the single-file target override.
+    pub(in crate::features) fn resolve_transfer_download_targets(
+        &self,
+        remote_paths: Vec<RemoteFilePath>,
+        directory: Option<PathBuf>,
+    ) -> anyhow::Result<Vec<(RemoteFilePath, PathBuf)>> {
+        let explicit = directory
+            .is_none()
+            .then(|| self.transfer.local_path().trim())
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        let directory = directory
+            .or_else(|| self.resolved_transfer_download_dir())
+            .unwrap_or_else(|| PathBuf::from("."));
+        transfer_download_targets(remote_paths, directory, explicit)
     }
 
     pub(in crate::features) fn prompt_transfer_download_directory_and_start(
@@ -394,6 +397,24 @@ impl ZzClawTermApp {
                         .set_status("source session is unavailable".to_string());
                     return;
                 };
+                if self
+                    .session
+                    .file_browser_backend_for_session(service_session_id)
+                    != Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+                {
+                    self.shell
+                        .set_status("source session is unavailable".to_string());
+                    return;
+                }
+                let targets = match self
+                    .resolve_transfer_download_targets(remote_paths, Some(directory.clone()))
+                {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        self.shell.set_status(error.to_string());
+                        return;
+                    }
+                };
                 let service = match self.remote_file_service_for_session(service_session_id, config)
                 {
                     Ok(service) => service,
@@ -406,15 +427,12 @@ impl ZzClawTermApp {
                     session_id,
                     service,
                 };
-                for remote_path in remote_paths {
-                    let local_path = directory.join(download_file_name_from_remote_path(
-                        &remote_path.display_path,
-                    ));
+                for (remote_path, local_path) in targets {
                     self.enqueue_sftp_download_job_for_target(
                         session.clone(),
                         remote_path,
                         local_path,
-                        path_options.clone(),
+                        path_options.clone_for_download_batch(),
                         cx,
                     );
                 }
@@ -638,6 +656,36 @@ impl ZzClawTermApp {
     }
 }
 
+/// Validate all generated names before enqueueing; an explicit single-file target
+/// does not depend on the remote display name.
+fn transfer_download_targets(
+    remote_paths: Vec<RemoteFilePath>,
+    directory: PathBuf,
+    explicit: Option<PathBuf>,
+) -> anyhow::Result<Vec<(RemoteFilePath, PathBuf)>> {
+    if remote_paths.len() == 1
+        && let Some(target) = explicit
+    {
+        return Ok(remote_paths
+            .into_iter()
+            .map(|path| (path, target.clone()))
+            .collect());
+    }
+    let mut names = std::collections::HashSet::new();
+    remote_paths
+        .into_iter()
+        .map(|remote_path| {
+            let name = zzclawterm_transport::download_path::file_name(&remote_path.display_path)?;
+            anyhow::ensure!(
+                names.insert(zzclawterm_transport::download_path::target_key(name)),
+                "selected remote items have conflicting local names"
+            );
+            let target = directory.join(name);
+            Ok((remote_path, target))
+        })
+        .collect()
+}
+
 fn default_transfer_download_dir() -> Option<PathBuf> {
     dirs::download_dir().or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
 }
@@ -674,6 +722,32 @@ fn transfer_upload_remote_child_path(remote_dir: &str, name: &str) -> String {
 mod tests {
     use super::{transfer_upload_local_name, transfer_upload_remote_child_path};
     use std::path::PathBuf;
+
+    #[test]
+    fn download_targets_preserve_raw_identity_and_respect_explicit_single_target() {
+        use zzclawterm_transport::RemoteFilePath;
+        let source = RemoteFilePath::from_raw("/remote/a\\b", b"/remote/a\\b");
+        let explicit = PathBuf::from("chosen.txt");
+        let targets = super::transfer_download_targets(
+            vec![source.clone()],
+            PathBuf::from("."),
+            Some(explicit.clone()),
+        )
+        .unwrap();
+        assert_eq!(targets, vec![(source.clone(), explicit)]);
+        assert!(super::transfer_download_targets(vec![source], PathBuf::from("."), None).is_err());
+        assert!(
+            super::transfer_download_targets(
+                vec![
+                    RemoteFilePath::new("/a/same"),
+                    RemoteFilePath::new("/b/same")
+                ],
+                PathBuf::from("."),
+                None,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn upload_remote_child_path_joins_browser_directory_and_local_name() {

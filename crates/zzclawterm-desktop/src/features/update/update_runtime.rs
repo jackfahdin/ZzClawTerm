@@ -1,13 +1,10 @@
 use rust_i18n::t;
 
-use futures::StreamExt as _;
 use gpui::{Context, IntoElement, Window};
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
+use super::UpdateCheckKind;
 use crate::features::ZzClawTermApp;
-use crate::http::update::check_native_update;
-
-use super::state::UpdateJobResult;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_update_dialog(
@@ -27,7 +24,16 @@ impl ZzClawTermApp {
             window,
             cx,
         );
-        self.start_update_check(cx);
+        let should_check = !matches!(
+            self.update.read(cx).phase(),
+            super::UpdatePhase::Available
+                | super::UpdatePhase::Downloading { .. }
+                | super::UpdatePhase::Ready
+                | super::UpdatePhase::Checking
+        );
+        if should_check {
+            self.start_update_check(cx);
+        }
     }
 
     pub(in crate::features) fn close_update_dialog(
@@ -40,48 +46,11 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn start_update_check(&mut self, cx: &mut Context<Self>) {
-        let Some(tx) = self.update.begin_check() else {
-            cx.notify();
-            return;
-        };
-        let rejected_tx = tx.clone();
-        if let Err(error) = self
-            .blocking_jobs
-            .submit_detached("update-check", move |_| {
-                let result = check_native_update();
-                let _ = tx.unbounded_send(UpdateJobResult::new(result));
-            })
-        {
-            let _ = rejected_tx.unbounded_send(UpdateJobResult::new(Err(error.to_string())));
+        if let Some(controller) = self.desktop_controller.clone() {
+            let _ = controller.update(cx, |controller, cx| {
+                controller.start_update_check(UpdateCheckKind::Manual, cx)
+            });
         }
         cx.notify();
-    }
-
-    /// Deliver update-check results as they arrive.
-    ///
-    /// Started once at window open. Before this the runtime tick polled
-    /// `rx.try_recv`, which meant a result waited for the next tick and forced
-    /// `runtime_quiet_tick_allowed` to carry an `update` term to keep that wait
-    /// short.
-    pub(in crate::features) fn start_update_event_drain(&mut self, cx: &mut Context<Self>) {
-        let Some(mut rx) = self.update.take_event_receiver() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = rx.next().await {
-                if this
-                    .update(cx, |this, cx| {
-                        if this.update.apply_event(event) {
-                            this.shell.set_status(this.update.status().to_string());
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 }

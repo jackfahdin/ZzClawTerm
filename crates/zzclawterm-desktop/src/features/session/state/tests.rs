@@ -622,6 +622,42 @@ fn session_catalog_registration_and_reordering_stay_synchronized() {
 }
 
 #[test]
+fn transferring_split_session_catalog_preserves_order_metadata_and_pending_events() {
+    let test_dir = TestConfigDir::new("zzclawterm-session-transfer-test");
+    let target_dir = TestConfigDir::new("zzclawterm-session-transfer-target-test");
+    let cx = TestAppContext::single();
+    let mut source = session_state(&cx, test_dir.path());
+    let mut target = session_state(&cx, target_dir.path());
+    source.register_session_metadata("root", session_metadata("root session", None));
+    source.register_session_metadata("leaf", session_metadata("split leaf", None));
+    source.register_session_metadata("keep", session_metadata("unmoved", None));
+    target.register_session_metadata("existing", session_metadata("existing", None));
+    source.set_custom_name("root".into(), "renamed".into());
+    source.set_tab_color("root", Some(0x123456));
+    source.set_tab_locked("root", true);
+    source.extend_pending_events([SessionEvent::CwdChanged {
+        session_id: "leaf".into(),
+        cwd: "/workspace".into(),
+    }]);
+
+    let ids = vec!["root".to_string(), "leaf".to_string()];
+    assert!(source.can_transfer_sessions(&ids).is_ok());
+    let bridge_events = source.pause_sessions_for_transfer(&ids);
+    let bundle = source
+        .detach_sessions_for_transfer(&ids, bridge_events)
+        .unwrap();
+    target.attach_sessions_from_transfer(bundle, Some(1));
+
+    assert_eq!(source.session_order(), ["keep"]);
+    assert_eq!(target.session_order(), ["existing", "root", "leaf"]);
+    assert_eq!(target.display_name("root").as_deref(), Some("renamed"));
+    assert_eq!(target.tab_color("root"), Some(0x123456));
+    assert!(target.tab_is_locked("root"));
+    assert_eq!(source.pending_event_count(), 0);
+    assert_eq!(target.pending_event_count(), 1);
+}
+
+#[test]
 fn session_catalog_inserts_out_of_order_completions_at_reserved_positions() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();

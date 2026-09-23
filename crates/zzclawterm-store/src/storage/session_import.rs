@@ -7,7 +7,8 @@ use zzclawterm_core::{
 use super::vault::bump_ssh_key_revision;
 use super::{
     CREDENTIALS_TABLE, ConnectionStore, LEGACY_TEXT_MASTER_KEY, META_MASTER_KEY, META_TABLE,
-    PASSWORD_PREFIX, SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE, entity_key,
+    PASSWORD_PREFIX, SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE,
+    connection_inline_password_requires_encryption, entity_key, prepare_connections_for_storage,
     save_connection_in_txn, save_group_in_txn, write_json_in_txn,
 };
 
@@ -93,16 +94,16 @@ impl ConnectionStore {
         }
 
         let crypto = self.credential_crypto()?;
-        for connection in &mut connections {
-            self.encrypt_connection_password_for_storage(connection)?;
-        }
         let needs_master_key = prepared.passwords.iter().any(|entry| {
             entry
                 .password
                 .as_ref()
                 .map(SecretString::expose_secret)
                 .is_some_and(|value| !value.is_empty())
-        }) || prepared.ssh_keys.iter().any(ssh_key_has_secret);
+        }) || prepared.ssh_keys.iter().any(ssh_key_has_secret)
+            || connections
+                .iter()
+                .any(connection_inline_password_requires_encryption);
         let existing_master_key = self.load_master_key_token()?;
         let generated_master_key = if needs_master_key && existing_master_key.is_none() {
             Some(crypto.generate_master_key_token()?)
@@ -122,6 +123,8 @@ impl ConnectionStore {
             .into_iter()
             .map(|entry| prepare_ssh_key(entry, &crypto, master_key))
             .collect::<Result<Vec<_>, _>>()?;
+        let prepared_connections =
+            prepare_connections_for_storage(&connections, &crypto, master_key)?;
 
         let txn = self.db.begin_write()?;
         if let Some(token) = generated_master_key.as_deref() {
@@ -156,7 +159,7 @@ impl ConnectionStore {
                 icon,
             )?;
         }
-        for connection in &connections {
+        for connection in &prepared_connections {
             save_connection_in_txn(&txn, connection)?;
         }
         txn.commit()?;
@@ -373,6 +376,50 @@ mod tests {
                 .and_then(|network| network.proxy_jump_id.as_deref()),
             Some(jump.id.as_str())
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn commit_session_import_encrypts_connection_inline_password() {
+        let dir = crate::storage::tests::unique_temp_dir("session-import-inline-password");
+        let store = ConnectionStore::open(&dir).expect("open store");
+        let mut connection = prepared_saved_ssh("source-secret", "Secret", None);
+        connection.auth = Some(ConnectionAuth {
+            mode: "password".to_string(),
+            password: Some("import-secret".to_string().into()),
+            ..ConnectionAuth::default()
+        });
+        let prepared = PreparedSessionImport {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            passwords: Vec::new(),
+            ssh_keys: Vec::new(),
+            connections: vec![connection],
+        };
+
+        store
+            .commit_session_import(prepared)
+            .expect("commit import");
+
+        let loaded = store.load_sessions().expect("load sessions");
+        let imported = &loaded.connections[0];
+        let auth = imported.auth.as_ref().expect("auth");
+        assert_eq!(auth.password.as_deref(), Some("import-secret"));
+        assert!(!auth.has_password);
+        let record = crate::storage::tests::connection_password_record(&store, &imported.id);
+        assert_ne!(record.password.expose_secret(), "import-secret");
+        let crypto = store.credential_crypto().expect("crypto");
+        let token = store
+            .load_master_key_token()
+            .expect("load master key")
+            .expect("master key");
+        assert_eq!(
+            crypto
+                .decrypt_secret(&token, record.password.expose_secret())
+                .expect("decrypt imported password"),
+            "import-secret"
+        );
+
         std::fs::remove_dir_all(dir).ok();
     }
 

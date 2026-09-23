@@ -28,6 +28,7 @@ struct ImportCommand {
     id: Option<String>,
     label: String,
     command: String,
+    preserve_command_text: bool,
     category_id: Option<String>,
     category: Option<String>,
     description: Option<String>,

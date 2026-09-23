@@ -19,7 +19,38 @@ use crate::models::{
 use super::browser_logic::BrowserFilterKey;
 use super::{TransferBrowserState, TransferBrowserView, TransferFeatureState};
 
+pub(in crate::features) struct TransferSessionTransferBundle {
+    caches: Vec<(String, TransferBrowserSessionCacheState)>,
+}
+
 impl TransferFeatureState {
+    pub(in crate::features) fn detach_sessions_for_transfer(
+        &mut self,
+        session_ids: &[String],
+    ) -> TransferSessionTransferBundle {
+        let mut caches = Vec::new();
+        for id in session_ids {
+            if let Some(cache) = self.browser.session_cache.remove(id) {
+                caches.push((id.clone(), cache));
+            }
+            if let Some(job_id) = self.browser.navigation_jobs.remove(id) {
+                self.browser.pending_navigations.remove(&job_id);
+            }
+        }
+        TransferSessionTransferBundle { caches }
+    }
+
+    pub(in crate::features) fn attach_sessions_from_transfer(
+        &mut self,
+        bundle: TransferSessionTransferBundle,
+    ) {
+        self.browser.session_cache.extend(bundle.caches);
+    }
+
+    pub(in crate::features) fn retains_transfer_session(&self, id: &str) -> bool {
+        self.browser.session_cache.contains_key(id) || self.browser.navigation_jobs.contains_key(id)
+    }
+
     pub(in crate::features) fn browser_view(&self) -> TransferBrowserView<'_> {
         TransferBrowserView {
             path: &self.browser.path,

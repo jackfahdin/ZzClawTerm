@@ -6,6 +6,7 @@ use crate::models::{CloudSyncSecretDraft, TranslationSecretDraft};
 
 #[derive(Debug, Clone)]
 pub(in crate::features) struct SettingsDraftSnapshot {
+    pub revisions: crate::app_shell::SettingsDraftRevisions,
     pub settings: AppSettingsSummary,
     pub ai_settings: AiSettings,
     pub ai_model_draft: String,

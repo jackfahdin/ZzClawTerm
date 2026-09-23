@@ -7,7 +7,9 @@ use zzclawterm_store::{StoreDomain, store_request};
 use crate::features::ZzClawTermApp;
 use crate::models::QuickCommandVariablePromptState;
 
-use super::helpers::{ai_command_card_category_name, unique_quick_command_category_id};
+use super::helpers::{
+    ai_command_card_category_name, unique_quick_command_category_id, validated_quick_command_text,
+};
 use super::variables::parse_quick_command_variables;
 
 impl ZzClawTermApp {
@@ -161,7 +163,7 @@ impl ZzClawTermApp {
         command_id: String,
         cx: &mut Context<Self>,
     ) {
-        self.apply_quick_command_by_id(&command_id, true, false, cx);
+        self.apply_quick_command_by_id(&command_id, false, cx);
     }
 
     pub(in crate::features) fn send_quick_command_to_all_by_id(
@@ -181,14 +183,12 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        let execute = command.execution_mode.as_deref() != Some("append");
-        self.apply_quick_command_by_id(&command.id, execute, true, cx);
+        self.apply_quick_command_by_id(&command.id, true, cx);
     }
 
     pub(in crate::features) fn apply_quick_command_by_id(
         &mut self,
         command_id: &str,
-        execute: bool,
         send_to_all: bool,
         cx: &mut Context<Self>,
     ) {
@@ -218,13 +218,13 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        let command_text = command.command.trim().to_string();
-        if command_text.is_empty() {
+        let Some(command_text) = validated_quick_command_text(&command.command) else {
             self.shell
                 .set_status("quick command has no command text".to_string());
             cx.notify();
             return;
-        }
+        };
+        let execute = quick_command_executes(&command);
         let variables = parse_quick_command_variables(&command_text);
         if !variables.is_empty() {
             self.commands
@@ -311,5 +311,51 @@ impl ZzClawTermApp {
             });
             cx.notify();
         }
+    }
+}
+
+fn quick_command_executes(command: &QuickCommand) -> bool {
+    command.execution_mode.as_deref() != Some("append")
+}
+
+#[cfg(test)]
+mod tests {
+    use zzclawterm_core::QuickCommand;
+
+    use super::quick_command_executes;
+
+    fn command_with_execution_mode(execution_mode: Option<&str>) -> QuickCommand {
+        QuickCommand {
+            id: "command-1".to_string(),
+            label: "Command".to_string(),
+            command: "pwd".to_string(),
+            category_id: None,
+            description: None,
+            color_tag: None,
+            icon_tag: None,
+            pinned: None,
+            execution_mode: execution_mode.map(ToOwned::to_owned),
+            source: None,
+            risk_level: None,
+            updated_at: None,
+            created_at: None,
+            use_count: None,
+            sort_order: None,
+        }
+    }
+
+    #[test]
+    fn append_mode_inserts_without_execution() {
+        assert!(!quick_command_executes(&command_with_execution_mode(Some(
+            "append"
+        ))));
+    }
+
+    #[test]
+    fn execute_and_legacy_modes_execute() {
+        assert!(quick_command_executes(&command_with_execution_mode(Some(
+            "execute"
+        ))));
+        assert!(quick_command_executes(&command_with_execution_mode(None)));
     }
 }

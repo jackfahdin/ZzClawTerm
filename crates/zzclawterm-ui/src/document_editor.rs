@@ -4,7 +4,7 @@ use gpui::{
     Action as _, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, SharedString, Subscription, Window, div, prelude::*,
 };
-use gpui_component::input::{Editor, EditorState, InputEvent, Redo, Undo};
+use gpui_kit::component::input::{Editor, EditorState, InputEvent, Redo, Undo};
 
 use crate::input_focus::register_nya_input_focus;
 
@@ -16,8 +16,8 @@ pub enum ZzClawDocumentEditorEvent {
 
 /// Full-size native document editor used by modeless document windows.
 ///
-/// This type is the stable ZzClawTerm boundary around gpui-component's editor;
-/// desktop features never need to import gpui-component directly.
+/// This type is the stable ZzClawTerm boundary around gpui-kit's editor;
+/// desktop features never need to import gpui-kit directly.
 pub struct ZzClawDocumentEditorState {
     editor: Entity<EditorState>,
     subscription: Subscription,
@@ -31,9 +31,19 @@ impl ZzClawDocumentEditorState {
         cx: &mut Context<Self>,
         content: impl Into<SharedString>,
     ) -> Self {
+        Self::new_with_placeholder(window, cx, content, SharedString::default())
+    }
+
+    pub fn new_with_placeholder(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        content: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+    ) -> Self {
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .default_value(content)
+                .placeholder(placeholder)
                 .soft_wrap(true)
         });
         register_nya_input_focus(&editor.read(cx).focus_handle(cx), cx);
@@ -68,6 +78,12 @@ impl ZzClawDocumentEditorState {
 
     pub fn selected_range(&self, cx: &App) -> Range<usize> {
         self.editor.read(cx).selected_range()
+    }
+
+    pub fn move_cursor_to_end(&mut self, cx: &mut Context<Self>) {
+        let end = self.editor.read(cx).value().len();
+        self.editor
+            .update(cx, |editor, cx| editor.set_selected_range(end..end, cx));
     }
 
     pub fn replace_content(&mut self, content: &str, window: &mut Window, cx: &mut Context<Self>) {

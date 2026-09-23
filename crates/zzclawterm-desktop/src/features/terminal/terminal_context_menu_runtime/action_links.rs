@@ -6,7 +6,7 @@ use zzclawterm_ui::ZzClawScrollable;
 
 use crate::features::ZzClawTermApp;
 
-use super::helpers::{clamp_menu_position, open_external_url, terminal_ctx_item_with_icon};
+use super::helpers::{clamp_menu_position, terminal_ctx_item_with_icon};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn action_link_menu_overlay(
@@ -77,13 +77,7 @@ impl ZzClawTermApp {
                 cx.listener(move |this, _, _, cx| {
                     this.close_action_link_menu(cx);
                     if let Some(url) = open_url.clone() {
-                        match open_external_url(&url) {
-                            Ok(()) => this.shell.set_status(format!("opened link: {url}")),
-                            Err(error) => {
-                                this.shell.set_status(format!("open link failed: {error}"))
-                            }
-                        }
-                        cx.notify();
+                        this.open_external_url_for_ui(&url, cx);
                         return;
                     }
                     if let Some(command) = command.clone() {

@@ -13,6 +13,21 @@ use crate::models::{
 };
 
 impl ZzClawTermApp {
+    pub(crate) fn set_desktop_controller(
+        &mut self,
+        controller: gpui::WeakEntity<crate::app_shell::DesktopController>,
+    ) {
+        self.desktop_controller = Some(controller);
+    }
+    pub(crate) fn set_workspace_identity(
+        &mut self,
+        workspace_id: zzclawterm_core::WorkspaceId,
+        revision: u64,
+    ) {
+        self.workspace_id = workspace_id;
+        self.workspace_revision = revision;
+    }
+
     pub(crate) fn set_title_menu_bar(&mut self, menu_bar: gpui::Entity<ZzClawAppMenuBar>) {
         self.shell.set_title_menu_bar(menu_bar);
     }
@@ -78,7 +93,7 @@ impl ZzClawTermApp {
                 self.open_terminal_search(window, cx);
             }
             NativeMenuCommand::TerminalClear => {
-                self.clear_terminal(cx);
+                self.send_terminal_clear_screen(cx);
             }
             NativeMenuCommand::TerminalSelectAll => {
                 self.select_all_terminal(cx);
@@ -154,9 +169,15 @@ impl ZzClawTermApp {
 
     fn title_file_menu_items(&self, cx: &mut Context<Self>) -> Vec<ZzClawMenuItem> {
         vec![
+            ZzClawMenuItem::action("New Window")
+                .icon("icons/window/restore.svg")
+                .shortcut("Ctrl+Shift+N")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.emit(crate::features::AppLifecycleEvent::NewWindowRequested);
+                })),
             ZzClawMenuItem::action(t!("menu.newSession"))
                 .icon("icons/conn/add.svg")
-                .shortcut(self.display_shortcut_for("tab.newSession", "Ctrl+Shift+N"))
+                .shortcut(self.display_shortcut_for("tab.newSession", "Ctrl+Shift+T"))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.shell.close_open_tabs_menu();
                     this.shell.close_new_session_menu();
@@ -274,7 +295,7 @@ impl ZzClawTermApp {
                 .icon("icons/fe/delete.svg")
                 .shortcut(self.display_shortcut_for("terminal.clear", "Ctrl+L"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.clear_terminal(cx);
+                    this.send_terminal_clear_screen(cx);
                 })),
             ZzClawMenuItem::action(t!("menu.refitTerminals"))
                 .icon("icons/menu/fit.svg")
@@ -291,9 +312,10 @@ impl ZzClawTermApp {
     }
 
     fn title_help_menu_items(&self, cx: &mut Context<Self>) -> Vec<ZzClawMenuItem> {
-        let update_label = if self.update.is_pending() {
+        let update = self.update.read(cx);
+        let update_label = if update.is_pending() {
             t!("updater.checking")
-        } else if self.update.info().is_some_and(|info| info.available) {
+        } else if update.info().is_some_and(|info| info.available) {
             t!("updater.newVersionAvailable")
         } else {
             t!("menu.checkForUpdates")

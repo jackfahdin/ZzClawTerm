@@ -7,6 +7,7 @@ pub mod sessions;
 pub mod settings;
 pub mod window_state;
 pub mod workspace;
+pub mod workspace_manifest;
 pub use connection::*;
 pub use credentials::*;
 pub use network::*;
@@ -16,6 +17,7 @@ pub use sessions::*;
 pub use settings::*;
 pub use window_state::*;
 pub use workspace::*;
+pub use workspace_manifest::*;
 
 fn default_ssh_port() -> u16 {
     22

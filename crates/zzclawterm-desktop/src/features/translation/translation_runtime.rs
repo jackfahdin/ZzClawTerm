@@ -78,6 +78,10 @@ impl ZzClawTermApp {
                     && let Ok(saved) = event.outcome.as_ref()
                 {
                     this.translation.settings_saved(saved.clone());
+                    this.request_shared_state_refresh(
+                        crate::app_shell::SharedStateDomain::Translation,
+                        cx,
+                    );
                 }
                 if completion.report_result() {
                     if let Err(error) = event.outcome {

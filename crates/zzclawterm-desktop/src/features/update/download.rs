@@ -2,24 +2,60 @@ use crate::features::ZzClawTermApp;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{Context, Window};
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
-use zzclawterm_core::updater::{UpdateManifest, UpdateTarget, parse_current_version};
+use std::path::Path;
+use zzclawterm_core::updater::{
+    UpdateManifest, UpdatePackageKind, UpdateTarget, parse_current_version,
+};
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
 const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK";
 
 #[derive(Clone, Debug)]
-pub(in crate::features) enum DownloadState {
+pub(crate) enum DownloadState {
     Idle,
     Downloading { received: u64, total: Option<u64> },
-    Ready { artifact: PathBuf, target: PathBuf },
+    Ready(super::install::PreparedUpdate),
     Failed(String),
 }
 
 pub(in crate::features) fn supports_native_install(portable: bool) -> bool {
-    !cfg!(debug_assertions)
-        && !portable
-        && (cfg!(windows) || cfg!(target_os = "macos") || std::env::var_os("APPIMAGE").is_some())
+    if cfg!(debug_assertions) {
+        return false;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        let Some(directory) = executable.parent() else {
+            return false;
+        };
+        return if portable {
+            directory.join("zzclawterm-portable").is_file()
+        } else {
+            directory.join("Uninstall.exe").is_file()
+        };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if portable {
+            return false;
+        }
+        let Some(bundle) = executable.ancestors().nth(3) else {
+            return false;
+        };
+        return bundle.extension().and_then(|value| value.to_str()) == Some("app")
+            && !bundle
+                .components()
+                .any(|part| part.as_os_str() == "Caskroom" || part.as_os_str() == "Cellar");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = executable;
+        return !portable && std::env::var_os("APPIMAGE").is_some();
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 fn decode_update_signature(value: &str) -> Result<minisign_verify::Signature, String> {
@@ -35,15 +71,21 @@ fn decode_update_signature(value: &str) -> Result<minisign_verify::Signature, St
 fn download_signed_update(
     version: &str,
     directory: &Path,
+    portable: bool,
     cancel: &ConnectionAttempt,
     mut progress: impl FnMut(u64, Option<u64>),
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<super::install::PreparedUpdate, String> {
     let version = parse_current_version(version).map_err(|error| error.to_string())?;
     if !zzclawterm_core::app_identity::AppFlavor::current().accepts_update(&version) {
         return Err("update belongs to a different application flavor".into());
     }
     let target = UpdateTarget::from_rust_target(std::env::consts::OS, std::env::consts::ARCH)
         .map_err(|error| error.to_string())?;
+    let package = if portable {
+        UpdatePackageKind::WindowsPortable
+    } else {
+        UpdatePackageKind::Installed
+    };
     let client = zed_reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(300))
@@ -71,7 +113,7 @@ fn download_signed_update(
     let manifest = UpdateManifest::parse_for_version(&manifest_body, &version)
         .map_err(|error| error.to_string())?;
     let selected = manifest
-        .select_artifact(&version, target)
+        .select_artifact(&version, target, package)
         .map_err(|error| error.to_string())?;
     let signature = decode_update_signature(&selected.signature)?;
     let public_key = STANDARD
@@ -90,12 +132,24 @@ fn download_signed_update(
     let partial = directory.join(format!("{name}.partial"));
     let artifact = directory.join(&name);
     let result = (|| {
-        let mut response = client
-            .get(&selected.url)
-            .send()
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?;
+        let mut response = None;
+        let mut last_error = None;
+        for url in std::iter::once(selected.url.as_str()).chain(selected.fallback_url.as_deref()) {
+            match client
+                .get(url)
+                .send()
+                .and_then(|response| response.error_for_status())
+            {
+                Ok(candidate) => {
+                    response = Some(candidate);
+                    break;
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+        let mut response = response.ok_or_else(|| {
+            last_error.unwrap_or_else(|| "no update download URL is available".to_string())
+        })?;
         let total = response.content_length();
         if total.is_some_and(|total| total > 1024 * 1024 * 1024) {
             return Err("update too large".into());
@@ -132,7 +186,7 @@ fn download_signed_update(
         cancel.check()?;
         std::fs::rename(&partial, &artifact).map_err(|error| error.to_string())?;
         let target = std::env::current_exe().map_err(|error| error.to_string())?;
-        super::install::prepare_artifact(artifact, target)
+        super::install::prepare_artifact(artifact, target, portable)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(partial);
@@ -145,75 +199,60 @@ impl ZzClawTermApp {
         if !supports_native_install(self.runtime.mode() == zzclawterm_core::RuntimeMode::Portable) {
             return;
         }
-        if matches!(self.update.download, DownloadState::Downloading { .. }) {
-            return;
-        }
-        let Some(info) = self.update.info().filter(|info| info.available).cloned() else {
-            return;
-        };
-        self.update.download_generation = self.update.download_generation.wrapping_add(1);
-        let generation = self.update.download_generation;
         let cancel = ConnectionAttempt::default();
-        self.update.download_cancel = cancel.clone();
-        self.update.download = DownloadState::Downloading {
-            received: 0,
-            total: None,
+        let Some((info, generation, event_tx)) = self.update.update(cx, |update, cx| {
+            let request = update.begin_download(cancel.clone());
+            if request.is_some() {
+                cx.notify();
+            }
+            request
+        }) else {
+            return;
         };
         let directory = self
             .runtime
             .cache_dir()
             .join("updates")
             .join(zzclawterm_core::uuid());
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let result_tx = tx.clone();
-        let scheduled = self
-            .blocking_jobs
-            .submit_detached("native-update-download", move |_| {
+        let portable = self.runtime.mode() == zzclawterm_core::RuntimeMode::Portable;
+        let progress_tx = event_tx.clone();
+        let result_tx = event_tx.clone();
+        let scheduled = std::thread::Builder::new()
+            .name("zzclawterm-update-download".to_string())
+            .spawn(move || {
                 let result = download_signed_update(
                     &info.latest_version,
                     &directory,
+                    portable,
                     &cancel,
                     |received, total| {
-                        let _ = tx.unbounded_send(DownloadState::Downloading { received, total });
+                        let _ = progress_tx.unbounded_send(super::UpdateEvent::Download {
+                            generation,
+                            state: DownloadState::Downloading { received, total },
+                        });
                     },
                 );
-                let event = match result {
-                    Ok((artifact, target)) => DownloadState::Ready { artifact, target },
+                let state = match result {
+                    Ok(prepared) => DownloadState::Ready(prepared),
                     Err(error) => DownloadState::Failed(error),
                 };
-                let _ = result_tx.unbounded_send(event);
+                let _ =
+                    result_tx.unbounded_send(super::UpdateEvent::Download { generation, state });
             });
         if let Err(error) = scheduled {
-            self.update.download = DownloadState::Failed(error.to_string());
-            cx.notify();
-            return;
+            let _ = event_tx.unbounded_send(super::UpdateEvent::Download {
+                generation,
+                state: DownloadState::Failed(format!("could not start update download: {error}")),
+            });
         }
-        cx.spawn(async move |this, cx| {
-            use futures::StreamExt as _;
-            while let Some(state) = rx.next().await {
-                let done = !matches!(state, DownloadState::Downloading { .. });
-                if this
-                    .update(cx, |app, cx| {
-                        if app.update.download_generation == generation {
-                            app.update.download = state;
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                    || done
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         cx.notify();
     }
 
     pub(in crate::features) fn cancel_native_update_download(&mut self, cx: &mut Context<Self>) {
-        self.update.download_cancel.cancel();
-        self.update.download_generation = self.update.download_generation.wrapping_add(1);
-        self.update.download = DownloadState::Idle;
+        self.update.update(cx, |update, cx| {
+            update.cancel_download();
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -221,45 +260,39 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.update.install_launch_pending {
-            return false;
-        }
-        if !self.update.install_requested {
+        let update = self.update.read(cx);
+        if !update.install_requested {
             return true;
         }
-        self.update.install_requested = false;
-        let DownloadState::Ready { artifact, target } = self.update.download.clone() else {
+        let DownloadState::Ready(_) = update.download else {
             return false;
         };
-        self.update.install_launch_pending = true;
-        let task = self
-            .blocking_jobs
-            .submit_task("update-installer", move |_| {
-                super::install::launch_installer(&artifact, &target)
-            });
-        cx.spawn(async move |this, cx| {
-            let result = crate::features::runtime_jobs::await_blocking_job(task)
-                .await
-                .and_then(|result| result);
-            let _ = this.update(cx, |app, cx| {
-                app.update.install_launch_pending = false;
-                match result {
-                    Ok(()) => cx.emit(crate::features::AppLifecycleEvent::ShutdownRequested),
-                    Err(error) => {
-                        app.update.download = DownloadState::Failed(error);
-                        app.notify_operation(
-                            "update-install",
-                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
-                            rust_i18n::t!("updater.installFailed").to_string(),
-                            cx,
-                        );
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-        false
+        true
+    }
+
+    pub(crate) fn launch_pending_update_after_shutdown(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let prepared = self.update.update(cx, |update, _| {
+            if !update.install_requested {
+                return Ok(None);
+            }
+            let DownloadState::Ready(prepared) = update.download.clone() else {
+                return Err("the downloaded update is no longer available".to_string());
+            };
+            update.clear_install_request();
+            Ok(Some(prepared))
+        })?;
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+        super::install::launch_installer(&prepared)?;
+        self.update.update(cx, |update, cx| {
+            update.mark_applying();
+            cx.notify();
+        });
+        Ok(())
     }
 
     pub(in crate::features) fn request_native_update_install(
@@ -267,7 +300,7 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.update.download, DownloadState::Ready { .. }) {
+        if !matches!(self.update.read(cx).download, DownloadState::Ready(_)) {
             return;
         }
         if self.notes.has_open_editor_windows()
@@ -284,9 +317,16 @@ impl ZzClawTermApp {
             );
             return;
         }
-        self.update.install_requested = true;
+        self.update.update(cx, |update, cx| {
+            update.install_requested = true;
+            cx.notify();
+        });
         self.close_update_dialog(window, cx);
-        self.handle_window_close_request(window, cx);
+        if let Some(controller) = self.desktop_controller.clone() {
+            let _ = controller.update(cx, |controller, cx| controller.request_quit(cx));
+        } else {
+            self.handle_window_close_request(window, cx);
+        }
     }
 }
 
@@ -296,11 +336,11 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     #[test]
-    fn published_signing_key_loads_and_portable_installs_never_self_replace() {
+    fn published_signing_key_loads_and_debug_builds_do_not_self_update() {
         let key = STANDARD.decode(PUBLIC_KEY).unwrap();
         assert!(minisign_verify::PublicKey::decode(std::str::from_utf8(&key).unwrap()).is_ok());
-        assert!(!supports_native_install(true));
         if cfg!(debug_assertions) {
+            assert!(!supports_native_install(true));
             assert!(!supports_native_install(false));
         }
     }

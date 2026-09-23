@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use futures::channel::mpsc::UnboundedReceiver;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use zzclawterm_transport::{
     CpuUsageSource, DockerComposeProject, DockerComposeService, DockerContainer,
@@ -20,13 +20,11 @@ use zzclawterm_transport::{
 
 use crate::features::formatting::docker_compose_project_key;
 use crate::features::remote::job_state::{RemoteJobState, RemoteJobTicket};
-use crate::features::remote::list_window::{
-    ACCELERATOR_PROCESS_VIEWPORT_ROWS, DOCKER_RESOURCE_VIEWPORT_ROWS, DOCKER_VIEWPORT_ROWS,
-    PROCESS_VIEWPORT_ROWS, max_list_offset,
-};
+use crate::features::remote::list_window::{ACCELERATOR_PROCESS_VIEWPORT_ROWS, max_list_offset};
 use crate::features::{
-    runtime_jobs::DockerJobResult, runtime_jobs::GpuJobResult, runtime_jobs::NpuJobResult,
-    runtime_jobs::ProcessJobOutput, runtime_jobs::ProcessJobResult, runtime_jobs::StatsJobResult,
+    runtime_jobs::DockerJobResult, runtime_jobs::DockerResource, runtime_jobs::GpuJobResult,
+    runtime_jobs::NpuJobResult, runtime_jobs::ProcessJobOutput, runtime_jobs::ProcessJobResult,
+    runtime_jobs::StatsJobResult,
 };
 use crate::models::{DockerTab, RemoteProcessSortDirection, RemoteProcessSortKey};
 
@@ -64,6 +62,8 @@ pub(in crate::features) struct RemoteOpsFeatureFocus {}
 struct DockerPaneState {
     job: RemoteJobState<DockerJobResult>,
     pub overview: Option<Arc<RemoteDockerOverview>>,
+    loaded_resources: HashSet<DockerTab>,
+    resource_attempts: HashMap<DockerTab, Instant>,
     /// Bumped by every mutation that changes what `docker_presentation` returns.
     revision: u64,
     data_generation: u64,
@@ -81,8 +81,6 @@ struct DockerPaneState {
     pub compose_expanded: Arc<HashSet<String>>,
     pub compose_services: Arc<HashMap<String, Vec<DockerComposeService>>>,
     pub compose_service_errors: Arc<HashMap<String, String>>,
-    pub list_offset: usize,
-    pub resource_list_offset: usize,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -124,7 +122,6 @@ struct ProcessPaneState {
     pub search_draft: String,
     pub sort_key: RemoteProcessSortKey,
     pub sort_direction: RemoteProcessSortDirection,
-    pub list_offset: usize,
     pub selected_pid: Option<u32>,
     pub menu_pid: Option<u32>,
     pub nice_draft: String,
@@ -226,6 +223,7 @@ struct AcceleratorDerivedCache<Process> {
 #[derive(Clone)]
 pub(in crate::features) struct DockerPresentationState {
     pub overview: Option<Arc<RemoteDockerOverview>>,
+    pub loaded_resources: HashSet<DockerTab>,
     pub status: String,
     pub details: Option<DockerContainerDetails>,
     pub details_container_id: Option<String>,
@@ -236,8 +234,6 @@ pub(in crate::features) struct DockerPresentationState {
     pub compose_expanded: Arc<HashSet<String>>,
     pub compose_services: Arc<HashMap<String, Vec<DockerComposeService>>>,
     pub compose_service_errors: Arc<HashMap<String, String>>,
-    pub list_offset: usize,
-    pub resource_list_offset: usize,
     pub pending: bool,
 }
 
@@ -249,7 +245,6 @@ pub(in crate::features) struct ProcessPresentationState {
     pub search_draft: String,
     pub sort_key: RemoteProcessSortKey,
     pub sort_direction: RemoteProcessSortDirection,
-    pub list_offset: usize,
     pub selected_pid: Option<u32>,
     pub menu_pid: Option<u32>,
     pub nice_draft: String,
@@ -294,6 +289,8 @@ impl RemoteOpsFeatureState {
             docker: DockerPaneState {
                 job: RemoteJobState::new(),
                 overview: None,
+                loaded_resources: HashSet::new(),
+                resource_attempts: HashMap::new(),
                 revision: 0,
                 data_generation: 0,
                 derived: None,
@@ -310,8 +307,6 @@ impl RemoteOpsFeatureState {
                 compose_expanded: Arc::default(),
                 compose_services: Arc::default(),
                 compose_service_errors: Arc::default(),
-                list_offset: 0,
-                resource_list_offset: 0,
             },
             process: ProcessPaneState {
                 job: RemoteJobState::new(),
@@ -325,7 +320,6 @@ impl RemoteOpsFeatureState {
                 search_draft: String::new(),
                 sort_key: RemoteProcessSortKey::Cpu,
                 sort_direction: RemoteProcessSortDirection::Descending,
-                list_offset: 0,
                 selected_pid: None,
                 menu_pid: None,
                 nice_draft: "0".to_string(),
@@ -374,6 +368,7 @@ impl RemoteOpsFeatureState {
     pub(in crate::features) fn docker_presentation(&self) -> DockerPresentationState {
         DockerPresentationState {
             overview: self.docker.overview.clone(),
+            loaded_resources: self.docker.loaded_resources.clone(),
             status: self.docker.status.clone(),
             details: self.docker.details.clone(),
             details_container_id: self.docker.details_container_id.clone(),
@@ -384,8 +379,6 @@ impl RemoteOpsFeatureState {
             compose_expanded: self.docker.compose_expanded.clone(),
             compose_services: self.docker.compose_services.clone(),
             compose_service_errors: self.docker.compose_service_errors.clone(),
-            list_offset: self.docker.list_offset,
-            resource_list_offset: self.docker.resource_list_offset,
             pending: self.docker.is_pending(),
         }
     }
@@ -400,6 +393,10 @@ impl RemoteOpsFeatureState {
         self.docker.effective_tab()
     }
 
+    pub(in crate::features) fn docker_resource_load_due(&self, interval: u32) -> bool {
+        self.docker.resource_load_due(interval)
+    }
+
     pub(in crate::features) fn process_presentation(&self) -> ProcessPresentationState {
         ProcessPresentationState {
             items: self.process.items.clone(),
@@ -408,7 +405,6 @@ impl RemoteOpsFeatureState {
             search_draft: self.process.search_draft.clone(),
             sort_key: self.process.sort_key,
             sort_direction: self.process.sort_direction,
-            list_offset: self.process.list_offset,
             selected_pid: self.process.selected_pid,
             menu_pid: self.process.menu_pid,
             nice_draft: self.process.nice_draft.clone(),
@@ -707,24 +703,6 @@ impl RemoteOpsFeatureState {
         self.docker.apply_search(text);
     }
 
-    pub(in crate::features) fn set_docker_list_offset(&mut self, offset: usize) -> bool {
-        if self.docker.list_offset == offset {
-            return false;
-        }
-        self.docker.list_offset = offset;
-        self.docker.touch();
-        true
-    }
-
-    pub(in crate::features) fn set_docker_resource_offset(&mut self, offset: usize) -> bool {
-        if self.docker.resource_list_offset == offset {
-            return false;
-        }
-        self.docker.resource_list_offset = offset;
-        self.docker.touch();
-        true
-    }
-
     pub(in crate::features) fn close_docker_details(&mut self) {
         self.docker.close_details();
     }
@@ -766,10 +744,6 @@ impl RemoteOpsFeatureState {
         self.process.close_menu();
     }
 
-    pub(in crate::features) fn set_process_list_offset(&mut self, offset: usize) -> bool {
-        self.process.set_list_offset(offset)
-    }
-
     pub(in crate::features) fn apply_process_nice_input(&mut self, text: String) {
         self.process.apply_nice_input(text);
     }
@@ -795,6 +769,10 @@ impl RemoteOpsFeatureState {
 
     pub(in crate::features) fn mark_docker_refresh_started(&mut self) {
         self.docker.mark_refresh_started();
+    }
+
+    pub(in crate::features) fn mark_docker_resource_started(&mut self, tab: DockerTab) {
+        self.docker.resource_attempts.insert(tab, Instant::now());
     }
 
     pub(in crate::features) fn take_docker_event_receiver(
@@ -831,6 +809,24 @@ impl RemoteOpsFeatureState {
 
     pub(in crate::features) fn apply_docker_overview(&mut self, overview: RemoteDockerOverview) {
         self.docker.apply_overview(overview);
+    }
+
+    pub(in crate::features) fn apply_docker_summary(&mut self, mut overview: RemoteDockerOverview) {
+        if overview.available
+            && let Some(previous) = self.docker.overview.as_deref()
+        {
+            overview.images = previous.images.clone();
+            overview.volumes = previous.volumes.clone();
+            overview.networks = previous.networks.clone();
+            if overview.compose_available {
+                overview.compose_projects = previous.compose_projects.clone();
+            }
+        }
+        self.apply_docker_overview(overview);
+    }
+
+    pub(in crate::features) fn apply_docker_resource(&mut self, resource: DockerResource) {
+        self.docker.apply_resource(resource);
     }
 
     pub(in crate::features) fn apply_docker_details(
@@ -1191,6 +1187,20 @@ impl RemoteOpsFeatureState {
 }
 
 impl DockerPaneState {
+    fn resource_load_due(&self, interval: u32) -> bool {
+        let tab = self.effective_tab();
+        tab != DockerTab::Containers
+            && self
+                .overview
+                .as_ref()
+                .is_some_and(|overview| overview.available)
+            && !self.loaded_resources.contains(&tab)
+            && self
+                .resource_attempts
+                .get(&tab)
+                .is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(u64::from(interval)))
+    }
+
     pub(in crate::features) fn is_pending(&self) -> bool {
         self.job.is_pending()
     }
@@ -1244,8 +1254,6 @@ impl DockerPaneState {
             return;
         }
         self.tab = tab;
-        self.list_offset = 0;
-        self.resource_list_offset = 0;
         self.reconcile();
         self.status = format!("Docker tab: {}", tab.label());
     }
@@ -1257,8 +1265,6 @@ impl DockerPaneState {
 
     pub(in crate::features) fn apply_search(&mut self, text: String) {
         self.search_draft = text;
-        self.list_offset = 0;
-        self.resource_list_offset = 0;
         self.reconcile();
         self.status = "Docker search updated".to_string();
     }
@@ -1272,6 +1278,13 @@ impl DockerPaneState {
     }
 
     pub(in crate::features) fn apply_overview(&mut self, overview: RemoteDockerOverview) {
+        if !overview.available {
+            self.loaded_resources.clear();
+            self.resource_attempts.clear();
+        } else if !overview.compose_available {
+            self.loaded_resources.remove(&DockerTab::Compose);
+            self.resource_attempts.remove(&DockerTab::Compose);
+        }
         if let Some(details_id) = self.details_container_id.as_deref()
             && !overview
                 .containers
@@ -1282,26 +1295,62 @@ impl DockerPaneState {
             self.details_container_id = None;
             self.details_last_refresh_at = None;
         }
-        let active_compose_keys = overview
-            .compose_projects
-            .iter()
-            .map(|project| {
-                docker_compose_project_key(&project.name, Some(project.config_files.as_str()))
-            })
-            .collect::<HashSet<_>>();
-        Arc::make_mut(&mut self.compose_expanded).retain(|key| active_compose_keys.contains(key));
-        Arc::make_mut(&mut self.compose_services)
-            .retain(|key, _| active_compose_keys.contains(key));
-        Arc::make_mut(&mut self.compose_service_errors)
-            .retain(|key, _| active_compose_keys.contains(key));
+        self.retain_compose_projects(&overview.compose_projects);
         self.overview = Some(Arc::new(overview));
         self.data_generation = self.data_generation.wrapping_add(1);
         self.derived = None;
         self.reconcile();
     }
 
+    fn apply_resource(&mut self, resource: DockerResource) {
+        if self.overview.is_none() {
+            return;
+        }
+        let tab = match resource {
+            DockerResource::Images(images) => {
+                Arc::make_mut(self.overview.as_mut().expect("Docker overview exists")).images =
+                    images;
+                DockerTab::Images
+            }
+            DockerResource::Volumes(volumes) => {
+                Arc::make_mut(self.overview.as_mut().expect("Docker overview exists")).volumes =
+                    volumes;
+                DockerTab::Volumes
+            }
+            DockerResource::Networks(networks) => {
+                Arc::make_mut(self.overview.as_mut().expect("Docker overview exists")).networks =
+                    networks;
+                DockerTab::Networks
+            }
+            DockerResource::Compose(projects) => {
+                self.retain_compose_projects(&projects);
+                Arc::make_mut(self.overview.as_mut().expect("Docker overview exists"))
+                    .compose_projects = projects;
+                DockerTab::Compose
+            }
+        };
+        self.loaded_resources.insert(tab);
+        self.data_generation = self.data_generation.wrapping_add(1);
+        self.derived = None;
+        self.reconcile();
+    }
+
+    fn retain_compose_projects(&mut self, projects: &[DockerComposeProject]) {
+        let active_keys = projects
+            .iter()
+            .map(|project| {
+                docker_compose_project_key(&project.name, Some(project.config_files.as_str()))
+            })
+            .collect::<HashSet<_>>();
+        Arc::make_mut(&mut self.compose_expanded).retain(|key| active_keys.contains(key));
+        Arc::make_mut(&mut self.compose_services).retain(|key, _| active_keys.contains(key));
+        Arc::make_mut(&mut self.compose_service_errors).retain(|key, _| active_keys.contains(key));
+    }
+
     fn clear_overview(&mut self) {
         self.overview = None;
+        self.loaded_resources.clear();
+        self.resource_attempts.clear();
         self.data_generation = self.data_generation.wrapping_add(1);
         self.derived = None;
         self.reconcile();
@@ -1309,8 +1358,8 @@ impl DockerPaneState {
 
     /// Record that the presentation changed.
     ///
-    /// `pub(super)` because seventeen mutators on `RemoteOpsFeatureState` write Docker
-    /// fields directly -- menus, offsets, details and compose state. Routing all of them
+    /// `pub(super)` because several mutators on `RemoteOpsFeatureState` write Docker
+    /// fields directly -- menus, details and compose state. Routing all of them
     /// through pane methods would be a larger change than this batch wants; what
     /// guarantees completeness either way is
     /// `docker_presentation_mutations_bump_the_revision`, which drives every one.
@@ -1340,31 +1389,10 @@ impl DockerPaneState {
         }
     }
 
-    /// Bring the derived list and both scroll offsets back in step.
-    ///
-    /// Called by every mutator that changes the overview, the query or the tab. Cheap
-    /// to call redundantly: the recompute is keyed and the clamps are integer compares.
+    /// Bring the derived list back in step with the overview, query and active tab.
     fn reconcile(&mut self) {
-        let items = self.derived_items(self.effective_tab());
-        match items {
-            DockerDerivedItems::Containers(items) => {
-                self.list_offset = self
-                    .list_offset
-                    .min(max_list_offset(items.len(), DOCKER_VIEWPORT_ROWS));
-            }
-            DockerDerivedItems::Images(items) => self.clamp_resource_offset(items.len()),
-            DockerDerivedItems::Volumes(items) => self.clamp_resource_offset(items.len()),
-            DockerDerivedItems::Networks(items) => self.clamp_resource_offset(items.len()),
-            // The compose list is not virtualised, so it has no offset to clamp.
-            DockerDerivedItems::Compose(_) => {}
-        }
+        self.derived_items(self.effective_tab());
         self.touch();
-    }
-
-    fn clamp_resource_offset(&mut self, total: usize) {
-        self.resource_list_offset = self
-            .resource_list_offset
-            .min(max_list_offset(total, DOCKER_RESOURCE_VIEWPORT_ROWS));
     }
 
     /// The filtered list for the effective tab, without recomputing.
@@ -1568,7 +1596,6 @@ impl ProcessPaneState {
         self.selected_pid = None;
         self.menu_pid = None;
         self.nice_draft = "0".to_string();
-        self.list_offset = 0;
         self.reconcile();
     }
 
@@ -1586,7 +1613,6 @@ impl ProcessPaneState {
                 | RemoteProcessSortKey::Command => RemoteProcessSortDirection::Ascending,
             };
         }
-        self.list_offset = 0;
         self.reconcile();
         self.status = format!(
             "sorted processes by {} {}",
@@ -1679,23 +1705,14 @@ impl ProcessPaneState {
         self.touch();
     }
 
-    fn set_list_offset(&mut self, offset: usize) -> bool {
-        if self.list_offset == offset {
-            return false;
-        }
-        self.list_offset = offset;
-        self.touch();
-        true
-    }
-
-    /// Bring the derived list, the sort key and the scroll offset back in step.
+    /// Bring the derived list and sort key back in step.
     ///
     /// Called by every mutator that changes one of their inputs, so a reader never has
     /// to trigger the recompute -- which is what the render pass used to do, by calling
     /// `derived_items` and `clamp_*` through `&mut self` while building elements.
     ///
     /// Cheap to call redundantly: the recompute is keyed, so an unchanged key returns
-    /// the cached list and the clamp is two integer compares.
+    /// the cached list.
     fn reconcile(&mut self) {
         // Sort first: the derived list is keyed on the sort key, so constraining after
         // recomputing would sort by a key the table cannot show.
@@ -1704,10 +1721,7 @@ impl ProcessPaneState {
         {
             self.sort_key = RemoteProcessSortKey::Cpu;
         }
-        let total = self.derived_items().len();
-        self.list_offset = self
-            .list_offset
-            .min(max_list_offset(total, PROCESS_VIEWPORT_ROWS));
+        self.derived_items();
         self.touch();
     }
 
@@ -2280,7 +2294,9 @@ mod tests {
         RemoteOpsFeatureFocus, RemoteOpsFeatureState, StatsApplyOutcome,
     };
     use crate::features::remote::job_state::RemoteJobState;
-    use crate::features::runtime_jobs::{ProcessJobOutput, ProcessJobResult, StatsJobResult};
+    use crate::features::runtime_jobs::{
+        DockerResource, ProcessJobOutput, ProcessJobResult, StatsJobResult,
+    };
     use crate::models::{DockerTab, RemoteProcessSortKey};
 
     fn process(pid: u32) -> RemoteProcess {
@@ -2527,6 +2543,87 @@ mod tests {
         let cleared = derived_containers(state.derived_docker_items());
         assert!(!Arc::ptr_eq(&refreshed, &cleared));
         assert!(cleared.is_empty());
+    }
+
+    #[test]
+    fn docker_summary_preserves_loaded_resources_and_empty_lists_are_loaded() {
+        let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
+        state.apply_docker_summary(RemoteDockerOverview {
+            available: true,
+            containers: vec![docker_container("one", "first")],
+            ..Default::default()
+        });
+        state.set_docker_tab(DockerTab::Images);
+        assert!(state.docker_resource_load_due(10));
+        state.mark_docker_resource_started(DockerTab::Images);
+        assert!(!state.docker_resource_load_due(10));
+
+        state.apply_docker_resource(DockerResource::Images(Vec::new()));
+        assert!(!state.docker_resource_load_due(10));
+        assert!(
+            state
+                .docker_presentation()
+                .loaded_resources
+                .contains(&DockerTab::Images)
+        );
+        state.apply_docker_resource(DockerResource::Images(vec![docker_image("img", "repo")]));
+        state.apply_docker_summary(RemoteDockerOverview {
+            available: true,
+            containers: vec![docker_container("two", "second")],
+            ..Default::default()
+        });
+        let overview = state
+            .docker_presentation()
+            .overview
+            .expect("Docker overview");
+        assert_eq!(overview.containers[0].id, "two");
+        assert_eq!(overview.images[0].id, "img");
+
+        state.set_docker_tab(DockerTab::Volumes);
+        assert!(state.docker_resource_load_due(10));
+        state.reset_for_session_switch();
+        assert!(state.docker_presentation().loaded_resources.is_empty());
+        state.apply_docker_summary(RemoteDockerOverview {
+            available: true,
+            ..Default::default()
+        });
+        assert!(state.docker_resource_load_due(10));
+        assert!(
+            state
+                .docker_presentation()
+                .overview
+                .expect("new host")
+                .images
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn docker_summary_disables_compose_without_dropping_other_resource_caches() {
+        let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
+        state.apply_docker_summary(RemoteDockerOverview {
+            available: true,
+            compose_available: true,
+            ..Default::default()
+        });
+        state.apply_docker_resource(DockerResource::Compose(vec![
+            zzclawterm_transport::DockerComposeProject {
+                name: "project".to_string(),
+                status: "running".to_string(),
+                config_files: "/compose.yml".to_string(),
+            },
+        ]));
+        state.apply_docker_resource(DockerResource::Images(vec![docker_image("img", "repo")]));
+        state.apply_docker_summary(RemoteDockerOverview {
+            available: true,
+            compose_available: false,
+            ..Default::default()
+        });
+        let presentation = state.docker_presentation();
+        let overview = presentation.overview.expect("Docker overview");
+        assert!(overview.compose_projects.is_empty());
+        assert!(!presentation.loaded_resources.contains(&DockerTab::Compose));
+        assert_eq!(overview.images[0].id, "img");
     }
 
     #[test]
@@ -2921,67 +3018,6 @@ mod tests {
         );
     }
 
-    /// A shorter list must pull the stored scroll offset down on its own.
-    ///
-    /// This is the property the render pass used to provide, by calling
-    /// `clamp_process_list_offset` through `&mut self` while building rows. It matters
-    /// beyond tidiness because the scroll handler does relative arithmetic on the
-    /// *stored* offset: left at 60 against a 3-row list, the first wheel event would
-    /// jump instead of stepping.
-    #[test]
-    fn shorter_process_results_clamp_the_stored_offset_with_no_render() {
-        let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
-        state.apply_processes((0..100).map(process).collect());
-        assert!(state.set_process_list_offset(60));
-        assert_eq!(state.process_presentation().list_offset, 60);
-
-        state.apply_processes((0..3).map(process).collect());
-
-        assert_eq!(
-            state.process_presentation().list_offset,
-            0,
-            "three rows cannot be scrolled, so the offset must come back to the top"
-        );
-        assert_eq!(state.derived_processes().len(), 3);
-    }
-
-    /// The same for Docker, whose two lists have different viewport heights.
-    #[test]
-    fn shorter_docker_results_clamp_the_stored_offsets_with_no_render() {
-        let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
-        state.apply_docker_overview(RemoteDockerOverview {
-            available: true,
-            containers: (0..100)
-                .map(|index| docker_container(&format!("c{index}"), "name"))
-                .collect(),
-            images: (0..100)
-                .map(|index| docker_image(&format!("i{index}"), "repo"))
-                .collect(),
-            ..Default::default()
-        });
-        assert!(state.set_docker_list_offset(50));
-        state.set_docker_tab(DockerTab::Images);
-        assert!(state.set_docker_resource_offset(50));
-
-        state.apply_docker_overview(RemoteDockerOverview {
-            available: true,
-            containers: vec![docker_container("c0", "name")],
-            images: vec![docker_image("i0", "repo")],
-            ..Default::default()
-        });
-
-        let presentation = state.docker_presentation();
-        assert_eq!(
-            presentation.resource_list_offset, 0,
-            "the images list shrank to one row"
-        );
-        assert_eq!(
-            presentation.list_offset, 0,
-            "and set_docker_tab already zeroed the container offset, which this pins so \
-             a later change cannot quietly leave it stale"
-        );
-    }
-
     /// And for a GPU card process list, which had no derived cache at all before: its
     /// filtering ran inside `stats_view`, so only the view knew the row count.
     #[test]
@@ -3286,12 +3322,6 @@ mod tests {
             (
                 "close_docker_compose_menu",
                 Box::new(|s: &mut RemoteOpsFeatureState| s.close_docker_compose_menu()),
-            ),
-            (
-                "set_docker_resource_offset",
-                Box::new(|s: &mut RemoteOpsFeatureState| {
-                    s.set_docker_resource_offset(5);
-                }),
             ),
             (
                 "toggle_compose_project",

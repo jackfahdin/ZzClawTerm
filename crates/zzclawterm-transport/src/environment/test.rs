@@ -712,10 +712,7 @@ async fn shell_loader_reads_a_requested_exported_value() {
 #[cfg(unix)]
 #[tokio::test]
 async fn shell_loader_reads_a_custom_exported_value() {
-    let root = std::env::temp_dir().join(format!(
-        "zzclawterm-shell-environment-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-shell-environment");
     fs::create_dir(&root).expect("create shell test directory");
     let shell = root.join("shell");
     fs::write(
@@ -737,16 +734,12 @@ async fn shell_loader_reads_a_custom_exported_value() {
         .expect("custom exported value is present");
 
     assert_eq!(value.as_str(), "/tmp/zzclawterm-agent.sock");
-    fs::remove_dir_all(root).expect("remove shell test directory");
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn targeted_shell_lookup_preserves_empty_and_unset_values() {
-    let root = std::env::temp_dir().join(format!(
-        "zzclawterm-targeted-shell-values-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-targeted-shell-values");
     fs::create_dir(&root).expect("create targeted shell test directory");
     let shell = root.join("shell");
     fs::write(
@@ -780,17 +773,13 @@ async fn targeted_shell_lookup_preserves_empty_and_unset_values() {
     );
     assert!(cache.cached("HOME").unwrap().is_none());
     assert!(cache.is_missing_cached("HOME").unwrap());
-
-    fs::remove_dir_all(root).expect("remove targeted shell test directory");
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn initialize_reads_the_complete_custom_shell_environment() {
-    let root = std::env::temp_dir().join(format!(
-        "zzclawterm-complete-shell-environment-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root =
+        zzclawterm_core::test_support::TestTempDir::new("zzclawterm-complete-shell-environment");
     fs::create_dir(&root).expect("create complete shell test directory");
     let shell = root.join("shell");
     fs::write(
@@ -833,17 +822,13 @@ async fn initialize_reads_the_complete_custom_shell_environment() {
         Some("first\nZZCLAWTERM_TEST_COMPLETE_FAKE=not-a-variable")
     );
     assert!(snapshot.get("ZZCLAWTERM_TEST_COMPLETE_FAKE").is_none());
-
-    fs::remove_dir_all(root).expect("remove complete shell test directory");
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn resolve_refreshes_the_complete_snapshot_once_for_a_new_variable() {
-    let root = std::env::temp_dir().join(format!(
-        "zzclawterm-refresh-shell-environment-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root =
+        zzclawterm_core::test_support::TestTempDir::new("zzclawterm-refresh-shell-environment");
     fs::create_dir(&root).expect("create refresh shell test directory");
     let state_file = root.join("loaded");
     let shell = root.join("shell");
@@ -879,17 +864,12 @@ async fn resolve_refreshes_the_complete_snapshot_once_for_a_new_variable() {
         .expect("refresh missing shell variable")
         .expect("late shell variable is present after refresh");
     assert_eq!(value.as_str(), "ready");
-
-    fs::remove_dir_all(root).expect("remove refresh shell test directory");
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelled_auto_refresh_does_not_leave_the_cache_stuck() {
-    let root = std::env::temp_dir().join(format!(
-        "zzclawterm-cancelled-refresh-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-cancelled-refresh");
     fs::create_dir(&root).expect("create cancelled refresh test directory");
     let state_file = root.join("loaded");
     let slow_file = root.join("slow");
@@ -934,8 +914,6 @@ async fn cancelled_auto_refresh_does_not_leave_the_cache_stuck() {
         .expect("retry the cancelled refresh")
         .expect("variable becomes available on retry");
     assert_eq!(value.as_str(), "ready");
-
-    fs::remove_dir_all(root).expect("remove cancelled refresh test directory");
 }
 
 #[cfg(unix)]

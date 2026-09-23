@@ -249,7 +249,10 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn save_terminal_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::Terminal,
+            cx,
+        ) {
             return;
         }
         self.enforce_terminal_scrollback_limit();

@@ -42,6 +42,7 @@ pub(in crate::features) use terminal_selection_runtime::measure_terminal_font;
 pub(in crate::features) use terminal_surface_entity::{
     FULL_SHELL_PAINT_COUNT, terminal_surface_paint_count,
 };
+pub(in crate::features) use view_state::TerminalSessionTransferBundle;
 pub(in crate::features) use window_state::{
     TerminalWindowDockResult, TerminalWindowReconcileResult,
 };

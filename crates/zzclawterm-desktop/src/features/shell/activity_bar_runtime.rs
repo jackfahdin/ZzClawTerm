@@ -124,18 +124,6 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn apply_activity_layout_from_settings(&mut self) {
-        self.shell.chrome.activity_bar_layout = ActivityBarLayoutState {
-            left_top: self.settings.summary().ui_activity_bar_left_top.clone(),
-            left_bottom: self.settings.summary().ui_activity_bar_left_bottom.clone(),
-            right_top: self.settings.summary().ui_activity_bar_right_top.clone(),
-            right_bottom: self.settings.summary().ui_activity_bar_right_bottom.clone(),
-            hidden_items: self.settings.summary().ui_activity_bar_hidden_items.clone(),
-            show_labels: self.settings.summary().ui_activity_bar_show_labels,
-        };
-        self.normalize_activity_bar_layout();
-    }
-
     pub(in crate::features) fn normalize_activity_bar_layout(&mut self) {
         let mut seen = std::collections::HashSet::new();
         for zone in ActivityBarZone::all() {

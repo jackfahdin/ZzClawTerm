@@ -363,6 +363,10 @@ impl ZzClawTermApp {
                 match result {
                     Ok((id, catalog)) => {
                         this.security.replace_catalog_state(catalog);
+                        this.request_shared_state_refresh(
+                            crate::app_shell::SharedStateDomain::Security,
+                            cx,
+                        );
                         this.security
                             .finish_otp_editor(format!("OTP entry saved ({})", compact_id(&id)));
                         this.shell.set_status("OTP entry saved".to_string());

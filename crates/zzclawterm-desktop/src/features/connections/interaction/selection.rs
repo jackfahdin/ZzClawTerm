@@ -57,17 +57,7 @@ impl ZzClawTermApp {
             0,
             store_request(StoreDomain::Connections, move |store| {
                 for connection in &connections {
-                    let mut copy = connection.clone();
-                    copy.id = uuid();
-                    copy.name = format!("{} (copy)", connection.name);
-                    copy.created_at_ms = None;
-                    copy.updated_at_ms = None;
-                    copy.last_used_at_ms = None;
-                    if let Some(auth) = copy.auth.as_mut() {
-                        auth.password = None;
-                        auth.password_id = None;
-                        auth.has_password = false;
-                    }
+                    let copy = duplicate_saved_connection(connection);
                     store.save_connection(&copy)?;
                 }
                 store.load_sessions()
@@ -92,5 +82,108 @@ impl ZzClawTermApp {
             cx,
         );
         cx.notify();
+    }
+}
+
+fn duplicate_saved_connection(connection: &SavedConnection) -> SavedConnection {
+    let mut copy = connection.clone();
+    copy.id = uuid();
+    copy.name = format!("{} (copy)", connection.name);
+    copy.created_at_ms = None;
+    copy.updated_at_ms = None;
+    copy.last_used_at_ms = None;
+    copy
+}
+
+#[cfg(test)]
+mod tests {
+    use zzclawterm_core::{
+        AiExecutionProfile, ConnectionAuth, ConnectionType, SavedConnection,
+        models::credentials::ConnectionPasswordSource,
+    };
+
+    use super::duplicate_saved_connection;
+
+    fn connection_with_auth(auth: ConnectionAuth) -> SavedConnection {
+        SavedConnection {
+            id: "source-connection".to_string(),
+            name: "Source".to_string(),
+            config: ConnectionType::LocalTerminal {
+                shell_path: String::new(),
+                shell_args: String::new(),
+                working_dir: None,
+                ai_execution_profile: AiExecutionProfile::Auto,
+                encoding: String::new(),
+                dynamic_tab_title: false,
+            },
+            group_id: None,
+            description: None,
+            tags: Vec::new(),
+            sort_order: 0,
+            icon: None,
+            icon_auto_detect: None,
+            auth: Some(auth),
+            network: None,
+            post_login: None,
+            recording: None,
+            ssh_algorithms: None,
+            ssh_profile: Default::default(),
+            terminal_type: None,
+            sftp: Default::default(),
+            asset: None,
+            created_at_ms: Some(1),
+            updated_at_ms: Some(2),
+            last_used_at_ms: Some(3),
+            extensions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn duplicate_connection_preserves_direct_password() {
+        let source = connection_with_auth(ConnectionAuth {
+            mode: "password".to_string(),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            password: Some("secret".to_string().into()),
+            ..ConnectionAuth::default()
+        });
+
+        let copy = duplicate_saved_connection(&source);
+
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name, "Source (copy)");
+        assert_eq!(copy.auth, source.auth);
+        assert_eq!(copy.created_at_ms, None);
+        assert_eq!(copy.updated_at_ms, None);
+        assert_eq!(copy.last_used_at_ms, None);
+    }
+
+    #[test]
+    fn duplicate_connection_preserves_saved_account_references() {
+        let source = connection_with_auth(ConnectionAuth {
+            mode: "password".to_string(),
+            account_id: Some("account-1".to_string()),
+            password_id: Some("legacy-password-1".to_string()),
+            password_source: Some(ConnectionPasswordSource::Account),
+            ..ConnectionAuth::default()
+        });
+
+        let copy = duplicate_saved_connection(&source);
+
+        assert_eq!(copy.auth, source.auth);
+    }
+
+    #[test]
+    fn duplicate_connection_preserves_locked_password() {
+        let source = connection_with_auth(ConnectionAuth {
+            mode: "password".to_string(),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            password: Some("locked-ciphertext".to_string().into()),
+            has_password: true,
+            ..ConnectionAuth::default()
+        });
+
+        let copy = duplicate_saved_connection(&source);
+
+        assert_eq!(copy.auth, source.auth);
     }
 }

@@ -141,6 +141,7 @@ const SYSTEM_ICONS: &[(&str, IconDef)] = &[
         "raspberrypi",
         IconDef::full_color("color/os/raspberrypi.svg"),
     ),
+    ("openwrt", IconDef::full_color("color/os/openwrt.svg")),
     (
         "alibaba-cloud-linux",
         IconDef::full_color("color/os/alibabacloudlinux.svg"),

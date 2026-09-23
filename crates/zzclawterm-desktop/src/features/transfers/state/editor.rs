@@ -70,7 +70,21 @@ impl TransferFeatureState {
         if let Some(workspace) = self.editor.workspace.as_mut() {
             let already_open = workspace.tabs.iter().any(|current| current.id == tab_id);
             if !already_open {
-                workspace.tabs.push(tab);
+                let insert_after = workspace
+                    .tabs
+                    .iter()
+                    .position(|current| {
+                        current.id == workspace.active_tab_id
+                            && current.session_id == tab.session_id
+                    })
+                    .or_else(|| {
+                        workspace
+                            .tabs
+                            .iter()
+                            .rposition(|current| current.session_id == tab.session_id)
+                    });
+                let index = insert_after.map_or(workspace.tabs.len(), |index| index + 1);
+                workspace.tabs.insert(index, tab);
             }
             workspace.active_tab_id = tab_id;
             Self::clear_editor_close_state(workspace);

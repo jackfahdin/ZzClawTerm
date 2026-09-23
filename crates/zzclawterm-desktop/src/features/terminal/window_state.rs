@@ -121,6 +121,24 @@ impl TerminalFeatureState {
         self.windows.tree.is_some()
     }
 
+    pub(in crate::features) fn terminal_window_tree(&self) -> Option<TerminalWindowNode> {
+        self.windows.tree.clone()
+    }
+
+    pub(in crate::features) fn restore_terminal_window_tree(
+        &mut self,
+        tree: Option<TerminalWindowNode>,
+    ) {
+        self.windows.tree = tree;
+    }
+
+    pub(in crate::features) fn terminal_window_has_leaf(&self, leaf_id: &str) -> bool {
+        self.windows
+            .tree
+            .as_ref()
+            .is_some_and(|tree| tree.leaf_ids().iter().any(|id| id == leaf_id))
+    }
+
     pub(in crate::features) fn sync_terminal_windows_active_tab(
         &mut self,
         tab_id: &str,

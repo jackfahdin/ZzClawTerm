@@ -9,7 +9,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, bail};
 use zzclawterm_core::{
     ACTIVATION_QUEUE_CAPACITY, ActivationAck, ActivationAckStatus, ActivationQueueError,
     ActivationReceiver, ActivationRequest, ActivationSender, MAX_ACTIVATION_FRAME_BYTES,
@@ -81,8 +81,7 @@ pub(crate) fn acquire(
         let lock_file = open_private_file(&lock_path)?;
         match lock_file.try_lock() {
             Ok(()) => {
-                return start_owner(lock_file, endpoint_path, initial_request)
-                    .map(SingleInstanceOutcome::Owner);
+                return start_owner(lock_file, endpoint_path).map(SingleInstanceOutcome::Owner);
             }
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => {
@@ -104,11 +103,7 @@ pub(crate) fn acquire(
     }
 }
 
-fn start_owner(
-    lock_file: File,
-    endpoint_path: PathBuf,
-    initial_request: ActivationRequest,
-) -> anyhow::Result<SingleInstanceOwner> {
+fn start_owner(lock_file: File, endpoint_path: PathBuf) -> anyhow::Result<SingleInstanceOwner> {
     let _ = std::fs::remove_file(&endpoint_path);
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .context("bind ZzClawTerm activation listener")?;
@@ -120,9 +115,6 @@ fn start_owner(
     write_endpoint(&endpoint_path, address, auth_token)?;
 
     let (activation_tx, activation_rx) = activation_channel(ACTIVATION_QUEUE_CAPACITY);
-    activation_tx
-        .try_send(initial_request)
-        .map_err(|_| anyhow!("failed to enqueue initial activation"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let listener_stop = Arc::clone(&stop);
     let listener_activation_tx = activation_tx.clone();
@@ -317,7 +309,8 @@ fn restrict_instance_directory(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{Shutdown, TcpStream};
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use futures::FutureExt as _;
 
     use zzclawterm_core::{
         ActivationAck, ActivationAckStatus, ActivationRequest, RawActivationArg,
@@ -335,16 +328,11 @@ mod tests {
         }
     }
 
-    fn temporary_root(test_name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "zzclawterm-single-instance-{test_name}-{}-{nanos}",
-            std::process::id()
+    fn temporary_root(test_name: &str) -> zzclawterm_core::test_support::TestTempDir {
+        let root = zzclawterm_core::test_support::TestTempDir::new(&format!(
+            "zzclawterm-single-instance-{test_name}"
         ));
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.path()).unwrap();
         root
     }
 
@@ -382,7 +370,6 @@ mod tests {
         ));
         drop(stable_owner);
         drop(preview_owner);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -393,10 +380,7 @@ mod tests {
             panic!("first process must own the instance");
         };
         let mut receiver = owner.take_activation_receiver();
-        assert_eq!(
-            futures::executor::block_on(receiver.recv()),
-            Some(request(1))
-        );
+        assert!(receiver.recv().now_or_never().is_none());
         assert!(matches!(
             acquire(&root, request(2)).unwrap(),
             SingleInstanceOutcome::Forwarded
@@ -411,7 +395,6 @@ mod tests {
         let third = acquire(&root, request(3)).unwrap();
         assert!(matches!(third, SingleInstanceOutcome::Owner(_)));
         drop(third);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -421,10 +404,6 @@ mod tests {
             panic!("first process must own the instance");
         };
         let mut receiver = owner.take_activation_receiver();
-        assert_eq!(
-            futures::executor::block_on(receiver.recv()),
-            Some(request(1))
-        );
         let endpoint = read_endpoint(&owner.endpoint_path).unwrap().unwrap();
 
         let mut wrong_token = endpoint.auth_token;
@@ -449,6 +428,5 @@ mod tests {
 
         drop(receiver);
         drop(owner);
-        let _ = std::fs::remove_dir_all(root);
     }
 }

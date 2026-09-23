@@ -28,7 +28,67 @@ pub(in crate::features) enum SyncSessionPauseResult {
     NoGroup,
 }
 
+pub(in crate::features) struct SyncInputTransferBundle {
+    original_groups: Vec<SyncInputGroup>,
+    moved_groups: Vec<SyncInputGroup>,
+}
+
 impl SyncInputFeatureState {
+    pub(in crate::features) fn detach_sessions_for_transfer(
+        &mut self,
+        session_ids: &[String],
+    ) -> SyncInputTransferBundle {
+        let original_groups = self.groups.clone();
+        let mut moved_groups = Vec::new();
+        for group in &mut self.groups {
+            let mut moved = group.clone();
+            moved.session_ids.retain(|id| session_ids.contains(id));
+            moved
+                .paused_session_ids
+                .retain(|id| session_ids.contains(id));
+            if !moved.session_ids.is_empty() {
+                moved_groups.push(moved);
+            }
+            group.session_ids.retain(|id| !session_ids.contains(id));
+            group
+                .paused_session_ids
+                .retain(|id| !session_ids.contains(id));
+        }
+        self.groups.retain(|group| !group.session_ids.is_empty());
+        self.repair_selection();
+        SyncInputTransferBundle {
+            original_groups,
+            moved_groups,
+        }
+    }
+
+    pub(in crate::features) fn attach_sessions_from_transfer(
+        &mut self,
+        bundle: SyncInputTransferBundle,
+    ) {
+        for mut group in bundle.moved_groups {
+            if self.groups.iter().any(|existing| existing.id == group.id) {
+                group.id = format!("sync-group-{}", uuid());
+            }
+            self.groups.push(group);
+        }
+        self.repair_selection();
+    }
+
+    pub(in crate::features) fn restore_sessions_after_failed_transfer(
+        &mut self,
+        bundle: SyncInputTransferBundle,
+    ) {
+        self.groups = bundle.original_groups;
+        self.repair_selection();
+    }
+
+    pub(in crate::features) fn retains_transfer_session(&self, id: &str) -> bool {
+        self.groups
+            .iter()
+            .any(|group| group.session_ids.iter().any(|member| member == id))
+    }
+
     pub(in crate::features) fn new(focus: FocusHandle) -> Self {
         Self {
             groups: Vec::new(),
@@ -791,6 +851,40 @@ mod tests {
 
         assert_eq!(state.groups()[0].session_ids, ["new", "peer"]);
         assert_eq!(state.groups()[0].paused_session_ids, ["new"]);
+    }
+
+    #[test]
+    fn transfer_splits_group_and_preserves_pause_state_with_conflicting_target_id() {
+        let mut source = state();
+        let mut original = group("shared", "Shared");
+        original.session_ids = vec!["moved".into(), "remaining".into()];
+        original.paused_session_ids = vec!["moved".into()];
+        source.groups.push(original.clone());
+        let mut target = state();
+        target.groups.push(group("shared", "Existing"));
+
+        let bundle = source.detach_sessions_for_transfer(&["moved".into()]);
+        assert_eq!(source.groups()[0].session_ids, ["remaining"]);
+        assert!(source.groups()[0].paused_session_ids.is_empty());
+        target.attach_sessions_from_transfer(bundle);
+        assert_eq!(target.groups()[0].name, "Existing");
+        assert_ne!(target.groups()[1].id, "shared");
+        assert_eq!(target.groups()[1].name, "Shared");
+        assert_eq!(target.groups()[1].session_ids, ["moved"]);
+        assert_eq!(target.groups()[1].paused_session_ids, ["moved"]);
+    }
+
+    #[test]
+    fn failed_transfer_restores_original_sync_group_membership() {
+        let mut source = state();
+        let mut original = group("shared", "Shared");
+        original.session_ids = vec!["moved".into(), "remaining".into()];
+        original.paused_session_ids = vec!["moved".into()];
+        source.groups.push(original.clone());
+
+        let bundle = source.detach_sessions_for_transfer(&["moved".into()]);
+        source.restore_sessions_after_failed_transfer(bundle);
+        assert_eq!(source.groups(), [original]);
     }
 
     #[test]

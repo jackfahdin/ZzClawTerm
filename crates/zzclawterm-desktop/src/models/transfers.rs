@@ -532,6 +532,9 @@ pub(crate) enum TransferJobOutput {
     /// session's browser cache without switching the active session.
     Sent {
         source_path: String,
+        /// Set only after a verified cut has deleted the source.
+        source_parent_path: Option<String>,
+        source_entries: Option<Vec<SftpFileEntry>>,
         target_session_id: String,
         target_path: String,
         target_parent_path: String,

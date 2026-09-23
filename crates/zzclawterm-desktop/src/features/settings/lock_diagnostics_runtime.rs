@@ -15,11 +15,35 @@ use crate::models::TransferJobStatus;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn lock_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_shared_screen_lock(true, window, cx);
+        self.broadcast_screen_lock(true, cx);
+    }
+
+    pub(crate) fn apply_shared_screen_lock(
+        &mut self,
+        locked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !locked {
+            self.security.deactivate_screen_lock();
+            let restore_focus = self.security.take_screen_lock_restore_focus();
+            self.ensure_idle_lock_clock(cx);
+            self.forget_text_inputs("lock-screen.password");
+            self.shell.set_status("screen unlocked".to_string());
+            if let Some(focus) = restore_focus {
+                window.focus(&focus, cx);
+            }
+            self.ensure_pending_focus_clock(cx);
+            cx.notify();
+            return;
+        }
         let lock_status = if self.settings.summary().has_master_password {
             t!("lockScreen.passwordPlaceholder").to_string()
         } else {
             String::new()
         };
+        self.security.remember_screen_lock_focus(window.focused(cx));
         self.security.activate_screen_lock(lock_status);
         self.forget_text_inputs("lock-screen.password");
         self.shell.set_status("screen locked".to_string());
@@ -34,11 +58,36 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn unlock_app(&mut self, cx: &mut Context<Self>) {
         self.security.deactivate_screen_lock();
+        let restore_focus = self.security.take_screen_lock_restore_focus();
         // Unlocking resets the idle timer, so the clock starts counting again.
         self.ensure_idle_lock_clock(cx);
         self.forget_text_inputs("lock-screen.password");
         self.shell.set_status("screen unlocked".to_string());
+        self.broadcast_screen_lock(false, cx);
+        if let Some(focus) = restore_focus {
+            cx.spawn(async move |this, cx| {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if !this.security.screen_locked() {
+                        window.focus(&focus, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+        self.ensure_pending_focus_clock(cx);
         cx.notify();
+    }
+
+    fn broadcast_screen_lock(&self, locked: bool, cx: &mut Context<Self>) {
+        let Some(controller) = self.desktop_controller.clone() else {
+            return;
+        };
+        let workspace_id = self.workspace_id;
+        cx.defer(move |cx| {
+            let _ = controller.update(cx, |controller, cx| {
+                controller.set_screen_locked(locked, workspace_id, cx)
+            });
+        });
     }
 
     pub(in crate::features) fn submit_lock_unlock(&mut self, cx: &mut Context<Self>) {

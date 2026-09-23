@@ -531,49 +531,6 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn apply_panel_stack_from_settings(&mut self) {
-        let mode =
-            crate::models::PanelOpenMode::from_setting(&self.settings.summary().ui_panel_open_mode);
-        self.shell.panels.set_open_mode(mode);
-        self.shell.panels.multi_open = self.settings.summary().ui_panel_multi_open;
-        self.shell.panels.clear_floating();
-        self.shell.panels.left_open = self.settings.summary().ui_left_open_panels.clone();
-        self.shell.panels.right_open = self.settings.summary().ui_right_open_panels.clone();
-        self.shell.panels.stack_sizes = self
-            .settings
-            .summary()
-            .ui_panel_stack_sizes
-            .iter()
-            .filter(|(_, value)| **value > 0)
-            .map(|(key, value)| (key.clone(), (*value as f32) / 1000.))
-            .collect();
-        if mode.is_floating() {
-            self.shell.panels.left_open.clear();
-            self.shell.panels.right_open.clear();
-            self.shell.panels.active_left = None;
-            self.shell.panels.active_right = None;
-            self.shell.panels.left_collapsed = true;
-            self.shell.panels.right_collapsed = true;
-        } else if self.shell.panels.multi_open {
-            if self.shell.panels.left_open.is_empty()
-                && let Some(panel) = self.shell.panels.active_left
-            {
-                let id = panel.persistence_id().to_string();
-                if Self::is_stackable_panel_id(&id) {
-                    self.shell.panels.left_open.push(id);
-                }
-            }
-            if self.shell.panels.right_open.is_empty()
-                && let Some(panel) = self.shell.panels.active_right
-            {
-                let id = panel.persistence_id().to_string();
-                if Self::is_stackable_panel_id(&id) {
-                    self.shell.panels.right_open.push(id);
-                }
-            }
-        }
-    }
-
     pub(in crate::features) fn floating_side_panel(
         &mut self,
         side: PanelSide,

@@ -170,23 +170,20 @@ mod tests {
 
     #[test]
     fn stale_discovery_can_be_removed_repeatedly() {
-        let root =
-            std::env::temp_dir().join(format!("zzclawterm-mcp-test-{}", uuid::Uuid::new_v4()));
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-mcp-test");
         let store = DiscoveryStore::new(&root);
         store.remove().unwrap();
         store.remove().unwrap();
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn both_portable_markers_resolve_discovery_under_executable_data() {
         for marker in ["zzclawterm-portable", "portable.flag"] {
-            let root = std::env::temp_dir().join(format!(
-                "zzclawterm-mcp-portable-{}-{}",
-                marker.replace('.', "-"),
-                uuid::Uuid::new_v4()
+            let root = zzclawterm_core::test_support::TestTempDir::new(&format!(
+                "zzclawterm-mcp-portable-{}",
+                marker.replace('.', "-")
             ));
-            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(root.path()).unwrap();
             std::fs::write(root.join(marker), b"").unwrap();
             let executable = root.join(if cfg!(windows) {
                 "zzclawterm.exe"
@@ -197,17 +194,13 @@ mod tests {
                 default_config_dir_from(&executable, None).unwrap(),
                 root.join("data").join("config")
             );
-            let _ = std::fs::remove_dir_all(root);
         }
     }
 
     #[cfg(windows)]
     #[test]
     fn discovery_replacement_preserves_private_acl_and_removes_temporary_files() {
-        let root = std::env::temp_dir().join(format!(
-            "zzclawterm-mcp-discovery-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-mcp-discovery-test");
         let store = DiscoveryStore::new(&root);
         let first = discovery_document("first-token", "first-generation");
         let second = discovery_document("second-token", "second-generation");
@@ -232,8 +225,6 @@ mod tests {
             })
             .count();
         assert_eq!(temporary_files, 0);
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]

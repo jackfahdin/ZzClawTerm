@@ -9,7 +9,7 @@ const VIEWPORT_INSET: f32 = 16.;
 
 pub(super) fn tab_actions_menu_content_height(policy: TabActionPolicy) -> f32 {
     let support = policy.support;
-    let general_rows = 4 + usize::from(support.copy_ssh_host);
+    let general_rows = 5 + usize::from(support.copy_ssh_host);
     let session_rows = 2 * usize::from(support.session_spawn)
         + usize::from(support.ssh_multiplex)
         + usize::from(support.reconnect)
@@ -21,7 +21,7 @@ pub(super) fn tab_actions_menu_content_height(policy: TabActionPolicy) -> f32 {
     let split_rows = if support.split { 3 } else { 0 };
     let close_rows = 4 + usize::from(support.session_info);
     let row_count = general_rows + session_rows + split_rows + close_rows;
-    let separator_count = policy.menu_groups().len().saturating_sub(1);
+    let separator_count = policy.menu_groups().len().saturating_sub(1) + 1;
 
     MENU_VERTICAL_PADDING
         + row_count as f32 * MENU_ITEM_HEIGHT
@@ -89,16 +89,16 @@ mod tests {
         let local = policy(TabSessionCapability::Local, false);
         let saved_vnc = policy(TabSessionCapability::Vnc, true);
 
-        assert_eq!(tab_actions_menu_content_height(saved_ssh), 567.);
-        assert_eq!(tab_actions_menu_content_height(local), 483.);
-        assert_eq!(tab_actions_menu_content_height(saved_vnc), 269.);
+        assert_eq!(tab_actions_menu_content_height(saved_ssh), 604.);
+        assert_eq!(tab_actions_menu_content_height(local), 520.);
+        assert_eq!(tab_actions_menu_content_height(saved_vnc), 306.);
     }
 
     #[test]
     fn menu_expands_to_content_and_only_scrolls_in_short_viewports() {
         let policy = policy(TabSessionCapability::Ssh, true);
 
-        assert_eq!(tab_actions_menu_visible_height(policy, 900.), 567.);
+        assert_eq!(tab_actions_menu_visible_height(policy, 900.), 604.);
         assert_eq!(tab_actions_menu_visible_height(policy, 500.), 484.);
     }
 
@@ -113,7 +113,7 @@ mod tests {
         );
         assert_eq!(
             clamp_tab_actions_position(900., 700., TAB_ACTIONS_MENU_WIDTH, height, 800., 600.),
-            (572., 25.)
+            (572., 8.)
         );
     }
 }

@@ -339,7 +339,7 @@ fn default_device_name() -> String {
 }
 
 fn default_sync_debounce_seconds() -> u64 {
-    15
+    60
 }
 
 fn default_true() -> bool {

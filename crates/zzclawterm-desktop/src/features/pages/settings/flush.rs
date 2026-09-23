@@ -101,10 +101,12 @@ impl ZzClawTermApp {
             cloud_sync: CloudSyncPresentation {
                 settings: Arc::new(self.cloud_sync.settings().clone()),
                 state: self.cloud_sync.state().clone(),
+                history: self.cloud_sync.history().to_vec(),
                 pending_settings: self.cloud_sync.pending_settings(),
                 secret_draft: self.cloud_sync.secret_draft().clone(),
                 status: self.cloud_sync.status().to_string(),
                 job_running: self.cloud_sync.job_running(),
+                live_state: self.cloud_sync.live_state(),
                 conflict: self.cloud_sync.conflict().cloned(),
                 github_auth: self.cloud_sync.github_auth().clone(),
             },
@@ -123,7 +125,7 @@ impl ZzClawTermApp {
             draft_open: self.shell.has_settings_draft(),
             draft_dirty,
             validation_error: draft_dirty
-                .then(|| self.pending_settings_cloud_error())
+                .then(|| self.pending_settings_validation_error())
                 .flatten(),
             backup_prompt,
             expanded_groups: Arc::from(
@@ -173,6 +175,15 @@ impl ZzClawTermApp {
             == Some(panel)
         {
             self.native_settings_panel = None;
+            if let Some(controller) = self
+                .desktop_controller
+                .as_ref()
+                .and_then(gpui::WeakEntity::upgrade)
+            {
+                controller.update(cx, |controller, _| {
+                    controller.release_settings_owner(self.workspace_id)
+                });
+            }
             self.request_settings_panel_refresh(cx);
         }
     }

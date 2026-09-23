@@ -6,6 +6,9 @@
 //! lifetime visible; the flat `transfer_*` prefix did not.
 
 mod browser;
+mod clipboard;
+pub(in crate::features) use browser::TransferSessionTransferBundle;
+pub(in crate::features) use clipboard::TransferFileClipboard;
 mod browser_logic;
 mod tree;
 pub(in crate::features) use tree::TransferTreePresentation;
@@ -45,6 +48,9 @@ use crate::models::{
 use super::external_sync_runtime::ExternalEditorWatcher;
 
 pub(in crate::features) struct TransferFeatureState {
+    clipboard: Option<TransferFileClipboard>,
+    clipboard_generation: u64,
+    cut_jobs: HashMap<String, (u64, String)>,
     tree: tree::TransferTreeState,
     tree_focus: FocusHandle,
     queue: TransferQueueState,
@@ -277,6 +283,24 @@ struct TransferPanelState {
 }
 
 impl TransferFeatureState {
+    pub(in crate::features) fn session_has_active_transfer(&self, session_ids: &[String]) -> bool {
+        let session_ids = session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        self.queue.jobs.iter().any(|job| {
+            job.session_id
+                .as_deref()
+                .is_some_and(|session_id| session_ids.contains(session_id))
+                && matches!(
+                    job.status,
+                    TransferJobStatus::Running
+                        | TransferJobStatus::Paused
+                        | TransferJobStatus::Cancelling
+                )
+        })
+    }
+
     pub(in crate::features) fn new(
         remote_path: String,
         local_path: String,
@@ -286,6 +310,9 @@ impl TransferFeatureState {
     ) -> Self {
         let (tx, rx) = unbounded();
         Self {
+            clipboard: None,
+            clipboard_generation: 0,
+            cut_jobs: HashMap::new(),
             tree: tree::TransferTreeState::default(),
             tree_focus: focus.tree,
             #[cfg(test)]
@@ -1116,10 +1143,6 @@ impl TransferFeatureState {
 
     pub(in crate::features) fn panel_height(&self) -> f32 {
         self.panel.height
-    }
-
-    pub(in crate::features) fn set_panel_height(&mut self, height: f32) {
-        self.panel.height = height;
     }
 
     pub(in crate::features) fn start_panel_height_resize(&mut self, start_y: Pixels) {

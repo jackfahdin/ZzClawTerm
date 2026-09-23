@@ -992,7 +992,9 @@ fn terminal_frame_pipeline_background_chunks_are_deterministic_after_priority_sn
         .into_iter()
         .find_map(|event| match event {
             TerminalFrameEvent::Snapshot(event) => Some(event),
-            TerminalFrameEvent::Output(_) | TerminalFrameEvent::Search(_) => None,
+            TerminalFrameEvent::Output(_)
+            | TerminalFrameEvent::ClearExceptInput(_)
+            | TerminalFrameEvent::Search(_) => None,
         })
         .expect("visible priority request should emit a snapshot");
     let expected = terminal_frame_snapshot_with_scroll_window(&reference, 0, true);
@@ -1017,6 +1019,77 @@ fn terminal_frame_pipeline_background_chunks_are_deterministic_after_priority_sn
             .map(|row| row.signature)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn clear_except_input_is_ordered_between_output_frames() {
+    let pipeline = TerminalFramePipeline::default();
+    pipeline.submit_output(
+        "clear-session",
+        b"old\r\nprompt> \x1b]133;B\x07draft".to_vec(),
+        "UTF-8",
+        1000,
+    );
+    pipeline.clear_session_except_input("clear-session");
+    pipeline.submit_output("clear-session", b"!".to_vec(), "UTF-8", 1000);
+    pipeline.flush_for_test();
+
+    let mut events = VecDeque::new();
+    pipeline.drain_events_into(&mut events, usize::MAX);
+    let clear_index = events
+        .iter()
+        .position(|event| matches!(event, TerminalFrameEvent::ClearExceptInput(_)))
+        .expect("clear must emit an authoritative snapshot");
+    let TerminalFrameEvent::ClearExceptInput(clear) = &events[clear_index] else {
+        unreachable!();
+    };
+    assert_eq!(clear.snapshot.scrollback_len, 0);
+    let cleared_text = clear
+        .snapshot
+        .rows()
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<String>();
+    assert!(cleared_text.contains("prompt> draft"));
+    assert!(!cleared_text.contains("old"));
+    let later = events
+        .iter()
+        .skip(clear_index + 1)
+        .find_map(|event| match event {
+            TerminalFrameEvent::Output(frame) => Some(frame),
+            _ => None,
+        })
+        .expect("post-clear output must remain after the clear event");
+    assert!(!later.visible_text.contains("old"));
+    let later_text = later
+        .snapshot
+        .as_ref()
+        .expect("live output snapshot")
+        .rows()
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<String>();
+    assert!(later_text.contains("draft!"));
+    assert!(!later_text.contains("old"));
+}
+
+#[test]
+fn clear_presentation_keeps_terminal_protocol_and_stream_state() {
+    let mut view = TerminalViewState::new();
+    view.screen.advance(b"\x1b[?2004hprompt> draft");
+    view.protocol_state = TerminalProtocolState::from_screen(&view.screen);
+    view.output = "old output".to_string();
+    view.scroll_offset = 3;
+    let before = view.protocol_state;
+    let snapshot = view.screen.snapshot();
+
+    view.clear_presentation_except_input(42, &snapshot);
+
+    assert_eq!(view.protocol_state, before);
+    assert!(view.screen.bracketed_paste());
+    assert_eq!(view.output, "prompt> draft");
+    assert_eq!(view.scroll_offset, 0);
+    assert_eq!(view.screen_revision, 42);
 }
 
 #[test]
@@ -1435,6 +1508,63 @@ fn terminal_frame_event_queue_coalesces_pure_output_to_latest() {
                 && frame.accepted_bytes == 3
     ));
     assert!(queue.try_recv().is_none());
+}
+
+#[test]
+fn terminal_frame_event_queue_moves_only_selected_sessions() {
+    let queue = TerminalFrameEventQueue::new(8);
+    let mut first = output_frame_with_sizes(1, 0);
+    first.session_id = "moved".into();
+    let mut second = output_frame_with_sizes(1, 0);
+    second.session_id = "kept".into();
+    queue.push(TerminalFrameEvent::Output(first));
+    queue.push(TerminalFrameEvent::Output(second));
+
+    let moved = queue.take_sessions(&["moved".into()]);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved.front().unwrap().session_id(), "moved");
+    assert_eq!(queue.try_recv().unwrap().session_id(), "kept");
+    assert!(queue.try_recv().is_none());
+}
+
+#[test]
+fn terminal_frame_transfer_preserves_multiple_sessions_and_returns_rejected_batch() {
+    let source = TerminalFramePipeline::default();
+    let target = TerminalFramePipeline::default();
+    source.seed_session("first", "hello", "UTF-8", 1000);
+    source.seed_session("second", "world", "UTF-8", 1000);
+    let first = source.take_session_for_transfer("first").unwrap().unwrap();
+    let second = source.take_session_for_transfer("second").unwrap().unwrap();
+
+    target
+        .insert_sessions_from_transfer(vec![("first".into(), first), ("second".into(), second)])
+        .unwrap();
+    let first = target.take_session_for_transfer("first").unwrap().unwrap();
+    let second = target.take_session_for_transfer("second").unwrap().unwrap();
+    assert!(
+        first
+            .screen
+            .snapshot()
+            .rows()
+            .iter()
+            .any(|row| row.text.contains("hello"))
+    );
+    assert!(
+        second
+            .screen
+            .snapshot()
+            .rows()
+            .iter()
+            .any(|row| row.text.contains("world"))
+    );
+
+    target.command_tx.close();
+    let rejected = target
+        .insert_sessions_from_transfer(vec![("first".into(), first), ("second".into(), second)])
+        .unwrap_err();
+    assert_eq!(rejected.len(), 2);
+    assert_eq!(rejected[0].0, "first");
+    assert_eq!(rejected[1].0, "second");
 }
 
 #[test]

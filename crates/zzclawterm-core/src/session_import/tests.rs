@@ -187,12 +187,8 @@ fn windterm_target_splits_on_last_at_symbol() {
 
 #[test]
 fn limited_reader_rejects_oversized_files() {
-    let dir = std::env::temp_dir().join(format!(
-        "zzclawterm-session-import-limit-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&dir).expect("create limit directory");
+    let dir = crate::test_support::TestTempDir::new("zzclawterm-session-import-limit");
+    std::fs::create_dir_all(dir.path()).expect("create limit directory");
     let path = dir.join("large.json");
     std::fs::write(&path, b"12345").expect("write oversized file");
 
@@ -441,13 +437,9 @@ fn electerm_json_imports_bookmarks_with_groups() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-fn temp_import_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "zzclawterm-session-import-{label}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&dir).expect("create import directory");
+fn temp_import_dir(label: &str) -> crate::test_support::TestTempDir {
+    let dir = crate::test_support::TestTempDir::new(&format!("zzclawterm-session-import-{label}"));
+    std::fs::create_dir_all(dir.path()).expect("create import directory");
     dir
 }
 

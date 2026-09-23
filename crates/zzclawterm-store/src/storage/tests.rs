@@ -1,14 +1,13 @@
-use std::path::PathBuf;
-
 use aes_gcm::{Aes256Gcm, Key, KeyInit, aead::Aead};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use redb::{Database, ReadableDatabase};
 use sha2::{Digest, Sha256};
+use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_core::{
-    AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType, AssetMetadata,
-    CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth, ConnectionType,
-    ExistingFileBehavior, MainWindowBounds, MainWindowState, OtpEntry, RecordingMode,
-    RecordingRotationPolicy, SavedCredential, SearchEngineConfig, SshKey,
+    AccountAuthError, AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType,
+    AssetMetadata, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth,
+    ConnectionType, ExistingFileBehavior, MainWindowBounds, MainWindowState, OtpEntry,
+    RecordingMode, RecordingRotationPolicy, SavedCredential, SearchEngineConfig, SshKey,
     export_quick_commands_json,
 };
 
@@ -23,8 +22,8 @@ use super::{
     RdpKnownHostCheck, SETTINGS_CLOUD_SYNC, SETTINGS_DEFAULT, SETTINGS_MAIN_WINDOW_STATE,
     SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SSH_KEY_FILE_IMPORT_MAX_BYTES, SSH_KEY_PREFIX,
     SavedConnection, SessionsConfig, StorageError, TEXT_DOCS_TABLE, TUNNELS_TABLE, TunnelConfig,
-    TunnelGroup, current_time_ms, default_settings_value, deserialize_json, entity_key, json_path,
-    set_nested_json_value, stable_id, stored_password_is_ciphertext, write_json_in_txn,
+    TunnelGroup, could_be_current_secret_ciphertext, current_time_ms, default_settings_value,
+    deserialize_json, entity_key, json_path, set_nested_json_value, stable_id, write_json_in_txn,
 };
 
 #[test]
@@ -368,7 +367,8 @@ fn round_trips_sessions_in_redb_compatible_tables() {
 fn exports_and_imports_native_redb_backup() {
     let source_dir = unique_temp_dir("backup-source");
     let target_dir = unique_temp_dir("backup-target");
-    let backup_path = unique_temp_dir("backup-output").join("zzclawterm.redb");
+    let backup_dir = unique_temp_dir("backup-output");
+    let backup_path = backup_dir.join("zzclawterm.redb");
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     let config = SessionsConfig {
         custom_icons: Vec::new(),
@@ -452,7 +452,8 @@ fn exports_and_imports_native_redb_backup() {
 fn exports_and_imports_portable_snapshot() {
     let source_dir = unique_temp_dir("portable-source");
     let target_dir = unique_temp_dir("portable-target");
-    let snapshot_path = unique_temp_dir("portable-output").join("zzclawterm.zz");
+    let snapshot_dir = unique_temp_dir("portable-output");
+    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -678,7 +679,8 @@ fn encrypted_portable_snapshot_requires_master_password() {
     let source_dir = unique_temp_dir("portable-encrypted-source");
     let target_dir = unique_temp_dir("portable-encrypted-target");
     let wrong_target_dir = unique_temp_dir("portable-encrypted-wrong-target");
-    let snapshot_path = unique_temp_dir("portable-encrypted-output").join("zzclawterm.zz");
+    let snapshot_dir = unique_temp_dir("portable-encrypted-output");
+    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -836,7 +838,8 @@ fn legacy_tauri_snapshot_reencrypts_settings_and_rewraps_master_key() {
     const VAULT_SECRET: &str = "synthetic-vault-secret";
 
     let source_dir = unique_temp_dir("legacy-tauri-portable-source");
-    let snapshot_path = unique_temp_dir("legacy-tauri-portable-output").join("legacy.nya");
+    let snapshot_dir = unique_temp_dir("legacy-tauri-portable-output");
+    let snapshot_path = snapshot_dir.join("legacy.nya");
     let source = ConnectionStore::open(&source_dir).expect("source store");
     source
         .save_master_password(Some(SNAPSHOT_PASSWORD))
@@ -2388,6 +2391,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert_eq!(summary.ui_docker_manager_interval, 13);
     assert_eq!(summary.ui_quick_cmd_view_mode, "compact");
     assert_eq!(summary.ui_quick_cmd_sort_mode, "useCount");
+    assert_eq!(summary.ui_quick_cmd_selected_category, "all");
     assert_eq!(
         summary.ui_file_explorer_view_mode,
         zzclawterm_core::TransferBrowserViewMode::Tree
@@ -2797,11 +2801,23 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     let mut quick_command_update = saved_terminal.clone();
     quick_command_update.ui_quick_cmd_view_mode = "list".to_string();
     quick_command_update.ui_quick_cmd_sort_mode = "name".to_string();
+    quick_command_update.ui_quick_cmd_selected_category = "category-1".to_string();
     let saved_quick_command_ui = store
         .save_quick_command_ui_settings(&quick_command_update)
         .expect("save quick command ui settings");
     assert_eq!(saved_quick_command_ui.ui_quick_cmd_view_mode, "list");
     assert_eq!(saved_quick_command_ui.ui_quick_cmd_sort_mode, "name");
+    assert_eq!(
+        saved_quick_command_ui.ui_quick_cmd_selected_category,
+        "category-1"
+    );
+    assert_eq!(
+        store
+            .load_app_settings_summary()
+            .expect("reload quick command settings")
+            .ui_quick_cmd_selected_category,
+        "category-1"
+    );
     let stored = store
         .load_settings_value()
         .expect("stored quick command ui settings");
@@ -2812,6 +2828,10 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert_eq!(
         json_path(&stored, &["ui", "quick_cmd_sort_mode"]).and_then(|value| value.as_str()),
         Some("name")
+    );
+    assert_eq!(
+        json_path(&stored, &["ui", "quick_cmd_selected_category"]).and_then(|value| value.as_str()),
+        Some("category-1")
     );
 
     let mut ui_layout_update = saved_quick_command_ui.clone();
@@ -3109,6 +3129,212 @@ fn terminal_window_layout_roundtrip() {
 }
 
 #[test]
+fn legacy_workspace_fields_migrate_and_new_manifest_dual_writes_recent_workspace() {
+    let dir = unique_temp_dir("workspace-manifest-migration");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let legacy_tab =
+        zzclawterm_core::RestorableOpenTab::with_leaf_root("legacy", "Local", None, None, None);
+    store
+        .save_open_tabs(std::slice::from_ref(&legacy_tab))
+        .unwrap();
+
+    let migrated = store.load_workspace_restore_manifest().unwrap();
+    assert_eq!(migrated.workspaces.len(), 1);
+    assert_eq!(
+        migrated.workspaces[0].id,
+        zzclawterm_core::WorkspaceId::legacy()
+    );
+    assert_eq!(migrated.workspaces[0].sessions.open_tabs, vec![legacy_tab]);
+
+    let first_id = migrated.workspaces[0].id;
+    let second_id = zzclawterm_core::WorkspaceId::new();
+    let mut second = zzclawterm_core::WorkspaceRestoreState::empty(second_id);
+    let recent_tab = zzclawterm_core::RestorableOpenTab::with_leaf_root(
+        "recent",
+        "SSH",
+        Some("connection-2".to_string()),
+        None,
+        None,
+    );
+    second.sessions.open_tabs.push(recent_tab.clone());
+    second.ui.left_panel_width = 333;
+    second.ui.right_panel_width = 444;
+    second.ui.transfer_panel_height = 275;
+    second.ui.bottom_panel_height = 225;
+    second.ui.serial_send_panel_height = 195;
+    second.ui.bottom_panel_mode = "command_send".to_string();
+    second.ui.panel_multi_open = true;
+    second.ui.left_open_panels = vec!["fileExplorer".to_string(), "notes".to_string()];
+    second
+        .ui
+        .panel_stack_sizes
+        .insert("left:fileExplorer".to_string(), 600);
+    let manifest = zzclawterm_core::WorkspaceRestoreManifest {
+        version: zzclawterm_core::WORKSPACE_RESTORE_MANIFEST_VERSION,
+        workspaces: vec![migrated.workspaces[0].clone(), second],
+        most_recent_workspace_id: Some(second_id),
+        extra: Default::default(),
+    };
+    store.save_workspace_restore_manifest(&manifest).unwrap();
+
+    assert_eq!(store.load_open_tabs().unwrap(), vec![recent_tab]);
+    let loaded = store.load_workspace_restore_manifest().unwrap();
+    assert_eq!(loaded, manifest);
+    assert_eq!(loaded.workspaces[0].id, first_id);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn device_window_manifest_roundtrips_and_projects_recent_window_to_legacy_key() {
+    let dir = unique_temp_dir("device-window-manifest");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let first_id = zzclawterm_core::WorkspaceId::new();
+    let second_id = zzclawterm_core::WorkspaceId::new();
+    let first = MainWindowState::new(
+        None,
+        MainWindowBounds {
+            x: 0,
+            y: 0,
+            width: 900,
+            height: 700,
+        },
+        false,
+    );
+    let second = MainWindowState::new(
+        None,
+        MainWindowBounds {
+            x: 120,
+            y: 80,
+            width: 1280,
+            height: 800,
+        },
+        true,
+    );
+    let manifest = zzclawterm_core::DeviceWindowManifest {
+        version: zzclawterm_core::DEVICE_WINDOW_MANIFEST_VERSION,
+        windows: vec![
+            zzclawterm_core::DeviceWindowState {
+                workspace_id: first_id,
+                window: first,
+                extra: Default::default(),
+            },
+            zzclawterm_core::DeviceWindowState {
+                workspace_id: second_id,
+                window: second.clone(),
+                extra: Default::default(),
+            },
+        ],
+        window_order: vec![first_id, second_id],
+        most_recent_workspace_id: Some(second_id),
+        extra: Default::default(),
+    };
+    store.save_device_window_manifest(&manifest).unwrap();
+
+    assert_eq!(
+        store.load_device_window_manifest(first_id).unwrap(),
+        manifest
+    );
+    assert_eq!(store.load_main_window_state().unwrap(), Some(second));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn restore_manifests_rollback_every_document_on_failure() {
+    use zzclawterm_core::{
+        DeviceWindowManifest, DeviceWindowState, WorkspaceId, WorkspaceRestoreManifest,
+        WorkspaceRestoreState,
+    };
+
+    let dir = unique_temp_dir("restore-atomic-rollback");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let first_id = WorkspaceId::new();
+    let second_id = WorkspaceId::new();
+    let first_window = MainWindowState::new(
+        None,
+        MainWindowBounds {
+            x: 10,
+            y: 20,
+            width: 900,
+            height: 700,
+        },
+        false,
+    );
+    let second_window = MainWindowState::new(
+        None,
+        MainWindowBounds {
+            x: 40,
+            y: 50,
+            width: 1100,
+            height: 800,
+        },
+        true,
+    );
+    let old_workspace = WorkspaceRestoreManifest::single(WorkspaceRestoreState::empty(first_id));
+    let old_device = DeviceWindowManifest {
+        version: zzclawterm_core::DEVICE_WINDOW_MANIFEST_VERSION,
+        windows: vec![DeviceWindowState {
+            workspace_id: first_id,
+            window: first_window.clone(),
+            extra: Default::default(),
+        }],
+        window_order: vec![first_id],
+        most_recent_workspace_id: Some(first_id),
+        extra: Default::default(),
+    };
+    store
+        .save_restore_manifests_atomically(&old_workspace, &old_device)
+        .unwrap();
+    let old_settings = store.load_settings_value().unwrap();
+    let mut next_workspace = old_workspace.clone();
+    next_workspace
+        .workspaces
+        .push(WorkspaceRestoreState::empty(second_id));
+    next_workspace.most_recent_workspace_id = Some(second_id);
+    let mut next_device = old_device.clone();
+    next_device.windows.push(DeviceWindowState {
+        workspace_id: second_id,
+        window: second_window.clone(),
+        extra: Default::default(),
+    });
+    next_device.window_order.push(second_id);
+    next_device.most_recent_workspace_id = Some(second_id);
+
+    for document in 1..=3 {
+        assert!(
+            store
+                .save_restore_manifests_failing_after(&next_workspace, &next_device, document)
+                .is_err()
+        );
+        assert_eq!(store.load_settings_value().unwrap(), old_settings);
+        assert_eq!(
+            store.load_workspace_restore_manifest().unwrap(),
+            old_workspace
+        );
+        assert_eq!(
+            store.load_device_window_manifest(first_id).unwrap(),
+            old_device
+        );
+        assert_eq!(
+            store.load_main_window_state().unwrap(),
+            Some(first_window.clone())
+        );
+    }
+    store
+        .save_restore_manifests_atomically(&next_workspace, &next_device)
+        .unwrap();
+    assert_eq!(
+        store.load_workspace_restore_manifest().unwrap(),
+        next_workspace
+    );
+    assert_eq!(
+        store.load_device_window_manifest(first_id).unwrap(),
+        next_device
+    );
+    assert_eq!(store.load_main_window_state().unwrap(), Some(second_window));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn verifies_encrypted_master_password_from_settings() {
     let dir = unique_temp_dir("verify-master-password");
     let store = ConnectionStore::open(&dir).expect("store");
@@ -3132,6 +3358,211 @@ fn verifies_encrypted_master_password_from_settings() {
             .expect("verify incorrect")
     );
 
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn fresh_portable_store_reopens_master_password_and_credential() {
+    let dir = unique_temp_dir("fresh-portable-store");
+    let key_path = dir.join("portable.key");
+    let store = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()))
+        .expect("open fresh portable store");
+
+    let key_material = std::fs::read_to_string(&key_path).expect("read portable key");
+    assert!(!key_material.trim().is_empty());
+    assert_eq!(
+        B64.decode(key_material.trim()).expect("base64 key").len(),
+        32
+    );
+    store
+        .save_master_password(Some("portable-master-password"))
+        .expect("save master password");
+    assert!(
+        store
+            .verify_master_password("portable-master-password")
+            .unwrap()
+    );
+    store
+        .save_credential(SavedCredential {
+            id: "portable-credential".to_string(),
+            sort_order: 0,
+            name: "Portable login".to_string(),
+            username: "portable-user".to_string(),
+            password: Some("portable-secret".into()),
+            username_prompt_regex: None,
+            password_prompt_regex: None,
+            enabled: true,
+            has_password: false,
+        })
+        .expect("save portable credential");
+    drop(store);
+
+    let reopened = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path))
+        .expect("reopen portable store");
+    assert!(
+        reopened
+            .verify_master_password("portable-master-password")
+            .unwrap()
+    );
+    let credential = reopened
+        .load_decrypted_credential_by_id("portable-credential")
+        .expect("decrypt reopened credential")
+        .expect("portable credential");
+    assert_eq!(credential.username, "portable-user");
+    assert_eq!(credential.password.as_deref(), Some("portable-secret"));
+
+    drop(reopened);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn existing_portable_key_is_preserved_byte_for_byte() {
+    let dir = unique_temp_dir("existing-portable-key");
+    std::fs::create_dir_all(&dir).expect("create portable dir");
+    let key_path = dir.join("portable.key");
+    let existing = b"existing-portable-key-material\r\n";
+    std::fs::write(&key_path, existing).expect("seed portable key");
+
+    let store = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()))
+        .expect("open portable store");
+    store
+        .save_master_password(Some("existing-key-password"))
+        .expect("save with existing key");
+    drop(store);
+
+    let store = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()))
+        .expect("reopen with existing key");
+    assert!(
+        store
+            .verify_master_password("existing-key-password")
+            .unwrap()
+    );
+    super::create_portable_key(&key_path).expect("concurrent creator preserves existing key");
+    assert_eq!(std::fs::read(&key_path).expect("read key"), existing);
+
+    drop(store);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn separate_fresh_portable_stores_get_distinct_keys() {
+    let first_dir = unique_temp_dir("first-portable-copy");
+    let second_dir = unique_temp_dir("second-portable-copy");
+    let first_key = first_dir.join("portable.key");
+    let second_key = second_dir.join("portable.key");
+    let first = ConnectionStore::open_with_portable_key_path(&first_dir, Some(first_key.clone()))
+        .expect("first portable store");
+    let second =
+        ConnectionStore::open_with_portable_key_path(&second_dir, Some(second_key.clone()))
+            .expect("second portable store");
+
+    assert_ne!(
+        std::fs::read(first_key).unwrap(),
+        std::fs::read(second_key).unwrap()
+    );
+
+    drop(first);
+    drop(second);
+    std::fs::remove_dir_all(first_dir).ok();
+    std::fs::remove_dir_all(second_dir).ok();
+}
+
+#[test]
+fn installed_store_does_not_create_portable_key() {
+    let dir = unique_temp_dir("installed-store-no-portable-key");
+    let key_path = dir.join("portable.key");
+    let store = ConnectionStore::open(&dir).expect("open installed store");
+    assert!(!key_path.exists());
+
+    drop(store);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn empty_existing_portable_key_is_rejected() {
+    let dir = unique_temp_dir("empty-portable-key");
+    std::fs::create_dir_all(&dir).expect("create portable dir");
+    let key_path = dir.join("portable.key");
+    std::fs::write(&key_path, b" \r\n\t").expect("seed empty portable key");
+
+    let result = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()));
+    assert!(matches!(
+        result,
+        Err(StorageError::Crypto(
+            zzclawterm_core::CredentialCryptoError::EmptyPortableKey(path)
+        )) if path == key_path
+    ));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn invalid_utf8_portable_key_is_not_replaced() {
+    let dir = unique_temp_dir("invalid-portable-key");
+    std::fs::create_dir_all(&dir).expect("create portable dir");
+    let key_path = dir.join("portable.key");
+    let invalid = [0xff, 0xfe, 0xfd];
+    std::fs::write(&key_path, invalid).expect("seed invalid portable key");
+
+    let result = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()));
+    assert!(matches!(
+        result,
+        Err(StorageError::Crypto(
+            zzclawterm_core::CredentialCryptoError::ReadPortableKey { path, .. }
+        )) if path == key_path
+    ));
+    assert_eq!(std::fs::read(&key_path).unwrap(), invalid);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn missing_portable_key_with_master_key_is_not_regenerated() {
+    let dir = unique_temp_dir("missing-portable-master-key");
+    let key_path = dir.join("portable.key");
+    let store = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()))
+        .expect("open portable store");
+    store
+        .save_credential(SavedCredential {
+            id: "portable-credential".to_string(),
+            sort_order: 0,
+            name: "Portable login".to_string(),
+            username: "portable-user".to_string(),
+            password: Some("portable-secret".into()),
+            username_prompt_regex: None,
+            password_prompt_regex: None,
+            enabled: true,
+            has_password: false,
+        })
+        .expect("save credential");
+    drop(store);
+    std::fs::remove_file(&key_path).expect("remove portable key");
+
+    let result = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()));
+    assert!(matches!(
+        result,
+        Err(StorageError::MissingPortableKey { path }) if path == key_path
+    ));
+    assert!(!key_path.exists());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn missing_portable_key_with_master_password_is_not_regenerated() {
+    let dir = unique_temp_dir("missing-portable-master-password");
+    let key_path = dir.join("portable.key");
+    let store = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()))
+        .expect("open portable store");
+    store
+        .save_master_password(Some("portable-master-password"))
+        .expect("save master password");
+    drop(store);
+    std::fs::remove_file(&key_path).expect("remove portable key");
+
+    let result = ConnectionStore::open_with_portable_key_path(&dir, Some(key_path.clone()));
+    assert!(matches!(
+        result,
+        Err(StorageError::MissingPortableKey { path }) if path == key_path
+    ));
+    assert!(!key_path.exists());
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -3342,6 +3773,7 @@ fn cloud_sync_state_round_trips_and_reads_legacy_doc() {
         last_applied_remote_revision: Some("rev-a".to_string()),
         last_checked_at_ms: Some(10),
         last_synced_at_ms: Some(20),
+        ..CloudSyncState::default()
     };
     store
         .save_cloud_sync_state(&state)
@@ -3357,8 +3789,16 @@ fn cloud_sync_state_round_trips_and_reads_legacy_doc() {
         last_applied_remote_revision: Some("legacy-rev".to_string()),
         last_checked_at_ms: Some(30),
         last_synced_at_ms: Some(40),
+        ..CloudSyncState::default()
     };
-    let legacy_content = serde_json::to_string(&legacy).expect("legacy json");
+    let legacy_content = serde_json::json!({
+        "device_id": "legacy-device",
+        "last_synced_payload_hash": "legacy-hash",
+        "last_applied_remote_revision": "legacy-rev",
+        "last_checked_at_ms": 30,
+        "last_synced_at_ms": 40
+    })
+    .to_string();
     let txn = legacy_store.db.begin_write().expect("legacy txn");
     txn.open_table(TEXT_DOCS_TABLE)
         .expect("text docs")
@@ -4268,14 +4708,8 @@ fn command_history_uses_legacy_table_and_normalizes_entries() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-pub(super) fn unique_temp_dir(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("zzclawterm-core-{name}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    dir
+pub(super) fn unique_temp_dir(name: &str) -> TestTempDir {
+    TestTempDir::new(&format!("zzclawterm-core-{name}"))
 }
 
 fn encrypt_for_test(plaintext: &[u8], key: &Key<Aes256Gcm>) -> String {
@@ -4568,6 +5002,399 @@ fn ssh_connection_for_asset(id: &str) -> SavedConnection {
     }
 }
 
+pub(super) fn connection_password_record(
+    store: &ConnectionStore,
+    connection_id: &str,
+) -> ConnectionPasswordRecord {
+    let txn = store.db.begin_read().expect("read transaction");
+    let table = txn
+        .open_table(CREDENTIALS_TABLE)
+        .expect("credentials table");
+    let raw = table
+        .get(entity_key(CONNECTION_PASSWORD_PREFIX, connection_id).as_str())
+        .expect("read connection password")
+        .expect("connection password record");
+    deserialize_json(raw.value()).expect("deserialize connection password")
+}
+
+#[test]
+fn connection_inline_password_is_encrypted_at_rest_and_roundtrips() {
+    let dir = unique_temp_dir("connection-inline-password-roundtrip");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = ssh_connection_for_asset("inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some("hunter2".to_string().into()),
+        has_password: false,
+        ..ConnectionAuth::default()
+    });
+
+    store.save_connection(&connection).expect("save connection");
+
+    let record = connection_password_record(&store, "inline-password");
+    assert_ne!(record.password.expose_secret(), "hunter2");
+    let crypto = store.credential_crypto().expect("credential crypto");
+    let master_key = store
+        .load_master_key_token()
+        .expect("load master key")
+        .expect("master key");
+    assert_eq!(
+        crypto
+            .decrypt_secret(&master_key, record.password.expose_secret())
+            .expect("decrypt stored password"),
+        "hunter2"
+    );
+
+    let loaded = store
+        .get_connection("inline-password")
+        .expect("load connection")
+        .expect("connection");
+    let auth = loaded.auth.expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("hunter2"));
+    assert!(!auth.has_password);
+    let (_, password) = auth
+        .resolve_account_auth("root", None)
+        .expect("resolve inline password");
+    assert_eq!(password.as_deref(), Some("hunter2"));
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn save_group_and_connection_encrypts_inline_password() {
+    let dir = unique_temp_dir("group-connection-inline-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let group = Group {
+        id: "group-secret".to_string(),
+        name: "Servers".to_string(),
+        parent_id: None,
+        sort_order: 0,
+        created_at_ms: None,
+        updated_at_ms: None,
+    };
+    let mut connection = ssh_connection_for_asset("group-inline-password");
+    connection.group_id = Some(group.id.clone());
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some("group-secret".to_string().into()),
+        ..ConnectionAuth::default()
+    });
+
+    store
+        .save_group_and_connection(&group, &connection)
+        .expect("save group and connection");
+
+    let record = connection_password_record(&store, "group-inline-password");
+    assert_ne!(record.password.expose_secret(), "group-secret");
+    let loaded = store
+        .get_connection("group-inline-password")
+        .expect("load connection")
+        .expect("connection");
+    let auth = loaded.auth.expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("group-secret"));
+    assert!(!auth.has_password);
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn locked_connection_ciphertext_is_not_reencrypted_or_unlocked() {
+    let dir = unique_temp_dir("locked-connection-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let locked_ciphertext = encrypt_for_test(b"locked-secret", &test_key(41));
+    let mut connection = ssh_connection_for_asset("locked-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some(locked_ciphertext.clone().into()),
+        has_password: true,
+        ..ConnectionAuth::default()
+    });
+
+    store
+        .save_connection(&connection)
+        .expect("save locked connection");
+    assert_eq!(
+        connection_password_record(&store, "locked-inline-password")
+            .password
+            .expose_secret(),
+        locked_ciphertext
+    );
+
+    let loaded = store
+        .get_connection("locked-inline-password")
+        .expect("load connection")
+        .expect("connection");
+    let auth = loaded.auth.as_ref().expect("auth");
+    assert!(auth.has_password);
+    assert_eq!(auth.password.as_deref(), Some(locked_ciphertext.as_str()));
+    assert_eq!(
+        auth.resolve_account_auth("root", None),
+        Err(AccountAuthError::LockedConnectionPassword)
+    );
+
+    store
+        .save_connection(&loaded)
+        .expect("resave locked connection");
+    assert_eq!(
+        connection_password_record(&store, "locked-inline-password")
+            .password
+            .expose_secret(),
+        locked_ciphertext
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn preview_plaintext_connection_password_is_migrated_immediately() {
+    let dir = unique_temp_dir("preview-plaintext-connection-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = ssh_connection_for_asset("preview-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        ..ConnectionAuth::default()
+    });
+    store.save_connection(&connection).expect("save connection");
+    let now = current_time_ms();
+    let plaintext_record = ConnectionPasswordRecord {
+        id: connection.id.clone(),
+        connection_id: connection.id.clone(),
+        password: "preview-secret!".to_string().into(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    {
+        let txn = store.db.begin_write().expect("write transaction");
+        write_json_in_txn(
+            &txn,
+            CREDENTIALS_TABLE,
+            &entity_key(CONNECTION_PASSWORD_PREFIX, &connection.id),
+            &plaintext_record,
+        )
+        .expect("write preview plaintext");
+        txn.commit().expect("commit preview plaintext");
+    }
+
+    let loaded = store
+        .get_connection(&connection.id)
+        .expect("load connection")
+        .expect("connection");
+    let auth = loaded.auth.expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("preview-secret!"));
+    assert!(!auth.has_password);
+
+    let migrated = connection_password_record(&store, &connection.id);
+    assert_ne!(migrated.password.expose_secret(), "preview-secret!");
+    let crypto = store.credential_crypto().expect("credential crypto");
+    let master_key = store
+        .load_master_key_token()
+        .expect("load master key")
+        .expect("master key");
+    assert_eq!(
+        crypto
+            .decrypt_secret(&master_key, migrated.password.expose_secret())
+            .expect("decrypt migrated password"),
+        "preview-secret!"
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn possible_ciphertext_with_failed_authentication_stays_locked() {
+    let dir = unique_temp_dir("possible-ciphertext-stays-locked");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = ssh_connection_for_asset("ambiguous-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        ..ConnectionAuth::default()
+    });
+    store.save_connection(&connection).expect("save connection");
+    let possible_ciphertext = B64.encode([17_u8; 28]);
+    let now = current_time_ms();
+    let record = ConnectionPasswordRecord {
+        id: connection.id.clone(),
+        connection_id: connection.id.clone(),
+        password: possible_ciphertext.clone().into(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    {
+        let txn = store.db.begin_write().expect("write transaction");
+        write_json_in_txn(
+            &txn,
+            CREDENTIALS_TABLE,
+            &entity_key(CONNECTION_PASSWORD_PREFIX, &connection.id),
+            &record,
+        )
+        .expect("write possible ciphertext");
+        txn.commit().expect("commit possible ciphertext");
+    }
+
+    let auth = store
+        .get_connection(&connection.id)
+        .expect("load connection")
+        .expect("connection")
+        .auth
+        .expect("auth");
+    assert!(auth.has_password);
+    assert_eq!(auth.password.as_deref(), Some(possible_ciphertext.as_str()));
+    assert_eq!(
+        auth.resolve_account_auth("root", None),
+        Err(AccountAuthError::LockedConnectionPassword)
+    );
+    assert_eq!(
+        connection_password_record(&store, &connection.id)
+            .password
+            .expose_secret(),
+        possible_ciphertext
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn replace_sessions_encrypts_plaintext_and_preserves_locked_ciphertext() {
+    let dir = unique_temp_dir("replace-inline-passwords");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut unlocked = ssh_connection_for_asset("replace-unlocked");
+    unlocked.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some("replace-secret".to_string().into()),
+        ..ConnectionAuth::default()
+    });
+    let locked_ciphertext = encrypt_for_test(b"locked-secret", &test_key(43));
+    let mut locked = ssh_connection_for_asset("replace-locked");
+    locked.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some(locked_ciphertext.clone().into()),
+        has_password: true,
+        ..ConnectionAuth::default()
+    });
+    let config = SessionsConfig {
+        connections: vec![unlocked, locked],
+        ..SessionsConfig::default()
+    };
+
+    store.replace_sessions(&config).expect("replace sessions");
+
+    assert_ne!(
+        connection_password_record(&store, "replace-unlocked")
+            .password
+            .expose_secret(),
+        "replace-secret"
+    );
+    assert_eq!(
+        connection_password_record(&store, "replace-locked")
+            .password
+            .expose_secret(),
+        locked_ciphertext
+    );
+    let loaded = store.load_sessions().expect("load sessions");
+    let unlocked_auth = loaded
+        .connections
+        .iter()
+        .find(|connection| connection.id == "replace-unlocked")
+        .and_then(|connection| connection.auth.as_ref())
+        .expect("unlocked auth");
+    assert_eq!(unlocked_auth.password.as_deref(), Some("replace-secret"));
+    assert!(!unlocked_auth.has_password);
+    let locked_auth = loaded
+        .connections
+        .iter()
+        .find(|connection| connection.id == "replace-locked")
+        .and_then(|connection| connection.auth.as_ref())
+        .expect("locked auth");
+    assert!(locked_auth.has_password);
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn metadata_only_connection_saves_keep_inline_password_unlocked() {
+    let dir = unique_temp_dir("connection-metadata-inline-password");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = ssh_connection_for_asset("metadata-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some("metadata-secret".to_string().into()),
+        ..ConnectionAuth::default()
+    });
+    store.save_connection(&connection).expect("initial save");
+
+    let mut loaded = store
+        .get_connection(&connection.id)
+        .expect("load connection")
+        .expect("connection");
+    loaded.sort_order = 42;
+    loaded.icon_auto_detect = Some(true);
+    store.save_connection(&loaded).expect("save metadata");
+
+    let reloaded = store
+        .get_connection(&connection.id)
+        .expect("reload connection")
+        .expect("connection");
+    let auth = reloaded.auth.expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("metadata-secret"));
+    assert!(!auth.has_password);
+    assert_eq!(reloaded.sort_order, 42);
+    let record = connection_password_record(&store, &connection.id);
+    assert_ne!(record.password.expose_secret(), "metadata-secret");
+    let crypto = store.credential_crypto().expect("crypto");
+    let token = store
+        .load_master_key_token()
+        .expect("load master key")
+        .expect("master key");
+    assert_eq!(
+        crypto
+            .decrypt_secret(&token, record.password.expose_secret())
+            .expect("decrypt metadata save"),
+        "metadata-secret"
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn portable_snapshot_restore_encrypts_connection_inline_password() {
+    let source_dir = unique_temp_dir("portable-inline-password-source");
+    let target_dir = unique_temp_dir("portable-inline-password-target");
+    let source = ConnectionStore::open(&source_dir).expect("source store");
+    let mut connection = ssh_connection_for_asset("portable-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some("portable-secret".to_string().into()),
+        ..ConnectionAuth::default()
+    });
+    source.save_connection(&connection).expect("save source");
+    let mut snapshot = source
+        .build_raw_portable_snapshot(
+            zzclawterm_core::PortableSnapshotKind::Backup,
+            "device",
+            "test",
+        )
+        .expect("build snapshot");
+    snapshot.recalculate_hash().expect("hash snapshot");
+
+    let target = ConnectionStore::open(&target_dir).expect("target store");
+    target
+        .apply_raw_portable_snapshot(&snapshot)
+        .expect("restore snapshot");
+
+    let record = connection_password_record(&target, &connection.id);
+    assert_ne!(record.password.expose_secret(), "portable-secret");
+    let restored = target
+        .get_connection(&connection.id)
+        .expect("load restored connection")
+        .expect("connection");
+    let auth = restored.auth.expect("auth");
+    assert_eq!(auth.password.as_deref(), Some("portable-secret"));
+    assert!(!auth.has_password);
+
+    std::fs::remove_dir_all(source_dir).ok();
+    std::fs::remove_dir_all(target_dir).ok();
+}
+
 #[test]
 fn merge_connection_asset_from_monitoring_creates_and_merges_atomically() {
     let dir = unique_temp_dir("asset-merge");
@@ -4740,6 +5567,7 @@ fn merge_connection_asset_preserves_inline_password() {
         .expect("connection");
     let auth = reloaded.auth.expect("auth");
     assert_eq!(auth.password.as_deref(), Some("hunter2"));
+    assert!(!auth.has_password);
     assert_eq!(
         reloaded.asset.expect("asset").hostname.as_deref(),
         Some("node-1")
@@ -4943,6 +5771,29 @@ fn portable_snapshot_excludes_and_preserves_device_local_main_window_state() {
             true,
         ))
         .expect("save source window state");
+    let workspace_id = zzclawterm_core::WorkspaceId::new();
+    source
+        .save_device_window_manifest(&zzclawterm_core::DeviceWindowManifest {
+            version: zzclawterm_core::DEVICE_WINDOW_MANIFEST_VERSION,
+            windows: vec![zzclawterm_core::DeviceWindowState {
+                workspace_id,
+                window: MainWindowState::new(
+                    None,
+                    MainWindowBounds {
+                        x: 30,
+                        y: 40,
+                        width: 800,
+                        height: 600,
+                    },
+                    false,
+                ),
+                extra: Default::default(),
+            }],
+            window_order: vec![workspace_id],
+            most_recent_workspace_id: Some(workspace_id),
+            extra: Default::default(),
+        })
+        .expect("save device windows");
     let mut snapshot = source
         .build_raw_portable_snapshot(
             zzclawterm_core::PortableSnapshotKind::Backup,
@@ -5151,7 +6002,7 @@ fn save_connection_encrypts_direct_password_and_roundtrips() {
     };
     let stored = stored_record.password.expose_secret().to_string();
     assert_ne!(stored, "secret123");
-    assert!(stored_password_is_ciphertext(&stored));
+    assert!(could_be_current_secret_ciphertext(&stored));
 
     let loaded = store.load_sessions().expect("load");
     let auth = loaded.connections[0].auth.as_ref().expect("auth");

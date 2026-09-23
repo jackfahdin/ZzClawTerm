@@ -74,6 +74,23 @@ impl ActivationRequest {
                 .collect(),
         }
     }
+
+    pub fn open_behavior(&self) -> crate::ActivationOpenBehavior {
+        if self.args.iter().any(|arg| arg.matches("--reuse-window")) {
+            crate::ActivationOpenBehavior::ReuseMostRecent
+        } else {
+            crate::ActivationOpenBehavior::NewWindow
+        }
+    }
+}
+
+impl RawActivationArg {
+    fn matches(&self, expected: &str) -> bool {
+        match self {
+            Self::Bytes(bytes) => String::from_utf8_lossy(bytes) == expected,
+            Self::Wide(units) => String::from_utf16_lossy(units) == expected,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

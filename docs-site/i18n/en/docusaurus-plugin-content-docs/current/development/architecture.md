@@ -28,7 +28,7 @@ The main responsibilities are:
 |------|----------------|
 | `zzclawterm-app` | Executable entry point, logging, embedded assets, and root-window creation |
 | `zzclawterm-desktop` | GPUI composition, state, views, platform adapters, and background coordination |
-| `zzclawterm-ui` | Shared controls, theme tokens, and the `gpui-component` integration boundary |
+| `zzclawterm-ui` | Shared controls, theme tokens, and the `gpui-kit` integration boundary |
 | `zzclawterm-terminal` | UI-independent terminal state, control sequences, encodings, and graphics protocols |
 | `zzclawterm-terminal-gpui` | GPUI terminal input, layout, selection, highlighting, images, and painting |
 | `zzclawterm-transport` | PTY, SSH, Telnet, Serial, SFTP, tunnels, remote operations, and transfer protocols |

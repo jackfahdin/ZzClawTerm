@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use zzclawterm_core::{QuickCommand, QuickCommandCategory, QuickCommandsConfig, uuid};
 
 use super::helpers::{
-    current_time_ms, normalize_id, require_text, slugify, trim_optional, validate_one_of,
+    current_time_ms, normalize_id, require_preserved_text, require_text, slugify, trim_optional,
+    validate_one_of,
 };
 use super::{ImportConfig, ImportSummary};
 
@@ -48,7 +49,11 @@ pub(super) fn merge_import(
     let now = current_time_ms();
     for command in import_config.commands {
         let label = require_text(&command.label, "command.label")?;
-        let command_text = require_text(&command.command, "command.command")?;
+        let command_text = if command.preserve_command_text {
+            require_preserved_text(&command.command, "command.command")?
+        } else {
+            require_text(&command.command, "command.command")?
+        };
         let id_input = command.id.unwrap_or_else(|| format!("cmd-{}", uuid()));
         let id = normalize_id(&id_input, "command.id")?;
 

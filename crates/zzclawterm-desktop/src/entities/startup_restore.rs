@@ -1,4 +1,6 @@
-use zzclawterm_core::{RestorableOpenTab, RestorableWorkspacePaneNode};
+use zzclawterm_core::{
+    RestorableOpenTab, RestorableTerminalWindowNode, RestorableWorkspacePaneNode,
+};
 
 #[derive(Debug, Default)]
 pub struct StartupRestoreStore {
@@ -8,6 +10,8 @@ pub struct StartupRestoreStore {
     pending_pane_layouts: Vec<RestorableWorkspacePaneNode>,
     pending_active_pane_indexes: Vec<usize>,
     loaded_open_tabs: Option<Vec<RestorableOpenTab>>,
+    loaded_terminal_window_layout: Option<Option<RestorableTerminalWindowNode>>,
+    loaded_workspace_pane_layout: Option<Option<RestorableWorkspacePaneNode>>,
 }
 
 impl StartupRestoreStore {
@@ -49,6 +53,27 @@ impl StartupRestoreStore {
 
     pub fn take_loaded_open_tabs(&mut self) -> Option<Vec<RestorableOpenTab>> {
         self.loaded_open_tabs.take()
+    }
+
+    pub fn set_loaded_window_layouts(
+        &mut self,
+        terminal: Option<RestorableTerminalWindowNode>,
+        workspace: Option<RestorableWorkspacePaneNode>,
+    ) {
+        self.loaded_terminal_window_layout = Some(terminal);
+        self.loaded_workspace_pane_layout = Some(workspace);
+    }
+
+    pub fn take_loaded_terminal_window_layout(
+        &mut self,
+    ) -> Option<Option<RestorableTerminalWindowNode>> {
+        self.loaded_terminal_window_layout.take()
+    }
+
+    pub fn take_loaded_workspace_pane_layout(
+        &mut self,
+    ) -> Option<Option<RestorableWorkspacePaneNode>> {
+        self.loaded_workspace_pane_layout.take()
     }
 
     pub fn queue_empty(&self) -> bool {

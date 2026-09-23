@@ -244,8 +244,7 @@ impl ZzClawTermApp {
             move |this, event, cx| {
                 match event.outcome {
                     Ok((config, deleted)) => {
-                        this.commands
-                            .replace_quick_command_catalog(config.commands, config.categories);
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         this.settings.update_store_status(
                             if deleted {
                                 format!("quick command '{command_label}' deleted")
@@ -360,9 +359,9 @@ impl ZzClawTermApp {
             move |this, event, cx| {
                 match event.outcome {
                     Ok((config, deleted_category, deleted_commands)) => {
-                        this.commands
-                            .replace_quick_command_catalog(config.commands, config.categories);
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         this.commands.finish_quick_category_delete(&delete.id);
+                        this.sync_quick_command_selected_category(cx);
                         this.settings.update_store_status(
                             if deleted_category {
                                 format!(
@@ -503,8 +502,7 @@ impl ZzClawTermApp {
             move |this, event, cx| {
                 match event.outcome {
                     Ok((config, renamed, duplicated)) => {
-                        this.commands
-                            .replace_quick_command_catalog(config.commands, config.categories);
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         if renamed {
                             this.commands.clear_quick_category_rename();
                             this.settings.update_store_status(
@@ -661,8 +659,7 @@ impl ZzClawTermApp {
             move |this, event, cx| {
                 match event.outcome {
                     Ok((config, created, duplicated)) => {
-                        this.commands
-                            .replace_quick_command_catalog(config.commands, config.categories);
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         if created {
                             this.commands.clear_quick_category_create();
                             this.settings.update_store_status(

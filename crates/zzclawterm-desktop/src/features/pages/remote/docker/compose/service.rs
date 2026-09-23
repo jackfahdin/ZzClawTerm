@@ -258,16 +258,18 @@ fn docker_compose_service_row(
                         }),
                     ))
                     .when(menu_open, |this| {
-                        this.child(docker_compose_service_action_menu(
-                            context,
-                            DockerComposeServiceMenu {
-                                project_name,
-                                config_files,
-                                service_name,
-                                running_container_id,
-                                can_enter,
-                            },
-                            cx,
+                        this.child(super::super::docker_menu_layer(
+                            docker_compose_service_action_menu(
+                                context,
+                                DockerComposeServiceMenu {
+                                    project_name,
+                                    config_files,
+                                    service_name,
+                                    running_container_id,
+                                    can_enter,
+                                },
+                                cx,
+                            ),
                         ))
                     }),
             ),

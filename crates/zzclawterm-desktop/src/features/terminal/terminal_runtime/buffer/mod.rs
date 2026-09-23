@@ -794,6 +794,17 @@ impl ZzClawTermApp {
             TerminalFrameEvent::Snapshot(snapshot) => {
                 self.apply_terminal_snapshot_frame(snapshot, cx)
             }
+            TerminalFrameEvent::ClearExceptInput(snapshot) => {
+                if let Some(view) = self.terminal.view.views.get_mut(&snapshot.session_id) {
+                    view.clear_presentation_except_input(snapshot.revision, &snapshot.snapshot);
+                }
+                if self.session.active_id() == Some(snapshot.session_id.as_str()) {
+                    self.terminal.view.output.clear();
+                    self.terminal.view.scroll_offset = 0;
+                }
+                self.clear_terminal_scroll_residual_for_session(Some(&snapshot.session_id));
+                self.apply_terminal_snapshot_frame(snapshot, cx)
+            }
             TerminalFrameEvent::Search(search) => self.apply_terminal_search_frame(search),
         }
     }
@@ -1564,7 +1575,9 @@ fn pop_terminal_frame_critical_events_for_apply(
     let Some(first_critical_index) = events.iter().position(|event| {
         matches!(
             event,
-            TerminalFrameEvent::Output(_) | TerminalFrameEvent::Snapshot(_)
+            TerminalFrameEvent::Output(_)
+                | TerminalFrameEvent::Snapshot(_)
+                | TerminalFrameEvent::ClearExceptInput(_)
         )
     }) else {
         return (Vec::new(), 0);
@@ -1572,7 +1585,7 @@ fn pop_terminal_frame_critical_events_for_apply(
 
     if matches!(
         events.get(first_critical_index),
-        Some(TerminalFrameEvent::Snapshot(_))
+        Some(TerminalFrameEvent::Snapshot(_) | TerminalFrameEvent::ClearExceptInput(_))
     ) {
         let Some(event) = events.remove(first_critical_index) else {
             return (Vec::new(), 0);

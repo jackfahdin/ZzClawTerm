@@ -25,6 +25,7 @@ mod settings;
 mod shell;
 mod sync;
 mod sync_input;
+mod tab_transfer;
 mod terminal;
 #[cfg(test)]
 mod test_support;
@@ -32,11 +33,11 @@ mod text_inputs;
 mod transfers;
 mod translation;
 mod tunnels;
-mod update;
+pub(crate) mod update;
 mod view_widgets;
 
 pub(crate) fn init(cx: &mut gpui::App) {
-    // gpui-component has already installed its bindings. Capture that immutable
+    // gpui-kit has already installed its bindings. Capture that immutable
     // baseline before adding ZzClawTerm's rebuildable bindings and protections.
     crate::shortcuts::init(cx);
     init_protection_key_bindings(cx);
@@ -48,9 +49,13 @@ pub(crate) fn init_protection_key_bindings(cx: &mut gpui::App) {
 }
 
 pub(crate) use app_state::AppLifecycleEvent;
+pub(crate) use app_state::WorkspaceCloseSnapshot;
 pub use app_state::ZzClawTermApp;
+pub(crate) use app_state::ZzClawTermProcessEntities;
+pub(crate) use app_state::ZzClawTermStoreClients;
 pub(in crate::features) use font_catalog::{
     FontAvailability, FontAvailabilityReason, FontCatalogEntry, FontCatalogKind,
     FontCatalogLoadState, FontCatalogPresentation, FontCatalogSnapshot, FontCatalogState,
     FontResolutionSource, FontResolutionStatus, font_names_fingerprint, normalize_font_family,
 };
+pub(crate) use shell::tray::{SystemTray, TraySnapshot, show_window as show_tray_window};

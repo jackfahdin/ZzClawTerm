@@ -139,6 +139,12 @@ pub struct CloudSyncState {
     pub last_checked_at_ms: Option<u64>,
     #[serde(default)]
     pub last_synced_at_ms: Option<u64>,
+    #[serde(default)]
+    pub last_validated_remote_revision: Option<String>,
+    #[serde(default)]
+    pub last_full_validation_at_ms: Option<u64>,
+    #[serde(default)]
+    pub last_gc_attempt_at_ms: Option<u64>,
 }
 
 impl Default for CloudSyncState {
@@ -149,6 +155,9 @@ impl Default for CloudSyncState {
             last_applied_remote_revision: None,
             last_checked_at_ms: None,
             last_synced_at_ms: None,
+            last_validated_remote_revision: None,
+            last_full_validation_at_ms: None,
+            last_gc_attempt_at_ms: None,
         }
     }
 }
@@ -262,6 +271,15 @@ pub struct CloudSyncResult {
     pub status: CloudSyncStatus,
     pub pointer: Option<RemoteSyncPointer>,
     pub backup: Option<CloudSyncBackupInfo>,
+    pub outcome: CloudSyncOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudSyncOutcome {
+    UpToDate,
+    Uploaded,
+    Downloaded,
+    Recovered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,14 +376,15 @@ pub fn push_snapshot_with_remote(
         next_state.last_synced_payload_hash = Some(local_hash);
         next_state.last_applied_remote_revision = Some(remote_pointer.revision_id.clone());
         next_state.last_checked_at_ms = Some(current_time_ms());
+        next_state.last_validated_remote_revision = Some(remote_pointer.revision_id.clone());
+        next_state.last_full_validation_at_ms = Some(current_time_ms());
         let result = result(
             next_state,
             remote.provider(),
-            "idle",
             "Cloud sync is already up to date",
             latest,
             None,
-            None,
+            CloudSyncOutcome::UpToDate,
         );
         local_store.persist_cloud_sync_state(&result.state)?;
         return Ok(result);
@@ -395,6 +414,8 @@ pub fn push_snapshot_with_remote(
     protocol::upload_sync_snapshot(local_store, remote, options, &snapshot)?;
     let pointer = protocol::pointer_from_snapshot(&snapshot);
     protocol::read_snapshot_for_pointer(local_store, remote, options, &pointer)?;
+    next_state.last_validated_remote_revision = Some(pointer.revision_id.clone());
+    next_state.last_full_validation_at_ms = Some(current_time_ms());
     if !force {
         protocol::ensure_remote_head_unchanged(
             local_store,
@@ -412,11 +433,10 @@ pub fn push_snapshot_with_remote(
     let result = result(
         next_state,
         remote.provider(),
-        "idle",
         "Cloud sync snapshot uploaded",
         Some(pointer),
         None,
-        None,
+        CloudSyncOutcome::Uploaded,
     );
     local_store.persist_cloud_sync_state(&result.state)?;
     Ok(result)
@@ -464,6 +484,8 @@ pub fn pull_snapshot_with_remote(
                 )));
             }
         };
+    next_state.last_validated_remote_revision = Some(latest.revision_id.clone());
+    next_state.last_full_validation_at_ms = Some(current_time_ms());
 
     if latest.payload_hash == local_snapshot.meta.payload_hash {
         next_state.last_synced_payload_hash = Some(latest.payload_hash.clone());
@@ -472,11 +494,10 @@ pub fn pull_snapshot_with_remote(
         let result = result(
             next_state,
             remote.provider(),
-            "idle",
             "Cloud sync is already up to date",
             Some(latest),
             None,
-            None,
+            CloudSyncOutcome::UpToDate,
         );
         local_store.persist_cloud_sync_state(&result.state)?;
         return Ok(result);
@@ -514,11 +535,10 @@ pub fn pull_snapshot_with_remote(
     let result = result(
         next_state,
         remote.provider(),
-        "idle",
         "Cloud sync snapshot downloaded",
         Some(latest),
-        None,
         Some(backup),
+        CloudSyncOutcome::Downloaded,
     );
     local_store.persist_cloud_sync_state(&result.state)?;
     Ok(result)
@@ -549,15 +569,17 @@ pub fn recover_current_snapshot_with_remote(
         last_applied_remote_revision: Some(pointer.revision_id.clone()),
         last_checked_at_ms: Some(now),
         last_synced_at_ms: Some(now),
+        last_validated_remote_revision: Some(pointer.revision_id.clone()),
+        last_full_validation_at_ms: Some(now),
+        last_gc_attempt_at_ms: None,
     };
     let result = result(
         state,
         remote.provider(),
-        "idle",
         "Cloud sync metadata recovered",
         Some(pointer),
-        None,
         Some(backup),
+        CloudSyncOutcome::Recovered,
     );
     local_store.persist_cloud_sync_state(&result.state)?;
     Ok(result)
@@ -662,26 +684,26 @@ fn remote_inconsistent_preview(
 fn result(
     state: CloudSyncState,
     provider: &str,
-    status_state: &str,
     message: &str,
     pointer: Option<RemoteSyncPointer>,
-    conflict: Option<CloudConflictPreview>,
     backup: Option<CloudSyncBackupInfo>,
+    outcome: CloudSyncOutcome,
 ) -> CloudSyncResult {
     CloudSyncResult {
         status: CloudSyncStatus {
             enabled: true,
             provider: provider.to_string(),
-            state: status_state.to_string(),
+            state: "idle".to_string(),
             message: message.to_string(),
             current_operation: None,
             last_checked_at_ms: state.last_checked_at_ms,
             last_synced_at_ms: state.last_synced_at_ms,
-            conflict,
+            conflict: None,
         },
         state,
         pointer,
         backup,
+        outcome,
     }
 }
 

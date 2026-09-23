@@ -74,6 +74,29 @@ struct SessionTabDragState {
     source_id: String,
 }
 
+pub(crate) struct SessionCatalogTransferBundle {
+    entries: Vec<SessionCatalogTransferEntry>,
+    ordered_ids: Vec<String>,
+    pending_events: VecDeque<SessionEvent>,
+}
+
+struct SessionCatalogTransferEntry {
+    session_id: String,
+    metadata: SessionRuntimeMetadata,
+    start_tab_placement: Option<SessionStartTabPlacement>,
+    custom_name: Option<String>,
+    dynamic_title: Option<String>,
+    cwd: Option<String>,
+    tab_color: Option<u32>,
+    locked: bool,
+    command_history: Option<Vec<String>>,
+    busy_action: Option<String>,
+    remote_file: Option<RemoteFileService>,
+    xymodem: Option<super::xymodem_runtime::XymodemSessionState>,
+    zmodem: Option<ZmodemSessionState>,
+    trzsz: Option<TrzszSessionState>,
+}
+
 #[derive(Default)]
 struct SessionRestoreState {
     complete: bool,
@@ -172,6 +195,178 @@ pub(in crate::features) struct SessionDisconnectUpdate {
 }
 
 impl SessionFeatureState {
+    pub(crate) fn can_transfer_sessions(&self, session_ids: &[String]) -> Result<(), &'static str> {
+        if self.start.has_pending() {
+            return Err("wait for the session connection attempt to finish");
+        }
+        if self.prompts.has_blocking_prompt() {
+            return Err("finish the active authentication or security prompt first");
+        }
+        if session_ids
+            .iter()
+            .any(|session_id| self.busy_actions.contains_key(session_id))
+        {
+            return Err("wait for the active session operation to finish");
+        }
+        if session_ids
+            .iter()
+            .any(|session_id| !self.metadata.contains_key(session_id))
+        {
+            return Err("the tab no longer exists");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pause_sessions_for_transfer(
+        &self,
+        session_ids: &[String],
+    ) -> VecDeque<SessionEvent> {
+        self.event_bridge.pause_sessions_for_transfer(session_ids)
+    }
+
+    pub(crate) fn resume_sessions_after_failed_transfer(
+        &mut self,
+        session_ids: &[String],
+        bridge_events: VecDeque<SessionEvent>,
+    ) {
+        self.events.pending.extend(bridge_events);
+        for session_id in session_ids {
+            self.event_bridge.claim_session(session_id);
+        }
+    }
+
+    pub(crate) fn detach_sessions_for_transfer(
+        &mut self,
+        session_ids: &[String],
+        bridge_events: VecDeque<SessionEvent>,
+    ) -> Option<SessionCatalogTransferBundle> {
+        let selected = session_ids.iter().cloned().collect::<HashSet<_>>();
+        if selected.is_empty() || selected.iter().any(|id| !self.metadata.contains_key(id)) {
+            return None;
+        }
+        let ordered_ids = self
+            .order
+            .iter()
+            .filter(|id| selected.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut entries = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            let metadata = self.metadata.remove(session_id)?;
+            entries.push(SessionCatalogTransferEntry {
+                session_id: session_id.clone(),
+                metadata,
+                start_tab_placement: self.start_tab_placements.remove(session_id),
+                custom_name: self.custom_names.remove(session_id),
+                dynamic_title: self.dynamic_titles.remove(session_id),
+                cwd: self.cwds.remove(session_id),
+                tab_color: self.tab_colors.remove(session_id),
+                locked: self.locked_tabs.remove(session_id),
+                command_history: self.command_history.remove(session_id),
+                busy_action: self.busy_actions.remove(session_id),
+                remote_file: self.protocols.remote_files.remove(session_id),
+                xymodem: self.protocols.xymodem.remove(session_id),
+                zmodem: self.protocols.zmodem.remove(session_id),
+                trzsz: self.protocols.trzsz.remove(session_id),
+            });
+        }
+        self.order.retain(|id| !selected.contains(id));
+        self.active.history.retain(|id| !selected.contains(id));
+        if self
+            .active
+            .id
+            .as_ref()
+            .is_some_and(|id| selected.contains(id))
+        {
+            self.active.id = None;
+        }
+        let mut pending_events = VecDeque::new();
+        let mut retained_events = VecDeque::new();
+        while let Some(event) = self.events.pending.pop_front() {
+            let session_id = match &event {
+                SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputDropped { session_id, .. }
+                | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandAccepted { session_id, .. }
+                | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::Error { session_id, .. } => session_id,
+            };
+            if selected.contains(session_id) {
+                pending_events.push_back(event);
+            } else {
+                retained_events.push_back(event);
+            }
+        }
+        self.events.pending = retained_events;
+        pending_events.extend(bridge_events);
+        Some(SessionCatalogTransferBundle {
+            entries,
+            ordered_ids,
+            pending_events,
+        })
+    }
+
+    pub(crate) fn attach_sessions_from_transfer(
+        &mut self,
+        bundle: SessionCatalogTransferBundle,
+        insert_index: Option<usize>,
+    ) {
+        let mut ordered_ids = bundle.ordered_ids;
+        let insert_index = insert_index
+            .unwrap_or(self.order.len())
+            .min(self.order.len());
+        for entry in bundle.entries {
+            let session_id = entry.session_id;
+            self.metadata.insert(session_id.clone(), entry.metadata);
+            if let Some(value) = entry.start_tab_placement {
+                self.start_tab_placements.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.custom_name {
+                self.custom_names.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.dynamic_title {
+                self.dynamic_titles.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.cwd {
+                self.cwds.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.tab_color {
+                self.tab_colors.insert(session_id.clone(), value);
+            }
+            if entry.locked {
+                self.locked_tabs.insert(session_id.clone());
+            }
+            if let Some(value) = entry.command_history {
+                self.command_history.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.busy_action {
+                self.busy_actions.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.remote_file {
+                self.protocols
+                    .remote_files
+                    .insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.xymodem {
+                self.protocols.xymodem.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.zmodem {
+                self.protocols.zmodem.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.trzsz {
+                self.protocols.trzsz.insert(session_id.clone(), value);
+            }
+            self.event_bridge.claim_session(&session_id);
+        }
+        ordered_ids.retain(|id| self.metadata.contains_key(id));
+        self.order
+            .splice(insert_index..insert_index, ordered_ids.iter().cloned());
+        self.events.pending.extend(bundle.pending_events);
+        if let Some(first) = ordered_ids.first() {
+            self.select_active_session(first.clone());
+        }
+    }
+
     pub(in crate::features) fn disconnect_multiplex_handle(&mut self, handle: SshMultiplexHandle) {
         self.protocols.spawn_multiplex_disconnect(handle);
     }
@@ -1101,6 +1296,7 @@ impl SessionFeatureState {
         tab_placement: Option<SessionStartTabPlacement>,
         insert_index: Option<usize>,
     ) {
+        self.event_bridge.claim_session(session_id);
         if !self.order.iter().any(|id| id == session_id) {
             self.order.push(session_id.to_string());
         }
@@ -1564,6 +1760,7 @@ impl SessionFeatureState {
         &mut self,
         session_id: &str,
     ) -> Option<String> {
+        self.event_bridge.release_session(session_id);
         self.remove_xymodem_session_runtime(session_id);
         self.remove_zmodem_session_runtime(session_id);
         self.remove_trzsz_session_runtime(session_id);
@@ -1668,6 +1865,14 @@ impl SessionRestoreState {
 }
 
 impl SessionPromptState {
+    fn has_blocking_prompt(&self) -> bool {
+        self.active_duplicate_prompt.is_some()
+            || self.active_host_key_prompt.is_some()
+            || self.active_credential_prompt.is_some()
+            || self.active_keyboard_interactive_prompt.is_some()
+            || self.active_agent_prompt.is_some()
+    }
+
     pub(in crate::features) fn duplicate_broker(&self) -> Arc<SftpDuplicatePromptBroker> {
         Arc::clone(&self.duplicate_prompts)
     }

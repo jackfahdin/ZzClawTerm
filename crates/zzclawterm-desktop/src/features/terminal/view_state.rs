@@ -6,7 +6,23 @@ use std::time::Instant;
 use futures::channel::mpsc::UnboundedReceiver;
 
 use super::state::TerminalFeatureState;
-use crate::models::TerminalViewState;
+use crate::models::TerminalFrameEvent;
+use crate::models::TerminalSelection;
+use crate::models::{TerminalFrameSession, TerminalViewState};
+
+pub(in crate::features) struct TerminalSessionTransferBundle {
+    entries: Vec<TerminalSessionTransferEntry>,
+    pending_events: std::collections::VecDeque<TerminalFrameEvent>,
+}
+
+struct TerminalSessionTransferEntry {
+    session_id: String,
+    frame: Option<TerminalFrameSession>,
+    view: Option<TerminalViewState>,
+    search_wrap: Option<bool>,
+    scroll_residual: Option<f32>,
+    selection: Option<TerminalSelection>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::features) struct TerminalFrameQueueMetrics {
@@ -18,6 +34,177 @@ pub(in crate::features) struct TerminalFrameQueueMetrics {
 }
 
 impl TerminalFeatureState {
+    pub(in crate::features) fn retains_transfer_session(&self, id: &str) -> bool {
+        self.view.views.contains_key(id)
+            || self.view.surfaces.contains_key(id)
+            || self.view.scroll_delta_residuals.contains_key(id)
+            || self.search.wrap_around_by_session.contains_key(id)
+            || self.layout.session_surface_bounds.contains_key(id)
+            || self.layout.session_scrollbar_track_bounds.contains_key(id)
+            || self.selection.session_id.as_deref() == Some(id)
+    }
+
+    pub(in crate::features) fn prepare_sessions_for_transfer(
+        &self,
+        session_ids: &[String],
+    ) -> Result<Vec<(String, Option<TerminalFrameSession>)>, &'static str> {
+        let mut frames = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            match self
+                .view
+                .frame_pipeline
+                .take_session_for_transfer(session_id.clone())
+            {
+                Ok(frame) => frames.push((session_id.clone(), frame)),
+                Err(error) => {
+                    let rollback = frames
+                        .into_iter()
+                        .filter_map(|(id, frame)| frame.map(|frame| (id, frame)))
+                        .collect();
+                    let _ = self
+                        .view
+                        .frame_pipeline
+                        .insert_sessions_from_transfer(rollback);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(frames)
+    }
+
+    pub(in crate::features) fn detach_sessions_for_transfer(
+        &mut self,
+        frames: Vec<(String, Option<TerminalFrameSession>)>,
+    ) -> TerminalSessionTransferBundle {
+        let session_ids = frames
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut pending_events = std::collections::VecDeque::new();
+        self.view.pending_frame_events.retain(|event| {
+            if session_ids.contains(event.session_id()) {
+                pending_events.push_back(event.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let selected = frames.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        pending_events.extend(self.view.frame_pipeline.take_events_for_transfer(&selected));
+        let entries = frames
+            .into_iter()
+            .map(|(session_id, frame)| {
+                self.view.surfaces.remove(&session_id);
+                self.layout.session_surface_bounds.remove(&session_id);
+                self.layout
+                    .session_scrollbar_track_bounds
+                    .remove(&session_id);
+                let selection = if self.selection.session_id.as_deref() == Some(&session_id) {
+                    self.selection.session_id = None;
+                    self.selection.dragging = false;
+                    self.selection.selection.take()
+                } else {
+                    None
+                };
+                TerminalSessionTransferEntry {
+                    view: self.view.views.remove(&session_id),
+                    search_wrap: self.search.wrap_around_by_session.remove(&session_id),
+                    scroll_residual: self.view.scroll_delta_residuals.remove(&session_id),
+                    selection,
+                    session_id,
+                    frame,
+                }
+            })
+            .collect();
+        self.layout.surface_bounds = None;
+        self.layout.scrollbar_track_bounds = None;
+        self.view.scrollbar_drag = None;
+        if self
+            .selection
+            .selected_occurrence
+            .session_id
+            .as_ref()
+            .is_some_and(|id| session_ids.contains(id))
+        {
+            self.selection.selected_occurrence.session_id = None;
+            self.selection.selected_occurrence.query = None;
+            self.selection.selected_occurrence.generation = self
+                .selection
+                .selected_occurrence
+                .generation
+                .wrapping_add(1);
+        }
+        if self
+            .selection
+            .mouse_report_session_id
+            .as_deref()
+            .is_some_and(|id| session_ids.contains(id))
+        {
+            self.selection.mouse_report_session_id = None;
+            self.selection.mouse_report_button = None;
+            self.selection.mouse_report_position = None;
+        }
+        self.selection
+            .mouse_report_peer_session_ids
+            .retain(|id| !session_ids.contains(id));
+        TerminalSessionTransferBundle {
+            entries,
+            pending_events,
+        }
+    }
+
+    pub(in crate::features) fn attach_sessions_from_transfer(
+        &mut self,
+        mut bundle: TerminalSessionTransferBundle,
+    ) -> Result<(), TerminalSessionTransferBundle> {
+        let frames = bundle
+            .entries
+            .iter_mut()
+            .filter_map(|entry| {
+                entry
+                    .frame
+                    .take()
+                    .map(|frame| (entry.session_id.clone(), frame))
+            })
+            .collect();
+        if let Err(frames) = self
+            .view
+            .frame_pipeline
+            .insert_sessions_from_transfer(frames)
+        {
+            let mut frames = frames
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            for entry in &mut bundle.entries {
+                entry.frame = frames.remove(&entry.session_id);
+            }
+            return Err(bundle);
+        }
+        for entry in bundle.entries {
+            if let Some(wrap) = entry.search_wrap {
+                self.search
+                    .wrap_around_by_session
+                    .insert(entry.session_id.clone(), wrap);
+            }
+            if let Some(residual) = entry.scroll_residual {
+                self.view
+                    .scroll_delta_residuals
+                    .insert(entry.session_id.clone(), residual);
+            }
+            if let Some(selection) = entry.selection
+                && self.selection.selection.is_none()
+            {
+                self.selection.session_id = Some(entry.session_id.clone());
+                self.selection.selection = Some(selection);
+            }
+            if let Some(view) = entry.view {
+                self.view.views.insert(entry.session_id, view);
+            }
+        }
+        self.view.pending_frame_events.extend(bundle.pending_events);
+        Ok(())
+    }
+
     pub(in crate::features) fn take_frame_event_wake_receiver(
         &self,
     ) -> Option<UnboundedReceiver<()>> {

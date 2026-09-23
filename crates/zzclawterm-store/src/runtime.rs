@@ -9,10 +9,11 @@ use std::task::{Context, Poll};
 
 use futures::channel::oneshot;
 use zzclawterm_core::{
-    AiSettings, AppSettingsSummary, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, Group,
-    KeywordHighlightConfig, MainWindowState, OtpEntry, ProxyConfig, ProxyGroup, QuickCommand,
-    QuickCommandCategory, SavedConnection, SavedCredential, SavedPassword, SshKey,
-    TranslationSettings, TunnelConfig, TunnelGroup,
+    AiSettings, AppSettingsSummary, CloudSyncSettings, CloudSyncState, CommandHistoryEntry,
+    DeviceWindowManifest, Group, KeywordHighlightConfig, MainWindowState, OtpEntry, ProxyConfig,
+    ProxyGroup, QuickCommand, QuickCommandCategory, SavedConnection, SavedCredential,
+    SavedPassword, SshKey, TranslationSettings, TunnelConfig, TunnelGroup, WorkspaceId,
+    WorkspaceRestoreManifest,
 };
 
 use crate::storage::{ConnectionStore, StorageError};
@@ -87,7 +88,9 @@ impl From<StorageError> for StoreOperationError {
         let category = match &error {
             StorageError::CreateDir { .. } => "create_dir",
             StorageError::Open { .. } => "open",
-            StorageError::Crypto(_) | StorageError::MissingMasterKey => "crypto",
+            StorageError::Crypto(_)
+            | StorageError::MissingMasterKey
+            | StorageError::MissingPortableKey { .. } => "crypto",
             StorageError::InvalidData(_) | StorageError::PortableSnapshotEntity { .. } => {
                 "invalid_data"
             }
@@ -419,6 +422,7 @@ impl fmt::Display for StoreClientError {
 
 impl std::error::Error for StoreClientError {}
 
+#[derive(Clone)]
 pub struct StoreRuntime {
     ui_client: StoreUiClient,
     blocking_client: StoreBlockingClient,
@@ -649,6 +653,7 @@ fn aggregate_barrier_failures(
     })
 }
 
+#[derive(Clone)]
 pub struct BootstrapSnapshot {
     pub database_path: PathBuf,
     pub connections: Vec<SavedConnection>,
@@ -675,6 +680,8 @@ pub struct BootstrapSnapshot {
     pub ai_message_count: usize,
     pub ai_audit_count: usize,
     pub open_tabs: Vec<zzclawterm_core::RestorableOpenTab>,
+    pub workspace_restore: WorkspaceRestoreManifest,
+    pub device_windows: DeviceWindowManifest,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -707,6 +714,66 @@ impl StoreRequest for SaveMainWindowState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LoadWorkspaceRestoreManifest;
+
+impl StoreRequest for LoadWorkspaceRestoreManifest {
+    type Response = WorkspaceRestoreManifest;
+
+    fn domain(&self) -> StoreDomain {
+        StoreDomain::Sessions
+    }
+
+    fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError> {
+        store.load_workspace_restore_manifest()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveWorkspaceRestoreManifest(pub WorkspaceRestoreManifest);
+
+impl StoreRequest for SaveWorkspaceRestoreManifest {
+    type Response = ();
+
+    fn domain(&self) -> StoreDomain {
+        StoreDomain::Sessions
+    }
+
+    fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError> {
+        store.save_workspace_restore_manifest(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoadDeviceWindowManifest(pub WorkspaceId);
+
+impl StoreRequest for LoadDeviceWindowManifest {
+    type Response = DeviceWindowManifest;
+
+    fn domain(&self) -> StoreDomain {
+        StoreDomain::WindowState
+    }
+
+    fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError> {
+        store.load_device_window_manifest(self.0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SaveDeviceWindowManifest(pub DeviceWindowManifest);
+
+impl StoreRequest for SaveDeviceWindowManifest {
+    type Response = ();
+
+    fn domain(&self) -> StoreDomain {
+        StoreDomain::WindowState
+    }
+
+    fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError> {
+        store.save_device_window_manifest(&self.0)
+    }
+}
+
 pub struct LoadBootstrap;
 
 impl StoreRequest for LoadBootstrap {
@@ -720,6 +787,16 @@ impl StoreRequest for LoadBootstrap {
         let sessions = store.load_sessions()?;
         let quick_commands = store.load_quick_commands()?;
         let ai_history = store.load_ai_history()?;
+        let workspace_restore = store.load_workspace_restore_manifest()?;
+        let legacy_workspace_id = workspace_restore
+            .most_recent()
+            .map(|workspace| workspace.id)
+            .unwrap_or_default();
+        let device_windows = store.load_device_window_manifest(legacy_workspace_id)?;
+        let open_tabs = workspace_restore
+            .most_recent()
+            .map(|workspace| workspace.sessions.open_tabs.clone())
+            .unwrap_or_default();
         Ok(BootstrapSnapshot {
             database_path: store.db_path().to_path_buf(),
             connections: sessions.connections,
@@ -745,7 +822,9 @@ impl StoreRequest for LoadBootstrap {
             ai_session_count: ai_history.sessions.len(),
             ai_message_count: ai_history.messages.len(),
             ai_audit_count: store.list_ai_audit_logs(None)?.len(),
-            open_tabs: store.load_open_tabs()?,
+            open_tabs,
+            workspace_restore,
+            device_windows,
         })
     }
 }
@@ -767,32 +846,23 @@ impl StoreRequest for FlushBarrier {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use super::{
         FlushBarrier, LoadBootstrap, LoadMainWindowState, SaveMainWindowState, StoreClientError,
         StoreConfig, StoreDomain, StoreOperationError, StoreRuntime,
     };
     use zzclawterm_core::{MainWindowBounds, MainWindowState};
 
-    fn temp_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "zzclawterm-store-runtime-{label}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+    fn temp_dir(label: &str) -> zzclawterm_core::test_support::TestTempDir {
+        zzclawterm_core::test_support::TestTempDir::new(&format!(
+            "zzclawterm-store-runtime-{label}"
         ))
     }
-
-    use std::path::PathBuf;
 
     #[test]
     fn bootstrap_and_barrier_run_on_the_store_worker() {
         let config_dir = temp_dir("bootstrap");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");
@@ -816,7 +886,7 @@ mod tests {
     fn request_ids_are_monotonic_across_clients() {
         let config_dir = temp_dir("request-ids");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");
@@ -851,7 +921,7 @@ mod tests {
     fn request_fn_returns_typed_operation_failures() {
         let config_dir = temp_dir("request-fn");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");
@@ -877,7 +947,7 @@ mod tests {
     fn flush_barrier_retains_failures_until_the_domain_succeeds() {
         let config_dir = temp_dir("barrier-failure");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");
@@ -936,7 +1006,7 @@ mod tests {
     fn shutdown_rejects_normal_clients_but_accepts_the_final_barrier() {
         let config_dir = temp_dir("shutdown-rejection");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");
@@ -973,7 +1043,7 @@ mod tests {
     fn shutdown_window_state_write_completes_before_the_barrier() {
         let config_dir = temp_dir("window-state-shutdown");
         let runtime = StoreRuntime::spawn(StoreConfig {
-            config_dir: config_dir.clone(),
+            config_dir: config_dir.path().to_path_buf(),
             portable_key_path: None,
         })
         .expect("spawn runtime");

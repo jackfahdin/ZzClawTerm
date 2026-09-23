@@ -29,7 +29,7 @@ must include explicit conversion logic and tests.
 * `crates/zzclawterm-transport`: local PTY, SSH, Telnet, Serial, SFTP, tunnels,
   remote operations, and transfer-protocol runtime. It must remain independent
   of GPUI and desktop presentation types.
-* `crates/zzclawterm-ui`: shared GPUI theme tokens, the `gpui-component`
+* `crates/zzclawterm-ui`: shared GPUI theme tokens, the `gpui-kit`
   integration boundary, and reusable ZzClawTerm presentation and interaction
   widgets.
 * `crates/zzclawterm-store`: persistence implementation, transactions, redb
@@ -57,7 +57,7 @@ must include explicit conversion logic and tests.
   <https://github.com/nyakang>), mirrored to
   <https://gitcode.com/JackfahdinImport> for faster access in mainland China
   and consumed from there at a revision pinned in the root `Cargo.toml`:
-  `alacritty` (`alacritty_terminal`), `gpui-component`, `IronRDP`
+  `alacritty` (`alacritty_terminal`), `gpui-kit`, `IronRDP`
   (`ironrdp-client`, `ironrdp-connector`), `russh`, `russh-sftp`, `sspi-rs`,
   `vnc-rs`, `zed` (`gpui`, `gpui_platform`), and `zmodem2`. Each branch carries
   a `NYATERM.md` recording its base revision, its patches, and how they were
@@ -123,8 +123,8 @@ models, services, GPUI types, and helpers from their authoritative modules.
 
 Ordinary forms, prompts, searches, menus, selects, switches, and dialogs should
 use the wrappers exposed by `zzclawterm-ui`. That crate owns the
-`gpui-component` integration, theme mapping, and stable ZzClawTerm component API;
-desktop feature modules must not depend directly on `gpui-component`.
+`gpui-kit` integration, theme mapping, and stable ZzClawTerm component API;
+desktop feature modules must not depend directly on `gpui-kit`.
 
 Ordinary text inputs should use `zzclawterm-ui::ZzClawInput` and `ZzClawInputState`,
 either owned by a focused feature or through the id-keyed registry in

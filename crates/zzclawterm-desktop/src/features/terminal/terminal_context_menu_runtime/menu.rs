@@ -10,7 +10,7 @@ use crate::features::{
 };
 use crate::models::{AiPreparedRequest, NavItem, SettingsTab, TerminalSearchMode};
 
-use super::helpers::{available_translation_providers, open_external_url, search_engine_url};
+use super::helpers::{available_translation_providers, search_engine_url};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn prepare_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -328,15 +328,9 @@ impl ZzClawTermApp {
                 let item =
                     ZzClawMenuItem::action(name).on_click(cx.listener(move |this, _, _, cx| {
                         let url = search_engine_url(&template, &query);
-                        match open_external_url(&url) {
-                            Ok(()) => this
-                                .shell
-                                .set_status(format!("opened online search: {status_name}")),
-                            Err(error) => this
-                                .shell
-                                .set_status(format!("online search failed: {error}")),
-                        }
-                        cx.notify();
+                        this.open_external_url_for_ui(&url, cx);
+                        this.shell
+                            .set_status(format!("opened online search: {status_name}"));
                     }));
                 match icon {
                     Some((path, Some(color))) => item.icon(path).icon_color(color),

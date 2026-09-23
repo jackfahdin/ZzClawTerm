@@ -39,6 +39,7 @@ pub(super) const CONNECTION_ICON_ALIASES: &[(&str, &str)] = &[
     ("nix-os", "nixos"),
     ("open-euler", "openeuler"),
     ("open-suse", "opensuse"),
+    ("open-wrt", "openwrt"),
     ("raspberry", "raspberrypi"),
     ("raspberry-pi", "raspberrypi"),
     ("rocky-linux", "rocky"),

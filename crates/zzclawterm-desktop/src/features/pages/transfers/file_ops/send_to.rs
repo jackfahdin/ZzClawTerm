@@ -283,6 +283,8 @@ fn run_send_to(request: SendToRequest) -> Result<TransferJobOutput, String> {
 
     Ok(TransferJobOutput::Sent {
         source_path: source_remote.display_path,
+        source_parent_path: None,
+        source_entries: None,
         target_session_id,
         target_path,
         target_parent_path,

@@ -302,6 +302,15 @@ impl ZzClawTermApp {
         let event_failed = matches!(&event.event, TransferJobEvent::Finished(Err(_)));
         let event_succeeded = matches!(&event.event, TransferJobEvent::Finished(Ok(_)));
         let event_finished = event_failed || event_succeeded;
+        if event_finished {
+            self.transfer.settle_cut_job(
+                &event_id,
+                matches!(
+                    &event.event,
+                    TransferJobEvent::Finished(Ok(TransferJobOutput::Sent { .. }))
+                ),
+            );
+        }
         let cleanup_internal_job = event_finished
             && !job.is_user_transfer()
             && (!matches!(&job.kind, TransferJobKind::OpenExternal { .. }) || event_failed);
@@ -587,6 +596,8 @@ impl ZzClawTermApp {
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Sent {
                 source_path,
+                source_parent_path,
+                source_entries,
                 target_session_id,
                 target_path,
                 target_parent_path,
@@ -608,6 +619,28 @@ impl ZzClawTermApp {
                 job.summary = None;
                 job.progress = None;
                 job.control = None;
+                if let (Some(source_session_id), Some(parent)) =
+                    (job_session_id.as_deref(), source_parent_path.as_deref())
+                {
+                    if let Some(source_entries) = source_entries {
+                        self.transfer.refresh_browser_session_cache_listing(
+                            source_session_id,
+                            parent,
+                            source_entries.clone(),
+                        );
+                        if self.session.active_id() == Some(source_session_id)
+                            && transfer_event_paths_match(&self.transfer.browser.path, parent)
+                        {
+                            self.transfer.browser.entries = Arc::new(source_entries);
+                            self.transfer
+                                .retain_browser_selection(|selected| selected != source_path);
+                        }
+                    } else if self.session.active_id() == Some(source_session_id)
+                        && transfer_event_paths_match(&self.transfer.browser.path, parent)
+                    {
+                        self.refresh_transfer_browser(window, cx);
+                    }
+                }
                 // Refresh the target session's cached listing in place if it is
                 // showing the destination directory — never switch the active
                 // session, and never touch the source browser.
@@ -966,9 +999,13 @@ impl ZzClawTermApp {
                 ));
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(summary))) => {
-                job.status = TransferJobStatus::Completed;
+                job.status = if summary.skipped {
+                    TransferJobStatus::Cancelled
+                } else {
+                    TransferJobStatus::Completed
+                };
                 job.detail = if summary.skipped {
-                    "Skipped duplicate".to_string()
+                    "Cancelled (duplicate skipped)".to_string()
                 } else {
                     format!("{} transferred", format_file_size(Some(summary.bytes)))
                 };
@@ -989,7 +1026,11 @@ impl ZzClawTermApp {
                 });
                 job.summary = Some(summary);
                 self.shell
-                    .set_status(format!("remote transfer completed: {}", job.detail));
+                    .set_status(if job.status == TransferJobStatus::Cancelled {
+                        format!("remote transfer cancelled: {}", job.detail)
+                    } else {
+                        format!("remote transfer completed: {}", job.detail)
+                    });
                 job.control = None;
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Uploaded {
@@ -1336,6 +1377,55 @@ mod tests {
         TRANSFER_UI_COALESCE_WINDOW, transfer_event_needs_browser_context,
         transfer_event_needs_ui_refresh, transfer_navigation_job_is_stale,
     };
+
+    #[test]
+    fn skipped_job_does_not_cancel_other_batch_jobs() {
+        let test_dir = TestConfigDir::new("zzclawterm-transfer-batch-skip");
+        let mut cx = TestAppContext::single();
+        let (app, vcx) = hosted(&mut cx, test_dir.path());
+        let sender = vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                for id in ["skipped", "completed", "running"] {
+                    app.transfer.enqueue_transfer_job(running_job(id));
+                }
+                app.start_transfer_event_drain(cx);
+                app.transfer.transfer_event_sender()
+            })
+        });
+        vcx.run_until_parked();
+        for (id, skipped) in [("skipped", true), ("completed", false)] {
+            sender
+                .unbounded_send(TransferJobResult {
+                    id: id.to_string(),
+                    event: TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(
+                        SftpTransferSummary {
+                            remote_path: format!("/remote/{id}"),
+                            local_path: PathBuf::from(id),
+                            bytes: 0,
+                            skipped,
+                        },
+                    ))),
+                })
+                .expect("send transfer job result");
+        }
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            for (id, expected) in [
+                ("skipped", TransferJobStatus::Cancelled),
+                ("completed", TransferJobStatus::Completed),
+                ("running", TransferJobStatus::Running),
+            ] {
+                let job = app
+                    .transfer
+                    .transfer_jobs()
+                    .iter()
+                    .find(|job| job.id == id)
+                    .unwrap();
+                assert_eq!(job.status, expected);
+            }
+        });
+    }
 
     fn app(cx: &mut TestAppContext, root: &Path) -> gpui::Entity<ZzClawTermApp> {
         // A uuid rather than a clock reading: these tests run in parallel and

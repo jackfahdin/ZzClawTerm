@@ -6,7 +6,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
     SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
+use gpui_kit::component::{
     Disableable, IndexPath, Sizable,
     checkbox::Checkbox,
     radio::RadioGroup,
@@ -244,7 +244,7 @@ struct ZzClawSelectItem {
     font_family: Option<SharedString>,
 }
 
-impl gpui_component::select::SelectItem for ZzClawSelectItem {
+impl gpui_kit::component::select::SelectItem for ZzClawSelectItem {
     type Value = String;
 
     fn title(&self) -> SharedString {
@@ -731,7 +731,7 @@ mod tests {
 
     #[gpui::test]
     fn selected_value_sync_only_runs_when_dirty(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::init);
         let cx = cx.add_empty_window();
         cx.update(|window, cx| {
             let select = cx.new(|cx| {
@@ -764,6 +764,6 @@ mod tests {
     #[test]
     fn select_uses_standard_form_control_size() {
         assert_eq!(NYA_FORM_CONTROL_HEIGHT_PX, 32.);
-        assert_eq!(form_control_size(), gpui_component::Size::Medium);
+        assert_eq!(form_control_size(), gpui_kit::component::Size::Medium);
     }
 }

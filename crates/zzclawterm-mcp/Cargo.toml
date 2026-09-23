@@ -23,3 +23,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true, features = ["rt"] }
 uuid.workspace = true
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }

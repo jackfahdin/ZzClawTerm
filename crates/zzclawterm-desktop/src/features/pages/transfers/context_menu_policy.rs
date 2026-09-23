@@ -13,6 +13,7 @@ pub(super) enum TransferContextMenuAction {
     Refresh,
     Upload,
     Download,
+    DownloadToDirectory,
     SendTo,
     Rename,
     Move,
@@ -41,6 +42,7 @@ pub(super) fn transfer_context_action_visible_for_backend(
             action,
             TransferContextMenuAction::Upload
                 | TransferContextMenuAction::Download
+                | TransferContextMenuAction::DownloadToDirectory
                 | TransferContextMenuAction::NewSymlink
         )
 }
@@ -53,7 +55,7 @@ pub(super) struct TransferEntryMenuCapabilities {
     pub show_preview: bool,
     pub has_ai_actions: bool,
     /// Whether at least one other browsable local or SSH session exists to send the
-    /// selection to. Drives the "Send to" submenu after `Download`, matching
+    /// selection to. Drives the "Send to" submenu after the download actions, matching
     /// the Tauri `openMoveDialog(getContextMenuEntries)` placement.
     pub has_send_targets: bool,
 }
@@ -79,9 +81,9 @@ pub(super) fn transfer_entry_context_menu_policy(
         Item(Action::Refresh),
         Item(Action::Upload),
         Item(Action::Download),
+        Item(Action::DownloadToDirectory),
     ]);
-    // Parity: Tauri inserts the "Send to" submenu (and its own separator) right
-    // after Download when there is at least one eligible target session.
+    // Keep "Send to" after both download actions when a target session is available.
     if capabilities.has_send_targets {
         items.extend([Separator, Item(Action::SendTo)]);
     }
@@ -207,7 +209,12 @@ mod tests {
     fn local_backend_hides_remote_only_actions() {
         use zzclawterm_transport::FileBrowserBackendKind::{Local, Remote};
 
-        for action in [Action::Upload, Action::Download, Action::NewSymlink] {
+        for action in [
+            Action::Upload,
+            Action::Download,
+            Action::DownloadToDirectory,
+            Action::NewSymlink,
+        ] {
             assert!(!transfer_context_action_visible_for_backend(action, Local));
             assert!(transfer_context_action_visible_for_backend(action, Remote));
         }
@@ -239,6 +246,7 @@ mod tests {
                 Node::Action(Action::Refresh),
                 Node::Action(Action::Upload),
                 Node::Action(Action::Download),
+                Node::Action(Action::DownloadToDirectory),
                 Node::Separator,
                 Node::Action(Action::Rename),
                 Node::Action(Action::Move),
@@ -356,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn send_to_submenu_follows_download_with_its_own_separator() {
+    fn send_to_submenu_follows_download_actions_with_its_own_separator() {
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_directory: false,
             show_open_internal: false,
@@ -365,17 +373,21 @@ mod tests {
             has_ai_actions: false,
             has_send_targets: true,
         });
-        // Download, then a separator, then Send to, then the Rename/Move/Delete group.
+        // Both download actions precede the separator, Send to, and Rename/Move/Delete group.
         let download = items
             .iter()
             .position(|node| node == &Node::Action(Action::Download))
             .expect("download action present");
-        assert_eq!(items[download + 1], Node::Separator);
-        assert_eq!(items[download + 2], Node::Action(Action::SendTo));
-        assert_eq!(items[download + 3], Node::Separator);
-        assert_eq!(items[download + 4], Node::Action(Action::Rename));
-        assert_eq!(items[download + 5], Node::Action(Action::Move));
-        assert_eq!(items[download + 6], Node::Action(Action::Delete));
+        assert_eq!(
+            items[download + 1],
+            Node::Action(Action::DownloadToDirectory)
+        );
+        assert_eq!(items[download + 2], Node::Separator);
+        assert_eq!(items[download + 3], Node::Action(Action::SendTo));
+        assert_eq!(items[download + 4], Node::Separator);
+        assert_eq!(items[download + 5], Node::Action(Action::Rename));
+        assert_eq!(items[download + 6], Node::Action(Action::Move));
+        assert_eq!(items[download + 7], Node::Action(Action::Delete));
     }
 
     #[test]
@@ -393,9 +405,13 @@ mod tests {
             .iter()
             .position(|node| node == &Node::Action(Action::Download))
             .expect("download action present");
-        // Straight to the Rename/Move/Delete group when there is nowhere to send.
-        assert_eq!(items[download + 1], Node::Separator);
-        assert_eq!(items[download + 2], Node::Action(Action::Rename));
+        // Without send targets, both download actions lead directly to Rename/Move/Delete.
+        assert_eq!(
+            items[download + 1],
+            Node::Action(Action::DownloadToDirectory)
+        );
+        assert_eq!(items[download + 2], Node::Separator);
+        assert_eq!(items[download + 3], Node::Action(Action::Rename));
     }
 
     #[test]

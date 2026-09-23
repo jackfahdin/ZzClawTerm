@@ -1,53 +1,82 @@
-//! Authoritative transient state for native update checks.
+//! Process-wide authoritative state for native updates.
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use zzclawterm_core::NativeUpdateInfo;
+use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
-pub(super) struct UpdateJobResult {
-    result: Result<NativeUpdateInfo, String>,
+use super::download::DownloadState;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckKind {
+    Silent,
+    Manual,
 }
 
-impl UpdateJobResult {
-    pub(super) fn new(result: Result<NativeUpdateInfo, String>) -> Self {
-        Self { result }
-    }
+#[derive(Clone, Debug)]
+pub(crate) enum UpdatePhase {
+    Idle,
+    Checking,
+    Available,
+    Downloading { received: u64, total: Option<u64> },
+    Ready,
+    Applying,
+    UpToDate,
+    Failed { message: String, download: bool },
 }
 
-pub(in crate::features) struct UpdateFeatureState {
-    pub(in crate::features) download: super::download::DownloadState,
-    pub(in crate::features) download_generation: u64,
-    pub(in crate::features) download_cancel:
-        zzclawterm_transport::connection_attempt::ConnectionAttempt,
-    pub(in crate::features) install_requested: bool,
-    pub(in crate::features) install_launch_pending: bool,
-    tx: UnboundedSender<UpdateJobResult>,
-    /// Taken once by `ZzClawTermApp::start_update_event_drain`, which owns delivery
-    /// from then on. `None` afterwards, so a second start is a no-op.
-    rx: Option<UnboundedReceiver<UpdateJobResult>>,
-    status: String,
+pub(crate) enum UpdateEvent {
+    Check {
+        generation: u64,
+        kind: UpdateCheckKind,
+        result: Result<NativeUpdateInfo, String>,
+    },
+    Download {
+        generation: u64,
+        state: DownloadState,
+    },
+}
+
+pub(crate) struct UpdateStore {
+    phase: UpdatePhase,
     info: Option<NativeUpdateInfo>,
-    pending: bool,
+    status: String,
+    last_silent_error: Option<String>,
+    check_generation: u64,
+    startup_check_started: bool,
+    pub(in crate::features) download: DownloadState,
+    pub(in crate::features) download_generation: u64,
+    pub(in crate::features) download_cancel: ConnectionAttempt,
+    pub(in crate::features) install_requested: bool,
+    tx: UnboundedSender<UpdateEvent>,
+    rx: Option<UnboundedReceiver<UpdateEvent>>,
 }
 
-impl UpdateFeatureState {
-    pub(in crate::features) fn new() -> Self {
+impl UpdateStore {
+    pub(crate) fn new() -> Self {
         let (tx, rx) = unbounded();
         Self {
-            download: super::download::DownloadState::Idle,
+            phase: UpdatePhase::Idle,
+            info: None,
+            status: format!("Current version {}", env!("CARGO_PKG_VERSION")),
+            last_silent_error: None,
+            check_generation: 0,
+            startup_check_started: false,
+            download: DownloadState::Idle,
             download_generation: 0,
             download_cancel: Default::default(),
             install_requested: false,
-            install_launch_pending: false,
             tx,
             rx: Some(rx),
-            status: format!("Current version {}", env!("CARGO_PKG_VERSION")),
-            info: None,
-            pending: false,
         }
     }
 
-    pub(in crate::features) fn status(&self) -> &str {
+    pub(in crate::features) fn phase(&self) -> &UpdatePhase {
+        &self.phase
+    }
+
+    #[cfg(test)]
+    fn status(&self) -> &str {
         &self.status
     }
 
@@ -56,110 +85,235 @@ impl UpdateFeatureState {
     }
 
     pub(in crate::features) fn is_pending(&self) -> bool {
-        self.pending
+        matches!(self.phase, UpdatePhase::Checking)
     }
 
-    pub(super) fn begin_check(&mut self) -> Option<UnboundedSender<UpdateJobResult>> {
-        if self.pending {
-            self.status = "update check already running".to_string();
+    pub(crate) fn mark_startup_check_started(&mut self) -> bool {
+        if self.startup_check_started {
+            return false;
+        }
+        self.startup_check_started = true;
+        true
+    }
+
+    pub(crate) fn begin_check(
+        &mut self,
+        _kind: UpdateCheckKind,
+    ) -> Option<(UnboundedSender<UpdateEvent>, u64)> {
+        if matches!(
+            self.phase,
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading { .. }
+                | UpdatePhase::Ready
+                | UpdatePhase::Applying
+        ) {
             return None;
         }
-        self.pending = true;
+        self.check_generation = self.check_generation.wrapping_add(1);
+        self.phase = UpdatePhase::Checking;
         self.status = "checking for updates...".to_string();
         self.info = None;
-        Some(self.tx.clone())
+        self.download = DownloadState::Idle;
+        self.install_requested = false;
+        Some((self.tx.clone(), self.check_generation))
     }
 
-    pub(super) fn take_event_receiver(&mut self) -> Option<UnboundedReceiver<UpdateJobResult>> {
+    pub(crate) fn take_event_receiver(&mut self) -> Option<UnboundedReceiver<UpdateEvent>> {
         self.rx.take()
     }
 
-    /// Apply one job result, reporting whether the UI needs a repaint.
-    pub(super) fn apply_event(&mut self, event: UpdateJobResult) -> bool {
-        if !self.pending {
-            // No check is outstanding, so this can only be a late duplicate.
-            // Dropping it keeps a stale status off a check that already settled.
-            return false;
+    pub(crate) fn begin_download(
+        &mut self,
+        cancel: ConnectionAttempt,
+    ) -> Option<(NativeUpdateInfo, u64, UnboundedSender<UpdateEvent>)> {
+        if matches!(
+            self.phase,
+            UpdatePhase::Downloading { .. } | UpdatePhase::Applying
+        ) {
+            return None;
         }
-        self.pending = false;
-        match event.result {
-            Ok(info) => {
-                self.status = if info.available {
-                    format!(
-                        "update available: {} -> {}",
-                        info.current_version, info.latest_version
-                    )
-                } else {
-                    format!("ZzClawTerm is up to date ({})", info.current_version)
+        let info = self.info.as_ref().filter(|info| info.available)?.clone();
+        self.download_generation = self.download_generation.wrapping_add(1);
+        self.download_cancel = cancel;
+        self.download = DownloadState::Downloading {
+            received: 0,
+            total: None,
+        };
+        self.phase = UpdatePhase::Downloading {
+            received: 0,
+            total: None,
+        };
+        self.status = "downloading update...".to_string();
+        Some((info, self.download_generation, self.tx.clone()))
+    }
+
+    pub(crate) fn cancel_download(&mut self) {
+        self.download_cancel.cancel();
+        self.download_generation = self.download_generation.wrapping_add(1);
+        self.download = DownloadState::Idle;
+        self.phase = if self.info.as_ref().is_some_and(|info| info.available) {
+            UpdatePhase::Available
+        } else {
+            UpdatePhase::Idle
+        };
+        self.status = "update download cancelled".to_string();
+    }
+
+    pub(crate) fn mark_applying(&mut self) {
+        self.phase = UpdatePhase::Applying;
+        self.status = "installing update...".to_string();
+    }
+
+    pub(crate) fn clear_install_request(&mut self) {
+        self.install_requested = false;
+        if matches!(self.download, DownloadState::Ready(_)) {
+            self.phase = UpdatePhase::Ready;
+            self.status = "update ready to install".to_string();
+        }
+    }
+
+    /// Apply one process-wide event. Stale generations cannot overwrite newer state.
+    pub(crate) fn apply_event(&mut self, event: UpdateEvent) -> bool {
+        match event {
+            UpdateEvent::Check {
+                generation,
+                kind,
+                result,
+            } => {
+                if generation != self.check_generation
+                    || !matches!(self.phase, UpdatePhase::Checking)
+                {
+                    return false;
+                }
+                match result {
+                    Ok(info) => {
+                        self.last_silent_error = None;
+                        self.status = if info.available {
+                            format!(
+                                "update available: {} -> {}",
+                                info.current_version, info.latest_version
+                            )
+                        } else {
+                            format!("ZzClawTerm is up to date ({})", info.current_version)
+                        };
+                        self.phase = if info.available {
+                            UpdatePhase::Available
+                        } else {
+                            UpdatePhase::UpToDate
+                        };
+                        self.info = Some(info);
+                    }
+                    Err(error) if kind == UpdateCheckKind::Silent => {
+                        self.last_silent_error = Some(error);
+                        self.phase = UpdatePhase::Idle;
+                        self.status = format!("Current version {}", env!("CARGO_PKG_VERSION"));
+                        self.info = None;
+                    }
+                    Err(error) => {
+                        self.status = format!("update check failed: {error}");
+                        self.phase = UpdatePhase::Failed {
+                            message: error,
+                            download: false,
+                        };
+                        self.info = None;
+                    }
+                }
+                true
+            }
+            UpdateEvent::Download { generation, state } => {
+                if generation != self.download_generation {
+                    return false;
+                }
+                self.phase = match &state {
+                    DownloadState::Idle => UpdatePhase::Available,
+                    DownloadState::Downloading { received, total } => UpdatePhase::Downloading {
+                        received: *received,
+                        total: *total,
+                    },
+                    DownloadState::Ready(_) => UpdatePhase::Ready,
+                    DownloadState::Failed(error) => UpdatePhase::Failed {
+                        message: error.clone(),
+                        download: true,
+                    },
                 };
-                self.info = Some(info);
-            }
-            Err(error) => {
-                self.status = format!("update check failed: {error}");
-                self.info = None;
+                self.status = match &state {
+                    DownloadState::Idle => "update available".to_string(),
+                    DownloadState::Downloading { .. } => "downloading update...".to_string(),
+                    DownloadState::Ready(_) => "update ready to install".to_string(),
+                    DownloadState::Failed(error) => format!("update download failed: {error}"),
+                };
+                self.download = state;
+                true
             }
         }
-        true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateFeatureState, UpdateJobResult};
+    use super::{UpdateCheckKind, UpdateEvent, UpdatePhase, UpdateStore};
+
+    fn check_event(
+        generation: u64,
+        kind: UpdateCheckKind,
+        result: Result<zzclawterm_core::NativeUpdateInfo, String>,
+    ) -> UpdateEvent {
+        UpdateEvent::Check {
+            generation,
+            kind,
+            result,
+        }
+    }
 
     #[test]
-    fn update_state_owns_job_channel_and_initial_status() {
-        let mut state = UpdateFeatureState::new();
-
-        assert!(state.status().contains(env!("CARGO_PKG_VERSION")));
-        assert!(
-            state
-                .take_event_receiver()
-                .expect("a fresh state still holds its receiver")
-                .try_recv()
-                .is_err(),
-            "the job channel starts empty"
-        );
-        assert!(state.info().is_none());
-        assert!(!state.is_pending());
+    fn startup_check_is_admitted_once_per_process() {
+        let mut state = UpdateStore::new();
+        assert!(state.mark_startup_check_started());
+        assert!(!state.mark_startup_check_started());
     }
 
     #[test]
     fn update_check_admission_prevents_overlapping_jobs() {
-        let mut state = UpdateFeatureState::new();
-
-        assert!(state.begin_check().is_some());
-        assert!(state.is_pending());
-        assert_eq!(state.status(), "checking for updates...");
-        assert!(state.begin_check().is_none());
-        assert_eq!(state.status(), "update check already running");
+        let mut state = UpdateStore::new();
+        assert!(state.begin_check(UpdateCheckKind::Manual).is_some());
+        assert!(matches!(state.phase(), UpdatePhase::Checking));
+        assert!(state.begin_check(UpdateCheckKind::Manual).is_none());
     }
 
     #[test]
-    fn update_event_completes_failed_job() {
-        let mut state = UpdateFeatureState::new();
-        let mut rx = state
-            .take_event_receiver()
-            .expect("state should retain its event receiver");
-        let tx = state.begin_check().expect("first check should start");
-        tx.unbounded_send(UpdateJobResult::new(Err("offline".to_string())))
-            .expect("the drain receiver is still alive");
-        let event = rx.try_recv().expect("the job result should be queued");
-
-        assert!(state.apply_event(event));
-        assert!(!state.is_pending());
-        assert_eq!(state.status(), "update check failed: offline");
-        assert!(state.info().is_none());
+    fn silent_failures_do_not_enter_the_user_visible_failed_state() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Silent).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Silent,
+            Err("offline".to_string()),
+        )));
+        assert!(matches!(state.phase(), UpdatePhase::Idle));
+        assert!(!state.status().contains("offline"));
     }
 
     #[test]
-    fn update_event_arriving_without_an_outstanding_check_is_dropped() {
-        let mut state = UpdateFeatureState::new();
-
-        assert!(
-            !state.apply_event(UpdateJobResult::new(Err("stale".to_string()))),
-            "a result with no check outstanding must not rewrite the status"
-        );
-        assert!(state.status().contains(env!("CARGO_PKG_VERSION")));
+    fn manual_failures_remain_visible_and_stale_results_are_ignored() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        assert!(!state.apply_event(check_event(
+            generation.wrapping_add(1),
+            UpdateCheckKind::Manual,
+            Err("stale".to_string()),
+        )));
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Manual,
+            Err("offline".to_string()),
+        )));
+        assert!(matches!(
+            state.phase(),
+            UpdatePhase::Failed {
+                download: false,
+                ..
+            }
+        ));
+        assert!(state.status().contains("offline"));
     }
 }

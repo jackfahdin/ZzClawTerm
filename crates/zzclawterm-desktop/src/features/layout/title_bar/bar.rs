@@ -863,6 +863,9 @@ impl ZzClawTermApp {
     /// date/time clock has to be reconsidered when the header changes shape.
     fn persist_header_status_settings(&mut self) {
         if self.shell.has_settings_draft() {
+            self.settings.mark_draft_domain_dirty(
+                crate::features::settings::SettingsPersistenceDomain::UiLayout,
+            );
             self.shell
                 .set_status("header status changed; apply settings to persist".to_string());
         } else {

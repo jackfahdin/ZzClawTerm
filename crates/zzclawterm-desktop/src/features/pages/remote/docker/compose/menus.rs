@@ -31,9 +31,6 @@ pub(super) fn docker_compose_project_action_menu(
         .id(SharedString::from(format!(
             "docker-compose-project-menu-{short}"
         )))
-        .absolute()
-        .top(px(28.))
-        .right_0()
         .w(px(140.))
         .rounded_md()
         .border_1()
@@ -43,7 +40,8 @@ pub(super) fn docker_compose_project_action_menu(
         .py_1()
         .flex()
         .flex_col()
-        .on_mouse_down(MouseButton::Left, |_, _, _| {})
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(compose_menu_item(
             palette,
             format!("compose-up-{short}"),
@@ -137,9 +135,6 @@ pub(super) fn docker_compose_service_action_menu(
         .id(SharedString::from(format!(
             "docker-compose-service-menu-{short}"
         )))
-        .absolute()
-        .top(px(28.))
-        .right_0()
         .w(px(140.))
         .rounded_md()
         .border_1()
@@ -149,7 +144,8 @@ pub(super) fn docker_compose_service_action_menu(
         .py_1()
         .flex()
         .flex_col()
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, _| {})
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(compose_menu_item(
             palette,
             format!("compose-svc-logs-{short}"),

@@ -22,7 +22,7 @@ mod status_clocks;
 mod tab_mouse;
 mod tab_windows_runtime;
 mod terminal_recovery;
-mod tray;
+pub(crate) mod tray;
 mod workspace_runtime;
 
 pub(in crate::features) use activity_bar_runtime::{

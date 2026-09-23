@@ -37,6 +37,7 @@ pub(in crate::features) struct CommandFeatureInit {
     pub history: Vec<CommandHistoryEntry>,
     pub sort_mode: QuickCommandSortMode,
     pub view_mode: QuickCommandViewMode,
+    pub selected_category: String,
     pub focus: QuickCommandFeatureFocus,
     pub store: StoreBlockingClient,
     pub scheduler: BlockingJobScheduler,
@@ -45,6 +46,17 @@ pub(in crate::features) struct CommandFeatureInit {
 struct CommandCatalogState {
     commands: Arc<[QuickCommand]>,
     categories: Vec<QuickCommandCategory>,
+}
+
+fn valid_quick_category(category_id: &str, categories: &[QuickCommandCategory]) -> String {
+    if category_id == "all"
+        || category_id == "uncategorized"
+        || categories.iter().any(|category| category.id == category_id)
+    {
+        category_id.to_string()
+    } else {
+        "all".to_string()
+    }
 }
 
 struct QuickCommandFeatureState {
@@ -57,9 +69,16 @@ struct QuickCommandFeatureState {
 
 impl CommandFeatureState {
     pub(in crate::features) fn new(init: CommandFeatureInit) -> Self {
+        let catalog = CommandCatalogState::new(init.commands, init.categories);
+        let selected_category = valid_quick_category(&init.selected_category, &catalog.categories);
         Self {
-            catalog: CommandCatalogState::new(init.commands, init.categories),
-            quick: QuickCommandFeatureState::new(init.sort_mode, init.view_mode, init.focus),
+            catalog,
+            quick: QuickCommandFeatureState::new(
+                init.sort_mode,
+                init.view_mode,
+                selected_category,
+                init.focus,
+            ),
             history: Arc::from(init.history),
             runtime: CommandRuntimeState::new(init.store, init.scheduler),
         }
@@ -73,6 +92,7 @@ impl CommandFeatureState {
     ) {
         self.catalog.replace(commands, categories);
         self.history = Arc::from(history);
+        self.reconcile_quick_category();
     }
 
     pub(in crate::features) fn quick_commands(&self) -> &[QuickCommand] {
@@ -101,6 +121,7 @@ impl CommandFeatureState {
         categories: Vec<QuickCommandCategory>,
     ) {
         self.catalog.replace(commands, categories);
+        self.reconcile_quick_category();
     }
 
     pub(in crate::features) fn quick_command_config(&self) -> QuickCommandsConfig {
@@ -296,7 +317,13 @@ impl CommandFeatureState {
     }
 
     pub(in crate::features) fn select_quick_category(&mut self, category_id: String) {
-        self.quick.list.selected_category = category_id;
+        self.quick.list.selected_category =
+            valid_quick_category(&category_id, &self.catalog.categories);
+    }
+
+    fn reconcile_quick_category(&mut self) {
+        self.quick.list.selected_category =
+            valid_quick_category(&self.quick.list.selected_category, &self.catalog.categories);
     }
 
     pub(in crate::features) fn set_quick_view_mode(&mut self, mode: QuickCommandViewMode) {
@@ -971,12 +998,13 @@ impl QuickCommandFeatureState {
     pub(in crate::features) fn new(
         sort_mode: QuickCommandSortMode,
         view_mode: QuickCommandViewMode,
+        selected_category: String,
         focus: QuickCommandFeatureFocus,
     ) -> Self {
         Self {
             list: QuickCommandListState {
                 search_draft: String::new(),
-                selected_category: "all".to_string(),
+                selected_category,
                 sort_mode,
                 view_mode,
                 drop_target: None,
@@ -1057,15 +1085,24 @@ mod tests {
     }
 
     fn command_state(root: &Path) -> CommandFeatureState {
+        command_state_with_category(root, "all", Vec::new())
+    }
+
+    fn command_state_with_category(
+        root: &Path,
+        selected_category: &str,
+        categories: Vec<QuickCommandCategory>,
+    ) -> CommandFeatureState {
         let cx = TestAppContext::single();
         let focus = || cx.update(|cx| cx.focus_handle());
         let store = blocking_test_store(root);
         CommandFeatureState::new(CommandFeatureInit {
             commands: Vec::new(),
-            categories: Vec::new(),
+            categories,
             history: Vec::new(),
             sort_mode: QuickCommandSortMode::Usage,
             view_mode: QuickCommandViewMode::List,
+            selected_category: selected_category.to_string(),
             focus: QuickCommandFeatureFocus {
                 editor: focus(),
                 details: focus(),
@@ -1083,6 +1120,28 @@ mod tests {
             parent_id: parent.map(ToString::to_string),
             sort_order: order,
         }
+    }
+
+    #[test]
+    fn selected_category_restores_only_when_it_exists_or_is_uncategorized() {
+        let valid_dir = TestConfigDir::new("zzclawterm-command-category-restore");
+        let uncategorized_dir = TestConfigDir::new("zzclawterm-command-category-restore");
+        let stale_dir = TestConfigDir::new("zzclawterm-command-category-restore");
+        let categories = vec![category("category-1", None, 0)];
+        let state = command_state_with_category(valid_dir.path(), "category-1", categories.clone());
+        assert_eq!(state.quick_selected_category(), "category-1");
+        let state = command_state_with_category(
+            uncategorized_dir.path(),
+            "uncategorized",
+            categories.clone(),
+        );
+        assert_eq!(state.quick_selected_category(), "uncategorized");
+        let mut state =
+            command_state_with_category(stale_dir.path(), "removed-category", categories);
+        assert_eq!(state.quick_selected_category(), "all");
+        state.select_quick_category("category-1".to_string());
+        state.replace_quick_command_catalog(Vec::new(), Vec::new());
+        assert_eq!(state.quick_selected_category(), "all");
     }
 
     #[test]
@@ -1241,6 +1300,7 @@ mod tests {
     fn category_deletion_clears_filter_and_matching_editor_category() {
         let test_dir = TestConfigDir::new("zzclawterm-command-state-test");
         let mut state = command_state(test_dir.path());
+        state.replace_quick_command_catalog(Vec::new(), vec![category("category-1", None, 0)]);
         state.open_quick_editor(QuickCommandEditorState::blank());
         assert!(state.set_quick_editor_category(Some("category-1".to_string()), String::new(),));
         state.select_quick_category("category-1".to_string());

@@ -38,6 +38,13 @@ impl ZzClawTermApp {
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
         self.settings.replace_summary(settings);
+        let selected = self
+            .settings
+            .summary()
+            .ui_quick_cmd_selected_category
+            .clone();
+        self.commands.select_quick_category(selected);
+        self.sync_quick_command_selected_category(cx);
         self.sync_component_theme(cx);
         if terminal_font_changed {
             // External loading or settings-save completion may replace font settings;
@@ -885,7 +892,10 @@ impl ZzClawTermApp {
     }
 
     fn save_appearance_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(
+            crate::features::settings::SettingsPersistenceDomain::Appearance,
+            cx,
+        ) {
             self.refresh_visible_terminal_surfaces(cx);
             return;
         }

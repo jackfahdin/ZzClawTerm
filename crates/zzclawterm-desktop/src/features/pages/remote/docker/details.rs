@@ -3,24 +3,52 @@ use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::{DockerContainer, DockerContainerDetails};
 use zzclawterm_ui::ZzClawScrollable;
 
-use super::super::panels::RemoteMonitorPanel;
 use crate::features::{
-    formatting::compact_id, formatting::docker_state_color, shell::gpui_code_font_family,
-    view_widgets::modal_dialog_shell,
+    ZzClawTermApp, formatting::compact_id, formatting::docker_state_color,
+    shell::gpui_code_font_family, view_widgets::modal_dialog_shell,
 };
 use crate::theme::ThemePalette;
 use crate::widgets::{empty_panel, small_button, status_pill};
 
-use super::DockerLabels;
+use super::{DockerLabels, docker_labels};
 
-pub(in crate::features::pages::remote) fn docker_details_panel(
+impl ZzClawTermApp {
+    pub(in crate::features) fn docker_details_overlay(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let state = self.remote_ops.docker_presentation();
+        let Some(container_id) = state.details_container_id.clone() else {
+            return div().into_any_element();
+        };
+        let container = state.overview.as_ref().and_then(|overview| {
+            overview
+                .containers
+                .iter()
+                .find(|container| container.id == container_id)
+                .cloned()
+        });
+        let palette = self.theme_palette();
+        docker_details_panel(
+            palette,
+            self.shell_surface_color(palette.bg),
+            Some(container_id),
+            state.details,
+            container,
+            docker_labels(),
+            cx,
+        )
+    }
+}
+
+fn docker_details_panel(
     palette: ThemePalette,
     dialog_bg: gpui::Rgba,
     container_id: Option<String>,
     details: Option<DockerContainerDetails>,
     container: Option<DockerContainer>,
     labels: DockerLabels,
-    cx: &mut Context<RemoteMonitorPanel>,
+    cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::AnyElement {
     let Some(details) = details else {
         let details_id = container_id
@@ -51,10 +79,9 @@ pub(in crate::features::pages::remote) fn docker_details_panel(
                             palette,
                             "docker-details-loading-close",
                             labels.close.clone(),
-                            cx.listener(|panel, _, _, cx| {
-                                panel.with_app(cx, |this, cx| {
-                                    this.close_docker_details(cx);
-                                });
+                            cx.listener(|this, _, _, cx| {
+                                this.close_docker_details(cx);
+                                this.defer_remote_panel_snapshot_flush(cx);
                             }),
                         ))
                     }),
@@ -186,20 +213,18 @@ pub(in crate::features::pages::remote) fn docker_details_panel(
                 palette,
                 format!("docker-details-refresh-{}", compact_id(&container_id)),
                 labels.refresh.clone(),
-                cx.listener(move |panel, _, _window, cx| {
-                    panel.with_app(cx, |this, cx| {
-                        this.load_docker_details(container_id.clone(), cx);
-                    });
+                cx.listener(move |this, _, _window, cx| {
+                    this.load_docker_details(container_id.clone(), cx);
+                    this.defer_remote_panel_snapshot_flush(cx);
                 }),
             ))
             .child(small_button(
                 palette,
                 "docker-details-close",
                 labels.close.clone(),
-                cx.listener(|panel, _, _, cx| {
-                    panel.with_app(cx, |this, cx| {
-                        this.close_docker_details(cx);
-                    });
+                cx.listener(|this, _, _, cx| {
+                    this.close_docker_details(cx);
+                    this.defer_remote_panel_snapshot_flush(cx);
                 }),
             ));
     }
@@ -579,7 +604,7 @@ fn docker_detail_line(
     display_value: String,
     copyable: bool,
     copy_label: impl Into<SharedString>,
-    cx: &mut Context<RemoteMonitorPanel>,
+    cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
     let label: SharedString = label.into();
     let copy_label: SharedString = copy_label.into();
@@ -615,10 +640,8 @@ fn docker_detail_line(
                 copy_label,
                 cx.listener({
                     let label = label.clone();
-                    move |panel, _, _, cx| {
-                        panel.with_app(cx, |this, cx| {
-                            this.copy_docker_text(copy_value.clone(), &label, cx);
-                        });
+                    move |this, _, _, cx| {
+                        this.copy_docker_text(copy_value.clone(), &label, cx);
                     }
                 }),
             ))

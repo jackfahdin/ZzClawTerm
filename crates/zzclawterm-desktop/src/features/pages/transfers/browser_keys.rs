@@ -27,6 +27,19 @@ impl ZzClawTermApp {
             return;
         }
 
+        if modified_for_location {
+            match keystroke.key.to_ascii_lowercase().as_str() {
+                "c" => self.capture_transfer_file_clipboard(false, cx),
+                "x" => self.capture_transfer_file_clipboard(true, cx),
+                "v" => self.paste_transfer_file_clipboard(window, cx),
+                _ => {}
+            }
+            if matches!(keystroke.key.to_ascii_lowercase().as_str(), "c" | "x" | "v") {
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         // Once the search field owns focus, editing keys must not fall through to
         // the browser shortcuts below. In particular, printable keys would
         // otherwise recreate the field from a one-character seed on every press.

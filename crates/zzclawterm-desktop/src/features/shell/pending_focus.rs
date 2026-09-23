@@ -31,7 +31,10 @@ impl ZzClawTermApp {
     /// or become satisfiable -- including `render`, which is where "the element now
     /// exists" first becomes true.
     pub(in crate::features) fn ensure_pending_focus_clock(&mut self, cx: &mut Context<Self>) {
-        if self.shell.pending_focus_clock_is_armed() || !self.has_pending_focus_request() {
+        if self.security.screen_locked()
+            || self.shell.pending_focus_clock_is_armed()
+            || !self.has_pending_focus_request()
+        {
             return;
         }
         self.shell.set_pending_focus_clock_armed(true);
@@ -39,6 +42,10 @@ impl ZzClawTermApp {
             loop {
                 // `update_in`: taking focus needs the window.
                 let Ok(still_pending) = this.update_in(cx, |this, window, cx| {
+                    if this.security.screen_locked() {
+                        this.shell.set_pending_focus_clock_armed(false);
+                        return false;
+                    }
                     if this.drive_pending_focus(window, cx) {
                         cx.notify();
                     }
@@ -76,6 +83,9 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.security.screen_locked() {
+            return false;
+        }
         if !self.has_pending_focus_request() {
             return false;
         }

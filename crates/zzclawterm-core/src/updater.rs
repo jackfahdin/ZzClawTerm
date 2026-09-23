@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 
 use crate::app_identity::AppFlavor;
 
@@ -87,6 +88,7 @@ impl UpdateManifest {
         &self,
         expected_version: &Version,
         target: UpdateTarget,
+        package: UpdatePackageKind,
     ) -> Result<SelectedUpdateArtifact, UpdaterError> {
         if &self.version != expected_version {
             return Err(UpdaterError::ManifestVersionMismatch {
@@ -95,7 +97,7 @@ impl UpdateManifest {
             });
         }
 
-        let key = target.manifest_key();
+        let key = target.manifest_key(package)?;
         let artifact = self
             .platforms
             .get(&key)
@@ -104,19 +106,20 @@ impl UpdateManifest {
             return Err(UpdaterError::MissingSignature);
         }
 
-        let filename = target.artifact_filename(expected_version);
-        let github_url = format!(
+        let filename = target.artifact_filename(expected_version, package)?;
+        let immutable_url = format!(
             "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{expected_version}/{filename}"
         );
         let preview_url = format!(
             "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/{filename}"
         );
-        if artifact.url != github_url && artifact.url != preview_url {
+        if !artifact_url_matches(&artifact.url, &immutable_url, &preview_url) {
             return Err(UpdaterError::InvalidArtifactUrl);
         }
 
         Ok(SelectedUpdateArtifact {
             url: artifact.url.clone(),
+            fallback_url: (artifact.url != immutable_url).then_some(immutable_url),
             signature: artifact.signature.clone(),
             filename,
         })
@@ -137,8 +140,24 @@ pub struct UpdateArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUpdateArtifact {
     pub url: String,
+    pub fallback_url: Option<String>,
     pub signature: String,
     pub filename: String,
+}
+
+fn artifact_url_matches(candidate: &str, immutable_url: &str, github_url: &str) -> bool {
+    let Ok(candidate) = Url::parse(candidate) else {
+        return false;
+    };
+    if candidate.username() != ""
+        || candidate.password().is_some()
+        || candidate.port().is_some()
+        || candidate.query().is_some()
+        || candidate.fragment().is_some()
+    {
+        return false;
+    }
+    candidate.as_str() == immutable_url || candidate.as_str() == github_url
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +171,12 @@ pub enum UpdatePlatform {
 pub enum UpdateArchitecture {
     X86_64,
     Aarch64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePackageKind {
+    Installed,
+    WindowsPortable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +204,7 @@ impl UpdateTarget {
         })
     }
 
-    fn manifest_key(self) -> String {
+    fn manifest_key(self, package: UpdatePackageKind) -> Result<String, UpdaterError> {
         let platform = match self.platform {
             UpdatePlatform::Windows => "windows",
             UpdatePlatform::MacOs => "darwin",
@@ -189,20 +214,45 @@ impl UpdateTarget {
             UpdateArchitecture::X86_64 => "x86_64",
             UpdateArchitecture::Aarch64 => "aarch64",
         };
-        format!("{platform}-{architecture}")
+        let suffix = match package {
+            UpdatePackageKind::Installed => "",
+            UpdatePackageKind::WindowsPortable if self.platform == UpdatePlatform::Windows => {
+                "-portable"
+            }
+            UpdatePackageKind::WindowsPortable => {
+                return Err(UpdaterError::UnsupportedPackageKind);
+            }
+        };
+        Ok(format!("{platform}-{architecture}{suffix}"))
     }
 
-    fn artifact_filename(self, version: &Version) -> String {
+    fn artifact_filename(
+        self,
+        version: &Version,
+        package: UpdatePackageKind,
+    ) -> Result<String, UpdaterError> {
         let architecture = match self.architecture {
             UpdateArchitecture::X86_64 => "x64",
             UpdateArchitecture::Aarch64 => "arm64",
         };
-        let suffix = match self.platform {
-            UpdatePlatform::Windows => format!("windows_{architecture}-setup.exe"),
-            UpdatePlatform::MacOs => format!("macos_{architecture}.app.tar.gz"),
-            UpdatePlatform::Linux => format!("linux_{architecture}.AppImage"),
+        let suffix = match (self.platform, package) {
+            (UpdatePlatform::Windows, UpdatePackageKind::Installed) => {
+                format!("windows_{architecture}-setup.exe")
+            }
+            (UpdatePlatform::Windows, UpdatePackageKind::WindowsPortable) => {
+                format!("windows_{architecture}_portable.zip")
+            }
+            (_, UpdatePackageKind::WindowsPortable) => {
+                return Err(UpdaterError::UnsupportedPackageKind);
+            }
+            (UpdatePlatform::MacOs, UpdatePackageKind::Installed) => {
+                format!("macos_{architecture}.app.tar.gz")
+            }
+            (UpdatePlatform::Linux, UpdatePackageKind::Installed) => {
+                format!("linux_{architecture}.AppImage")
+            }
         };
-        format!("ZzClawTerm_{version}_{suffix}")
+        Ok(format!("ZzClawTerm_{version}_{suffix}"))
     }
 }
 
@@ -223,6 +273,8 @@ pub enum UpdaterError {
     UnsupportedPlatform(String),
     #[error("unsupported update architecture `{0}`")]
     UnsupportedArchitecture(String),
+    #[error("the selected update package is not supported on this platform")]
+    UnsupportedPackageKind,
     #[error("update manifest does not contain artifact `{0}`")]
     MissingArtifact(String),
     #[error("update artifact URL does not match the selected platform and version")]
@@ -266,8 +318,8 @@ mod tests {
     use semver::Version;
 
     use super::{
-        PREVIEW_MANIFEST_URL, STABLE_MANIFEST_URL, UpdateChannel, UpdateManifest, UpdateTarget,
-        UpdaterError, parse_update_manifest,
+        PREVIEW_MANIFEST_URL, STABLE_MANIFEST_URL, UpdateChannel, UpdateManifest,
+        UpdatePackageKind, UpdateTarget, UpdaterError, parse_update_manifest,
     };
 
     fn manifest(version: &str, platform: &str, url: &str, signature: &str) -> String {
@@ -356,15 +408,29 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            valid.select_artifact(&version, target).unwrap().url,
+            valid
+                .select_artifact(&version, target, UpdatePackageKind::Installed)
+                .unwrap()
+                .url,
             expected_url
+        );
+        assert_eq!(
+            valid
+                .select_artifact(&version, target, UpdatePackageKind::Installed)
+                .unwrap()
+                .fallback_url
+                .as_deref(),
+            Some(
+                "https://github.com/jackfahdin/ZzClawTerm/releases/download/v2.1.0-preview.1/ZzClawTerm_2.1.0-preview.1_windows_x64-setup.exe"
+            )
         );
 
         assert!(
             valid
                 .select_artifact(
                     &version,
-                    UpdateTarget::from_rust_target("windows", "aarch64").unwrap()
+                    UpdateTarget::from_rust_target("windows", "aarch64").unwrap(),
+                    UpdatePackageKind::Installed,
                 )
                 .is_err()
         );
@@ -372,7 +438,8 @@ mod tests {
             valid
                 .select_artifact(
                     &version,
-                    UpdateTarget::from_rust_target("linux", "x86_64").unwrap()
+                    UpdateTarget::from_rust_target("linux", "x86_64").unwrap(),
+                    UpdatePackageKind::Installed,
                 )
                 .is_err()
         );
@@ -384,7 +451,7 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(
-            wrong_url.select_artifact(&version, target),
+            wrong_url.select_artifact(&version, target, UpdatePackageKind::Installed),
             Err(UpdaterError::InvalidArtifactUrl)
         ));
         let unsigned = UpdateManifest::parse(
@@ -400,9 +467,60 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            unsigned.select_artifact(&version, target),
+            unsigned.select_artifact(&version, target, UpdatePackageKind::Installed),
             Err(UpdaterError::MissingSignature)
         ));
+
+        let portable_url = "https://github.com/jackfahdin/ZzClawTerm/releases/download/v2.1.0-preview.1/ZzClawTerm_2.1.0-preview.1_windows_x64_portable.zip";
+        let portable = UpdateManifest::parse(&manifest(
+            &version_text,
+            "windows-x86_64-portable",
+            portable_url,
+            "signed",
+        ))
+        .unwrap();
+        let selected = portable
+            .select_artifact(&version, target, UpdatePackageKind::WindowsPortable)
+            .unwrap();
+        assert_eq!(selected.url, portable_url);
+        assert_eq!(selected.fallback_url, None);
+    }
+
+    #[test]
+    fn artifact_selection_rejects_noncanonical_url_components() {
+        let version = Version::parse("2.1.0-preview.1").unwrap();
+        let target = UpdateTarget::from_rust_target("windows", "x86_64").unwrap();
+        // The version-pinned release asset is the canonical URL on its own.
+        let pinned = "https://github.com/jackfahdin/ZzClawTerm/releases/download/v2.1.0-preview.1/ZzClawTerm_2.1.0-preview.1_windows_x64-setup.exe";
+        let pinned_manifest = UpdateManifest::parse(&manifest(
+            version.to_string().as_str(),
+            "windows-x86_64",
+            pinned,
+            "signed",
+        ))
+        .unwrap();
+        let selected = pinned_manifest
+            .select_artifact(&version, target, UpdatePackageKind::Installed)
+            .unwrap();
+        assert_eq!(selected.url, pinned);
+        assert_eq!(selected.fallback_url, None);
+
+        for url in [
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/releases/v2.1.0-preview.1/ZzClawTerm_2.1.0-preview.1_windows_x64-setup.exe",
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/v2.1.0-preview.1/ZzClawTerm_2.1.0-preview.1_windows_x64-setup.exe?mirror=1",
+        ] {
+            let manifest = UpdateManifest::parse(&manifest(
+                version.to_string().as_str(),
+                "windows-x86_64",
+                url,
+                "signed",
+            ))
+            .unwrap();
+            assert!(matches!(
+                manifest.select_artifact(&version, target, UpdatePackageKind::Installed),
+                Err(UpdaterError::InvalidArtifactUrl)
+            ));
+        }
     }
 
     #[test]

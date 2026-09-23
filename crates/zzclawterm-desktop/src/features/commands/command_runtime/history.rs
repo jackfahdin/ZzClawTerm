@@ -314,6 +314,11 @@ impl ZzClawTermApp {
                         this.commands.note_persistence_event_delivered();
                         if let Err(message) = this.commands.apply_persistence_result(event) {
                             this.settings.update_store_status(message, false);
+                        } else {
+                            this.request_shared_state_refresh(
+                                crate::app_shell::SharedStateDomain::Commands,
+                                cx,
+                            );
                         }
                         cx.notify();
                     })

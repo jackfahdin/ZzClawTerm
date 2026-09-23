@@ -97,6 +97,6 @@ pub(in crate::features) use prompt_runtime::{
     keyboard_interactive_text_input_id, sftp_duplicate_prompt_id, uuid_like_prompt_id,
 };
 pub(in crate::features) use state::{
-    PendingSessionStart, SavedConnectionStartOptions, SessionFeatureFocus, SessionFeatureState,
-    SessionStartEventRequest, SessionStartTabPlacement,
+    PendingSessionStart, SavedConnectionStartOptions, SessionCatalogTransferBundle,
+    SessionFeatureFocus, SessionFeatureState, SessionStartEventRequest, SessionStartTabPlacement,
 };

@@ -511,11 +511,8 @@ mod tests {
     use super::LocalFileService;
     use crate::{RemoteTextWriteResult, SftpFileType, SftpWriteTextResult};
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "zzclawterm-local-fs-{name}-{}",
-            uuid::Uuid::new_v4()
-        ))
+    fn temp_dir(name: &str) -> zzclawterm_core::test_support::TestTempDir {
+        zzclawterm_core::test_support::TestTempDir::new(&format!("zzclawterm-local-fs-{name}"))
     }
 
     #[test]
@@ -543,7 +540,6 @@ mod tests {
 
         service.delete(&renamed).unwrap();
         assert!(service.list_dir(&root).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -566,8 +562,6 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(result, SftpWriteTextResult::Conflict { .. }));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -592,7 +586,6 @@ mod tests {
                 .unwrap(),
             RemoteTextWriteResult::Saved { .. }
         ));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

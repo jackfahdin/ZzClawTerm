@@ -445,6 +445,7 @@ impl ZzClawTermApp {
         }
     }
     pub(in crate::features) fn persist_workspace_pane_layout(&mut self) {
+        self.workspace_revision = self.workspace_revision.saturating_add(1);
         if !self.settings.summary().startup_restore
             || !self.settings.summary().startup_restore_window_layout
         {
@@ -538,6 +539,26 @@ impl ZzClawTermApp {
         }
         self.shell.workspace.pane_layout_restored = true;
         let active = self.session.active_id_owned();
+        let loaded = self
+            .stores
+            .startup_restore
+            .update(cx, |store, _| store.take_loaded_workspace_pane_layout());
+        if let Some(layout) = loaded {
+            let Some(layout) = layout else {
+                return;
+            };
+            let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
+                return;
+            };
+            if self.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {
+                self.shell.navigation.selected_nav = NavItem::Workspace;
+                self.shell.navigation.main_mode = MainMode::Workspace;
+                self.shell
+                    .set_status("restored workspace pane layout".to_string());
+                cx.notify();
+            }
+            return;
+        }
         self.submit_store_request(
             0,
             store_request(StoreDomain::Sessions, |store| {

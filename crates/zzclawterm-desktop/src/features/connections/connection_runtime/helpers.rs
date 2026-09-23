@@ -119,6 +119,7 @@ pub(super) fn connection_editor_from_saved(
         password_id: auth.password_id,
         password: zzclawterm_core::SecretString::default(),
         existing_password: auth.password.filter(|value| !value.is_empty()),
+        existing_password_locked: auth.has_password,
         key_id: auth.key_id,
         otp_id: auth.otp_id,
         auto_fill_otp: auth.auto_fill_otp,
@@ -621,7 +622,7 @@ pub(super) fn build_saved_connection_from_editor(
         | ConnectionKindTab::Telnet
         | ConnectionKindTab::Rdp
         | ConnectionKindTab::Vnc => {
-            let password = editor.password.trim().to_string();
+            let entered_password = editor.password.trim().to_string();
             let existing = editor.existing_password.clone();
             let mode = match editor.auth_mode.as_str() {
                 "password" => "password".to_string(),
@@ -636,6 +637,18 @@ pub(super) fn build_saved_connection_from_editor(
                     "key".to_string()
                 }
                 _ => "none".to_string(),
+            };
+            let (password, has_password) = if mode == "password"
+                && editor.password_source == ConnectionEditorPasswordSource::Direct
+            {
+                if entered_password.is_empty() {
+                    let has_password = existing.is_some() && editor.existing_password_locked;
+                    (existing, has_password)
+                } else {
+                    (Some(entered_password.into()), false)
+                }
+            } else {
+                (None, false)
             };
             Some(ConnectionAuth {
                 account_id: editor.account_id.clone(),
@@ -656,17 +669,7 @@ pub(super) fn build_saved_connection_from_editor(
                     && editor.password_source == ConnectionEditorPasswordSource::Saved)
                     .then(|| editor.password_id.clone())
                     .flatten(),
-                password: if mode == "password"
-                    && editor.password_source == ConnectionEditorPasswordSource::Direct
-                {
-                    if !password.is_empty() {
-                        Some(password.into())
-                    } else {
-                        existing
-                    }
-                } else {
-                    None
-                },
+                password,
                 key_id: (mode == "key")
                     .then(|| {
                         editor
@@ -684,7 +687,7 @@ pub(super) fn build_saved_connection_from_editor(
                     })
                     .flatten(),
                 auto_fill_otp: editor.kind == ConnectionKindTab::Ssh && editor.auto_fill_otp,
-                has_password: false,
+                has_password,
                 mode,
             })
         }
@@ -965,6 +968,29 @@ mod tests {
             saved.auth.and_then(|auth| auth.password_id).as_deref(),
             Some("password-1")
         );
+    }
+
+    #[test]
+    fn connection_editor_preserves_locked_ciphertext_until_password_is_replaced() {
+        let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id": "locked-editor", "name": "Locked SSH", "type": "ssh",
+            "host": "example.com", "username": "root",
+            "auth": {"mode": "password", "password": "locked-ciphertext", "has_password": true}
+        }))
+        .expect("connection");
+        let editor = connection_editor_from_saved(connection.clone(), false);
+        assert!(editor.existing_password_locked);
+        let saved = build_saved_connection_from_editor(&editor).expect("unchanged password");
+        let auth = saved.auth.expect("auth");
+        assert_eq!(auth.password.as_deref(), Some("locked-ciphertext"));
+        assert!(auth.has_password);
+
+        let mut editor = connection_editor_from_saved(connection, false);
+        editor.password = "new-secret".to_string().into();
+        let replaced = build_saved_connection_from_editor(&editor).expect("replacement password");
+        let auth = replaced.auth.expect("auth");
+        assert_eq!(auth.password.as_deref(), Some("new-secret"));
+        assert!(!auth.has_password);
     }
 
     #[test]

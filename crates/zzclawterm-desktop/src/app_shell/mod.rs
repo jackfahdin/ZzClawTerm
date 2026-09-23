@@ -1,27 +1,36 @@
 //! Root GPUI shell boundary.
 
+mod controller;
+mod process_state;
+mod session_hub;
 mod window_state;
 
 use self::window_state::{
     MAIN_WINDOW_STATE_SAVE_DEBOUNCE, MainWindowStateController, capture_main_window_state,
 };
+pub use controller::{DesktopController, DesktopControllerGlobal};
+pub(crate) use process_state::{
+    GlobalStateMutation, ProcessStateStore, SettingsDraftRevisions, SharedStateDomain,
+    SharedStateEvent, WorkspaceInitSnapshot,
+};
+pub use session_hub::SessionHub;
 pub use window_state::{AppShellStartup, MainWindowPlacement};
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, Menu, MenuItem,
-    OsAction, ParentElement, Render, Styled, Subscription, SystemMenuType, WeakEntity, Window,
-    actions, div, prelude::FluentBuilder, px, rgb,
+    AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding,
+    Menu, MenuItem, MouseButton, OsAction, ParentElement, Render, Styled, Subscription,
+    SystemMenuType, WeakEntity, Window, actions, div, prelude::FluentBuilder, px, rgb,
 };
+use rust_i18n::t;
 use zzclawterm_core::{
-    ACTIVATION_QUEUE_CAPACITY, ActivationReceiver, ActivationRequest, AppRuntime,
-    DiagnosticsExportOptions, DiagnosticsRuntimeSnapshot, export_diagnostics_archive,
+    ActivationRequest, AppRuntime, DiagnosticsExportOptions, DiagnosticsRuntimeSnapshot,
+    WorkspaceId, export_diagnostics_archive,
 };
 use zzclawterm_store::{
-    FlushBarrier, LoadBootstrap, SaveMainWindowState, StoreConfig, StoreOperationError,
-    StoreRuntime, StoreTask,
+    FlushBarrier, StoreOperationError, StoreRuntime, StoreSubmitError, StoreTask,
 };
 use zzclawterm_ui::{
     ZzClawAppMenu, ZzClawAppMenuBar, ZzClawButton, ZzClawButtonVariant, ZzClawCopy, ZzClawCut,
@@ -30,8 +39,12 @@ use zzclawterm_ui::{
 
 use crate::{
     entities::{OverlayStore, StartupRestoreStore, UiStoreHandles},
-    features::{AppLifecycleEvent, ZzClawTermApp},
+    features::{
+        AppLifecycleEvent, ZzClawTermApp, ZzClawTermProcessEntities, ZzClawTermStoreClients,
+    },
 };
+
+const SHUTDOWN_STATUS_DELAY: Duration = Duration::from_millis(200);
 
 actions!(
     zzclawterm_native_menu,
@@ -40,6 +53,7 @@ actions!(
         NativeHide,
         NativeHideOthers,
         NativeShowAll,
+        NativeNewWindow,
         NativeNewSession,
         NativeQuickSwitch,
         NativeImportConfig,
@@ -64,6 +78,19 @@ actions!(
     ]
 );
 
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([native_new_window_key_binding()]);
+}
+
+fn native_new_window_key_binding() -> KeyBinding {
+    let keystroke = if cfg!(target_os = "macos") {
+        "cmd-shift-n"
+    } else {
+        "ctrl-shift-n"
+    };
+    KeyBinding::new(keystroke, NativeNewWindow, None)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeMenuCommand {
     NewSession,
@@ -85,16 +112,19 @@ pub(crate) enum NativeMenuCommand {
 #[allow(dead_code)]
 pub struct AppShell {
     runtime: AppRuntime,
+    workspace_id: WorkspaceId,
+    controller: Entity<DesktopController>,
+    session_hub: Entity<SessionHub>,
+    quit_requested: bool,
     lifecycle: AppShellLifecycle,
+    flushing_view_ready: bool,
     app: Option<Entity<ZzClawTermApp>>,
     store_runtime: Option<StoreRuntime>,
-    pending_bootstrap: Option<StoreTask<zzclawterm_store::BootstrapSnapshot>>,
+    workspace_seed: Option<zzclawterm_core::WorkspaceRestoreState>,
     startup_restore: Entity<StartupRestoreStore>,
     overlays: Entity<OverlayStore>,
-    activation_rx: Option<ActivationReceiver>,
     pending_activations: VecDeque<ActivationRequest>,
-    recent_activation_ids: HashSet<[u8; 16]>,
-    recent_activation_order: VecDeque<[u8; 16]>,
+    pending_process_quit_tasks: Vec<StoreTask<()>>,
     main_window_state: MainWindowStateController,
     _subscriptions: Vec<Subscription>,
 }
@@ -116,8 +146,11 @@ struct RecoveryState {
 impl AppShell {
     pub fn new(
         runtime: AppRuntime,
-        activation_rx: ActivationReceiver,
+        initial_activation: Option<ActivationRequest>,
         startup: AppShellStartup,
+        workspace_id: WorkspaceId,
+        controller: Entity<DesktopController>,
+        session_hub: Entity<SessionHub>,
         cx: &mut Context<Self>,
     ) -> Self {
         let startup_restore = cx.new(|_| StartupRestoreStore::default());
@@ -139,44 +172,36 @@ impl AppShell {
             })
             .unwrap_or(AppShellLifecycle::Loading);
 
-        let mut shell = Self {
+        Self {
             runtime,
+            workspace_id,
+            controller,
+            session_hub,
+            quit_requested: false,
             lifecycle,
+            flushing_view_ready: true,
             app: None,
             store_runtime: startup.store_runtime,
-            pending_bootstrap: startup.pending_bootstrap,
+            workspace_seed: startup.workspace_seed,
             startup_restore,
             overlays,
-            activation_rx: Some(activation_rx),
-            pending_activations: VecDeque::new(),
-            recent_activation_ids: HashSet::new(),
-            recent_activation_order: VecDeque::new(),
+            pending_activations: initial_activation.into_iter().collect(),
+            pending_process_quit_tasks: Vec::new(),
             main_window_state: MainWindowStateController::default(),
             _subscriptions: subscriptions,
-        };
-        let quit_subscription = cx.on_app_quit(|this, cx| {
-            let store = this
-                .store_runtime
-                .as_ref()
-                .map(StoreRuntime::blocking_client);
-            let window_state = this.main_window_state.latest_for_shutdown();
-            cx.background_executor().spawn(async move {
-                if let Some(store) = store {
-                    if let Some(state) = window_state {
-                        let _ = store.request_shutdown(u64::MAX - 1, SaveMainWindowState(state));
-                    }
-                    let _ = store.request_shutdown(u64::MAX, FlushBarrier);
-                }
-            })
-        });
-        shell._subscriptions.push(quit_subscription);
-        shell
+        }
     }
 
     pub fn start_after_window_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_id = self.workspace_id;
+        let controller = self.controller.clone();
+        let activation_subscription = cx.observe_window_activation(window, move |_, window, cx| {
+            if window.is_window_active() {
+                controller.update(cx, |controller, _| controller.mark_active(workspace_id));
+            }
+        });
+        self._subscriptions.push(activation_subscription);
         self.start_main_window_state_persistence(window, cx);
-        self.start_activation_drain(window, cx);
-        self.launch_pending_bootstrap(window, cx);
     }
 
     fn start_main_window_state_persistence(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,10 +229,11 @@ impl AppShell {
                 .timer(MAIN_WINDOW_STATE_SAVE_DEBOUNCE)
                 .await;
             let pending = this
-                .update(cx, |this, _| {
+                .update(cx, |this, cx| {
                     let (generation, state) = this.main_window_state.take_debounced_save()?;
-                    let store = this.store_runtime.as_ref()?.ui_client();
-                    match store.try_submit(generation, SaveMainWindowState(state)) {
+                    match this.controller.update(cx, |controller, _| {
+                        controller.submit_window_state(this.workspace_id, state, generation)
+                    }) {
                         Ok(task) => Some((generation, task)),
                         Err(error) => {
                             tracing::warn!(category = %error, "main window state save was not submitted");
@@ -236,46 +262,11 @@ impl AppShell {
         .detach();
     }
 
-    fn start_activation_drain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut activation_rx) = self.activation_rx.take() else {
-            return;
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let can_receive = this
-                    .update(cx, |this, _| {
-                        matches!(this.lifecycle, AppShellLifecycle::Ready)
-                            || this.pending_activations.len() < ACTIVATION_QUEUE_CAPACITY
-                    })
-                    .unwrap_or(false);
-                if !can_receive {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(40))
-                        .await;
-                    continue;
-                }
-                let Some(request) = activation_rx.recv().await else {
-                    break;
-                };
-                if cx
-                    .update(|window, cx| {
-                        window.activate_window();
-                        cx.activate(true);
-                        this.update(cx, |this, cx| this.receive_activation(request, cx))
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn receive_activation(&mut self, request: ActivationRequest, cx: &mut Context<Self>) {
-        if !self.remember_activation(request.request_id) {
-            return;
-        }
+    pub(super) fn receive_activation_direct(
+        &mut self,
+        request: ActivationRequest,
+        cx: &mut Context<Self>,
+    ) {
         if matches!(self.lifecycle, AppShellLifecycle::Ready) {
             if let Some(app) = &self.app {
                 app.update(cx, |app, cx| app.handle_activation(request, cx));
@@ -283,21 +274,6 @@ impl AppShell {
         } else if !matches!(self.lifecycle, AppShellLifecycle::Flushing) {
             self.pending_activations.push_back(request);
         }
-    }
-
-    fn remember_activation(&mut self, request_id: [u8; 16]) -> bool {
-        const RECENT_ACTIVATION_CAPACITY: usize = ACTIVATION_QUEUE_CAPACITY * 4;
-
-        if !self.recent_activation_ids.insert(request_id) {
-            return false;
-        }
-        self.recent_activation_order.push_back(request_id);
-        while self.recent_activation_order.len() > RECENT_ACTIVATION_CAPACITY {
-            if let Some(expired) = self.recent_activation_order.pop_front() {
-                self.recent_activation_ids.remove(&expired);
-            }
-        }
-        true
     }
 
     fn drain_pending_activations(&mut self, cx: &mut Context<Self>) {
@@ -309,60 +285,27 @@ impl AppShell {
         }
     }
 
-    fn begin_bootstrap(&mut self) {
+    fn begin_bootstrap(&mut self, cx: &mut Context<Self>) {
         self.app = None;
         self.lifecycle = AppShellLifecycle::Loading;
-        let store_runtime = match StoreRuntime::spawn(StoreConfig {
-            config_dir: self.runtime.config_dir().to_path_buf(),
-            portable_key_path: self.runtime.portable_key_path().map(ToOwned::to_owned),
-        }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                self.lifecycle = AppShellLifecycle::Recovery(RecoveryState {
-                    category: "worker_start".to_string(),
-                    message: error.to_string(),
-                    diagnostics_status: None,
-                });
-                return;
-            }
-        };
-        match store_runtime.ui_client().try_submit(0, LoadBootstrap) {
-            Ok(task) => {
-                self.pending_bootstrap = Some(task);
-                self.store_runtime = Some(store_runtime);
-            }
-            Err(error) => {
-                self.lifecycle = AppShellLifecycle::Recovery(RecoveryState {
-                    category: "request_submit".to_string(),
-                    message: error.to_string(),
-                    diagnostics_status: None,
-                });
-            }
-        }
+        let controller = self.controller.clone();
+        cx.defer(move |cx| {
+            controller.update(cx, |controller, cx| controller.retry_process_bootstrap(cx));
+        });
     }
 
-    fn launch_pending_bootstrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(task) = self.pending_bootstrap.take() else {
-            return;
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            let event = task.await;
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |this, cx| match event.outcome {
-                    Ok(bootstrap) => this.complete_bootstrap(bootstrap, window, cx),
-                    Err(error) => this.enter_recovery(error, cx),
-                })
-            });
-        })
-        .detach();
-    }
-
-    fn complete_bootstrap(
+    pub(super) fn complete_bootstrap(
         &mut self,
-        bootstrap: zzclawterm_store::BootstrapSnapshot,
+        process_state: Entity<ProcessStateStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            self.lifecycle,
+            AppShellLifecycle::Flushing | AppShellLifecycle::Ready
+        ) {
+            return;
+        }
         let Some(store_runtime) = &self.store_runtime else {
             self.lifecycle = AppShellLifecycle::Recovery(RecoveryState {
                 category: "runtime_missing".to_string(),
@@ -372,40 +315,129 @@ impl AppShell {
             cx.notify();
             return;
         };
+        let mut workspace_init = process_state.read(cx).workspace_init(self.workspace_id);
+        if workspace_init.state.is_none() {
+            workspace_init.state = self.workspace_seed.take();
+        }
+        let workspace_revision = if let Some(workspace) = workspace_init.state.as_ref() {
+            self.startup_restore.update(cx, |store, _| {
+                store.set_loaded_window_layouts(
+                    workspace.sessions.terminal_window_layout.clone(),
+                    workspace.sessions.workspace_pane_layout.clone(),
+                );
+            });
+            workspace.revision
+        } else {
+            self.startup_restore
+                .update(cx, |store, _| store.set_loaded_window_layouts(None, None));
+            0
+        };
         let stores = UiStoreHandles {
             startup_restore: self.startup_restore.clone(),
             overlays: self.overlays.clone(),
         };
+        let update_store = self.controller.read(cx).update_store();
         let app = cx.new(|cx| {
+            let session_manager = self.session_hub.read(cx).manager();
             ZzClawTermApp::from_bootstrap(
                 self.runtime.clone(),
                 stores,
-                bootstrap,
-                store_runtime.ui_client(),
-                store_runtime.blocking_client(),
+                ZzClawTermProcessEntities::new(process_state, update_store.clone()),
+                workspace_init,
+                ZzClawTermStoreClients::new(
+                    store_runtime.ui_client(),
+                    store_runtime.blocking_client(),
+                ),
+                session_manager,
                 cx,
             )
         });
         let title_menu_bar = build_title_menu_bar(app.downgrade(), cx);
+        let screen_locked = self.controller.read(cx).screen_locked();
         app.update(cx, |app, cx| {
+            app.set_workspace_identity(self.workspace_id, workspace_revision);
+            app.set_desktop_controller(self.controller.downgrade());
             app.set_title_menu_bar(title_menu_bar);
             app.start_shell_environment_preload(cx);
-            app.start_system_tray(cx);
+            if screen_locked {
+                app.apply_shared_screen_lock(true, window, cx);
+            }
         });
         let shutdown_subscription =
             cx.subscribe(&app, |this, _, event: &AppLifecycleEvent, cx| match event {
-                AppLifecycleEvent::ShutdownRequested => this.request_close(cx),
+                AppLifecycleEvent::ShutdownRequested => {
+                    if this.quit_requested || this.controller.read(cx).workspace_count() == 1 {
+                        if !this
+                            .controller
+                            .update(cx, |controller, _| controller.begin_process_quit())
+                        {
+                            return;
+                        }
+                        let workspace_id = this.workspace_id;
+                        let tasks = this.controller.update(cx, |controller, cx| {
+                            controller.prepare_other_workspaces_for_quit(workspace_id, cx)
+                        });
+                        match tasks {
+                            Ok(tasks) => this.pending_process_quit_tasks = tasks,
+                            Err(error) => {
+                                this.controller
+                                    .update(cx, |controller, _| controller.cancel_process_quit());
+                                if let Some(app) = &this.app {
+                                    app.update(cx, |app, cx| {
+                                        app.report_close_save_failed(error.to_string(), cx)
+                                    });
+                                }
+                                return;
+                            }
+                        }
+                        this.request_close(cx);
+                    } else {
+                        let Some(app) = this.app.clone() else { return };
+                        let persistence_task = match app.update(cx, |app, cx| {
+                            app.submit_shutdown_persistence(false).inspect_err(|error| {
+                                app.report_close_save_failed(error.to_string(), cx);
+                            })
+                        }) {
+                            Ok(task) => task,
+                            Err(_) => return,
+                        };
+                        this.enter_flushing(cx);
+                        let workspace_id = this.workspace_id;
+                        if let Err(error) = this.controller.update(cx, |controller, cx| {
+                            controller.request_close_workspace(workspace_id, persistence_task, cx)
+                        }) {
+                            tracing::error!(%error, "could not close workspace");
+                            this.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
+                            app.update(cx, |app, cx| {
+                                app.report_close_save_failed(error.to_string(), cx)
+                            });
+                        }
+                    }
+                }
+                AppLifecycleEvent::NewWindowRequested => this.request_new_window(cx),
             });
         self._subscriptions.push(shutdown_subscription);
         self.app = Some(app);
+        let update_subscription = cx.observe(&update_store, |this, _, cx| {
+            if let Some(app) = this.app.clone() {
+                app.update(cx, |_, cx| cx.notify());
+            }
+        });
+        self._subscriptions.push(update_subscription);
         self.lifecycle = AppShellLifecycle::Ready;
         self.start_ready_app(window, cx);
         self.drain_pending_activations(cx);
+        let controller = self.controller.downgrade();
+        let workspace_id = self.workspace_id;
+        cx.defer(move |cx| {
+            let _ = controller.update(cx, |controller, cx| {
+                controller.workspace_ready(workspace_id, cx)
+            });
+        });
         cx.notify();
     }
 
-    fn enter_recovery(&mut self, error: StoreOperationError, cx: &mut Context<Self>) {
-        self.store_runtime = None;
+    pub(super) fn enter_recovery(&mut self, error: StoreOperationError, cx: &mut Context<Self>) {
         self.lifecycle = AppShellLifecycle::Recovery(RecoveryState {
             category: error.category().to_string(),
             message: error.user_message().to_string(),
@@ -460,8 +492,8 @@ impl AppShell {
     }
 
     fn retry_bootstrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_bootstrap();
-        self.launch_pending_bootstrap(window, cx);
+        let _ = window;
+        self.begin_bootstrap(cx);
         cx.notify();
     }
 
@@ -519,12 +551,78 @@ impl AppShell {
 
     pub fn request_close(&mut self, cx: &mut Context<Self>) {
         match self.lifecycle {
-            AppShellLifecycle::Ready | AppShellLifecycle::FlushFailed(_) => self.begin_shutdown(cx),
+            AppShellLifecycle::Ready | AppShellLifecycle::FlushFailed(_) if self.app.is_some() => {
+                self.begin_shutdown(cx)
+            }
             AppShellLifecycle::Flushing => {}
-            AppShellLifecycle::Loading | AppShellLifecycle::Recovery(_) => {
-                self.quit_after_worker_shutdown(cx);
+            AppShellLifecycle::Ready
+            | AppShellLifecycle::FlushFailed(_)
+            | AppShellLifecycle::Loading
+            | AppShellLifecycle::Recovery(_) => {
+                self.enter_flushing(cx);
+                let workspace_id = self.workspace_id;
+                self.controller.update(cx, |controller, cx| {
+                    controller.request_close_unready_workspace(workspace_id, cx)
+                });
             }
         }
+    }
+
+    pub fn request_new_window(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.controller.update(cx, |controller, cx| {
+            controller.open_workspace(
+                zzclawterm_core::OpenWorkspaceRequest {
+                    layout_source_workspace_id: Some(self.workspace_id),
+                    ..Default::default()
+                },
+                cx,
+            )
+        }) {
+            tracing::error!(%error, "failed to open a new ZzClawTerm window");
+        }
+    }
+
+    pub(super) fn request_application_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quit_requested = true;
+        if let Some(app) = &self.app {
+            let count = self
+                .controller
+                .update(cx, |controller, cx| controller.live_session_count(cx));
+            app.update(cx, |app, cx| {
+                app.handle_window_close_request_with_count(count, window, cx)
+            });
+        } else {
+            self.controller.update(cx, |controller, cx| {
+                controller.request_quit_without_ready(cx)
+            });
+        }
+    }
+
+    pub(super) fn can_coordinate_quit(&self) -> bool {
+        self.app.is_some()
+    }
+
+    pub(super) fn apply_shared_state(
+        &mut self,
+        process_state: Entity<ProcessStateStore>,
+        event: SharedStateEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.apply_shared_state(process_state.read(cx).snapshot().clone(), event, cx)
+            });
+        }
+    }
+
+    pub(super) fn submit_process_quit_persistence(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<StoreTask<()>>, StoreSubmitError> {
+        self.app
+            .as_ref()
+            .map(|app| app.update(cx, |app, _| app.submit_shutdown_persistence(false)))
+            .transpose()
     }
 
     /// Handles a close request from the primary window or native Quit command.
@@ -546,15 +644,56 @@ impl AppShell {
         }
     }
 
-    fn quit_after_worker_shutdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(app) = &self.app {
-            app.update(cx, |app, _| app.shutdown_blocking_jobs());
+    fn quit_after_worker_shutdown(&mut self, launch_update: bool, cx: &mut Context<Self>) {
+        self.controller
+            .update(cx, |controller, cx| controller.shutdown_all_workspaces(cx));
+        if launch_update && let Some(app) = &self.app {
+            let update_result =
+                app.update(cx, |app, cx| app.launch_pending_update_after_shutdown(cx));
+            if let Err(error) = update_result {
+                if let Some(store_runtime) = &self.store_runtime {
+                    store_runtime.resume_after_failed_shutdown();
+                }
+                self.controller
+                    .update(cx, |controller, _| controller.cancel_process_quit());
+                self.lifecycle = AppShellLifecycle::FlushFailed(error.clone());
+                app.update(cx, |app, cx| app.report_close_save_failed(error, cx));
+                cx.notify();
+                return;
+            }
         }
-        cx.quit();
+        cx.defer(move |cx| {
+            cx.quit();
+        });
+    }
+
+    fn enter_flushing(&mut self, cx: &mut Context<Self>) {
+        self.lifecycle = AppShellLifecycle::Flushing;
+        self.flushing_view_ready = self.app.is_none();
+        cx.notify();
+
+        if self.flushing_view_ready {
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHUTDOWN_STATUS_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if matches!(this.lifecycle, AppShellLifecycle::Flushing)
+                    && !this.flushing_view_ready
+                {
+                    this.flushing_view_ready = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn begin_shutdown(&mut self, cx: &mut Context<Self>) {
         let Some(store_runtime) = &self.store_runtime else {
+            self.controller
+                .update(cx, |controller, _| controller.cancel_process_quit());
             self.lifecycle = AppShellLifecycle::FlushFailed(
                 "The storage runtime is unavailable; pending changes cannot be verified."
                     .to_string(),
@@ -564,19 +703,17 @@ impl AppShell {
         };
         store_runtime.begin_shutdown();
         let store_ui = store_runtime.ui_client();
-        let window_state_task = if let Some(state) = self.main_window_state.latest_for_shutdown() {
-            match store_ui.try_submit_shutdown(u64::MAX - 2, SaveMainWindowState(state)) {
-                Ok(task) => Some(task),
-                Err(error) => {
-                    self.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let recent = self
+            .controller
+            .read(cx)
+            .is_most_recent_workspace(self.workspace_id);
+        let latest_window_state = recent
+            .then(|| self.main_window_state.latest_for_shutdown())
+            .flatten();
         let Some(app) = &self.app else {
+            store_runtime.resume_after_failed_shutdown();
+            self.controller
+                .update(cx, |controller, _| controller.cancel_process_quit());
             self.lifecycle = AppShellLifecycle::FlushFailed(
                 "The application state is unavailable; pending changes cannot be captured."
                     .to_string(),
@@ -584,9 +721,31 @@ impl AppShell {
             cx.notify();
             return;
         };
-        let snapshot_task = match app.update(cx, |app, _| app.submit_shutdown_persistence()) {
+        let snapshot_task = match app.update(cx, |app, _| app.submit_shutdown_persistence(false)) {
             Ok(task) => task,
             Err(error) => {
+                store_runtime.resume_after_failed_shutdown();
+                self.controller
+                    .update(cx, |controller, _| controller.cancel_process_quit());
+                self.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let current_snapshot = app.update(cx, |app, _| app.capture_workspace_close_snapshot());
+        let restore_task = match self.controller.update(cx, |controller, cx| {
+            controller.submit_process_restore_snapshot(
+                self.workspace_id,
+                current_snapshot,
+                latest_window_state,
+                cx,
+            )
+        }) {
+            Ok(task) => task,
+            Err(error) => {
+                store_runtime.resume_after_failed_shutdown();
+                self.controller
+                    .update(cx, |controller, _| controller.cancel_process_quit());
                 self.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
                 cx.notify();
                 return;
@@ -595,28 +754,47 @@ impl AppShell {
         let task = match store_ui.try_submit_shutdown(u64::MAX, FlushBarrier) {
             Ok(task) => task,
             Err(error) => {
+                store_runtime.resume_after_failed_shutdown();
+                self.controller
+                    .update(cx, |controller, _| controller.cancel_process_quit());
                 self.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
                 cx.notify();
                 return;
             }
         };
-        drop(window_state_task);
-        drop(snapshot_task);
-        self.lifecycle = AppShellLifecycle::Flushing;
+        let pending_tasks = std::mem::take(&mut self.pending_process_quit_tasks);
+        self.enter_flushing(cx);
         cx.spawn(async move |this, cx| {
-            let event = task.await;
-            let _ = this.update(cx, |this, cx| match event.outcome {
-                Ok(()) => {
-                    this.quit_after_worker_shutdown(cx);
+            let mut failure = None;
+            for pending in pending_tasks {
+                if let Err(error) = pending.await.outcome {
+                    failure.get_or_insert(error);
                 }
-                Err(error) => {
+            }
+            if let Err(error) = snapshot_task.await.outcome {
+                failure.get_or_insert(error);
+            }
+            if let Err(error) = restore_task.await.outcome {
+                failure.get_or_insert(error);
+            }
+            if let Err(error) = task.await.outcome {
+                failure.get_or_insert(error);
+            }
+            let _ = this.update(cx, |this, cx| {
+                if let Some(error) = failure {
+                    if let Some(store_runtime) = &this.store_runtime {
+                        store_runtime.resume_after_failed_shutdown();
+                    }
+                    this.controller
+                        .update(cx, |controller, _| controller.cancel_process_quit());
                     this.lifecycle = AppShellLifecycle::FlushFailed(error.to_string());
                     cx.notify();
+                } else {
+                    this.quit_after_worker_shutdown(true, cx);
                 }
             });
         })
         .detach();
-        cx.notify();
     }
 
     fn return_to_app_after_flush_failure(&mut self, cx: &mut Context<Self>) {
@@ -624,11 +802,46 @@ impl AppShell {
             return;
         };
         store_runtime.resume_after_failed_shutdown();
-        self.lifecycle = AppShellLifecycle::Ready;
+        self.controller
+            .update(cx, |controller, _| controller.cancel_process_quit());
+        self.lifecycle = if self.app.is_some() {
+            AppShellLifecycle::Ready
+        } else {
+            AppShellLifecycle::Recovery(RecoveryState {
+                category: "close_failed".to_string(),
+                message: "The window was not closed; retry loading or closing it.".to_string(),
+                diagnostics_status: None,
+            })
+        };
         if let Some(app) = &self.app {
             app.update(cx, ZzClawTermApp::report_shutdown_retry_required);
         }
         cx.notify();
+    }
+
+    pub(super) fn finish_workspace_close_failure(
+        &mut self,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.lifecycle = AppShellLifecycle::FlushFailed(message.clone());
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| app.report_close_save_failed(message, cx));
+        }
+        cx.notify();
+    }
+
+    fn retry_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.app.is_none() {
+            self.request_close(cx);
+            return;
+        }
+        if self.quit_requested || self.controller.read(cx).workspace_count() == 1 {
+            self.begin_shutdown(cx);
+            return;
+        }
+        self.return_to_app_after_flush_failure(cx);
+        self.request_window_close(window, cx);
     }
 
     fn lifecycle_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -707,22 +920,27 @@ impl AppShell {
                                         ZzClawButton::new("recovery-quit", "Quit")
                                             .variant(ZzClawButtonVariant::Danger)
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.quit_after_worker_shutdown(cx);
+                                                this.controller.update(cx, |controller, cx| {
+                                                    controller.request_quit(cx)
+                                                });
                                             })),
                                     ),
                             ),
                     )
                     .into_any_element()
             }
-            AppShellLifecycle::Flushing => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x101214))
-                .text_color(rgb(0xe7e9ea))
-                .child("Saving changes before closing...")
-                .into_any_element(),
+            AppShellLifecycle::Flushing => {
+                debug_assert!(self.flushing_view_ready);
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(0x101214))
+                    .text_color(rgb(0xe7e9ea))
+                    .child(t!("appShell.savingBeforeClose"))
+                    .into_any_element()
+            }
             AppShellLifecycle::FlushFailed(message) => {
                 div()
                     .size_full()
@@ -762,8 +980,8 @@ impl AppShell {
                                     .child(
                                         ZzClawButton::new("shutdown-retry", "Retry")
                                             .variant(ZzClawButtonVariant::Primary)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.begin_shutdown(cx);
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.retry_close(window, cx);
                                             })),
                                     )
                                     .child(
@@ -776,7 +994,7 @@ impl AppShell {
                                         ZzClawButton::new("shutdown-force", "Force Quit")
                                             .variant(ZzClawButtonVariant::Danger)
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.quit_after_worker_shutdown(cx);
+                                                this.quit_after_worker_shutdown(false, cx);
                                             })),
                                     ),
                             ),
@@ -813,6 +1031,7 @@ fn native_app_menus_for(flavor: zzclawterm_core::app_identity::AppFlavor) -> Vec
             MenuItem::action(format!("Quit {name}"), NativeQuit),
         ]),
         Menu::new("File").items([
+            MenuItem::action("New Window", NativeNewWindow),
             MenuItem::action("New Session", NativeNewSession),
             MenuItem::separator(),
             MenuItem::action("Import Config", NativeImportConfig),
@@ -898,9 +1117,16 @@ fn build_title_menu_bar(
 
 impl Render for AppShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let show_app = matches!(self.lifecycle, AppShellLifecycle::Ready);
+        let show_app = should_render_app(&self.lifecycle, self.flushing_view_ready);
+        let block_input = matches!(self.lifecycle, AppShellLifecycle::Flushing)
+            && !self.flushing_view_ready
+            && self.app.is_some();
+
         div()
             .size_full()
+            .on_action(cx.listener(|this, _: &NativeNewWindow, _window, cx| {
+                this.request_new_window(cx);
+            }))
             .on_action(cx.listener(|this, _: &NativeNewSession, window, cx| {
                 this.perform_native_menu_command(NativeMenuCommand::NewSession, window, cx);
             }))
@@ -1008,20 +1234,40 @@ impl Render for AppShell {
                 this.perform_native_menu_command(NativeMenuCommand::ManageSyncGroups, window, cx);
             }))
             .on_action(cx.listener(|this, _: &NativeQuit, window, cx| {
-                this.request_window_close(window, cx);
+                let _ = window;
+                this.controller
+                    .update(cx, |controller, cx| controller.request_quit(cx));
             }))
             .when_some(self.app.clone().filter(|_| show_app), |root, app| {
                 root.child(app)
             })
+            .when(block_input, |root| {
+                root.child(
+                    div()
+                        .id("shutdown-input-blocker")
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation()),
+                )
+            })
             .when(!show_app, |root| root.child(self.lifecycle_view(cx)))
     }
+}
+
+fn should_render_app(lifecycle: &AppShellLifecycle, flushing_view_ready: bool) -> bool {
+    matches!(lifecycle, AppShellLifecycle::Ready)
+        || (matches!(lifecycle, AppShellLifecycle::Flushing) && !flushing_view_ready)
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{Menu, MenuItem};
 
-    use crate::app_shell::native_app_menus_for;
+    use crate::app_shell::{
+        AppShellLifecycle, native_app_menus_for, native_new_window_key_binding, should_render_app,
+    };
     use zzclawterm_core::app_identity::AppFlavor;
 
     fn menu_names(menus: &[Menu]) -> Vec<&str> {
@@ -1088,5 +1334,17 @@ mod tests {
 
         assert!(item_names(app).contains(&"About ZzClawTerm"));
         assert!(!item_names(help).contains(&"About ZzClawTerm"));
+    }
+
+    #[test]
+    fn native_new_window_shortcut_is_valid_for_the_current_platform() {
+        let _ = native_new_window_key_binding();
+    }
+
+    #[test]
+    fn app_remains_visible_until_delayed_shutdown_status_is_ready() {
+        assert!(should_render_app(&AppShellLifecycle::Flushing, false));
+        assert!(!should_render_app(&AppShellLifecycle::Flushing, true));
+        assert!(should_render_app(&AppShellLifecycle::Ready, true));
     }
 }

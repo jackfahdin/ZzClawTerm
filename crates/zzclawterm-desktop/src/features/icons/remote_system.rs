@@ -32,6 +32,7 @@ const DISTRO_MATCHES: &[(&[&str], &str)] = &[
     (&["linux mint", "linuxmint"], "mint"),
     (&["nixos", "nix os"], "nixos"),
     (&["open euler", "openeuler"], "openeuler"),
+    (&["openwrt", "open-wrt"], "openwrt"),
     (&["opensuse", "open suse", "sles", "suse"], "opensuse"),
     (&["rocky"], "rocky"),
     (&["tencent", "tlinux"], "tencentos"),
@@ -137,6 +138,7 @@ mod tests {
         assert_eq!(infer("Debian GNU/Linux 12"), Some("debian"));
         assert_eq!(infer("Rocky Linux 9.4"), Some("rocky"));
         assert_eq!(infer("openEuler 24.03"), Some("openeuler"));
+        assert_eq!(infer("OpenWrt 24.10.0"), Some("openwrt"));
         assert_eq!(infer("Alibaba Cloud Linux 3"), Some("alibaba-cloud-linux"));
         assert_eq!(infer("Amazon Linux 2023"), Some("aws"));
         assert_eq!(infer("Kylin V10"), Some("kylin"));

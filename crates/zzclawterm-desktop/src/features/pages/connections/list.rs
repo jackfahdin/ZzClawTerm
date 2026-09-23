@@ -1478,7 +1478,7 @@ pub(super) fn editor_field_box(
         }))
 }
 
-/// A numeric field backed by gpui-component's spinner control.
+/// A numeric field backed by gpui-kit's spinner control.
 pub(super) fn editor_stepper_field(
     palette: crate::theme::ThemePalette,
     label: impl Into<FieldLabel>,

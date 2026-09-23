@@ -272,6 +272,7 @@ impl ZzClawTermApp {
         self.remove_terminal_surface(session_id);
         self.terminal.remove_session_surface_bounds(session_id);
         self.transfer.remove_browser_session_cache(session_id);
+        self.transfer.clear_file_clipboard_for_session(session_id);
         self.transfer.clear_external_sync_for_session(session_id);
         self.transfer
             .close_properties_dialog_for_session(session_id);

@@ -207,6 +207,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn persist_terminal_window_layout(&mut self) {
+        self.workspace_revision = self.workspace_revision.saturating_add(1);
         if !self.settings.summary().startup_restore
             || !self.settings.summary().startup_restore_window_layout
         {
@@ -250,6 +251,25 @@ impl ZzClawTermApp {
         }
         self.terminal.complete_terminal_windows_restore();
         let active = self.session.active_id_owned();
+        let loaded = self
+            .stores
+            .startup_restore
+            .update(cx, |store, _| store.take_loaded_terminal_window_layout());
+        if let Some(layout) = loaded {
+            if let Some(layout) = layout
+                && let Some(focused_leaf_id) = self.terminal.restore_terminal_window_layout(
+                    &layout,
+                    &ordered,
+                    active.as_deref(),
+                )
+            {
+                self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
+                self.shell
+                    .set_status("restored multi-leaf window layout".to_string());
+            }
+            cx.notify();
+            return;
+        }
         self.submit_store_request(
             0,
             store_request(StoreDomain::Sessions, |store| {

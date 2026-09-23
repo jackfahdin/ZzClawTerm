@@ -258,7 +258,7 @@ fn os_name_lower(asset: Option<&AssetMetadata>) -> String {
 
 /// Whether the OS name looks like a Linux distribution.
 pub fn is_linux_asset(asset: Option<&AssetMetadata>) -> bool {
-    const NEEDLES: [&str; 11] = [
+    const NEEDLES: [&str; 12] = [
         "linux",
         "ubuntu",
         "debian",
@@ -269,6 +269,7 @@ pub fn is_linux_asset(asset: Option<&AssetMetadata>) -> bool {
         "arch",
         "alpine",
         "openeuler",
+        "openwrt",
         "suse",
     ];
     let os = os_name_lower(asset);

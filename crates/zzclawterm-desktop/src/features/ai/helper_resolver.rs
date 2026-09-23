@@ -87,8 +87,8 @@ mod tests {
 
     #[test]
     fn resolver_prefers_sibling_and_does_not_expose_override_paths_on_failure() {
-        let root = std::env::temp_dir().join(format!("zzclawterm-helper-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-helper");
+        std::fs::create_dir_all(root.path()).unwrap();
         let helper = root.join(if cfg!(windows) {
             "zzclawterm-mcp.exe"
         } else {
@@ -108,6 +108,5 @@ mod tests {
         let missing = root.join("private-sensitive-location");
         let error = resolve_mcp_helper_from(Some(missing.as_os_str()), None, None).unwrap_err();
         assert!(!error.contains("private-sensitive-location"));
-        let _ = std::fs::remove_dir_all(root);
     }
 }

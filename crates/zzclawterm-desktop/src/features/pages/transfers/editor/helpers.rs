@@ -43,17 +43,41 @@ pub(super) fn open_local_path_with_editor(path: &Path, editor_command: &str) -> 
 }
 
 pub(super) fn open_local_path_with_system_default(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                wide_path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!(
+                "failed to open {} with the system handler (ShellExecuteW={})",
+                path.display(),
+                result as isize
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
         command.arg(path);
-        command
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(path);
         command
     };
 
@@ -64,10 +88,11 @@ pub(super) fn open_local_path_with_system_default(path: &Path) -> Result<(), Str
         command
     };
 
-    command
+    #[cfg(not(target_os = "windows"))]
+    return command
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("failed to open {}: {error}", path.display()))
+        .map_err(|error| format!("failed to open {}: {error}", path.display()));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,7 +13,8 @@ use super::ai::AiFullAccessSetting;
 use super::mcp::{McpApprovalDecision, McpApprovalRequest};
 use super::terminal::{FULL_SHELL_PAINT_COUNT, terminal_surface_paint_count};
 use super::view_widgets::{
-    full_window_input_layer, full_window_overlay_layer, modal_scrim_is_drawn, passive_overlay_layer,
+    APP_OVERLAY_PRIORITY, full_window_input_layer, full_window_overlay_layer, modal_scrim_is_drawn,
+    passive_overlay_layer,
 };
 use crate::features::perf::{GpuiPerfContext, record_gpui_perf_sample};
 use crate::features::runtime_jobs::ActivitySide;
@@ -146,7 +147,6 @@ impl ZzClawTermApp {
         self.start_runtime_data_plane_drain(cx);
         self.start_tunnel_event_drain(cx);
         self.start_translation_event_drain(cx);
-        self.start_update_event_drain(cx);
         self.start_github_gist_auth_event_drain(cx);
         self.start_command_persistence_event_drain(cx);
         self.start_stats_event_drain(cx);
@@ -704,6 +704,11 @@ impl ZzClawTermApp {
         let ssh_auth_prompt_open = self.session.prompt_has_active_ssh_auth();
         let full_access_confirmation = self.pending_ai_full_access();
         let mcp_approval = self.mcp_pending_approval_requests().into_iter().next();
+        let docker_details_open = self
+            .remote_ops
+            .docker_presentation()
+            .details_container_id
+            .is_some();
 
         content
             .when(overlay.tab_actions_open, |this| {
@@ -827,6 +832,11 @@ impl ZzClawTermApp {
                     "quick-command-variable-input-layer",
                     self.quick_command_variable_prompt_overlay(cx),
                 ))
+            })
+            .when(docker_details_open, |this| {
+                this.child(
+                    deferred(self.docker_details_overlay(cx)).with_priority(APP_OVERLAY_PRIORITY),
+                )
             })
             .when(quick_switch_open, |this| {
                 this.child(full_window_overlay_layer(

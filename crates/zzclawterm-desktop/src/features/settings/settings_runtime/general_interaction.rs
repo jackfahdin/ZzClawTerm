@@ -61,6 +61,21 @@ impl SettingsSaveKind {
 }
 
 impl ZzClawTermApp {
+    pub(crate) fn publish_shared_settings(
+        &self,
+        settings: AppSettingsSummary,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(controller) = self.desktop_controller.clone() {
+            let source = self.workspace_id;
+            cx.defer(move |cx| {
+                let _ = controller.update(cx, |controller, cx| {
+                    controller.publish_settings(source, settings, cx)
+                });
+            });
+        }
+    }
+
     pub(in crate::features) fn update_ui_language(
         &mut self,
         language: &str,
@@ -135,14 +150,14 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn save_diagnostics_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(SettingsPersistenceDomain::Diagnostics, cx) {
             return;
         }
         self.queue_settings_save(SettingsSaveKind::Diagnostics, cx);
     }
 
     pub(in crate::features) fn save_general_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(SettingsPersistenceDomain::General, cx) {
             return;
         }
         self.queue_settings_save(SettingsSaveKind::General, cx);
@@ -240,7 +255,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn save_interaction_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(SettingsPersistenceDomain::Interaction, cx) {
             return;
         }
         self.queue_settings_save(SettingsSaveKind::Interaction, cx);
@@ -265,7 +280,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn save_screen_lock_settings(&mut self, cx: &mut Context<Self>) {
-        if self.defer_settings_persistence(cx) {
+        if self.defer_settings_domain_persistence(SettingsPersistenceDomain::ScreenLock, cx) {
             return;
         }
         self.queue_settings_save(SettingsSaveKind::ScreenLock, cx);
@@ -276,6 +291,14 @@ impl ZzClawTermApp {
         kind: SettingsSaveKind,
         cx: &mut Context<Self>,
     ) {
+        if self.shell.has_settings_draft() {
+            self.settings.mark_draft_domain_dirty(kind.domain());
+            self.settings
+                .update_store_status(format!("{} changes staged", kind.label()), true);
+            self.request_settings_panel_refresh(cx);
+            cx.notify();
+            return;
+        }
         let Some((generation, snapshot)) = self.settings.queue_persistence(kind.domain()) else {
             self.settings
                 .update_store_status(format!("{} changes queued", kind.label()), false);
@@ -332,6 +355,7 @@ impl ZzClawTermApp {
                     && let Ok(settings) = event.outcome.as_ref()
                 {
                     this.apply_gpui_settings(settings.clone(), cx);
+                    this.publish_shared_settings(settings.clone(), cx);
                 }
                 if completion.report_result {
                     match event.outcome {

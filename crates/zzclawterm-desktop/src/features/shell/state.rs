@@ -33,7 +33,6 @@ pub(in crate::features) enum NewSessionMenuAnchor {
 }
 
 pub(in crate::features) struct ShellFeatureState {
-    pub(in crate::features) system_tray: Option<super::tray::SystemTray>,
     /// Application-wide transient status shown by shell chrome and terminal overlays.
     status: String,
     /// GPUI event-pump, repaint, and shell-persistence scheduling bookkeeping.
@@ -69,6 +68,7 @@ pub(super) struct ShellDiagnosticState {
 
 pub(in crate::features) struct ShellFeatureInit {
     pub status: String,
+    pub selected_nav: NavItem,
     pub bottom_panel_mode: BottomPanelMode,
     pub quick_commands_height: f32,
     pub command_send_height: f32,
@@ -197,7 +197,6 @@ impl ShellFeatureState {
     pub(in crate::features) fn new(init: ShellFeatureInit) -> Self {
         Self {
             status: init.status,
-            system_tray: None,
             runtime: ShellRuntimeState::default(),
             bottom_panel: ShellBottomPanelState {
                 mode: init.bottom_panel_mode,
@@ -212,7 +211,7 @@ impl ShellFeatureState {
                 title_drag_active_until: None,
             },
             navigation: ShellNavigationState {
-                selected_nav: NavItem::Workspace,
+                selected_nav: init.selected_nav,
                 main_mode: MainMode::Workspace,
                 settings: ShellSettingsNavigationState {
                     active_tab: SettingsTab::General,
@@ -564,6 +563,26 @@ impl ShellFeatureState {
         self.panels.open_mode
     }
 
+    pub(in crate::features) fn left_panel_collapsed(&self) -> bool {
+        self.panels.left_collapsed
+    }
+
+    pub(in crate::features) fn right_panel_collapsed(&self) -> bool {
+        self.panels.right_collapsed
+    }
+
+    pub(in crate::features) fn left_open_panels(&self) -> &[String] {
+        &self.panels.left_open
+    }
+
+    pub(in crate::features) fn right_open_panels(&self) -> &[String] {
+        &self.panels.right_open
+    }
+
+    pub(in crate::features) fn panel_stack_sizes(&self) -> &HashMap<String, f32> {
+        &self.panels.stack_sizes
+    }
+
     pub(in crate::features) fn panel_is_floating(&self) -> bool {
         self.panels.open_mode.is_floating()
     }
@@ -805,6 +824,13 @@ impl ShellFeatureState {
 
     pub(in crate::features) fn workspace_pane_roots(&self) -> &HashMap<String, WorkspacePaneNode> {
         &self.workspace.pane_roots
+    }
+
+    pub(in crate::features) fn take_workspace_pane_root(
+        &mut self,
+        tab_root: &str,
+    ) -> Option<WorkspacePaneNode> {
+        self.workspace.pane_roots.remove(tab_root)
     }
 
     pub(in crate::features) fn insert_workspace_pane_root(
@@ -1201,6 +1227,7 @@ mod tests {
     fn shell(mode: BottomPanelMode) -> ShellFeatureState {
         ShellFeatureState::new(ShellFeatureInit {
             status: "idle".to_string(),
+            selected_nav: NavItem::Workspace,
             bottom_panel_mode: mode,
             quick_commands_height: 120.,
             command_send_height: 180.,

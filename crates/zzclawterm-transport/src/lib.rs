@@ -1,4 +1,5 @@
 pub mod connection_attempt;
+pub mod download_path;
 pub mod network_route;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -9,7 +10,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::thread::JoinHandle;
@@ -108,8 +109,8 @@ use session_event_queue::{
     SESSION_EVENT_QUEUE_OUTPUT_EVENT_LIMIT, SESSION_EVENT_QUEUE_OUTPUT_LIMIT,
 };
 pub use session_types::{
-    SessionDrain, SessionDrainStats, SessionError, SessionEvent, SessionInfo, SessionKind,
-    TerminalTransport,
+    SessionDrain, SessionDrainStats, SessionError, SessionEvent, SessionEventConsumerId,
+    SessionInfo, SessionKind, TerminalTransport,
 };
 pub use sftp::{
     RemoteBinaryFile, RemoteFilePath, SFTP_TRANSFER_CANCELLED, SftpAttributeUpdate, SftpFileEntry,
@@ -584,6 +585,7 @@ const XAUTH_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, ManagedSession>>,
     event_queue: SessionEventQueue,
+    next_event_consumer_id: AtomicU64,
     shell_environment: Arc<ShellEnvironmentCache>,
 }
 
@@ -774,8 +776,33 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             event_queue: SessionEventQueue::new(),
+            next_event_consumer_id: AtomicU64::new(1),
             shell_environment: ShellEnvironmentCache::global(),
         }
+    }
+
+    /// Allocate an independent event consumer. Sessions are invisible to the
+    /// consumer until explicitly assigned, which lets multiple desktop
+    /// workspaces share one transport manager without stealing each other's
+    /// output.
+    pub fn register_event_consumer(&self) -> SessionEventConsumerId {
+        SessionEventConsumerId(self.next_event_consumer_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn assign_session_event_consumer(
+        &self,
+        session_id: &str,
+        consumer_id: SessionEventConsumerId,
+    ) {
+        self.event_queue.assign_consumer(session_id, consumer_id);
+    }
+
+    pub fn clear_session_event_consumer(
+        &self,
+        session_id: &str,
+        consumer_id: SessionEventConsumerId,
+    ) {
+        self.event_queue.clear_consumer(session_id, consumer_id);
     }
 
     /// Return the runtime-only shell environment cache shared by SSH tasks.
@@ -1241,6 +1268,23 @@ impl SessionManager {
             Some(max_output_bytes),
             timeout,
         ))
+    }
+
+    pub fn drain_events_blocking_for_consumer_with_output_budget(
+        &self,
+        consumer_id: SessionEventConsumerId,
+        max_events: usize,
+        max_output_bytes: usize,
+        timeout: Duration,
+    ) -> Result<SessionDrain, SessionError> {
+        Ok(self
+            .event_queue
+            .drain_blocking_for_consumer_with_output_budget(
+                consumer_id,
+                max_events,
+                Some(max_output_bytes),
+                timeout,
+            ))
     }
 }
 

@@ -24,6 +24,7 @@ impl ZzClawTermApp {
     /// Connect/register must not open the config database or rewrite settings on
     /// the UI thread — that path was a major connect-time freeze source.
     pub(in crate::features) fn persist_open_tabs(&mut self) {
+        self.workspace_revision = self.workspace_revision.saturating_add(1);
         if !self.settings.summary().startup_restore {
             return;
         }
@@ -100,14 +101,35 @@ impl ZzClawTermApp {
         let Some(generation) = self.shell.begin_session_persistence(dirty) else {
             return;
         };
+        let workspace_id = self.workspace_id;
         let request = store_request(StoreDomain::Sessions, move |store| {
-            if let Some(tabs) = tabs.as_ref() {
-                store.save_open_tabs(tabs)?;
+            let mut manifest = store.load_workspace_restore_manifest()?;
+            let workspace = if let Some(index) = manifest
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id)
+            {
+                &mut manifest.workspaces[index]
+            } else {
+                manifest
+                    .workspaces
+                    .push(zzclawterm_core::WorkspaceRestoreState::empty(workspace_id));
+                manifest
+                    .workspaces
+                    .last_mut()
+                    .expect("workspace was inserted")
+            };
+            workspace.revision = workspace.revision.saturating_add(1);
+            if let Some(tabs) = tabs {
+                workspace.sessions.open_tabs = tabs;
             }
-            if let Some(layout) = layout.as_ref() {
-                store.save_terminal_window_layout(layout.as_ref())?;
+            if let Some(layout) = layout {
+                workspace.sessions.terminal_window_layout = layout;
             }
-            store.save_workspace_pane_layout(workspace_layout.as_ref())
+            if dirty.window_layout() {
+                workspace.sessions.workspace_pane_layout = workspace_layout;
+            }
+            store.save_workspace_restore_manifest(&manifest)
         });
         let task = match self.store_ui.try_submit(generation, request) {
             Ok(task) => task,

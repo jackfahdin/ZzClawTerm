@@ -329,7 +329,7 @@ mod tests {
             );
 
             // Quit without ever advancing the clock.
-            let _ = app.submit_shutdown_persistence();
+            let _ = app.submit_shutdown_persistence(true);
 
             assert!(
                 app.settings

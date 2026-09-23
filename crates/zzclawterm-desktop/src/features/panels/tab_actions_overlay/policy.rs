@@ -150,6 +150,7 @@ impl TabActionPolicy {
     pub(in crate::features) fn supports_submenu(self, submenu: TabActionsSubmenu) -> bool {
         match submenu {
             TabActionsSubmenu::Color => true,
+            TabActionsSubmenu::MoveWindow => true,
             TabActionsSubmenu::SshAdvanced => self.support.ssh_multiplex,
             TabActionsSubmenu::Ai => self.support.ai,
         }

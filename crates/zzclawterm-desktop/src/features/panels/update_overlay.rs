@@ -1,14 +1,31 @@
 use rust_i18n::t;
 
-use gpui::{Context, FontWeight, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, FontWeight, IntoElement, div, prelude::*, px, relative, rgb};
 use zzclawterm_core::RuntimeMode;
-use zzclawterm_ui::ZzClawScrollable;
+use zzclawterm_ui::{ZzClawMarkdown, ZzClawScrollable};
 
 use crate::features::ZzClawTermApp;
+use crate::features::update::UpdatePhase;
 use crate::features::view_widgets::dialog_action_button;
 use crate::widgets::small_button;
 
 const RELEASES_URL: &str = "https://github.com/jackfahdin/ZzClawTerm/releases";
+
+fn format_download_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.;
+    const MIB: f64 = KIB * 1024.;
+    const GIB: f64 = MIB * 1024.;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as u64)
+    }
+}
 
 impl ZzClawTermApp {
     pub(in crate::features) fn update_dialog_content(
@@ -16,39 +33,42 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let update_info = self.update.info().cloned();
-        let checking = self.update.is_pending();
-        let failed = !checking
-            && update_info.is_none()
-            && self.update.status().starts_with("update check failed:");
-        let available =
-            !checking && !failed && update_info.as_ref().is_some_and(|info| info.available);
-        let portable = self.runtime.mode() == RuntimeMode::Portable;
-        let download_state = self.update.download.clone();
-        let download_error = if let crate::features::update::download::DownloadState::Failed(
-            error,
-        ) = &download_state
-        {
-            Some(error.clone())
-        } else {
-            None
+        let (update_info, phase) = {
+            let update = self.update.read(cx);
+            (update.info().cloned(), update.phase().clone())
         };
+        let checking = matches!(phase, UpdatePhase::Checking);
+        let available = update_info.as_ref().is_some_and(|info| info.available);
+        let downloading = matches!(phase, UpdatePhase::Downloading { .. });
+        let ready = matches!(phase, UpdatePhase::Ready);
+        let applying = matches!(phase, UpdatePhase::Applying);
+        let check_failed = matches!(
+            phase,
+            UpdatePhase::Failed {
+                download: false,
+                ..
+            }
+        );
+        let download_failed = matches!(phase, UpdatePhase::Failed { download: true, .. });
+        let failed_message = match &phase {
+            UpdatePhase::Failed { message, .. } => Some(message.clone()),
+            _ => None,
+        };
+        let portable = self.runtime.mode() == RuntimeMode::Portable;
         let can_install = crate::features::update::download::supports_native_install(portable);
         let (_, viewport_h) = self.shell.viewport_size();
         let release_url = update_info
             .as_ref()
             .and_then(|info| info.html_url.clone())
             .unwrap_or_else(|| RELEASES_URL.to_string());
-        let title = if checking {
-            t!("updater.checking")
-        } else if failed {
-            t!("updater.updateFailed")
-        } else if available && portable {
-            t!("updater.portableManualTitle")
-        } else if available {
-            t!("updater.newVersionAvailable")
-        } else {
-            t!("updater.noUpdate")
+        let title = match &phase {
+            UpdatePhase::Checking => t!("updater.checking"),
+            UpdatePhase::Downloading { .. } => t!("updater.downloading"),
+            UpdatePhase::Ready => t!("updater.readyToRestart"),
+            UpdatePhase::Applying => t!("updater.installing"),
+            UpdatePhase::Failed { .. } => t!("updater.updateFailed"),
+            UpdatePhase::Available => t!("updater.newVersionAvailable"),
+            UpdatePhase::Idle | UpdatePhase::UpToDate => t!("updater.noUpdate"),
         };
 
         div()
@@ -107,23 +127,13 @@ impl ZzClawTermApp {
                             ))
                         }
                     })
-                    .when(failed, |this| {
+                    .when_some(failed_message, |this, error| {
                         this.child(
                             div()
                                 .text_xs()
                                 .line_height(px(18.))
                                 .text_color(rgb(palette.danger))
-                                .child(self.update.status().to_string()),
-                        )
-                    })
-                    .when(available && portable, |this| {
-                        this.child(
-                            div()
-                                .mt_1()
-                                .text_xs()
-                                .line_height(px(18.))
-                                .text_color(rgb(palette.text_muted))
-                                .child(t!("updater.portableManualDesc")),
+                                .child(error),
                         )
                     }),
             )
@@ -149,56 +159,71 @@ impl ZzClawTermApp {
                                     .text_color(rgb(palette.text_muted))
                                     .child(t!("updater.releaseNotes")),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .line_height(px(20.))
-                                    .whitespace_normal()
-                                    .text_color(rgb(palette.text))
-                                    .child(notes),
-                            ),
+                            .child(ZzClawMarkdown::new("update-release-notes-markdown", notes)),
                     )
                 },
             )
-            .when_some(download_error, |this, error| {
-                this.child(div().text_xs().text_color(rgb(palette.danger)).child(error))
-            })
             .when(can_install && available, |this| {
-                use crate::features::update::download::DownloadState;
-                this.child(match download_state {
-                    DownloadState::Downloading { received, total } => div()
-                        .flex()
-                        .gap_2()
-                        .child(format!(
-                            "{} / {} MiB",
-                            received / 1048576,
-                            total
-                                .map(|value| (value / 1048576).to_string())
-                                .unwrap_or_else(|| "?".into())
-                        ))
-                        .child(
-                            zzclawterm_ui::ZzClawButton::new(
-                                "update-cancel-download",
-                                t!("common.cancel"),
+                this.child(match &phase {
+                    UpdatePhase::Downloading { received, total } => {
+                        let ratio = total
+                            .filter(|total| *total > 0)
+                            .map(|total| *received as f32 / total as f32)
+                            .unwrap_or(0.)
+                            .clamp(0., 1.);
+                        let percent = (ratio * 100.).round() as u32;
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(rgb(palette.text_muted))
+                                    .child(format!(
+                                        "{} / {}",
+                                        format_download_bytes(*received),
+                                        total
+                                            .map(format_download_bytes)
+                                            .unwrap_or_else(|| "...".to_string())
+                                    ))
+                                    .child(format!("{percent}%")),
                             )
-                            .on_click(
-                                cx.listener(|app, _, _, cx| app.cancel_native_update_download(cx)),
-                            ),
-                        )
-                        .into_any_element(),
-                    DownloadState::Ready { .. } => zzclawterm_ui::ZzClawButton::new(
-                        "update-install",
-                        t!("updater.installAndRestart"),
-                    )
-                    .on_click(cx.listener(|app, _, window, cx| {
-                        app.request_native_update_install(window, cx)
-                    }))
-                    .into_any_element(),
-                    DownloadState::Idle | DownloadState::Failed(_) => div()
+                            .child(
+                                div()
+                                    .h(px(8.))
+                                    .w_full()
+                                    .rounded_sm()
+                                    .bg(rgb(palette.hover))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(ratio))
+                                            .rounded_sm()
+                                            .bg(rgb(palette.primary)),
+                                    ),
+                            )
+                            .child(
+                                div().flex().justify_end().child(
+                                    zzclawterm_ui::ZzClawButton::new(
+                                        "update-cancel-download",
+                                        t!("common.cancel"),
+                                    )
+                                    .on_click(cx.listener(
+                                        |app, _, _, cx| app.cancel_native_update_download(cx),
+                                    )),
+                                ),
+                            )
+                            .into_any_element()
+                    }
+                    UpdatePhase::Available | UpdatePhase::Failed { download: true, .. } => div()
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .when(matches!(download_state, DownloadState::Failed(_)), |this| {
+                        .when(download_failed, |this| {
                             this.child(t!("updater.downloadFailed"))
                         })
                         .child(
@@ -211,9 +236,15 @@ impl ZzClawTermApp {
                             ),
                         )
                         .into_any_element(),
+                    UpdatePhase::Ready => div()
+                        .text_xs()
+                        .text_color(rgb(palette.text_muted))
+                        .child(t!("updater.readyToRestart"))
+                        .into_any_element(),
+                    _ => div().into_any_element(),
                 })
             })
-            .when(!checking, |this| {
+            .when(!checking && !downloading && !applying, |this| {
                 this.child(
                     div()
                         .flex()
@@ -224,12 +255,16 @@ impl ZzClawTermApp {
                         .child(small_button(
                             palette,
                             "update-close",
-                            t!("common.close"),
+                            if ready {
+                                t!("updater.later")
+                            } else {
+                                t!("common.close")
+                            },
                             cx.listener(|this, _, window, cx| {
                                 this.close_update_dialog(window, cx);
                             }),
                         ))
-                        .when(failed, |this| {
+                        .when(check_failed, |this| {
                             this.child(dialog_action_button(
                                 palette,
                                 "update-retry",
@@ -248,6 +283,17 @@ impl ZzClawTermApp {
                                 false,
                                 cx.listener(move |this, _, _, cx| {
                                     this.open_external_url_for_ui(&release_url, cx);
+                                }),
+                            ))
+                        })
+                        .when(ready, |this| {
+                            this.child(dialog_action_button(
+                                palette,
+                                "update-install",
+                                t!("updater.installAndRestart"),
+                                true,
+                                cx.listener(|app, _, window, cx| {
+                                    app.request_native_update_install(window, cx)
                                 }),
                             ))
                         }),

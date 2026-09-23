@@ -2352,8 +2352,6 @@ const TRZSZ_UPLOAD_WORKER_EVENT_DRAIN_BATCH: usize = 32;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use zzclawterm_transport::{
         TrzszDownloadEngine, TrzszProtocolFrame, TrzszProtocolPayload, TrzszTransferState,
@@ -2371,7 +2369,7 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("test directory should be created");
         let mut download = TrzszDownloadRuntime {
             engine: TrzszDownloadEngine::new(false),
-            directory: directory.clone(),
+            directory: directory.path().to_path_buf(),
             directory_roots: HashMap::new(),
             pending_path: None,
             current_file: None,
@@ -2438,8 +2436,6 @@ mod tests {
             std::fs::read(directory.join("hello.txt")).expect("download file should exist"),
             data
         );
-
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -2469,8 +2465,6 @@ mod tests {
                 .local_path,
             file_path
         );
-
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -2514,11 +2508,7 @@ mod tests {
         }
     }
 
-    fn unique_test_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("zzclawterm-{name}-{nanos}"))
+    fn unique_test_dir(name: &str) -> zzclawterm_core::test_support::TestTempDir {
+        zzclawterm_core::test_support::TestTempDir::new(&format!("zzclawterm-{name}"))
     }
 }

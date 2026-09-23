@@ -461,8 +461,8 @@ pub(crate) const SHORTCUT_REGISTRY: [ShortcutDefinition; 32] = [
         "settings.shortcutLabels.newSession",
         Workspace,
         ShortcutKind::Direct,
-        "ctrl+shift+n",
-        "meta+shift+n",
+        "ctrl+shift+t",
+        "meta+shift+t",
         Supported,
         "Opens saved connections."
     ),

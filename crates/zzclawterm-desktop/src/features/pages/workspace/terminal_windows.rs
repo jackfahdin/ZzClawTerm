@@ -160,6 +160,9 @@ impl ZzClawTermApp {
                         rgba(0x00000000)
                     };
                     let drag_payload = SessionTabDragPayload {
+                        source_workspace_id: self.workspace_id,
+                        root_tab_id: tab_id.clone(),
+                        source_revision: self.workspace_revision(),
                         session_id: tab_id.clone(),
                         order_index: tab_number.saturating_sub(1),
                         display_name: title.clone(),
@@ -254,6 +257,16 @@ impl ZzClawTermApp {
                         })
                         .on_drop(cx.listener(
                             move |this, payload: &SessionTabDragPayload, _, cx| {
+                                if payload.source_workspace_id != this.workspace_id {
+                                    this.request_tab_tree_move(
+                                        payload,
+                                        zzclawterm_core::MoveTabPlacement::BeforeTab(
+                                            drop_before_id.clone(),
+                                        ),
+                                        cx,
+                                    );
+                                    return;
+                                }
                                 this.place_tab_before_in_terminal_windows(
                                     payload.session_id.clone(),
                                     drop_before_id.clone(),
@@ -450,12 +463,38 @@ impl ZzClawTermApp {
                                 .terminal
                                 .terminal_window_drop_for_leaf(&drop_leaf_id_drop)
                                 .unwrap_or(TabDockZone::Center);
-                            this.dock_tab_on_terminal_window_leaf(
-                                payload.session_id.clone(),
-                                drop_leaf_id_drop.clone(),
-                                zone,
-                                cx,
-                            );
+                            if payload.source_workspace_id == this.workspace_id {
+                                this.dock_tab_on_terminal_window_leaf(
+                                    payload.session_id.clone(),
+                                    drop_leaf_id_drop.clone(),
+                                    zone,
+                                    cx,
+                                );
+                            } else {
+                                let edge = match zone {
+                                    TabDockZone::Center => None,
+                                    TabDockZone::Edge(TabDockEdge::Left) => {
+                                        Some(zzclawterm_core::MoveTabDockEdge::Left)
+                                    }
+                                    TabDockZone::Edge(TabDockEdge::Right) => {
+                                        Some(zzclawterm_core::MoveTabDockEdge::Right)
+                                    }
+                                    TabDockZone::Edge(TabDockEdge::Top) => {
+                                        Some(zzclawterm_core::MoveTabDockEdge::Top)
+                                    }
+                                    TabDockZone::Edge(TabDockEdge::Bottom) => {
+                                        Some(zzclawterm_core::MoveTabDockEdge::Bottom)
+                                    }
+                                };
+                                this.request_tab_tree_move(
+                                    payload,
+                                    zzclawterm_core::MoveTabPlacement::TerminalLeaf {
+                                        leaf_id: drop_leaf_id_drop.clone(),
+                                        edge,
+                                    },
+                                    cx,
+                                );
+                            }
                         }),
                     )
                     .child(canvas)

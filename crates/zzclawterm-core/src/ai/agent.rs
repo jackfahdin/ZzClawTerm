@@ -453,7 +453,11 @@ pub fn build_observation_message(
         .map(|code| format!("exit code {code}"))
         .unwrap_or_else(|| "unknown exit code".to_string());
     let output = if obs.output.len() > 8000 {
-        let truncated = &obs.output[obs.output.len() - 8000..];
+        let mut start = obs.output.len() - 8000;
+        while !obs.output.is_char_boundary(start) {
+            start += 1;
+        }
+        let truncated = &obs.output[start..];
         format!("...(truncated)\n{truncated}")
     } else {
         obs.output.clone()
@@ -601,5 +605,19 @@ mod tests {
         assert!(message.contains("exit code 0"));
         assert!(message.contains("...(truncated)"));
         assert!(message.len() < 8_500);
+    }
+
+    #[test]
+    fn observation_message_truncates_at_utf8_boundary() {
+        let obs = CommandObservation {
+            output: "你".repeat(3_000),
+            exit_code: Some(0),
+            duration_ms: 42,
+        };
+
+        let message = build_observation_message(&obs, "cat file", "zh-CN");
+
+        assert!(message.contains("...(truncated)\n你"));
+        assert!(message.contains("命令 `cat file` 执行完成"));
     }
 }

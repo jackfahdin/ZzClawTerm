@@ -7,9 +7,9 @@ use zzclawterm_core::{
     AiCommandCard, AiMode, AiModelDiscovery, CommandHistoryEntry, CommandObservation,
 };
 use zzclawterm_transport::{
-    DockerComposeService, DockerContainerDetails, RemoteDockerOverview, RemoteGpuOverview,
-    RemoteNpuOverview, RemoteProcess, RemoteStats, SessionInfo, SessionKind, SshMultiplexHandle,
-    SshSessionConfig, SshTunnelInfo,
+    DockerComposeProject, DockerComposeService, DockerContainerDetails, RemoteDockerOverview,
+    RemoteGpuOverview, RemoteNpuOverview, RemoteProcess, RemoteStats, SessionInfo, SessionKind,
+    SshMultiplexHandle, SshSessionConfig, SshTunnelInfo,
 };
 
 use crate::blocking_jobs::{BlockingJobScheduler, JobRejected, JobTask};
@@ -263,7 +263,11 @@ pub(in crate::features) enum ProcessJobOutput {
 
 #[derive(Debug)]
 pub(in crate::features) enum DockerJobOutput {
-    Overview(RemoteDockerOverview),
+    Overview {
+        overview: RemoteDockerOverview,
+        resource: Option<Result<DockerResource, String>>,
+    },
+    Resource(DockerResource),
     Details {
         container_id: String,
         details: DockerContainerDetails,
@@ -292,6 +296,14 @@ pub(in crate::features) enum DockerJobOutput {
         label: String,
         overview: RemoteDockerOverview,
     },
+}
+
+#[derive(Debug)]
+pub(in crate::features) enum DockerResource {
+    Images(Vec<zzclawterm_transport::DockerImage>),
+    Volumes(Vec<zzclawterm_transport::DockerVolume>),
+    Networks(Vec<zzclawterm_transport::DockerNetwork>),
+    Compose(Vec<DockerComposeProject>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

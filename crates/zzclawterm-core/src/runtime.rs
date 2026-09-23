@@ -178,9 +178,8 @@ mod tests {
 
     #[test]
     fn portable_runtime_remains_directory_local() {
-        let directory =
-            std::env::temp_dir().join(format!("zzclawterm-runtime-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let directory = crate::test_support::TestTempDir::new("zzclawterm-runtime");
+        std::fs::create_dir_all(directory.path()).unwrap();
         assert!(AppRuntime::portable_from_directory(&directory).is_none());
         std::fs::write(directory.join("zzclawterm-portable"), b"").unwrap();
         let runtime = AppRuntime::portable_from_directory(&directory).unwrap();

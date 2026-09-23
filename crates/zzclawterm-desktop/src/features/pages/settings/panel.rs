@@ -9,8 +9,8 @@ use gpui::{
     Window, div, prelude::*, px, rgb,
 };
 use zzclawterm_core::{
-    AiSettings, AppSettingsSummary, CloudSyncSettings, CloudSyncState, KeywordHighlightConfig,
-    TranslationSettings,
+    AiSettings, AppSettingsSummary, CloudSyncHistoryEntry, CloudSyncSettings, CloudSyncState,
+    KeywordHighlightConfig, TranslationSettings,
 };
 use zzclawterm_ui::{
     NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputShell, ZzClawNumberInputState, ZzClawSelect,
@@ -22,6 +22,7 @@ use crate::features::selects::SelectRegistry;
 use crate::features::settings::{
     KeybindingPresentationState, KeywordHighlightPresentationState, SearchEnginePresentationState,
 };
+use crate::features::sync::CloudSyncLiveState;
 use crate::features::text_inputs::number_input_box_from_state;
 use crate::features::{
     FontAvailability, FontCatalogKind, FontCatalogLoadState, FontCatalogPresentation,
@@ -342,10 +343,12 @@ impl AiSettingsPresentation {
 pub(in crate::features) struct CloudSyncPresentation {
     pub(in crate::features) settings: Arc<CloudSyncSettings>,
     pub(in crate::features) state: CloudSyncState,
+    pub(in crate::features) history: Vec<CloudSyncHistoryEntry>,
     pub(in crate::features) pending_settings: CloudSyncSettings,
     pub(in crate::features) secret_draft: CloudSyncSecretDraft,
     pub(in crate::features) status: String,
     pub(in crate::features) job_running: bool,
+    pub(in crate::features) live_state: CloudSyncLiveState,
     pub(in crate::features) conflict: Option<CloudSyncConflictState>,
     pub(in crate::features) github_auth: GithubGistAuthState,
 }
@@ -355,10 +358,12 @@ impl Default for CloudSyncPresentation {
         Self {
             settings: Arc::new(CloudSyncSettings::default()),
             state: CloudSyncState::default(),
+            history: Vec::new(),
             pending_settings: CloudSyncSettings::default(),
             secret_draft: CloudSyncSecretDraft::default(),
             status: String::new(),
             job_running: false,
+            live_state: CloudSyncLiveState::Idle,
             conflict: None,
             github_auth: GithubGistAuthState::default(),
         }
@@ -372,6 +377,10 @@ impl CloudSyncPresentation {
 
     pub(in crate::features) fn state(&self) -> &CloudSyncState {
         &self.state
+    }
+
+    pub(in crate::features) fn history(&self) -> &[CloudSyncHistoryEntry] {
+        &self.history
     }
 
     pub(in crate::features) fn pending_settings(&self) -> CloudSyncSettings {
@@ -388,6 +397,10 @@ impl CloudSyncPresentation {
 
     pub(in crate::features) fn job_running(&self) -> bool {
         self.job_running
+    }
+
+    pub(in crate::features) fn live_state(&self) -> CloudSyncLiveState {
+        self.live_state
     }
 
     pub(in crate::features) fn conflict(&self) -> Option<&CloudSyncConflictState> {

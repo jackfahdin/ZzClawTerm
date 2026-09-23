@@ -6,6 +6,16 @@ use crate::models::{MainMode, NavItem, PanelSide, RightFocus};
 impl ZzClawTermApp {
     pub(in crate::features) fn open_page(&mut self, item: NavItem, cx: &mut Context<Self>) {
         if item == NavItem::Settings || item.opens_settings() {
+            if let Some(controller) = self
+                .desktop_controller
+                .as_ref()
+                .and_then(|controller| controller.upgrade())
+                && controller.update(cx, |controller, cx| {
+                    controller.activate_or_claim_settings(self.workspace_id, cx)
+                })
+            {
+                return;
+            }
             self.begin_settings_draft(cx);
             // Inputs are built where a tab is revealed, never in its render.
             let tab = self.shell.navigation.settings.active_tab;

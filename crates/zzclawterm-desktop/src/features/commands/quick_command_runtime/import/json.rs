@@ -59,6 +59,7 @@ pub(super) fn parse_import_command(value: Value) -> Result<ImportCommand, String
         id: optional_string_field(&object, "id")?,
         label: required_string_field(&object, "label")?,
         command: required_string_field(&object, "command")?,
+        preserve_command_text: false,
         category_id: optional_string_field(&object, "category_id")?,
         category: optional_string_field(&object, "category")?,
         description: optional_string_field(&object, "description")?,

@@ -26,15 +26,48 @@ use super::text_inputs::TextInputRegistry;
 use super::transfers::TransferFeatureState;
 use super::translation::TranslationFeatureState;
 use super::tunnels::TunnelFeatureState;
-use super::update::UpdateFeatureState;
 
 mod construct;
 mod store_runtime;
+pub(crate) use store_runtime::WorkspaceCloseSnapshot;
 mod types;
 
 pub(in crate::features) use types::SettingsDraftSnapshot;
 
+pub(crate) struct ZzClawTermStoreClients {
+    pub(crate) ui: StoreUiClient,
+    pub(crate) blocking: StoreBlockingClient,
+}
+
+pub(crate) struct ZzClawTermProcessEntities {
+    pub(crate) process_state: gpui::Entity<crate::app_shell::ProcessStateStore>,
+    pub(crate) update: gpui::Entity<super::update::UpdateStore>,
+}
+
+impl ZzClawTermProcessEntities {
+    pub(crate) fn new(
+        process_state: gpui::Entity<crate::app_shell::ProcessStateStore>,
+        update: gpui::Entity<super::update::UpdateStore>,
+    ) -> Self {
+        Self {
+            process_state,
+            update,
+        }
+    }
+}
+
+impl ZzClawTermStoreClients {
+    pub(crate) fn new(ui: StoreUiClient, blocking: StoreBlockingClient) -> Self {
+        Self { ui, blocking }
+    }
+}
+
 pub struct ZzClawTermApp {
+    pub(in crate::features) workspace_id: zzclawterm_core::WorkspaceId,
+    pub(in crate::features) workspace_revision: u64,
+    pub(in crate::features) desktop_controller:
+        Option<gpui::WeakEntity<crate::app_shell::DesktopController>>,
+    pub(in crate::features) process_state: gpui::Entity<crate::app_shell::ProcessStateStore>,
     pub(in crate::features) blocking_jobs: crate::blocking_jobs::BlockingJobScheduler,
     pub(in crate::features) stores: crate::entities::UiStoreHandles,
     pub(in crate::features) store_ui: StoreUiClient,
@@ -68,7 +101,7 @@ pub struct ZzClawTermApp {
     pub(in crate::features) send_command: SendCommandFeatureState,
     pub(in crate::features) transfer: TransferFeatureState,
     pub(in crate::features) translation: TranslationFeatureState,
-    pub(in crate::features) update: UpdateFeatureState,
+    pub(in crate::features) update: gpui::Entity<super::update::UpdateStore>,
     pub(in crate::features) cloud_sync: CloudSyncFeatureState,
     pub(in crate::features) session: SessionFeatureState,
     pub(in crate::features) shell: ShellFeatureState,
@@ -91,6 +124,7 @@ impl gpui::EventEmitter<NotesCatalogEvent> for ZzClawTermApp {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppLifecycleEvent {
     ShutdownRequested,
+    NewWindowRequested,
 }
 
 impl gpui::EventEmitter<AppLifecycleEvent> for ZzClawTermApp {}

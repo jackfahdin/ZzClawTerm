@@ -2969,6 +2969,7 @@ mod tests {
             account_id: None,
             password: zzclawterm_core::SecretString::default(),
             existing_password: None,
+            existing_password_locked: false,
             key_id: None,
             otp_id: None,
             auto_fill_otp: false,

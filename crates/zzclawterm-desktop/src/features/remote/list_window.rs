@@ -1,24 +1,9 @@
-//! Virtual-list window sizes for the remote panels.
+//! Manual virtual-list window size for accelerator process cards.
 //!
-//! These live here rather than in the views because the offsets they bound are
+//! This lives here rather than in the view because the offset it bounds is
 //! authoritative state: `RemoteOpsFeatureState` clamps a stored scroll offset whenever
 //! the list behind it changes length, and it needs the viewport height to know what the
-//! maximum offset is. The views import the same constants for their own windowing, so
-//! there is one definition per list rather than one per reader.
-//!
-//! Docker's two were previously declared twice each -- `DOCKER_VIEWPORT_ROWS = 16` in
-//! `docker/containers.rs` beside a bare `VIEWPORT_ROWS = 16` in `docker_view.rs`, and
-//! the same for the resource list's 14 -- so the clamp and the window it was clamping
-//! for agreed only by coincidence.
-
-/// Container rows visible in the Docker containers list.
-pub(in crate::features) const DOCKER_VIEWPORT_ROWS: usize = 16;
-
-/// Rows visible in the Docker images/volumes/networks lists.
-pub(in crate::features) const DOCKER_RESOURCE_VIEWPORT_ROWS: usize = 14;
-
-/// Rows visible in the process table.
-pub(in crate::features) const PROCESS_VIEWPORT_ROWS: usize = 28;
+//! maximum offset is. Docker and the main process table use GPUI-owned scroll handles.
 
 /// Rows visible in a GPU/NPU card's process list.
 pub(in crate::features) const ACCELERATOR_PROCESS_VIEWPORT_ROWS: usize = 6;

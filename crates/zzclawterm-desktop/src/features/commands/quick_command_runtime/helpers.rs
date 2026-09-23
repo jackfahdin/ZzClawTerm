@@ -4,6 +4,14 @@ use zzclawterm_core::{AiCommandCard, QuickCommand, QuickCommandCategory};
 
 use crate::models::{QuickCommandSortMode, QuickCommandViewMode};
 
+pub(super) fn validated_quick_command_text(command: &str) -> Option<String> {
+    if command.trim().is_empty() {
+        None
+    } else {
+        Some(command.to_string())
+    }
+}
+
 pub(super) fn unix_millis_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -104,5 +112,31 @@ pub(super) fn quick_command_slug(input: &str) -> String {
         "commands".to_string()
     } else {
         slug.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_quick_command_text;
+
+    #[test]
+    fn validated_quick_command_text_preserves_surrounding_whitespace() {
+        for command in [
+            "echo foo ",
+            "echo foo   ",
+            "  echo foo ",
+            "echo {{name}} ",
+            "echo foo\t",
+        ] {
+            assert_eq!(
+                validated_quick_command_text(command).as_deref(),
+                Some(command)
+            );
+        }
+    }
+
+    #[test]
+    fn validated_quick_command_text_rejects_whitespace_only_input() {
+        assert_eq!(validated_quick_command_text("   \t\r\n"), None);
     }
 }

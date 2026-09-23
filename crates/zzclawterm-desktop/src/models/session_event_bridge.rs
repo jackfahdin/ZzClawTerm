@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
 use zzclawterm_transport::{
-    SessionDrainStats, SessionEvent, SessionManager, TrzszDetector, ZmodemDetector,
+    SessionDrainStats, SessionEvent, SessionEventConsumerId, SessionManager, TrzszDetector,
+    ZmodemDetector,
 };
 
 use super::event_wake::{ANY_INTEREST, EventWake};
@@ -54,11 +55,14 @@ pub(crate) struct SessionEventBridgeDrain {
 
 pub(crate) struct SessionEventBridge {
     state: Arc<SessionEventBridgeState>,
+    session_manager: Arc<SessionManager>,
+    consumer_id: SessionEventConsumerId,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 struct SessionEventBridgeState {
     control: Mutex<SessionEventBridgeControl>,
+    transfer_gate: Mutex<()>,
     ui_queue: SessionEventBridgeQueue,
     /// Handed to `ZzClawTermApp::start_runtime_data_plane_drain` once, at window open.
     ui_queue_wake_rx: Mutex<Option<UnboundedReceiver<()>>>,
@@ -73,6 +77,7 @@ struct SessionEventBridgeState {
 
 #[derive(Clone)]
 struct SessionEventBridgeControl {
+    owned_sessions: HashSet<String>,
     ui_routed_sessions: HashSet<String>,
     encoding: String,
     scrollback_limit: usize,
@@ -114,14 +119,17 @@ impl SessionEventBridge {
         scrollback_limit: usize,
     ) -> Self {
         let (ui_queue, ui_queue_wake_rx) = SessionEventBridgeQueue::new_with_wake();
+        let consumer_id = session_manager.register_event_consumer();
         let state = Arc::new(SessionEventBridgeState {
             control: Mutex::new(SessionEventBridgeControl {
+                owned_sessions: HashSet::new(),
                 ui_routed_sessions: HashSet::new(),
                 encoding,
                 scrollback_limit,
                 source_queued_events: 0,
                 source_queued_output_bytes: 0,
             }),
+            transfer_gate: Mutex::new(()),
             ui_queue,
             ui_queue_wake_rx: Mutex::new(Some(ui_queue_wake_rx)),
             source_queued_events: AtomicUsize::new(0),
@@ -133,14 +141,63 @@ impl SessionEventBridge {
             stop: AtomicBool::new(false),
         });
         let worker_state = state.clone();
+        let worker_manager = Arc::clone(&session_manager);
         let worker = thread::Builder::new()
             .name("zzclawterm-session-event-bridge".to_string())
-            .spawn(move || run_session_event_bridge(session_manager, frame_pipeline, worker_state))
+            .spawn(move || {
+                run_session_event_bridge(worker_manager, consumer_id, frame_pipeline, worker_state)
+            })
             .expect("failed to spawn session event bridge");
         Self {
             state,
+            session_manager,
+            consumer_id,
             worker: Some(worker),
         }
+    }
+
+    pub(crate) fn claim_session(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        if let Ok(mut control) = self.state.control.lock() {
+            control.owned_sessions.insert(session_id.to_string());
+        }
+        self.session_manager
+            .assign_session_event_consumer(session_id, self.consumer_id);
+    }
+
+    pub(crate) fn release_session(&self, session_id: &str) {
+        if let Ok(mut control) = self.state.control.lock() {
+            control.owned_sessions.remove(session_id);
+            control.ui_routed_sessions.remove(session_id);
+        }
+        self.session_manager
+            .clear_session_event_consumer(session_id, self.consumer_id);
+    }
+
+    /// Stop this bridge from consuming the selected sessions after all work
+    /// already being processed by its worker has completed. Events produced
+    /// after this returns remain queued in the shared manager until another
+    /// workspace claims the sessions.
+    pub(crate) fn pause_sessions_for_transfer(
+        &self,
+        session_ids: &[String],
+    ) -> VecDeque<SessionEvent> {
+        let Ok(_gate) = self.state.transfer_gate.lock() else {
+            return VecDeque::new();
+        };
+        if let Ok(mut control) = self.state.control.lock() {
+            for session_id in session_ids {
+                control.owned_sessions.remove(session_id);
+                control.ui_routed_sessions.remove(session_id);
+            }
+        }
+        for session_id in session_ids {
+            self.session_manager
+                .clear_session_event_consumer(session_id, self.consumer_id);
+        }
+        self.state.ui_queue.take_sessions(session_ids)
     }
 
     /// Taken once, by the drain task that consumes this queue.
@@ -277,6 +334,16 @@ impl SessionEventBridge {
         {
             tracing::warn!("session event bridge panicked during shutdown");
         }
+        let owned_sessions = self
+            .state
+            .control
+            .lock()
+            .map(|mut control| std::mem::take(&mut control.owned_sessions))
+            .unwrap_or_default();
+        for session_id in owned_sessions {
+            self.session_manager
+                .clear_session_event_consumer(&session_id, self.consumer_id);
+        }
     }
 }
 
@@ -315,6 +382,39 @@ impl SessionEventBridgeState {
 }
 
 impl SessionEventBridgeQueue {
+    fn take_sessions(&self, session_ids: &[String]) -> VecDeque<SessionEvent> {
+        let selected = session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let Ok(mut inner) = self.inner.lock() else {
+            return VecDeque::new();
+        };
+        let mut selected_events = VecDeque::new();
+        let mut retained = VecDeque::new();
+        while let Some(event) = inner.events.pop_front() {
+            let session_id = match &event {
+                SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputDropped { session_id, .. }
+                | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandAccepted { session_id, .. }
+                | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::Error { session_id, .. } => session_id,
+            };
+            if selected.contains(session_id.as_str()) {
+                if let SessionEvent::Output { data, .. } = &event {
+                    inner.queued_output_bytes =
+                        inner.queued_output_bytes.saturating_sub(data.len());
+                }
+                selected_events.push_back(event);
+            } else {
+                retained.push_back(event);
+            }
+        }
+        inner.events = retained;
+        selected_events
+    }
+
     #[cfg(test)]
     fn new() -> Self {
         Self {
@@ -472,6 +572,7 @@ impl SessionEventBridgeQueueInner {
 
 fn run_session_event_bridge(
     session_manager: Arc<SessionManager>,
+    consumer_id: SessionEventConsumerId,
     frame_pipeline: TerminalFramePipeline,
     state: Arc<SessionEventBridgeState>,
 ) {
@@ -479,6 +580,10 @@ fn run_session_event_bridge(
         HashMap::new();
     let mut source_drain_backpressured = false;
     while !state.stop.load(Ordering::Relaxed) {
+        let Ok(_transfer_gate) = state.transfer_gate.lock() else {
+            thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
+            continue;
+        };
         let Some(control) = state.control_snapshot() else {
             thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
             continue;
@@ -495,7 +600,8 @@ fn run_session_event_bridge(
         // Park on the queue rather than polling it: a PTY read wakes this
         // thread directly, so the first hop of the echo path no longer spends
         // an arbitrary slice of the poll interval waiting to notice.
-        let Ok(drain) = session_manager.drain_events_blocking_with_output_budget(
+        let Ok(drain) = session_manager.drain_events_blocking_for_consumer_with_output_budget(
+            consumer_id,
             SESSION_EVENT_BRIDGE_DRAIN_BATCH,
             SESSION_EVENT_BRIDGE_OUTPUT_BUDGET,
             SESSION_EVENT_BRIDGE_WAIT_TIMEOUT,
@@ -839,6 +945,29 @@ mod tests {
 
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.wake_count(), 0);
+    }
+
+    #[test]
+    fn bridge_ui_queue_transfer_keeps_other_sessions_and_output_accounting() {
+        let queue = SessionEventBridgeQueue::new();
+        queue.push(SessionEvent::Output {
+            session_id: "source".into(),
+            data: b"before move".to_vec(),
+        });
+        queue.push(SessionEvent::CwdChanged {
+            session_id: "other".into(),
+            cwd: "/tmp".into(),
+        });
+        queue.push(SessionEvent::Exited {
+            session_id: "source".into(),
+            reason: "done".into(),
+        });
+        let moved = queue.take_sessions(&["source".into()]);
+        assert_eq!(moved.len(), 2);
+        assert_eq!(queue.queued_output_bytes(), 0);
+        let remaining = queue.drain_with_output_budget(8, usize::MAX);
+        assert!(matches!(remaining.events.as_slice(),
+            [SessionEvent::CwdChanged { session_id, .. }] if session_id == "other"));
     }
 
     #[test]

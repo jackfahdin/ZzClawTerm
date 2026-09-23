@@ -22,31 +22,47 @@ use super::helpers::{
 };
 
 impl ZzClawTermApp {
+    /// Use clone_for_download_batch on these options for sibling downloads.
+    pub(in crate::features) fn sftp_download_path_options(&self) -> SftpPathTransferOptions {
+        let duplicate_policy = self.transfer.duplicate_policy();
+        let duplicate_resolver = (duplicate_policy == SftpDuplicatePolicy::Ask)
+            .then(|| self.session.prompt_duplicate_broker() as Arc<dyn SftpDuplicateResolver>);
+        SftpPathTransferOptions::new(
+            duplicate_policy,
+            duplicate_resolver,
+            self.sftp_transfer_options(),
+        )
+    }
+
     pub(in crate::features) fn start_sftp_download_job_for_target(
         &mut self,
         remote_path: RemoteFilePath,
         local_path: PathBuf,
-        _window: &mut Window,
+        path_options: SftpPathTransferOptions,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.session.active_ssh_config_owned().is_none() {
             self.shell
                 .set_status("start an SSH session first".to_string());
             self.ensure_panel_open(NavItem::Transfers);
             cx.notify();
-            return;
+            return false;
+        }
+        if self.session.active_file_browser_backend()
+            != Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+        {
+            self.shell
+                .set_status("source session is unavailable".to_string());
+            cx.notify();
+            return false;
         }
 
-        let duplicate_policy = self.transfer.duplicate_policy();
-        let duplicate_resolver = (duplicate_policy == SftpDuplicatePolicy::Ask)
-            .then(|| self.session.prompt_duplicate_broker() as Arc<dyn SftpDuplicateResolver>);
-        let transfer_options = self.sftp_transfer_options();
         let service = match self.active_remote_file_service() {
             Ok(service) => service,
             Err(error) => {
                 self.shell.set_status(error.to_string());
                 cx.notify();
-                return;
+                return false;
             }
         };
         let session = SftpJobSession {
@@ -57,9 +73,10 @@ impl ZzClawTermApp {
             session,
             remote_path,
             local_path,
-            SftpPathTransferOptions::new(duplicate_policy, duplicate_resolver, transfer_options),
+            path_options,
             cx,
         );
+        true
     }
 
     pub(in crate::features) fn enqueue_sftp_download_job_for_target(

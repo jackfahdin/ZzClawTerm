@@ -1850,6 +1850,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         account_id: None,
         password: "draft-secret".to_string().into(),
         existing_password: Some("existing-secret".to_string().into()),
+        existing_password_locked: false,
         key_id: None,
         otp_id: None,
         auto_fill_otp: false,

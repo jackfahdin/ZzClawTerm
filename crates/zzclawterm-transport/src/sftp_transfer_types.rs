@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,16 +212,25 @@ pub trait SftpDuplicateResolver: Send + Sync {
     ) -> Result<SftpDuplicateDecision, String>;
 }
 
+struct DownloadTargetOwner {
+    task: String,
+    source: SftpDuplicateCacheKey,
+}
+
+/// Ordinary clones are independent tasks. Use clone_for_download_batch for sibling
+/// downloads and with_transfer_options for retries of the same task.
 pub struct SftpPathTransferOptions {
     duplicate_policy: SftpDuplicatePolicy,
     duplicate_resolver: Option<Arc<dyn SftpDuplicateResolver>>,
     transfer: SftpTransferOptions,
     duplicate_decisions: Arc<SftpDuplicateDecisionCache>,
+    download_targets: Arc<Mutex<HashMap<String, DownloadTargetOwner>>>,
+    download_owner: String,
 }
 
 impl Clone for SftpPathTransferOptions {
     fn clone(&self) -> Self {
-        // Clone 表示给另一个传输任务复制配置，任务运行态不能随普通配置复制泄漏。
+        // Copy configuration without leaking task or batch state into an independent operation.
         Self::new(
             self.duplicate_policy,
             self.duplicate_resolver.clone(),
@@ -237,6 +246,8 @@ impl Default for SftpPathTransferOptions {
             duplicate_resolver: None,
             transfer: SftpTransferOptions::default(),
             duplicate_decisions: Arc::new(SftpDuplicateDecisionCache::default()),
+            download_targets: Arc::default(),
+            download_owner: zzclawterm_core::uuid(),
         }
     }
 }
@@ -252,6 +263,8 @@ impl SftpPathTransferOptions {
             duplicate_resolver,
             transfer,
             duplicate_decisions: Arc::new(SftpDuplicateDecisionCache::default()),
+            download_targets: Arc::default(),
+            download_owner: zzclawterm_core::uuid(),
         }
     }
 
@@ -267,6 +280,14 @@ impl SftpPathTransferOptions {
         &self.transfer
     }
 
+    /// Create a sibling download with its own prompt decisions and reservation identity,
+    /// sharing only this batch's final-target reservations.
+    pub fn clone_for_download_batch(&self) -> Self {
+        let mut options = self.clone();
+        options.download_targets = Arc::clone(&self.download_targets);
+        options
+    }
+
     /// 使用新的执行参数，同时保留同一任务已经回答过的重名决定。
     pub fn with_transfer_options(&self, transfer: SftpTransferOptions) -> Self {
         Self {
@@ -274,6 +295,36 @@ impl SftpPathTransferOptions {
             duplicate_resolver: self.duplicate_resolver.clone(),
             transfer,
             duplicate_decisions: Arc::clone(&self.duplicate_decisions),
+            download_targets: Arc::clone(&self.download_targets),
+            download_owner: self.download_owner.clone(),
+        }
+    }
+
+    /// Atomically reserve a final path for this task and source. Retries retain their
+    /// identity; batch clones are different tasks. No filesystem I/O or prompt runs
+    /// under this lock. Reservations live as long as the batch options, including retries.
+    pub(crate) fn reserve_download_target(
+        &self,
+        target: &Path,
+        source: &SftpDuplicateCacheKey,
+    ) -> anyhow::Result<bool> {
+        let key = crate::download_path::target_key(&target.to_string_lossy());
+        let mut targets = self
+            .download_targets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("download target reservations are poisoned"))?;
+        match targets.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let owner = entry.get();
+                Ok(owner.task == self.download_owner && &owner.source == source)
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(DownloadTargetOwner {
+                    task: self.download_owner.clone(),
+                    source: source.clone(),
+                });
+                Ok(true)
+            }
         }
     }
 

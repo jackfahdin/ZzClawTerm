@@ -169,6 +169,14 @@ impl ZzClawTermApp {
                 })),
             );
         }
+        items.push(ZzClawMenuItem::separator());
+        items.push(
+            ZzClawMenuItem::action(t!("menu.paste"))
+                .icon("icons/menu/paste.svg")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.paste_transfer_file_clipboard(window, cx);
+                })),
+        );
         items
     }
 
@@ -232,6 +240,30 @@ impl ZzClawTermApp {
         let local_backend = self.session.active_file_browser_backend()
             == Some(zzclawterm_transport::FileBrowserBackendKind::Local);
         let mut items = Vec::with_capacity(policy.len());
+
+        items.push(
+            ZzClawMenuItem::action(t!("menu.copy"))
+                .icon("icons/copy.svg")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.capture_transfer_file_clipboard(false, cx);
+                })),
+        );
+        items.push(
+            ZzClawMenuItem::action(t!("menu.cut"))
+                .icon("icons/net/move.svg")
+                .disabled(local_backend)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.capture_transfer_file_clipboard(true, cx);
+                })),
+        );
+        items.push(
+            ZzClawMenuItem::action(t!("menu.paste"))
+                .icon("icons/menu/paste.svg")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.paste_transfer_file_clipboard(window, cx);
+                })),
+        );
+        items.push(ZzClawMenuItem::separator());
 
         for node in policy {
             if let Node::Action(action) = node {
@@ -307,6 +339,14 @@ impl ZzClawTermApp {
                         .icon("icons/fe/download.svg")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.start_selected_sftp_download_jobs(window, cx);
+                            this.defer_transfer_panel_snapshot_flush(cx);
+                        }))
+                }
+                Node::Action(Action::DownloadToDirectory) => {
+                    ZzClawMenuItem::action(t!("fileExplorer.cmDownloadToDirectory"))
+                        .icon("icons/fe/download.svg")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.start_selected_sftp_download_to_directory(window, cx);
                             this.defer_transfer_panel_snapshot_flush(cx);
                         }))
                 }

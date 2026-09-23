@@ -5,7 +5,7 @@ use crate::features::ZzClawTermApp;
 use crate::features::text_inputs::TextInputSetup;
 use zzclawterm_core::SearchEngineConfig;
 
-use super::helpers::{open_external_url_simple, urlencoding_query};
+use super::helpers::urlencoding_query;
 
 impl ZzClawTermApp {
     /// Build the two inputs an opened engine row draws.
@@ -153,17 +153,10 @@ impl ZzClawTermApp {
         let url = engine
             .url_template
             .replace("%s", &urlencoding_query("zzclawterm"));
-        match open_external_url_simple(&url) {
-            Ok(()) => {
-                self.shell
-                    .set_status(format!("tested search engine: {}", engine.name));
-            }
-            Err(error) => {
-                self.shell
-                    .set_status(format!("test search engine failed: {error}"));
-            }
-        }
-        cx.notify();
+        let name = engine.name.clone();
+        self.open_external_url_for_ui(&url, cx);
+        self.shell
+            .set_status(format!("tested search engine: {name}"));
     }
 
     pub(in crate::features) fn toggle_terminal_action_links(&mut self, cx: &mut Context<Self>) {

@@ -7,7 +7,7 @@ use zzclawterm_store::{StoreDomain, store_request};
 use crate::features::{ZzClawTermApp, formatting::non_empty_string};
 use crate::models::QuickCommandEditorField;
 
-use super::helpers::unix_millis_now;
+use super::helpers::{unix_millis_now, validated_quick_command_text};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn set_quick_command_editor_category(
@@ -113,19 +113,18 @@ impl ZzClawTermApp {
             return;
         };
         let label = editor.label.trim().to_string();
-        let command_text = editor.command.trim().to_string();
         if label.is_empty() {
             self.commands
                 .set_quick_editor_error(label_required, Some(QuickCommandEditorField::Label));
             cx.notify();
             return;
         }
-        if command_text.is_empty() {
+        let Some(command_text) = validated_quick_command_text(&editor.command) else {
             self.commands
                 .set_quick_editor_error(command_required, Some(QuickCommandEditorField::Command));
             cx.notify();
             return;
-        }
+        };
 
         let now = unix_millis_now();
         let original = editor.original.clone();
@@ -187,8 +186,7 @@ impl ZzClawTermApp {
             move |this, event, cx| {
                 match event.outcome {
                     Ok(config) => {
-                        this.commands
-                            .replace_quick_command_catalog(config.commands, config.categories);
+                        this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         this.commands.close_quick_editor();
                         this.settings
                             .update_store_status(format!("quick command '{label}' saved"), true);

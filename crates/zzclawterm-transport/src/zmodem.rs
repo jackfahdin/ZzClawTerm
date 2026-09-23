@@ -1341,7 +1341,7 @@ mod tests {
     /// `pump_receiver` rather than the header detection above.
     #[test]
     fn loopback_transfer_reproduces_the_file_on_the_receiving_side() {
-        let root = std::env::temp_dir().join(format!("zzclawterm-zmodem-{}", uuid::Uuid::new_v4()));
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-zmodem");
         let src_dir = root.join("src");
         let dst_dir = root.join("dst");
         std::fs::create_dir_all(&src_dir).expect("create source dir");
@@ -1419,8 +1419,6 @@ mod tests {
         let received = std::fs::read(dst_dir.join("payload.bin")).expect("read received file");
         assert_eq!(received.len(), payload.len());
         assert_eq!(received, payload);
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn collect_wire(actions: Vec<ZmodemAction>) -> Vec<u8> {

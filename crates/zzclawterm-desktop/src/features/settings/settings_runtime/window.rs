@@ -159,7 +159,7 @@ impl ZzClawTermApp {
     /// Returning `true` is what keeps a second "open settings" from starting a
     /// competing draft: there is one draft, so the request has to land on the
     /// window already holding it.
-    pub(in crate::features) fn activate_settings_window(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn activate_settings_window(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(handle) = self.shell.settings_window() else {
             return false;
         };
@@ -234,6 +234,15 @@ fn open_settings_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &mut App) {
         }
         Err(error) => {
             app.shell.fail_settings_window_open();
+            if let Some(controller) = app
+                .desktop_controller
+                .as_ref()
+                .and_then(|controller| controller.upgrade())
+            {
+                controller.update(cx, |controller, _| {
+                    controller.release_settings_owner(app.workspace_id)
+                });
+            }
             app.shell
                 .set_status(format!("failed to open settings window: {error}"));
             cx.notify();

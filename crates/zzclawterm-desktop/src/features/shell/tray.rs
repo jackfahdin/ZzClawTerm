@@ -1,17 +1,33 @@
 use crate::features::ZzClawTermApp;
-use gpui::{AppContext as _, Context, Window};
+use gpui::{Context, Window};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuItem},
 };
 
 #[derive(Clone, PartialEq, Eq)]
-struct TraySnapshot {
+pub(crate) struct TraySnapshot {
     entries: Vec<(String, String)>,
 }
 
-pub(in crate::features) struct SystemTray {
+impl TraySnapshot {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: vec![
+                ("show".into(), rust_i18n::t!("tray.show").to_string()),
+                (
+                    "new-window".into(),
+                    rust_i18n::t!("tray.newWindow").to_string(),
+                ),
+                ("quit".into(), rust_i18n::t!("tray.quit").to_string()),
+            ],
+        }
+    }
+}
+
+pub(crate) struct SystemTray {
     #[cfg(not(target_os = "linux"))]
     icon: TrayIcon,
     #[cfg(target_os = "linux")]
@@ -19,6 +35,40 @@ pub(in crate::features) struct SystemTray {
     #[cfg(target_os = "linux")]
     worker: Option<std::thread::JoinHandle<()>>,
     snapshot: TraySnapshot,
+}
+
+impl SystemTray {
+    pub(crate) fn new(
+        snapshot: TraySnapshot,
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let icon = build_tray(&snapshot, pixels, width, height)?;
+            Ok(Self { icon, snapshot })
+        }
+        #[cfg(target_os = "linux")]
+        {
+            linux_tray(snapshot, pixels, width, height)
+        }
+    }
+
+    pub(crate) fn update(&mut self, snapshot: TraySnapshot) {
+        if self.snapshot == snapshot {
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Ok(menu) = menu(&snapshot) {
+            self.icon.set_menu(Some(Box::new(menu)));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(updates) = &self.updates {
+            let _ = updates.send(snapshot.clone());
+        }
+        self.snapshot = snapshot;
+    }
 }
 
 fn menu(snapshot: &TraySnapshot) -> Result<Menu, String> {
@@ -48,9 +98,13 @@ fn build_tray(
 }
 
 impl ZzClawTermApp {
-    fn tray_snapshot(&self) -> TraySnapshot {
+    pub(crate) fn tray_snapshot(&self) -> TraySnapshot {
         let mut entries = vec![
             ("show".into(), rust_i18n::t!("tray.show").to_string()),
+            (
+                "new-window".into(),
+                rust_i18n::t!("tray.newWindow").to_string(),
+            ),
             (
                 "new".into(),
                 rust_i18n::t!("tray.newConnection").to_string(),
@@ -79,77 +133,7 @@ impl ZzClawTermApp {
         TraySnapshot { entries }
     }
 
-    pub(crate) fn start_system_tray(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let image = cx
-                .background_spawn(async {
-                    image::load_from_memory(include_bytes!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../zzclawterm-app/resources/icons/32x32.png"
-                    )))
-                    .map(|image| {
-                        let image = image.to_rgba8();
-                        (image.width(), image.height(), image.into_raw())
-                    })
-                })
-                .await;
-            let Ok((width, height, pixels)) = image else {
-                return;
-            };
-            let initialized = this
-                .update(cx, |app, _| {
-                    let snapshot = app.tray_snapshot();
-                    #[cfg(not(target_os = "linux"))]
-                    let tray = build_tray(&snapshot, pixels, width, height)
-                        .map(|icon| SystemTray { icon, snapshot });
-                    #[cfg(target_os = "linux")]
-                    let tray = linux_tray(snapshot, pixels, width, height);
-                    app.shell.system_tray = tray.ok();
-                    app.shell.system_tray.is_some()
-                })
-                .unwrap_or(false);
-            if !initialized {
-                return;
-            }
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                if this
-                    .update(cx, |app, cx| {
-                        let snapshot = app.tray_snapshot();
-                        if let Some(tray) = app.shell.system_tray.as_mut()
-                            && tray.snapshot != snapshot
-                        {
-                            #[cfg(not(target_os = "linux"))]
-                            if let Ok(menu) = menu(&snapshot) {
-                                tray.icon.set_menu(Some(Box::new(menu)));
-                            }
-                            #[cfg(target_os = "linux")]
-                            if let Some(updates) = &tray.updates {
-                                let _ = updates.send(snapshot.clone());
-                            }
-                            tray.snapshot = snapshot;
-                        }
-                        while let Ok(event) = MenuEvent::receiver().try_recv() {
-                            app.handle_tray_action(event.id.as_ref().to_owned(), cx);
-                        }
-                        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
-                            if matches!(event, tray_icon::TrayIconEvent::DoubleClick { .. }) {
-                                app.handle_tray_action("show".into(), cx);
-                            }
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn handle_tray_action(&mut self, action: String, cx: &mut Context<Self>) {
+    pub(crate) fn handle_tray_action(&mut self, action: String, cx: &mut Context<Self>) {
         let Some(window) = self.shell.main_window() else {
             return;
         };
@@ -186,7 +170,12 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.shell.system_tray.is_none() {
+        if !self
+            .desktop_controller
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+            .is_some_and(|controller| controller.read(cx).tray_available())
+        {
             return false;
         }
         #[cfg(windows)]
@@ -217,7 +206,7 @@ impl ZzClawTermApp {
     }
 }
 
-fn show_window(window: &mut Window, cx: &mut gpui::App) {
+pub(crate) fn show_window(window: &mut Window, cx: &mut gpui::App) {
     #[cfg(windows)]
     if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window)
         && let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw()

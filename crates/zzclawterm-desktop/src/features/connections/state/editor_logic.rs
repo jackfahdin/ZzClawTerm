@@ -277,6 +277,7 @@ pub(super) fn set_connection_editor_password_source(
         ConnectionEditorPasswordSource::Saved => {
             editor.password.expose_secret_mut().clear();
             editor.existing_password = None;
+            editor.existing_password_locked = false;
         }
     }
     editor.error = None;
@@ -845,6 +846,7 @@ fn clear_connection_editor_password_secret(editor: &mut ConnectionEditorState) {
     editor.password_id = None;
     editor.password.expose_secret_mut().clear();
     editor.existing_password = None;
+    editor.existing_password_locked = false;
 }
 
 pub(super) fn set_connection_editor_error(
