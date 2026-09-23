@@ -33,7 +33,7 @@ pub(in crate::features) fn supports_native_install(portable: bool) -> bool {
         return if portable {
             directory.join("zzclawterm-portable").is_file()
         } else {
-            directory.join("Uninstall.exe").is_file()
+            super::install::is_installed_copy(directory)
         };
     }
     #[cfg(target_os = "macos")]

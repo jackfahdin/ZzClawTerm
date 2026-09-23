@@ -18,6 +18,28 @@ const PORTABLE_FILES: [&str; 7] = [
     "VERSION",
 ];
 const MAX_PORTABLE_ENTRIES: usize = 128;
+
+/// True when `directory` holds an installed copy the updater is allowed to replace.
+///
+/// Inno Setup names its uninstaller `unins000.exe` (and `unins001.exe` after a
+/// reinstall) while the earlier NSIS packages used `uninstall.exe`. Accepting
+/// only the NSIS name left every installed copy unable to update: the panel
+/// found no uninstaller and fell back to "open the release page".
+#[cfg(windows)]
+pub(in crate::features) fn is_installed_copy(directory: &Path) -> bool {
+    if directory.join("Uninstall.exe").is_file() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_str().is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.starts_with("unins") && name.ends_with(".exe")
+        })
+    })
+}
 const MAX_PORTABLE_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -56,7 +78,7 @@ pub(super) fn prepare_artifact(
         let directory = executable
             .parent()
             .ok_or("installed executable has no parent directory")?;
-        if !directory.join("Uninstall.exe").is_file() {
+        if !is_installed_copy(directory) {
             return Err("this installation must be updated manually".into());
         }
         let work_dir = artifact
@@ -431,7 +453,7 @@ fn run_windows_installed_helper(args: &[OsString]) -> Result<(), String> {
         .parent()
         .ok_or("installed application directory is unavailable")?;
     if target.file_name().and_then(|name| name.to_str()) != Some("ZzClawTerm.exe")
-        || !target_dir.join("Uninstall.exe").is_file()
+        || !is_installed_copy(target_dir)
     {
         return Err("installed update target failed validation".into());
     }
@@ -654,6 +676,32 @@ mod tests {
     use std::io::Write as _;
     #[cfg(windows)]
     use std::path::Path;
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_copy_is_recognised_with_either_uninstaller_name() {
+        use zzclawterm_core::test_support::TestTempDir;
+
+        let directory = TestTempDir::new("zzclawterm-installed-copy");
+        std::fs::create_dir_all(directory.path()).unwrap();
+        assert!(!super::is_installed_copy(directory.path()));
+
+        // Inno Setup's uninstaller, which is what this project ships today.
+        std::fs::write(directory.path().join("unins000.exe"), b"MZ").unwrap();
+        assert!(super::is_installed_copy(directory.path()));
+
+        std::fs::remove_file(directory.path().join("unins000.exe")).unwrap();
+        assert!(!super::is_installed_copy(directory.path()));
+
+        // The NSIS-era name the original check required still counts.
+        std::fs::write(directory.path().join("uninstall.exe"), b"MZ").unwrap();
+        assert!(super::is_installed_copy(directory.path()));
+
+        // Only the uninstaller's data file is not an installation marker.
+        std::fs::remove_file(directory.path().join("uninstall.exe")).unwrap();
+        std::fs::write(directory.path().join("unins000.dat"), b"data").unwrap();
+        assert!(!super::is_installed_copy(directory.path()));
+    }
 
     #[cfg(windows)]
     fn write_portable_zip(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
