@@ -37,7 +37,8 @@ jobs:
   preflight:
     name: Preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # 只解析版本与 tag；源码级检查已经移进 build-native.yml。
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
@@ -110,104 +111,18 @@ jobs:
             echo '::warning::ZZCLAWTERM_GITHUB_GIST_CLIENT_ID is not set; the build will ship without GitHub Gist sync'
           fi
 
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          cache-key: release-preflight
-      - name: Install Linux system dependencies
-        uses: ./.github/actions/install-linux-deps
-      - name: Test workspace
-        run: cargo test --workspace --locked --no-fail-fast
-      - name: Test packaging and release helpers
-        run: >-
-          python -m unittest
-          scripts.tests.test_check_release_assets
-          scripts.tests.test_package_native
-          scripts.tests.test_verify_native_package
-          scripts.tests.test_generate_release_metadata
-      - name: Check workflow syntax
-        run: >-
-          docker run --rm
-          -v "${PWD}:/repo"
-          -w /repo
-          rhysd/actionlint:1.7.7
-
-  package:
-    name: Package ${{ matrix.label }}
+  build:
+    name: Build native packages
     needs: preflight
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { label: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
-          - { label: macos-x64, os: macos-15-intel, target: x86_64-apple-darwin }
-          # Keep the x64 glibc floor at 2.35 while ubuntu-22.04 is supported.
-          - { label: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { label: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { label: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
-          - { label: windows-arm64, os: windows-2025, target: aarch64-pc-windows-msvc }
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          targets: ${{ matrix.target }}
-          cache-key: release-${{ matrix.target }}
-          cache-on-failure: 'true'
-          save-cache: always
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/install-linux-deps
-        with:
-          extra_packages: curl file patchelf desktop-file-utils dpkg-dev rpm
-      - name: Install AppImage tooling
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
-      - name: Install Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/ci/install-innosetup.ps1
-      - name: Package native application
-        shell: bash
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
-          ZZCLAWTERM_ARTIFACT_VERSION: ${{ needs.preflight.outputs.version }}
-          ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
-          ZZCLAWTERM_VERSION: ${{ needs.preflight.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: python scripts/release/package_native.py "${TARGET}"
-      - name: Verify native package
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: >-
-          python scripts/release/verify_native_package.py
-          --target "${TARGET}" --version "${VERSION}"
-          --artifact-version "${VERSION}" --dist dist
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZzClawTerm-${{ matrix.label }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
+    # 手动触发但选择不发布时仍然构建，方便先看产物再决定是否发布。
+    uses: ./.github/workflows/build-native.yml
+    with:
+      source_sha: ${{ github.sha }}
+      version: ${{ needs.preflight.outputs.version }}
 
   release:
     name: Publish GitHub release
-    needs: [preflight, package]
+    needs: [preflight, build]
     if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -236,7 +151,7 @@ jobs:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ZzClawTerm-*
+          pattern: native-*
           path: dist-release
           merge-multiple: true
       - name: Validate release assets
@@ -256,6 +171,8 @@ jobs:
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' > release-notes.md
             published_at="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json publishedAt --jq '.publishedAt')"
+            # 上一次失败留下的草稿还没有 publishedAt，用当前时间兜底。
+            [[ -n "${published_at}" ]] || published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
               -f tag_name="${TAG}" -f target_commitish="${GITHUB_SHA}" --jq '.body // ""' > release-notes.md
@@ -318,7 +235,7 @@ jobs:
             --dist dist-release --version "${VERSION}" --tag "${TAG}" \
             --base-url "${BASE_URL}" --notes-file release-notes.md --pub-date "${PUB_DATE}"
           rm -- dist-release/*.sig
-      - name: Create or update GitHub Release
+      - name: Stage release as a draft
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -326,17 +243,54 @@ jobs:
           TAG: ${{ needs.preflight.outputs.tag }}
         run: |
           set -euo pipefail
+          # 已发布的 release 不允许再改：重跑只能续写草稿，要换内容就换版本号。
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            release_id="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq '.databaseId')"
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
-              -f name="${TAG}" -F prerelease="${PRERELEASE}" >/dev/null
+            draft="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
+            if [[ "${draft}" != 'true' ]]; then
+              echo "release ${TAG} is already published; published releases are immutable, so bump the workspace version instead" >&2
+              exit 1
+            fi
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --notes-file release-notes.md
           else
-            args=(release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --target "${GITHUB_SHA}" --title "${TAG}" --notes-file release-notes.md)
+            args=(release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft --target "${GITHUB_SHA}" --title "${TAG}" --notes-file release-notes.md)
             [[ "${PRERELEASE}" == 'true' ]] && args+=(--prerelease)
             gh "${args[@]}"
           fi
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
           gh release upload "${TAG}" dist-release/* \
             --repo "${GITHUB_REPOSITORY}" --clobber
+      # 上传成功后远端可能被截断或与本地不同，公开前逐个比对大小与摘要。
+      - name: Verify uploaded assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/verify_remote_assets.py \
+            --tag "${TAG}" --directory dist-release
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 预发布版本绝不能占用 releases/latest，否则稳定通道的更新检查会指向它。
+          make_latest='true'
+          [[ "${PRERELEASE}" == 'true' ]] && make_latest='false'
+          release_id="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json databaseId --jq '.databaseId')"
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f name="${TAG}" -F draft=false -F prerelease="${PRERELEASE}" \
+            -f make_latest="${make_latest}" >/dev/null
+          echo "published ${TAG}"
 
   # The Cloudflare R2 download-mirror job was removed: the bucket and public
   # base URL belonged to the original project. Manifests point at GitHub

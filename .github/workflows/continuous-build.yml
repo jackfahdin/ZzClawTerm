@@ -24,9 +24,10 @@ env:
 
 jobs:
   prepare:
-    name: Resolve and test main
+    name: Resolve main and version
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # 只解析提交与版本；源码级检查已经移进 build-native.yml。
+    timeout-minutes: 15
     outputs:
       main_sha: ${{ steps.metadata.outputs.main_sha }}
       version: ${{ steps.version.outputs.version }}
@@ -80,104 +81,19 @@ jobs:
             *) echo "preview=false" >> "${GITHUB_OUTPUT}" ;;
           esac
 
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          cache-key: continuous-build-preflight
-      - name: Install Linux system dependencies
-        uses: ./.github/actions/install-linux-deps
-      - name: Test workspace
-        run: cargo test --workspace --locked --no-fail-fast
-      - name: Test packaging and release helpers
-        run: >-
-          python -m unittest
-          scripts.tests.test_check_release_assets
-          scripts.tests.test_package_native
-          scripts.tests.test_verify_native_package
-          scripts.tests.test_generate_release_metadata
-      - name: Check workflow syntax
-        run: >-
-          docker run --rm
-          -v "${PWD}:/repo"
-          -w /repo
-          rhysd/actionlint:1.7.7
-
-  package:
-    name: Package ${{ matrix.label }}
+  build:
+    name: Build snapshot packages
     needs: prepare
+    # master 没有新提交时整个构建都跳过，源码级检查也随之跳过。
     if: needs.prepare.outputs.changed == 'true'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { label: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
-          - { label: macos-x64, os: macos-15-intel, target: x86_64-apple-darwin }
-          - { label: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { label: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { label: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
-          - { label: windows-arm64, os: windows-2025, target: aarch64-pc-windows-msvc }
-    steps:
-      - name: Checkout main commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.main_sha }}
-          persist-credentials: false
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          targets: ${{ matrix.target }}
-          cache-key: continuous-build-${{ matrix.target }}
-          cache-on-failure: 'true'
-          save-cache: always
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/install-linux-deps
-        with:
-          extra_packages: curl file patchelf desktop-file-utils dpkg-dev rpm
-      - name: Install AppImage tooling
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
-      - name: Install Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/ci/install-innosetup.ps1
-      - name: Package native application
-        shell: bash
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
-          ZZCLAWTERM_ARTIFACT_VERSION: ${{ needs.prepare.outputs.version }}
-          ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
-          ZZCLAWTERM_VERSION: ${{ needs.prepare.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: python scripts/release/package_native.py "${TARGET}"
-      - name: Verify native package
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: >-
-          python scripts/release/verify_native_package.py
-          --target "${TARGET}" --version "${VERSION}" --dist dist
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: continuous-build-${{ matrix.label }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
+    uses: ./.github/workflows/build-native.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.main_sha }}
+      version: ${{ needs.prepare.outputs.version }}
 
   publish:
     name: Publish main snapshot
-    needs: [prepare, package]
+    needs: [prepare, build]
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -196,7 +112,7 @@ jobs:
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: continuous-build-*
+          pattern: native-*
           path: release-assets
           merge-multiple: true
       - name: Validate snapshot assets

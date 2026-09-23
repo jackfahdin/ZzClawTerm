@@ -1,0 +1,150 @@
+name: Build Native
+
+# 正式发布与每日快照共用这一条构建链。六腿矩阵、打包、验包与源码级检查都只写在
+# 这里，两个入口的产物就不会各自漂移。调用方负责先解析源码提交与版本号。
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Commit to build
+        required: true
+        type: string
+      version:
+        description: Workspace version the packages carry
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  # GitCode 的 HTTP 重定向会让 cargo 内置的 git2 传输在 Windows runner 上失败
+  # (too many redirects or authentication replays)，改用系统 git 命令拉取 git 依赖。
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
+jobs:
+  verify:
+    name: Verify sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: native-verify
+
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/install-linux-deps
+
+      - name: Test workspace
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Test packaging and release helpers
+        run: >-
+          python -m unittest
+          scripts.tests.test_check_release_assets
+          scripts.tests.test_package_native
+          scripts.tests.test_verify_native_package
+          scripts.tests.test_generate_release_metadata
+          scripts.tests.test_verify_remote_assets
+
+      - name: Check workflow syntax
+        run: >-
+          docker run --rm
+          -v "${PWD}:/repo"
+          -w /repo
+          rhysd/actionlint:1.7.7
+
+  package:
+    name: Package ${{ matrix.label }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: macos-arm64, os: macos-15, target: aarch64-apple-darwin }
+          - { label: macos-x64, os: macos-15-intel, target: x86_64-apple-darwin }
+          # Keep the x64 glibc floor at 2.35 while ubuntu-22.04 is supported.
+          - { label: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { label: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { label: windows-x64, os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { label: windows-arm64, os: windows-2025, target: aarch64-pc-windows-msvc }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.target }}
+          cache-key: native-${{ matrix.target }}
+          cache-on-failure: 'true'
+          save-cache: always
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-linux-deps
+        with:
+          extra_packages: curl file patchelf desktop-file-utils dpkg-dev rpm
+
+      - name: Install AppImage tooling
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
+
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/install-innosetup.ps1
+
+      - name: Package native application
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          ZZCLAWTERM_ARTIFACT_VERSION: ${{ inputs.version }}
+          ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
+          ZZCLAWTERM_VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: python scripts/release/package_native.py "${TARGET}"
+
+      - name: Verify native package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python scripts/release/verify_native_package.py
+          --target "${TARGET}" --version "${VERSION}" --dist dist
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

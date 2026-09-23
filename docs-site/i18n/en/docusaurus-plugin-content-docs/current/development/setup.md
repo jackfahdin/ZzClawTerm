@@ -130,7 +130,7 @@ Release packages come from `scripts/release/package_native.py`. It builds the ap
 | Windows x64 | `x86_64-pc-windows-msvc` | `_portable.zip`, `-setup.exe` |
 | Windows arm64 | `aarch64-pc-windows-msvc` | `_portable.zip`, `-setup.exe` |
 
-Every release CI matrix leg runs:
+Both the version-tag release and the daily snapshot call the reusable workflow `.github/workflows/build-native.yml`; the six-target matrix, packaging, package verification and the source-level checks (`cargo test`, packaging unit tests, actionlint) live only there, so the two entry points cannot drift apart. Every matrix leg runs:
 
 ```bash
 python scripts/release/package_native.py "${TARGET}"
@@ -153,7 +153,7 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
-After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` is the update manifest an installed application reads. `Continuous Build` checks master daily at 00:00 (UTC+8) and rebuilds the rolling `continuous-build` prerelease only when there are new commits (it can also be dispatched manually): when the workspace version carries a prerelease suffix it also signs and publishes `latest.json` and `downloads.json` as the preview channel manifest at `releases/download/continuous-build/latest.json`, while a stable-looking version skips the manifest because stable clients only read the stable channel.
+After validation, a version tag stages the GitHub Release as a draft, uploads every asset and compares each remote asset's size and sha256 digest against the local file through `scripts/ci/verify_remote_assets.py` before publishing (a prerelease version is flagged as such and never takes over `releases/latest`); a published release refuses further writes, so a rerun only continues its draft and changing the content requires a new version. The website reads `downloads.json`; signed `latest.json` is the update manifest an installed application reads. `Continuous Build` checks master daily at 00:00 (UTC+8) and rebuilds the rolling `continuous-build` prerelease only when there are new commits (it can also be dispatched manually): when the workspace version carries a prerelease suffix it also signs and publishes `latest.json` and `downloads.json` as the preview channel manifest at `releases/download/continuous-build/latest.json`, while a stable-looking version skips the manifest because stable clients only read the stable channel.
 
 The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` and the `GITCODE_*` mirror configuration are optional, and the corresponding features are skipped when unset. See the release section of `BUILDING.md` for details.
 
