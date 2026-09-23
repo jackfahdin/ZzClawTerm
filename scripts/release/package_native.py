@@ -40,6 +40,10 @@ HELPER_BINS = ("zzclawterm-rdp-helper", "zzclawterm-vnc-helper", "zzclawterm-mcp
 VCXSRV_ENV_VAR = "ZZCLAWTERM_VCXSRV_DIST"
 VCXSRV_DIRNAME = "vcxsrv"
 VCXSRV_EXE = "vcxsrv.exe"
+# Releases that promise an X server set this: without it a missing distribution
+# only warns, which would silently publish a package whose X11 forwarding cannot
+# start. CI sets it for the Windows x64 leg.
+VCXSRV_REQUIRED_ENV_VAR = "ZZCLAWTERM_REQUIRE_VCXSRV"
 VCXSRV_NOTICE = textwrap.dedent(
     """
     VcXsrv Windows X Server
@@ -261,6 +265,12 @@ def stage_vcxsrv(destination: Path) -> Path | None:
     """
     source = resolve_vcxsrv_source()
     if source is None:
+        if os.environ.get(VCXSRV_REQUIRED_ENV_VAR):
+            raise RuntimeError(
+                f"{VCXSRV_REQUIRED_ENV_VAR} is set but no VcXsrv distribution "
+                f"was found; set {VCXSRV_ENV_VAR} or populate "
+                f"vendor/{VCXSRV_DIRNAME}/"
+            )
         print(
             f"WARNING: no VcXsrv distribution found (set {VCXSRV_ENV_VAR} or "
             f"populate vendor/{VCXSRV_DIRNAME}/); packaging without an X server",

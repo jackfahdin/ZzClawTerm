@@ -304,6 +304,20 @@ class PackageNativeTests(unittest.TestCase):
             self.assertIn("GPLv3", notice)
             self.assertIn("sourceforge.net/projects/vcxsrv", notice)
 
+    def test_stage_vcxsrv_fails_when_the_release_requires_a_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "package"
+            destination.mkdir()
+            with (
+                mock.patch.dict(
+                    "os.environ", {package_native.VCXSRV_REQUIRED_ENV_VAR: "1"}, clear=True
+                ),
+                mock.patch.object(package_native, "ROOT_DIR", root),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "no VcXsrv distribution"):
+                    package_native.stage_vcxsrv(destination)
+
     def test_stage_vcxsrv_warns_and_skips_without_a_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
