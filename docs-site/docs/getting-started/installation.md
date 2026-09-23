@@ -6,7 +6,7 @@ ZzClawTerm 支持以下操作系统：
 
 - **Windows** 10/11（x64 / ARM64）
 - **macOS** 12+（Intel / Apple Silicon）
-- **Linux**（x64 / ARM64；Ubuntu 20.04+、Fedora 36+、Arch Linux 等）
+- **Linux**（x64：Ubuntu 22.04+；arm64：Ubuntu 24.04+；Fedora、Arch Linux 等需满足对应架构的系统库要求）
 
 ZzClawTerm 用 GPUI 做原生 GPU 渲染，因此对图形环境有要求：
 

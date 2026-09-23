@@ -132,7 +132,7 @@ Windows x64 包另外自带一份精简版 ZzXsrv 作为 X server：CI 在打包
 | Windows x64 | `x86_64-pc-windows-msvc` | `_portable.zip`、`-setup.exe` |
 | Windows arm64 | `aarch64-pc-windows-msvc` | `_portable.zip`、`-setup.exe` |
 
-正式发布与每日快照都调用可复用工作流 `.github/workflows/build-native.yml`，六腿矩阵、打包、验包与源码级检查（`cargo test`、打包脚本单测、actionlint）只写在这一处，两个入口的产物因此不会各自漂移。每个 matrix leg 都执行：
+正式发布与每日快照都调用可复用工作流 `.github/workflows/build-native.yml`。六腿矩阵在工作区测试、打包脚本单测、actionlint、fmt、Clippy、架构检查及文档构建通过后才开始打包和验包。每个 matrix leg 都执行：
 
 ```bash
 python scripts/release/package_native.py "${TARGET}"
@@ -151,13 +151,13 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
-正式标签先把 release 建成草稿，上传全部产物后用 `scripts/ci/verify_remote_assets.py` 逐个比对远端 asset 的大小与 sha256 摘要，一致才公开（预发布版本带 `prerelease` 标记，不会占用 `releases/latest`）；已公开的 release 拒绝再写，重跑只会续写草稿，要改内容必须换版本号。公开后的产物内含 `downloads.json` 与签名的 `latest.json`，随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 是已安装应用读取的更新清单。`Continuous Build` 每天东八区 0:00 自动检查 master，有新提交才重建并覆盖 `continuous-build` prerelease（也可手动触发）：当 workspace 版本号带预发布后缀时，它同样会签名并发布 `latest.json` 与 `downloads.json`，作为预览通道（`releases/download/continuous-build/latest.json`）的清单；版本号是正式版形态时则不生成清单，因为正式版客户端只读稳定通道。
+正式标签先把 release 建成草稿，上传全部产物后用 `scripts/ci/verify_remote_assets.py` 逐个比对远端 asset 的大小与 sha256 摘要，一致才公开（预发布版本带 `prerelease` 标记，不会占用 `releases/latest`）；已公开的 release 拒绝再写，重跑只会续写草稿，要改内容必须换版本号。公开后的产物内含 `downloads.json` 与签名的 `latest.json`，随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 是已安装应用读取的更新清单。`Continuous Build` 每天东八区 0:00 自动检查 master，只有当前提交的快照已校验才跳过重建（也可手动触发）。快照覆盖远端附件并校验摘要后才记录完成状态，失败的覆盖会在下次定时运行时重试；当 workspace 版本号带预发布后缀时，它还会签名并发布 `latest.json` 与 `downloads.json`，作为预览通道（`releases/download/continuous-build/latest.json`）的清单；版本号是正式版形态时则不生成清单，因为正式版客户端只读稳定通道。
 
 Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` 与 GitCode 同步的 `GITCODE_*` 配置均为可选，未配置时对应功能跳过。详见根目录 `BUILDING.md` 的发布一节；更新签名密钥的用途、存放位置与轮换流程见 [更新签名密钥与轮换](./update-signing.md)。
 
 ### 原生工具与手工验收边界
 
-原生打包依赖目标平台工具：Windows 使用 Inno Setup 6（安装包校验通过真实静默安装完成）；macOS 使用 `codesign` 和 `hdiutil`；Linux 使用 `appimagetool`、`dpkg-shlibdeps`、`dpkg-deb`、`rpmbuild`、`rpm`/`rpm2cpio` 等工具。因此在缺少对应工具的平台上，单独运行 Python 打包单测并不等于完成原生打包。
+原生打包依赖目标平台工具：Windows 使用 Inno Setup 7（安装包校验通过真实静默安装完成）；macOS 使用 `codesign` 和 `hdiutil`；Linux 使用 `appimagetool`、`dpkg-shlibdeps`、`dpkg-deb`、`rpmbuild`、`rpm`/`rpm2cpio` 等工具。因此在缺少对应工具的平台上，单独运行 Python 打包单测并不等于完成原生打包。
 
 自动验证会检查产物集合、归档路径、应用与 helper 是否齐全、二进制架构、版本及包元数据。它不会证明 GUI 能实际启动，也不会覆盖真实安装/升级/卸载、快捷方式或 `zzclawterm:` URL handler 调用、签名/notarization 与 Gatekeeper/SmartScreen 信任、真实 RDP/VNC 会话，以及 GPU、IME、PTY、剪贴板和窗口生命周期。发布候选必须在对应目标操作系统上手工验收这些行为，并如实记录实际执行的平台与结果。
 

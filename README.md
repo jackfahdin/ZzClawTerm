@@ -22,7 +22,7 @@ SSH、本地 Shell、Telnet、串口、RDP、VNC、SFTP、隧道、OTP、AI 辅�
 | :--- | :--- |
 | **Windows** | Windows 10/11，x64 / arm64 |
 | **macOS** | macOS 12+，Intel / Apple Silicon |
-| **Linux** | Ubuntu 20.04+、Fedora 36+、Arch Linux 及类似发行版 |
+| **Linux** | x64：Ubuntu 22.04+；arm64：Ubuntu 24.04+。Fedora、Arch Linux 等需满足对应架构的系统库要求 |
 
 ## 下载
 

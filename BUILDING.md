@@ -31,7 +31,7 @@
    （包含 MSVC 编译器、链接器与 Windows SDK）。装完整版 Visual Studio
    或独立的 Build Tools for Visual Studio 都可以
 2. Rust 工具链使用默认的 `stable-x86_64-pc-windows-msvc` 即可
-3. **Inno Setup 6**（仅打包安装包时需要）：可用仓库脚本安装
+3. **Inno Setup 7**（仅打包安装包时需要）：可用仓库脚本安装
 
    ```powershell
    ./scripts/ci/install-innosetup.ps1
@@ -256,7 +256,7 @@ python scripts/release/package_native.py <rust-target>
 
 ### Windows
 
-前置：Inno Setup 6（`./scripts/ci/install-innosetup.ps1`）。
+前置：Inno Setup 7（`./scripts/ci/install-innosetup.ps1`）。
 
 ```bash
 python scripts/release/package_native.py x86_64-pc-windows-msvc
@@ -339,13 +339,13 @@ git push origin v0.0.1
 
 工作流分三个阶段（`.github/workflows/release.yml`）：
 
-1. **preflight**（Ubuntu）：解析并校验版本号、跑工作区测试与 Python
-   脚本测试、actionlint 校验全部工作流
-2. **package**（6 个平台矩阵）：macOS arm64/x64、Linux x64/arm64、
+1. **preflight + 源码门禁**（Ubuntu）：解析并校验版本号，然后并行运行
+   工作区测试、Python 脚本测试、actionlint、fmt、Clippy、架构检查与文档构建
+2. **package**（6 个平台矩阵，等待全部源码门禁通过）：macOS arm64/x64、Linux x64/arm64、
    Windows x64/arm64，分别执行 `package_native.py` +
    `verify_native_package.py` 并上传产物
 3. **release**（仅 tag 或手动选择发布时执行）：对 6 个更新器产物做
-   Tauri/minisign 签名、生成 `checksums.txt`、`downloads.json`、
+   Tauri/minisign 签名、生成 `SHA256SUMS`、`downloads.json`、
    `latest.json`，创建或更新 GitHub Release 并上传全部产物
 
 发布前需要在仓库配置以下内容：
@@ -372,6 +372,10 @@ git push origin v0.0.1
 
 发布 tag 不存在于 GitCode 时，工作流会用令牌自行推送该 tag，不依赖
 GitCode 的镜像同步功能。
+
+CI 使用 GitHub 官方托管 Runner，Action 默认跟随已核实的最新稳定 Major。
+若以后改用 self-hosted Runner，升级 Action Major 前须逐项检查最低 Runner
+版本、Node.js runtime 要求和 Breaking Changes，再调整该 Runner 的版本与环境。
 
 ---
 

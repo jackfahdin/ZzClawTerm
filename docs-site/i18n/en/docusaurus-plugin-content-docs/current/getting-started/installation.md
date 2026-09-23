@@ -6,7 +6,7 @@ ZzClawTerm supports the following operating systems:
 
 - **Windows** 10/11 (x64 / ARM64)
 - **macOS** 12+ (Intel / Apple Silicon)
-- **Linux** (x64 / ARM64; Ubuntu 20.04+, Fedora 36+, Arch Linux, and similar distributions)
+- **Linux** (x64: Ubuntu 22.04+; arm64: Ubuntu 24.04+; Fedora, Arch Linux, and similar distributions require the matching architecture's system libraries)
 
 ZzClawTerm renders natively on the GPU through GPUI, so it has graphics requirements:
 
