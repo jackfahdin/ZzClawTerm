@@ -1,15 +1,19 @@
 {
   "wildcard_super_import": [],
-  "desktop_feature_thread_spawn": [],
+  "desktop_feature_thread_spawn": [
+    {"path": "crates/zzclawterm-desktop/src/features/update/install.rs", "max_count": 1, "reason": "The one-shot update cleanup worker waits before removing a temporary directory and never touches GPUI state."}
+  ],
   "desktop_thread_builder": [
     {"path": "crates/zzclawterm-desktop/src/blocking_jobs.rs", "max_count": 1, "reason": "BlockingJobScheduler owns and joins its bounded worker pool."},
     {"path": "crates/zzclawterm-desktop/src/lib.rs", "max_count": 1, "reason": "The one-shot i18n preload worker is joined before preload_i18n returns."},
     {"path": "crates/zzclawterm-desktop/src/thread_owner.rs", "max_count": 1, "reason": "The central named-thread factory returns join handles to explicit lifecycle owners."},
+    {"path": "crates/zzclawterm-desktop/src/app_shell/controller.rs", "max_count": 1, "reason": "The one-shot update check performs blocking HTTP work and reports its result through a typed UpdateEvent."},
     {"path": "crates/zzclawterm-desktop/src/models/connections.rs", "max_count": 1, "reason": "CredentialAutofillMatchPipeline owns, stops, and joins its matcher worker."},
     {"path": "crates/zzclawterm-desktop/src/models/recording.rs", "max_count": 1, "reason": "RecordingWritePipeline owns, stops, and joins its writer worker."},
     {"path": "crates/zzclawterm-desktop/src/models/session_event_bridge.rs", "max_count": 1, "reason": "SessionEventBridge owns, signals, and joins its bridge worker."},
     {"path": "crates/zzclawterm-desktop/src/models/terminal/mod.rs", "max_count": 1, "reason": "TerminalFramePipeline owns, closes, and joins its frame worker."},
     {"path": "crates/zzclawterm-desktop/src/features/remote_desktop/keyboard_capture.rs", "max_count": 1, "reason": "Windows keyboard capture owns the hook thread, posts WM_QUIT, unhooks, and joins it."},
+    {"path": "crates/zzclawterm-desktop/src/features/update/download.rs", "max_count": 1, "reason": "The one-shot update download worker reports progress through typed UpdateEvents and carries a cancellation token."},
     {"path": "crates/zzclawterm-desktop/src/features/root.rs", "max_count": 1, "reason": "The ignored root-render benchmark joins its large-stack test thread."},
     {"path": "crates/zzclawterm-desktop/src/features/session/auth_runtime.rs", "max_count": 1, "reason": "The prompt broker test joins its named request thread."},
     {"path": "crates/zzclawterm-desktop/src/features/session/mod.rs", "max_count": 1, "reason": "SessionProtocolRuntimeState owns and joins multiplex disconnect workers."},

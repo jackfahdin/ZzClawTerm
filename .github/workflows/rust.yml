@@ -4,11 +4,9 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [master]
+  push:
+    branches: [master]
 
-# Master pushes are deliberately not built here: the tag release and the nightly
-# continuous build run these same checks, so building on every push only
-# duplicates them. Pull requests still run so this workflow's gate reports.
-#
 # No paths filter on purpose. A workflow filtered out by `paths` never runs, so its
 # gate job never reports either, which leaves a pull request waiting forever on a
 # required status check that will never arrive. The repository is public, so the
@@ -36,7 +34,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -74,7 +72,7 @@ jobs:
             os: windows-2025
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -99,12 +97,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -125,7 +123,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 

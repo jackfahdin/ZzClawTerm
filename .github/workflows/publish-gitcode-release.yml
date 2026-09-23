@@ -144,7 +144,7 @@ jobs:
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
-          UPLOAD_SMALL_ASSETS: ${{ inputs.upload_small_assets || 'true' }}
+          UPLOAD_SMALL_ASSETS: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_small_assets || github.event_name != 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           "${RUNNER_TEMP}/gitcode-release-venv/bin/python" <<'PY'

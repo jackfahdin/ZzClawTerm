@@ -43,12 +43,14 @@ jobs:
           set -euo pipefail
           main_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/master | awk '{print $1}')"
           [[ -n "${main_sha}" ]] || { echo 'failed to resolve master' >&2; exit 1; }
-          # 定时触发时，若 master 相对上次快照没有新提交则跳过整个构建，
-          # 避免每天烧六平台 runner 产出内容完全相同的包。
+          # The tag alone is not a completion marker: creating a release may
+          # create it before all assets have been uploaded and verified.
           changed='true'
           if [[ "${GITHUB_EVENT_NAME}" == 'schedule' ]]; then
             snapshot_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${SNAPSHOT_TAG}" --jq '.object.sha' 2>/dev/null || true)"
-            if [[ "${snapshot_sha}" == "${main_sha}" ]]; then
+            snapshot_notes="$(gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' 2>/dev/null || true)"
+            verified_marker="<!-- zzclawterm-snapshot-verified:${main_sha} -->"
+            if [[ "${snapshot_sha}" == "${main_sha}" && "${snapshot_notes}" == *"${verified_marker}"* ]]; then
               changed='false'
               echo "master is unchanged since the last snapshot (${main_sha}); skipping."
             fi
@@ -57,13 +59,13 @@ jobs:
           echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout main commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.metadata.outputs.main_sha }}
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -84,7 +86,7 @@ jobs:
   build:
     name: Build snapshot packages
     needs: prepare
-    # master 没有新提交时整个构建都跳过，源码级检查也随之跳过。
+    # 当前提交已有校验完成的快照时跳过，源码级检查也随之跳过。
     if: needs.prepare.outputs.changed == 'true'
     uses: ./.github/workflows/build-native.yml
     with:
@@ -101,16 +103,16 @@ jobs:
       contents: write
     steps:
       - name: Checkout main commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.main_sha }}
           persist-credentials: false
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: release-assets
@@ -136,7 +138,7 @@ jobs:
           EOF
       - name: Install Node.js
         if: needs.prepare.outputs.preview == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Install signature verification tool
@@ -206,18 +208,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           echo "::notice::snapshot version ${VERSION} is not a prerelease, so no preview update manifest is published"
-      - name: Move snapshot tag
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAIN_SHA: ${{ needs.prepare.outputs.main_sha }}
-        run: |
-          set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${SNAPSHOT_TAG}" >/dev/null 2>&1; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${SNAPSHOT_TAG}" -f sha="${MAIN_SHA}" -F force=true >/dev/null
-          else
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${SNAPSHOT_TAG}" -f sha="${MAIN_SHA}" >/dev/null
-          fi
       - name: Create or update snapshot release
         shell: bash
         env:
@@ -234,3 +224,31 @@ jobs:
             gh release create "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${MAIN_SHA}" --title 'Continuous Build' --notes-file release-notes.md --prerelease
           fi
           gh release upload "${SNAPSHOT_TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Verify uploaded snapshot assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci/verify_remote_assets.py
+          --tag "${SNAPSHOT_TAG}" --directory release-assets
+      - name: Move snapshot tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ needs.prepare.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${SNAPSHOT_TAG}" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${SNAPSHOT_TAG}" -f sha="${MAIN_SHA}" -F force=true >/dev/null
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${SNAPSHOT_TAG}" -f sha="${MAIN_SHA}" >/dev/null
+          fi
+      - name: Mark snapshot complete
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ needs.prepare.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          printf '\n<!-- zzclawterm-snapshot-verified:%s -->\n' "${MAIN_SHA}" >> release-notes.md
+          gh release edit "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --notes-file release-notes.md

@@ -4,11 +4,9 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [master]
+  push:
+    branches: [master]
 
-# Master pushes are deliberately not built here, for the same reason as rust.yml.
-# This workflow does not deploy the site, so skipping push runs only defers the
-# docs build to review time.
-#
 # No paths filter, for the same reason as rust.yml: a filtered-out workflow never
 # reports its gate, which blocks any pull request that requires it.
 
@@ -28,12 +26,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -44,16 +42,13 @@ jobs:
       # reached end of life in April 2026. pnpm is pinned exactly rather than to
       # the 11 range so a future 11.x cannot raise the Node floor again without
       # this file changing.
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@v3
         with:
-          node-version: '22'
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
+          working-directory: docs-site
           version: 11.15.1
-          run_install: false
+          runtime: node@22
+          install: false
 
       - name: Install documentation dependencies
         run: pnpm --dir docs-site install --frozen-lockfile

@@ -31,13 +31,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -68,9 +68,71 @@ jobs:
           -w /repo
           rhysd/actionlint:1.7.7
 
+  lint:
+    name: Lint sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          cache-key: native-lint
+
+      - name: Install Linux system dependencies
+        uses: ./.github/actions/install-linux-deps
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check architecture boundaries
+        run: python3 scripts/ci/check_architecture.py
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  docs:
+    name: Build documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Check translation parity and authoring leftovers
+        run: python3 scripts/ci/check_docs_translations.py
+
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@v3
+        with:
+          working-directory: docs-site
+          version: 11.15.1
+          runtime: node@22
+          install: false
+
+      - name: Install documentation dependencies
+        run: pnpm --dir docs-site install --frozen-lockfile
+
+      - name: Build all locales
+        run: pnpm --dir docs-site build
+
   package:
     name: Package ${{ matrix.label }}
-    needs: verify
+    needs: [verify, lint, docs]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -86,13 +148,13 @@ jobs:
           - { label: windows-arm64, os: windows-2025, target: aarch64-pc-windows-msvc }
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -151,7 +213,7 @@ jobs:
           --target "${TARGET}" --version "${VERSION}" --dist dist
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.label }}
           path: dist/*
