@@ -119,6 +119,8 @@ The native binary is written to `target/release/zzclawterm`, or `target/release/
 
 Release packages come from `scripts/release/package_native.py`. It builds the application and both helpers with locked dependencies, puts the helpers next to the application, and produces native installers and portable packages. When you add a helper, its `HELPER_BINS` list must be updated too.
 
+Windows x64 packages also carry a slim ZzXsrv build as their X server: before packaging, CI downloads the portable archive whose version and sha256 are pinned through `scripts/ci/install-vcxsrv.ps1`, unpacks it, and hands the tree to the packaging script through `ZZCLAWTERM_VCXSRV_DIST`, so the package contains `vcxsrv/` with `vcxsrv.exe` and the GPLv3 `NOTICE.txt`. When no distribution is available the build continues without an X server; Windows arm64 packages ship without one by design.
+
 ### Six release targets
 
 | Platform | Rust target | Artifacts |

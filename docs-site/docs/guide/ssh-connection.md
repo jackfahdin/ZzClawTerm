@@ -138,9 +138,9 @@ ZzClawTerm 会校验跳板机链路，阻止缺失引用和环路引用，避免
 
 X11 转发允许远端 Linux 图形程序通过 SSH 显示到本机。
 
-ZzClawTerm 不内置 X server，用户需要自行安装并启动：
+Windows 的 x64 安装包与便携包自带一份精简的 ZzXsrv；在 **设置 → 终端** 打开 **启动时自动运行 X Server** 后，应用会自行启动或复用应用目录旁的 `vcxsrv`。其余情况需要自行安装并启动：
 
-- Windows: VcXsrv / Xming
+- Windows arm64（包里不含 X server）以及想用自己安装的 X server 的用户：VcXsrv / Xming，可在 **设置 → 终端 → X Server 路径** 指定 `vcxsrv.exe`
 - macOS: XQuartz
 - Linux: Xorg / Xwayland
 

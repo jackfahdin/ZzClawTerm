@@ -122,6 +122,13 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/install-innosetup.ps1
 
+      # 只有 x64 腿随包分发 X server：ZzXsrv 只发布 x64 构建，arm64 包保持精简，
+      # 那边的用户可以在设置里指向自己安装的 X server。
+      - name: Install bundled X server
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: ./scripts/ci/install-vcxsrv.ps1
+
       - name: Package native application
         shell: bash
         env:

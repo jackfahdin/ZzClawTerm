@@ -138,9 +138,9 @@ The command is sent as terminal input after login, so it behaves exactly like ty
 
 X11 Forwarding allows remote graphical applications to display on your local machine through SSH.
 
-ZzClawTerm does not include an X server. You need to install and start one:
+Windows x64 installers and portable packages ship a slim ZzXsrv build; turn on **Start X Server automatically** under **Settings → Terminal** and the application starts or reuses the `vcxsrv` directory beside the application. Every other case needs an X server you install and start yourself:
 
-- Windows: VcXsrv or Xming
+- Windows arm64 (its packages carry no X server) and anyone who prefers their own install: VcXsrv or Xming, with **Settings → Terminal → X Server path** pointing at `vcxsrv.exe`
 - macOS: XQuartz
 - Linux: Xorg or Xwayland
 

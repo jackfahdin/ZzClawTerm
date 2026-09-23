@@ -119,6 +119,8 @@ cargo build -p zzclawterm-app --bin zzclawterm --release --locked
 
 发布包由 `scripts/release/package_native.py` 生成。它会以锁定依赖分别构建应用和两个 helper，把 helper 放到应用旁边，并按平台产出安装包和便携包。新增 helper 时必须同时更新该脚本的 `HELPER_BINS` 列表。
 
+Windows x64 包另外自带一份精简版 ZzXsrv 作为 X server：CI 在打包前用 `scripts/ci/install-vcxsrv.ps1` 下载钉死版本号与 sha256 的 portable 包并解压，通过 `ZZCLAWTERM_VCXSRV_DIST` 交给打包脚本，包内会出现 `vcxsrv/`（含 `vcxsrv.exe` 与 GPLv3 的 `NOTICE.txt`）。来源缺失时打包照常进行、只是不含 X server；Windows arm64 包按设计不带。
+
 ### 六个发布目标
 
 | 平台 | Rust target | 产物 |
