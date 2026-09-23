@@ -140,9 +140,10 @@ python scripts/release/verify_native_package.py --target "${TARGET}" --version "
 Before publication, `scripts/ci/check_release_assets.py` also rejects missing or extra artifacts in the combined six-target asset set.
 
 `ZZCLAWTERM_ARTIFACT_VERSION` changes only the version segment in artifact names;
-package metadata still uses the workspace SemVer. This interface is reserved
-for manual snapshot builds, and packaging and verification must receive the
-same value:
+package metadata still uses the workspace SemVer. This interface is reserved for
+local manual verification; every published pipeline uses the workspace version as
+the name segment, because the updater derives artifact filenames from the version
+recorded in the manifest:
 
 ```bash
 ZZCLAWTERM_ARTIFACT_VERSION=continuous-build \
@@ -152,7 +153,7 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
-After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` exists only to migrate installed Tauri releases to GPUI. `Continuous Build` checks master daily at 00:00 (UTC+8) and rebuilds the rolling `continuous-build` prerelease only when there are new commits (it can also be dispatched manually), without publishing to downstream channels.
+After validation, a version tag publishes the GitHub Release (with `downloads.json` and the signed `latest.json` as assets), which can then trigger the GitCode mirror. The website reads `downloads.json`; signed `latest.json` is the update manifest an installed application reads. `Continuous Build` checks master daily at 00:00 (UTC+8) and rebuilds the rolling `continuous-build` prerelease only when there are new commits (it can also be dispatched manually): when the workspace version carries a prerelease suffix it also signs and publishes `latest.json` and `downloads.json` as the preview channel manifest at `releases/download/continuous-build/latest.json`, while a stable-looking version skips the manifest because stable clients only read the stable channel.
 
 The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` and the `GITCODE_*` mirror configuration are optional, and the corresponding features are skipped when unset. See the release section of `BUILDING.md` for details.
 

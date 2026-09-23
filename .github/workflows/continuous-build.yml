@@ -30,6 +30,7 @@ jobs:
     outputs:
       main_sha: ${{ steps.metadata.outputs.main_sha }}
       version: ${{ steps.version.outputs.version }}
+      preview: ${{ steps.version.outputs.preview }}
       changed: ${{ steps.metadata.outputs.changed }}
     steps:
       - name: Resolve main commit
@@ -71,6 +72,13 @@ jobs:
         run: |
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          # 只有预发布版本号才会走预览通道：正式版本号的快照和正式发布是同一个
+          # 版本，客户端只会去读稳定通道的清单，发预览清单反而会让更旧的预览版
+          # 本看到一条装不上的更新。
+          case "${version}" in
+            *-*) echo "preview=true" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "preview=false" >> "${GITHUB_OUTPUT}" ;;
+          esac
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -146,7 +154,7 @@ jobs:
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
-          ZZCLAWTERM_ARTIFACT_VERSION: continuous-build
+          ZZCLAWTERM_ARTIFACT_VERSION: ${{ needs.prepare.outputs.version }}
           ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
           ZZCLAWTERM_VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
@@ -158,8 +166,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: >-
           python scripts/release/verify_native_package.py
-          --target "${TARGET}" --version "${VERSION}"
-          --artifact-version continuous-build --dist dist
+          --target "${TARGET}" --version "${VERSION}" --dist dist
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
@@ -197,7 +204,92 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: >-
           python3 scripts/ci/check_release_assets.py --dist release-assets
-          --version "${VERSION}" --artifact-version continuous-build
+          --version "${VERSION}"
+      - name: Write snapshot release notes
+        shell: bash
+        env:
+          MAIN_SHA: ${{ needs.prepare.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          Rolling snapshot of the master branch, rebuilt daily at 00:00 (UTC+8) when master has new commits, or on manual dispatch.
+
+          Source commit: ${MAIN_SHA}
+
+          This prerelease is overwritten after every successful snapshot build and is intended for testing only.
+          EOF
+      - name: Install Node.js
+        if: needs.prepare.outputs.preview == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install signature verification tool
+        if: needs.prepare.outputs.preview == 'true'
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Prepare updater signing key
+        if: needs.prepare.outputs.preview == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_B64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_B64:-}" || -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
+            echo 'Tauri updater signing key and password are required' >&2
+            exit 1
+          fi
+          key_text="$(printf '%s' "${TAURI_SIGNING_PRIVATE_KEY_B64}" | base64 --decode)"
+          delimiter="TAURI_KEY_$(openssl rand -hex 12)"
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<${delimiter}"
+            printf '%s\n' "${key_text}"
+            echo "${delimiter}"
+          } >> "${GITHUB_ENV}"
+      - name: Sign updater artifacts
+        if: needs.prepare.outputs.preview == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_UPDATER_PUBLIC_KEY_B64: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBM0E2Mzg3MzNGOUM3MDYKUldRR3gva3poMk02eXFGbGhobkVuaFVCZ0V2bnFheFRGQVlnVS9pSmFxRGc4WXNaMmZYeUZOM1cK
+        run: |
+          set -euo pipefail
+          printf '%s' "${TAURI_UPDATER_PUBLIC_KEY_B64}" | base64 --decode > "${RUNNER_TEMP}/zzclawterm-updater.pub"
+          files=(
+            "release-assets/ZzClawTerm_${VERSION}_macos_arm64.app.tar.gz"
+            "release-assets/ZzClawTerm_${VERSION}_macos_x64.app.tar.gz"
+            "release-assets/ZzClawTerm_${VERSION}_linux_arm64.AppImage"
+            "release-assets/ZzClawTerm_${VERSION}_linux_x64.AppImage"
+            "release-assets/ZzClawTerm_${VERSION}_windows_arm64-setup.exe"
+            "release-assets/ZzClawTerm_${VERSION}_windows_x64-setup.exe"
+          )
+          for file in "${files[@]}"; do
+            npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "${file}"
+            # tauri signer 的 .sig 是 base64 包裹的整体 blob，正是 latest.json 的
+            # signature 字段需要的形态；解码出标准 minisign 副本用于校验。
+            base64 --decode "${file}.sig" > "${RUNNER_TEMP}/verify.sig"
+            minisign -Vm "${file}" -p "${RUNNER_TEMP}/zzclawterm-updater.pub" -x "${RUNNER_TEMP}/verify.sig"
+          done
+      - name: Generate checksums and update manifest
+        if: needs.prepare.outputs.preview == 'true'
+        shell: bash
+        env:
+          BASE_URL: https://github.com/${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/generate_release_metadata.py \
+            --dist release-assets --version "${VERSION}" --tag "${SNAPSHOT_TAG}" \
+            --base-url "${BASE_URL}" --notes-file release-notes.md \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          rm -- release-assets/*.sig
+      - name: Report a snapshot without preview channel
+        if: needs.prepare.outputs.preview != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          echo "::notice::snapshot version ${VERSION} is not a prerelease, so no preview update manifest is published"
       - name: Move snapshot tag
         shell: bash
         env:
@@ -217,13 +309,6 @@ jobs:
           MAIN_SHA: ${{ needs.prepare.outputs.main_sha }}
         run: |
           set -euo pipefail
-          cat > release-notes.md <<EOF
-          Rolling snapshot of the master branch, rebuilt daily at 00:00 (UTC+8) when master has new commits, or on manual dispatch.
-
-          Source commit: ${MAIN_SHA}
-
-          This prerelease is overwritten after every successful snapshot build and is intended for testing only.
-          EOF
           if gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --title 'Continuous Build' --notes-file release-notes.md --prerelease
             while IFS= read -r asset; do

@@ -139,7 +139,7 @@ python scripts/release/verify_native_package.py --target "${TARGET}" --version "
 
 发布前还会对六目标合并后的资产集合执行 `scripts/ci/check_release_assets.py`，拒绝缺失或多余的产物。
 
-`ZZCLAWTERM_ARTIFACT_VERSION` 只改变产物文件名中的版本段，包内元数据仍使用 workspace 的 SemVer。该接口仅供手动快照构建使用，打包和验包必须传入同一个值：
+`ZZCLAWTERM_ARTIFACT_VERSION` 只改变产物文件名中的版本段，包内元数据仍使用 workspace 的 SemVer。该接口只留给本机手工验证；发布链路一律用 workspace 版本号当文件名段，因为更新器正是按清单里的版本号推导文件名：
 
 ```bash
 ZZCLAWTERM_ARTIFACT_VERSION=continuous-build \
@@ -149,7 +149,7 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
-正式标签在验包后发布 GitHub Release（产物内含 `downloads.json` 与签名的 `latest.json`），随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 只用于让已安装的旧 Tauri 版本迁移到 GPUI。`Continuous Build` 每天东八区 0:00 自动检查 master，有新提交才重建并覆盖 `continuous-build` prerelease（也可手动触发），不发布到外部分发渠道。
+正式标签在验包后发布 GitHub Release（产物内含 `downloads.json` 与签名的 `latest.json`），随后可触发 GitCode 镜像同步。官网读取 `downloads.json`；签名的 `latest.json` 是已安装应用读取的更新清单。`Continuous Build` 每天东八区 0:00 自动检查 master，有新提交才重建并覆盖 `continuous-build` prerelease（也可手动触发）：当 workspace 版本号带预发布后缀时，它同样会签名并发布 `latest.json` 与 `downloads.json`，作为预览通道（`releases/download/continuous-build/latest.json`）的清单；版本号是正式版形态时则不生成清单，因为正式版客户端只读稳定通道。
 
 Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` 与 GitCode 同步的 `GITCODE_*` 配置均为可选，未配置时对应功能跳过。详见根目录 `BUILDING.md` 的发布一节。
 

@@ -142,5 +142,42 @@ class GenerateReleaseMetadataTests(unittest.TestCase):
                     self.assertIn(f"/releases/download/v{version}/", platform["url"])
 
 
+    def test_snapshot_manifest_serves_the_preview_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            version = "0.1.0-preview.3"
+            self.make_release(directory, version)
+            downloads, updater = generate_release_metadata.generate(
+                directory,
+                version=version,
+                tag=generate_release_metadata.SNAPSHOT_TAG,
+                base_url=BASE_URL,
+                notes="snapshot",
+                pub_date="2026-09-23T00:00:00Z",
+            )
+
+            self.assertEqual(updater["version"], version)
+            for manifest in (downloads, updater):
+                for platform in manifest["platforms"].values():
+                    self.assertIn(
+                        f"/releases/download/{generate_release_metadata.SNAPSHOT_TAG}/",
+                        platform["url"],
+                    )
+
+    def test_snapshot_manifest_rejects_a_stable_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.make_release(directory, "0.1.0")
+            with self.assertRaisesRegex(ValueError, "prerelease version"):
+                generate_release_metadata.generate(
+                    directory,
+                    version="0.1.0",
+                    tag=generate_release_metadata.SNAPSHOT_TAG,
+                    base_url=BASE_URL,
+                    notes="",
+                    pub_date="2026-09-23T00:00:00Z",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,10 @@ UPDATER_ARTIFACTS = {
 
 CHANNEL_MANIFEST_NAMES = ("latest.json", "downloads.json")
 
+# 滚动快照 tag。预览通道的客户端从这个 tag 取 latest.json，具体装哪个版本由
+# 清单里的 version 决定，因此产物 URL 必须走 /releases/download/<tag>/。
+SNAPSHOT_TAG = "continuous-build"
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -73,7 +77,15 @@ def generate(
     pub_date: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
     version = package_native.validate_version(version)
-    if tag != f"v{version}":
+    if tag == SNAPSHOT_TAG:
+        # 快照 tag 是滚动的，不接受 "tag == v<version>" 这条约束；但只有预发布
+        # 版本号才会被预览通道接受，正式版本号的清单没有客户端会读，还会让更旧的
+        # 预览版本看到一条装不上的更新。
+        if "-" not in version:
+            raise ValueError(
+                f"snapshot manifests require a prerelease version, got {version}"
+            )
+    elif tag != f"v{version}":
         raise ValueError(f"release tag {tag} does not match version {version}")
 
     expected = expected_artifacts(version)
