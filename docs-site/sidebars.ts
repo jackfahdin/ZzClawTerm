@@ -43,6 +43,7 @@ const sidebars: SidebarsConfig = {
         'development/setup',
         'development/frontend',
         'development/backend',
+        'development/update-signing',
         'development/contributing',
       ],
     },
