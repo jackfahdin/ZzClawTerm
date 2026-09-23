@@ -8,7 +8,7 @@ use zzclawterm_core::updater::{
 };
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
-const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyQUYxQTA2NTYyQTNEOTkKUldTWlBTcFdCaHF2Z29pS0pEdE13U3ZUMVZVTlpGVmQ0YlU2cWlORkdNWU1BY005MU01YjFiU2IK";
+const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBM0E2Mzg3MzNGOUM3MDYKUldRR3gva3poMk02eXFGbGhobkVuaFVCZ0V2bnFheFRGQVlnVS9pSmFxRGc4WXNaMmZYeUZOM1cK";
 
 #[derive(Clone, Debug)]
 pub(crate) enum DownloadState {
@@ -349,5 +349,32 @@ mod tests {
     fn malformed_update_signatures_are_rejected_before_download() {
         assert!(decode_update_signature("not-base64").is_err());
         assert!(decode_update_signature(&STANDARD.encode("not a minisign signature")).is_err());
+    }
+
+    /// 内置公钥必须与发布流程用来签名的公钥一致。只断言"能解析"是不够的：换了
+    /// 签名密钥却忘了同步这里时，每次更新都会在验签阶段以 UnexpectedKeyId 失败，
+    /// 而单测与构建都不会察觉。
+    #[test]
+    fn embedded_signing_key_matches_the_publishing_workflows() {
+        let workflows =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&workflows).expect("read workflows directory") {
+            let path = entry.expect("workflow directory entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("yml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read workflow");
+            for line in text.lines() {
+                if let Some(value) = line.trim().strip_prefix("TAURI_UPDATER_PUBLIC_KEY_B64: ") {
+                    checked += 1;
+                    assert_eq!(PUBLIC_KEY, value.trim(), "{}", path.display());
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no workflow declares TAURI_UPDATER_PUBLIC_KEY_B64"
+        );
     }
 }
