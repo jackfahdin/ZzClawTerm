@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: continuous-build
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -209,6 +209,7 @@ jobs:
         run: |
           echo "::notice::snapshot version ${VERSION} is not a prerelease, so no preview update manifest is published"
       - name: Create or update snapshot release
+        id: snapshot_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -216,11 +217,13 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo 'existing=true' >> "${GITHUB_OUTPUT}"
             gh release edit "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --title 'Continuous Build' --notes-file release-notes.md --prerelease
             while IFS= read -r asset; do
               [[ -z "${asset}" ]] || gh release delete-asset "${SNAPSHOT_TAG}" "${asset}" --repo "${GITHUB_REPOSITORY}" --yes
             done < <(gh release view "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')
           else
+            echo 'existing=false' >> "${GITHUB_OUTPUT}"
             gh release create "${SNAPSHOT_TAG}" --repo "${GITHUB_REPOSITORY}" --target "${MAIN_SHA}" --title 'Continuous Build' --notes-file release-notes.md --prerelease
           fi
           gh release upload "${SNAPSHOT_TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber
@@ -243,6 +246,13 @@ jobs:
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${SNAPSHOT_TAG}" -f sha="${MAIN_SHA}" >/dev/null
           fi
+      - name: Refresh snapshot publication date
+        if: steps.snapshot_release.outputs.existing == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci/refresh_snapshot_release.py
+          --repo "${GITHUB_REPOSITORY}" --tag "${SNAPSHOT_TAG}"
       - name: Mark snapshot complete
         shell: bash
         env:

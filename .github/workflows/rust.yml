@@ -116,6 +116,7 @@ jobs:
           scripts.tests.test_verify_native_package
           scripts.tests.test_generate_release_metadata
           scripts.tests.test_gitcode_release_upload
+          scripts.tests.test_refresh_snapshot_release
           scripts.tests.test_verify_remote_assets
 
   workflows:
