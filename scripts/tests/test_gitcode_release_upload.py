@@ -226,6 +226,24 @@ class GitCodeReleaseUploadTests(unittest.TestCase):
         self.assertEqual(session.calls[-1][1], b"package contents")
         self.assertFalse(backup.exists())
 
+    def test_identical_attachment_is_kept_without_deletion_or_upload(self) -> None:
+        backup = Path(self.directory.name) / "backup" / "release.zip"
+        session = FakeSession(FakeResponse(200), self.asset.read_bytes())
+
+        def request(*_args, **_kwargs):
+            raise AssertionError("unchanged attachment must not be modified")
+
+        success, reason, restored = replace_asset_with_backup(
+            session, request, "/releases/v0.0.5",
+            {"id": 12, "name": "release.zip", "type": "attach",
+             "browser_download_url": "https://gitcode.com/a/release.zip"},
+            self.asset, backup,
+        )
+
+        self.assertEqual((success, reason, restored), (True, "", False))
+        self.assertEqual(len(session.calls), 1)
+        self.assertFalse(backup.exists())
+
     def test_failed_delete_keeps_existing_attachment(self) -> None:
         backup = Path(self.directory.name) / "backup" / "release.zip"
         session = FakeSession(FakeResponse(200))

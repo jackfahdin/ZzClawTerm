@@ -3,6 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
+import hashlib
 import json
 import re
 import time
@@ -74,6 +75,13 @@ def replace_asset_with_backup(
     """Replace one attachment, restoring the old bytes if replacement fails."""
     if not backup_ready:
         backup_release_asset(session, previous, backup)
+    if backup.stat().st_size == asset.stat().st_size:
+        with backup.open("rb") as old_file, asset.open("rb") as new_file:
+            if hashlib.file_digest(old_file, "sha256").digest() == hashlib.file_digest(
+                new_file, "sha256"
+            ).digest():
+                backup.unlink()
+                return True, "", False
     releases_path, tag = release_path.rsplit("/", 1)
     try:
         replace_release_assets(
