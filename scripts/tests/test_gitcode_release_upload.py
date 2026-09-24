@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.ci.gitcode_release_upload import upload_asset
+from scripts.ci.gitcode_release_upload import (
+    backup_release_asset,
+    replace_release_assets,
+    replace_asset_with_backup,
+    upload_asset,
+)
 
 
 class FakeResponse:
@@ -21,6 +26,23 @@ class FakeSession:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+    def get(self, url, *, stream, timeout):
+        self.calls.append((url, stream, timeout))
+        return FakeDownloadResponse()
+
+
+class FakeDownloadResponse:
+    status_code = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def iter_content(self, chunk_size):
+        yield b"previous package"
 
 
 class GitCodeReleaseUploadTests(unittest.TestCase):
@@ -86,3 +108,136 @@ class GitCodeReleaseUploadTests(unittest.TestCase):
                 result, _, _ = self.upload(info, response)
                 self.assertFalse(result[0])
                 self.assertNotIn("Signature=", result[1])
+
+    def test_replacement_deletes_only_uploaded_assets_and_waits_for_removal(self) -> None:
+        assets = [
+            {"id": 12, "name": "old.zip", "type": "attach"},
+            {"name": "v0.0.5.zip", "type": "source"},
+        ]
+
+        def request(method, path, **_kwargs):
+            if method == "DELETE":
+                self.assertEqual(path, "/releases/v0.0.5/attach_files/12")
+                assets[:] = [asset for asset in assets if asset.get("id") != 12]
+                return None
+            self.assertEqual(path, "/releases/tags/v0.0.5")
+            return {"assets": assets.copy()}
+
+        replace_release_assets(request, "/releases/v0.0.5", {"assets": assets.copy()}, sleep=lambda _: None)
+        self.assertEqual(assets, [{"name": "v0.0.5.zip", "type": "source"}])
+
+    def test_replacement_rejects_attachment_without_deletable_id(self) -> None:
+        release = {"assets": [{"name": "old.zip", "type": "attach"}]}
+        with self.assertRaisesRegex(RuntimeError, "no id"):
+            replace_release_assets(lambda *_args: None, "/releases/v0.0.5", release)
+
+    def test_replacement_can_delete_only_a_named_attachment(self) -> None:
+        assets = [
+            {"id": 12, "name": "old.zip", "type": "attach"},
+            {"id": 13, "name": "keep.zip", "type": "attach"},
+        ]
+
+        def request(method, path, **_kwargs):
+            if method == "DELETE":
+                self.assertEqual(path, "/releases/v0.0.5/attach_files/12")
+                assets.pop(0)
+                return None
+            return {"assets": assets.copy()}
+
+        replace_release_assets(
+            request, "/releases/v0.0.5", {"assets": assets.copy()},
+            names={"old.zip"}, sleep=lambda _: None,
+        )
+        self.assertEqual([asset["name"] for asset in assets], ["keep.zip"])
+
+    def test_previous_attachment_is_backed_up_before_deletion(self) -> None:
+        session = FakeSession(FakeResponse(200))
+        backup = Path(self.directory.name) / "old.zip"
+        backup_release_asset(
+            session,
+            {"name": "old.zip", "browser_download_url": "https://gitcode.com/a/old.zip"},
+            backup,
+        )
+        self.assertEqual(backup.read_bytes(), b"previous package")
+
+    def test_failed_deletion_check_restores_old_attachment(self) -> None:
+        assets = [{"id": 12, "name": "release.zip", "type": "attach"}]
+        backup = Path(self.directory.name) / "backup" / "release.zip"
+        session = FakeSession(FakeResponse(200))
+        get_calls = 0
+
+        def request(method, path, **_kwargs):
+            nonlocal get_calls
+            if method == "DELETE":
+                assets.clear()
+                return None
+            if path.endswith("/upload_url"):
+                return {"url": self.signed_url, "headers": self.headers}
+            get_calls += 1
+            if get_calls == 1:
+                raise TimeoutError("GitCode did not answer the deletion check")
+            if get_calls == 2:
+                return {"assets": assets.copy()}
+            assets.append({"id": 13, "name": "release.zip", "type": "attach"})
+            return {"assets": assets.copy()}
+
+        success, reason, restored = replace_asset_with_backup(
+            session, request, "/releases/v0.0.5",
+            {"id": 12, "name": "release.zip", "type": "attach",
+             "browser_download_url": "https://gitcode.com/a/release.zip"},
+            self.asset, backup, sleep=lambda _: None,
+        )
+
+        self.assertFalse(success)
+        self.assertTrue(restored)
+        self.assertIn("TimeoutError", reason)
+        self.assertEqual(session.calls[-1][1], b"previous package")
+
+    def test_successful_replacement_uploads_new_bytes(self) -> None:
+        assets = [{"id": 12, "name": "release.zip", "type": "attach"}]
+        backup = Path(self.directory.name) / "backup" / "release.zip"
+        session = FakeSession(FakeResponse(200))
+
+        def request(method, path, **_kwargs):
+            if method == "DELETE":
+                assets.clear()
+                return None
+            if path.endswith("/upload_url"):
+                return {"url": self.signed_url, "headers": self.headers}
+            if not assets and any(call[1] == b"package contents" for call in session.calls if len(call) == 4):
+                assets.append({"id": 13, "name": "release.zip", "type": "attach"})
+            return {"assets": assets.copy()}
+
+        success, reason, restored = replace_asset_with_backup(
+            session, request, "/releases/v0.0.5",
+            {"id": 12, "name": "release.zip", "type": "attach",
+             "browser_download_url": "https://gitcode.com/a/release.zip"},
+            self.asset, backup, sleep=lambda _: None,
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(reason, "")
+        self.assertFalse(restored)
+        self.assertEqual(session.calls[-1][1], b"package contents")
+        self.assertFalse(backup.exists())
+
+    def test_failed_delete_keeps_existing_attachment(self) -> None:
+        backup = Path(self.directory.name) / "backup" / "release.zip"
+        session = FakeSession(FakeResponse(200))
+
+        def request(method, path, **_kwargs):
+            if method == "DELETE":
+                raise TimeoutError("deletion failed")
+            return {"assets": [{"id": 12, "name": "release.zip", "type": "attach"}]}
+
+        success, reason, restored = replace_asset_with_backup(
+            session, request, "/releases/v0.0.5",
+            {"id": 12, "name": "release.zip", "type": "attach",
+             "browser_download_url": "https://gitcode.com/a/release.zip"},
+            self.asset, backup, sleep=lambda _: None,
+        )
+
+        self.assertFalse(success)
+        self.assertTrue(restored)
+        self.assertIn("TimeoutError", reason)
+        self.assertEqual(len(session.calls), 1)

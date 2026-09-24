@@ -1,11 +1,13 @@
 name: Sync to GitCode
 
 on:
-  push:
+  workflow_run:
+    workflows: ['Rust', 'Docs']
+    types: [completed]
     branches: [master]
-    tags: ['v*']
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -15,21 +17,34 @@ concurrency:
 jobs:
   sync:
     name: Mirror refs to GitCode
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Confirm Rust and Docs passed for the current master commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 scripts/ci/gitcode_mirror_gate.py master
+          --repo "${GITHUB_REPOSITORY}" --sha "${HEAD_SHA}"
+
       - name: Push refs to GitCode
+        if: steps.gate.outputs.ready == 'true'
         shell: bash
         env:
           GITCODE_OWNER: ${{ vars.GITCODE_OWNER }}
           GITCODE_REPO: ${{ vars.GITCODE_REPO }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           if [[ -z "${GITCODE_OWNER:-}" || -z "${GITCODE_REPO:-}" || -z "${GITCODE_TOKEN:-}" ]]; then
@@ -37,8 +52,4 @@ jobs:
             exit 0
           fi
           remote="https://${GITCODE_OWNER}:${GITCODE_TOKEN}@gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git"
-          if [[ "${GITHUB_REF_TYPE}" == 'tag' ]]; then
-            git push "${remote}" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
-          else
-            git push "${remote}" "refs/heads/${GITHUB_REF_NAME}:refs/heads/${GITHUB_REF_NAME}"
-          fi
+          git push "${remote}" "${HEAD_SHA}:refs/heads/master"
