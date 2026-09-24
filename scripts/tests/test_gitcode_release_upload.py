@@ -18,9 +18,14 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, response: FakeResponse | Exception, download=b"previous package") -> None:
+    def __init__(
+        self, response: FakeResponse | Exception, download=b"previous package",
+        get_failures=0,
+    ) -> None:
         self.response = response
         self.download = download
+        self.get_failures = get_failures
+        self.download_headers = {"Content-Length": str(len(download)), "Content-Type": "application/octet-stream"}
         self.calls: list[tuple[str, bytes, dict[str, str], int]] = []
 
     def put(self, url, *, data, headers, timeout):
@@ -31,14 +36,18 @@ class FakeSession:
 
     def get(self, url, *, stream, timeout):
         self.calls.append((url, stream, timeout))
-        return FakeDownloadResponse(self.download)
+        if self.get_failures:
+            self.get_failures -= 1
+            raise ConnectionResetError("connection reset by peer")
+        return FakeDownloadResponse(self.download, self.download_headers)
 
 
 class FakeDownloadResponse:
     status_code = 200
 
-    def __init__(self, content):
+    def __init__(self, content, headers):
         self.content = content
+        self.headers = headers
 
     def __enter__(self):
         return self
@@ -164,6 +173,56 @@ class GitCodeReleaseUploadTests(unittest.TestCase):
             backup,
         )
         self.assertEqual(backup.read_bytes(), b"previous package")
+
+    def test_backup_retries_a_reset_connection(self) -> None:
+        session = FakeSession(FakeResponse(200), get_failures=1)
+        backup = Path(self.directory.name) / "old.zip"
+        backup_release_asset(
+            session,
+            {"name": "old.zip", "browser_download_url": "https://gitcode.com/a/old.zip"},
+            backup, sleep=lambda _: None,
+        )
+        self.assertEqual(backup.read_bytes(), b"previous package")
+        self.assertEqual(len(session.calls), 2)
+
+    def test_failed_backup_keeps_the_old_attachment(self) -> None:
+        session = FakeSession(FakeResponse(200), get_failures=3)
+        backup = Path(self.directory.name) / "backup" / "release.zip"
+
+        def request(*_args, **_kwargs):
+            raise AssertionError("old attachment must not be deleted")
+
+        success, reason, restored = replace_asset_with_backup(
+            session, request, "/releases/v0.0.5",
+            {"id": 12, "name": "release.zip", "type": "attach",
+             "browser_download_url": "https://gitcode.com/a/release.zip"},
+            self.asset, backup, sleep=lambda _: None,
+        )
+        self.assertEqual((success, restored), (False, True))
+        self.assertIn("backing up", reason)
+        self.assertEqual(len(session.calls), 3)
+        self.assertFalse(backup.exists())
+
+    def test_html_or_truncated_backup_never_deletes_the_old_attachment(self) -> None:
+        for headers in (
+            {"Content-Type": "text/html", "Content-Length": "16"},
+            {"Content-Type": "application/octet-stream", "Content-Length": "999"},
+        ):
+            with self.subTest(headers=headers):
+                session = FakeSession(FakeResponse(200), b"old file contents")
+                session.download_headers = headers
+
+                def request(*_args, **_kwargs):
+                    raise AssertionError("old attachment must not be deleted")
+
+                success, _, restored = replace_asset_with_backup(
+                    session, request, "/releases/v0.0.5",
+                    {"id": 12, "name": "release.zip", "type": "attach",
+                     "browser_download_url": "https://gitcode.com/a/release.zip"},
+                    self.asset, Path(self.directory.name) / "backup.zip",
+                    sleep=lambda _: None,
+                )
+                self.assertEqual((success, restored), (False, True))
 
     def test_failed_deletion_check_restores_old_attachment(self) -> None:
         assets = [{"id": 12, "name": "release.zip", "type": "attach"}]

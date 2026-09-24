@@ -51,21 +51,38 @@ def replace_release_assets(
     raise RuntimeError("GitCode did not remove old release attachments")
 
 
-def backup_release_asset(session, asset: dict, destination: Path) -> None:
+def backup_release_asset(session, asset: dict, destination: Path, *, sleep=time.sleep) -> None:
     """Keep the old file available for rollback if its replacement upload fails."""
     url = asset.get("browser_download_url")
     host = urlsplit(url).hostname if isinstance(url, str) else None
     if not host or (host != "gitcode.com" and not host.endswith(".gitcode.com")):
         raise RuntimeError(f"GitCode attachment {asset.get('name')} has no trusted download URL")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with session.get(url, stream=True, timeout=600) as response:
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"GitCode attachment {asset.get('name')} backup failed: HTTP {response.status_code}"
-            )
-        with destination.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                handle.write(chunk)
+    for attempt in range(1, 4):
+        try:
+            with session.get(url, stream=True, timeout=(20, 120)) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type:
+                    raise RuntimeError("GitCode returned an HTML page instead of an attachment")
+                expected_length = response.headers.get("Content-Length")
+                received = 0
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+                        received += len(chunk)
+                if expected_length is not None and received != int(expected_length):
+                    raise RuntimeError("GitCode attachment backup was truncated")
+            return
+        except Exception as error:
+            destination.unlink(missing_ok=True)
+            if attempt == 3:
+                raise RuntimeError(
+                    f"GitCode attachment {asset.get('name')} backup failed after 3 attempts: "
+                    f"{type(error).__name__}"
+                ) from error
+            sleep(5 * attempt)
 
 
 def replace_asset_with_backup(
@@ -73,8 +90,11 @@ def replace_asset_with_backup(
     backup: Path, *, sleep=time.sleep, backup_ready=False,
 ) -> tuple[bool, str, bool]:
     """Replace one attachment, restoring the old bytes if replacement fails."""
-    if not backup_ready:
-        backup_release_asset(session, previous, backup)
+    try:
+        if not backup_ready:
+            backup_release_asset(session, previous, backup, sleep=sleep)
+    except Exception as error:
+        return False, f"{type(error).__name__} while backing up the old attachment", True
     if backup.stat().st_size == asset.stat().st_size:
         with backup.open("rb") as old_file, asset.open("rb") as new_file:
             if hashlib.file_digest(old_file, "sha256").digest() == hashlib.file_digest(

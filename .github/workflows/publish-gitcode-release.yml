@@ -269,6 +269,7 @@ jobs:
               if not upload_small or asset.stat().st_size > max_bytes:
                   fallbacks.append((asset.name, github_asset_url(asset.name), "附件过大，从 GitHub Releases 下载"))
                   continue
+              print(f"Synchronizing GitCode attachment {asset.name}", flush=True)
               previous = old_assets.get(asset.name)
               backup = backup_dir / asset.name if previous else None
               if previous:
