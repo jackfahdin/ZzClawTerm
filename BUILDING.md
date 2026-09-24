@@ -361,8 +361,10 @@ git push origin v0.0.1
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_B64` | 更新器签名私钥（base64） |
 | Settings → Secrets | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 签名私钥口令 |
 
-另有 `publish-gitcode-release.yml` 可把发布同步到 GitCode。Release 工作流
-成功后会自动触发，也可在 Actions 页面手动运行并指定 tag。未配置时整个
+`sync-gitcode.yml` 只有在同一 master 提交的 Rust 和 Docs CI 都成功后才
+同步源码分支；版本 tag 不随 push 立即同步。`publish-gitcode-release.yml`
+在 Release 工作流完成构建、附件校验和公开发布后才同步 tag 与附件，也可在
+Actions 页面手动指定已成功发布的 tag 重试。未配置时整个
 任务跳过（结果为成功并附 notice），不会报错。启用需要：
 
 | 位置 | 名称 | 用途 |
@@ -375,10 +377,12 @@ git push origin v0.0.1
 `MAX_GITCODE_ASSET_MB`（默认 `99`，超过该大小的附件不上传到 GitCode，
 改在 Release 说明中放 GitHub 备用链接）。
 大小上限内的附件上传失败时，同样保留 GitHub 备用链接，但同步任务会报错；
-排查 Actions 日志后可手动指定同一 tag 重跑。
+排查 Actions 日志后可手动指定同一 tag 重跑。重跑会删除 GitCode 上该
+Release 的旧普通附件，再上传本次 GitHub 附件；平台生成的源码包不会删除。
 
-发布 tag 不存在于 GitCode 时，工作流会用令牌自行推送该 tag，不依赖
-GitCode 的镜像同步功能。
+发布 tag 不存在于 GitCode 时，工作流会用令牌自行推送；同名 tag 已存在
+但指向不同提交时，会在校验 GitHub 发布成功后带租约覆盖 GitCode tag。
+GitHub 正式版同一 tag 重跑会重新暂存 Release、替换旧附件并校验后公开。
 
 CI 使用 GitHub 官方托管 Runner，Action 默认跟随已核实的最新稳定 Major。
 若以后改用 self-hosted Runner，升级 Action Major 前须逐项检查最低 Runner
