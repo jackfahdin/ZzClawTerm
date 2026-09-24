@@ -33,7 +33,7 @@ resolver = "3"
 exclude = ["temp"]
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 authors = ["Jackfahdin"]
 license = "Apache-2.0"
