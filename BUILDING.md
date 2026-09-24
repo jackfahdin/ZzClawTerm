@@ -348,6 +348,11 @@ git push origin v0.0.1
    Tauri/minisign 签名、生成 `SHA256SUMS`、`downloads.json`、
    `latest.json`，创建或更新 GitHub Release 并上传全部产物
 
+每日构建复用 `continuous-build` 预发布版。已有快照在附件校验通过后会短暂
+转为草稿并重新发布，以刷新 GitHub Release 列表中的发布时间；它不会成为
+正式版的 `Latest`。若重新发布失败，工作流会尝试恢复公开状态并在下一次
+定时运行时重试。
+
 发布前需要在仓库配置以下内容：
 
 | 位置 | 名称 | 用途 |
