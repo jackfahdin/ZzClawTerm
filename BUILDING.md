@@ -384,6 +384,15 @@ Release 的旧普通附件，再上传本次 GitHub 附件；平台生成的源�
 但指向不同提交时，会在校验 GitHub 发布成功后带租约覆盖 GitCode tag。
 GitHub 正式版同一 tag 重跑会重新暂存 Release、替换旧附件并校验后公开。
 
+正式版安装程序的更新对话框可选自动、GitCode 或 GitHub。自动模式优先读取
+GitCode 的 `update-stable` Release 附件 `latest.json`，并限时比较 GitHub
+版本；GitCode 不可用或落后时使用 GitHub；
+显式选择只使用指定来源。GitCode 发行版全部附件同步成功、且该 tag 仍是
+GitHub 最新稳定版、所需更新附件与版本清单均已镜像后，工作流才替换
+`update-stable/latest.json`。安装包仍按
+原有 minisign 签名校验。预览版目前只从 GitHub `continuous-build` 更新，
+因为该快照尚未同步到 GitCode。
+
 CI 使用 GitHub 官方托管 Runner，Action 默认跟随已核实的最新稳定 Major。
 若以后改用 self-hosted Runner，升级 Action Major 前须逐项检查最低 Runner
 版本、Node.js runtime 要求和 Breaking Changes，再调整该 Runner 的版本与环境。

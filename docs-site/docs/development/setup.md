@@ -153,6 +153,8 @@ python scripts/release/verify_native_package.py \
 
 正式标签先把 release 建成草稿，上传全部产物后用 `scripts/ci/verify_remote_assets.py` 逐个比对远端 asset 的大小与 sha256 摘要，一致才公开（预发布版本带 `prerelease` 标记，不会占用 `releases/latest`）；同一 tag 重跑会重新暂存 release、替换旧附件并校验后公开。公开后的产物内含 `downloads.json` 与签名的 `latest.json`，GitHub 发布成功后才触发 GitCode tag 与附件同步。官网读取 `downloads.json`；签名的 `latest.json` 是已安装应用读取的更新清单。`Continuous Build` 每天东八区 0:00 自动检查 master，只有当前提交的快照已校验才跳过重建（也可手动触发）。快照覆盖远端附件并校验摘要后才记录完成状态，失败的覆盖会在下次定时运行时重试；已有快照会短暂转为草稿并重新发布，以刷新 GitHub 列表中的发布时间，同时保持预发布状态。当 workspace 版本号带预发布后缀时，它还会签名并发布 `latest.json` 与 `downloads.json`，作为预览通道（`releases/download/continuous-build/latest.json`）的清单；版本号是正式版形态时则不生成清单，因为正式版客户端只读稳定通道。
 
+正式版的更新对话框可选自动、GitCode、GitHub 来源。自动模式优先读取 GitCode 的固定 `update-stable/latest.json` 附件，并限时比较 GitHub 版本；GitCode 不可用或落后时使用 GitHub。固定清单仅在 GitCode 对应版本的所需更新附件与版本清单同步成功、且该版本仍为 GitHub 最新稳定版时更新。安装包继续验证 minisign 签名。预览版继续使用 GitHub `continuous-build`，因为该快照暂未镜像到 GitCode。
+
 Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_CLIENT_ID` 与 GitCode 同步的 `GITCODE_*` 配置均为可选，未配置时对应功能跳过。详见根目录 `BUILDING.md` 的发布一节；更新签名密钥的用途、存放位置与轮换流程见 [更新签名密钥与轮换](./update-signing.md)。
 
 ### 原生工具与手工验收边界
