@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.ci.gitcode_release_upload import (
     backup_release_asset,
+    publish_stable_manifest,
     replace_release_assets,
     replace_asset_with_backup,
     upload_asset,
@@ -17,8 +18,9 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, response: FakeResponse | Exception) -> None:
+    def __init__(self, response: FakeResponse | Exception, download=b"previous package") -> None:
         self.response = response
+        self.download = download
         self.calls: list[tuple[str, bytes, dict[str, str], int]] = []
 
     def put(self, url, *, data, headers, timeout):
@@ -29,11 +31,14 @@ class FakeSession:
 
     def get(self, url, *, stream, timeout):
         self.calls.append((url, stream, timeout))
-        return FakeDownloadResponse()
+        return FakeDownloadResponse(self.download)
 
 
 class FakeDownloadResponse:
     status_code = 200
+
+    def __init__(self, content):
+        self.content = content
 
     def __enter__(self):
         return self
@@ -42,7 +47,7 @@ class FakeDownloadResponse:
         return False
 
     def iter_content(self, chunk_size):
-        yield b"previous package"
+        yield self.content
 
 
 class GitCodeReleaseUploadTests(unittest.TestCase):
@@ -240,4 +245,74 @@ class GitCodeReleaseUploadTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertTrue(restored)
         self.assertIn("TimeoutError", reason)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_stable_manifest_is_published_only_after_upload_registration(self) -> None:
+        manifest = Path(self.directory.name) / "latest.json"
+        manifest.write_text('{"version":"0.0.5"}', encoding="utf-8")
+        session = FakeSession(FakeResponse(200))
+        created = []
+
+        def request(method, path, **kwargs):
+            if method == "GET" and path.endswith("/tags/update-stable"):
+                if not created:
+                    return None
+                return {"assets": [{"id": 20, "name": "latest.json", "type": "attach"}]}
+            if method == "POST":
+                created.append(kwargs["data"])
+                return {}
+            if path.endswith("/upload_url"):
+                return {"url": self.signed_url, "headers": self.headers}
+            raise AssertionError((method, path))
+
+        publish_stable_manifest(
+            session, request, "/repos/owner/repo/releases", manifest, "a0dc46d",
+            sleep=lambda _: None,
+        )
+        self.assertEqual(created[0]["tag_name"], "update-stable")
+        self.assertEqual(session.calls[-1][1], b'{"version":"0.0.5"}')
+
+    def test_stable_manifest_replacement_preserves_previous_file_on_failure(self) -> None:
+        manifest = Path(self.directory.name) / "latest.json"
+        manifest.write_text('{"version":"0.0.6"}', encoding="utf-8")
+        session = FakeSession(FakeResponse(409), b'{"version":"0.0.5"}')
+        previous = {
+            "id": 20, "name": "latest.json", "type": "attach",
+            "browser_download_url": "https://gitcode.com/a/latest.json",
+        }
+        assets = [previous.copy()]
+
+        def request(method, path, **_kwargs):
+            if method == "DELETE":
+                assets.clear()
+                return None
+            if path.endswith("/upload_url"):
+                return {"url": self.signed_url, "headers": self.headers}
+            return {"assets": assets.copy()}
+
+        with self.assertRaisesRegex(RuntimeError, "stable update manifest"):
+            publish_stable_manifest(
+                session, request, "/repos/owner/repo/releases", manifest, "new-sha",
+                sleep=lambda _: None,
+            )
+        self.assertEqual(session.calls[0][0], "https://gitcode.com/a/latest.json")
+
+    def test_stable_manifest_rejects_an_older_release(self) -> None:
+        manifest = Path(self.directory.name) / "latest.json"
+        manifest.write_text('{"version":"0.0.4"}', encoding="utf-8")
+        session = FakeSession(FakeResponse(200), b'{"version":"0.0.5"}')
+
+        def request(method, path, **_kwargs):
+            self.assertEqual(method, "GET")
+            self.assertTrue(path.endswith("/tags/update-stable"))
+            return {"assets": [{
+                "id": 20, "name": "latest.json", "type": "attach",
+                "browser_download_url": "https://gitcode.com/a/latest.json",
+            }]}
+
+        with self.assertRaisesRegex(RuntimeError, "older version"):
+            publish_stable_manifest(
+                session, request, "/repos/owner/repo/releases", manifest, "old-sha",
+                sleep=lambda _: None,
+            )
         self.assertEqual(len(session.calls), 1)

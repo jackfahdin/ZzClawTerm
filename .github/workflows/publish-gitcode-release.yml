@@ -346,3 +346,117 @@ jobs:
       - name: Cleanup
         if: always()
         run: rm -rf release-assets github-release.json "${RUNNER_TEMP}/gitcode-release-venv" "${RUNNER_TEMP}/gitcode-release-backup"
+
+  stable:
+    name: Publish GitCode stable update channel
+    needs: publish
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: gitcode-stable-update
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Refresh the latest fully mirrored stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITCODE_OWNER}" || -z "${GITCODE_REPO}" || -z "${GITCODE_TOKEN}" ]]; then
+            echo 'GitCode mirror is not configured; skipping the stable channel'
+            exit 0
+          fi
+          tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+          mkdir -p "${RUNNER_TEMP}/stable-release"
+          gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --pattern latest.json --dir "${RUNNER_TEMP}/stable-release"
+          expected_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}^{}" | awk '{print $1}')"
+          [[ -n "${expected_sha}" ]] || expected_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}" | awk '{print $1}')"
+          [[ -n "${expected_sha}" ]]
+          public_remote="https://gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git"
+          mirrored_sha="$(git ls-remote "${public_remote}" "refs/tags/${tag}^{}" | awk '{print $1}')"
+          [[ -n "${mirrored_sha}" ]] || mirrored_sha="$(git ls-remote "${public_remote}" "refs/tags/${tag}" | awk '{print $1}')"
+          if [[ "${expected_sha}" != "${mirrored_sha}" ]]; then
+            echo "${tag} is not mirrored yet; keeping the stable channel unchanged"
+            exit 0
+          fi
+          stable_sha="$(git ls-remote "${public_remote}" refs/tags/update-stable | awk '{print $1}')"
+          if [[ -z "${stable_sha}" ]]; then
+            work="${RUNNER_TEMP}/gitcode-stable-tag"
+            git init -q "${work}"
+            git -C "${work}" fetch -q "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${tag}:refs/tags/${tag}"
+            [[ "$(git -C "${work}" rev-parse "refs/tags/${tag}^{}")" == "${expected_sha}" ]]
+            git -C "${work}" tag update-stable "${expected_sha}"
+            git -C "${work}" push -q \
+              "https://${GITCODE_OWNER}:${GITCODE_TOKEN}@gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git" \
+              refs/tags/update-stable:refs/tags/update-stable
+          fi
+          python3 -m venv "${RUNNER_TEMP}/gitcode-stable-venv"
+          "${RUNNER_TEMP}/gitcode-stable-venv/bin/pip" install --disable-pip-version-check 'requests==2.32.5'
+          export TAG="${tag}" EXPECTED_SHA="${expected_sha}"
+          "${RUNNER_TEMP}/gitcode-stable-venv/bin/python" <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.parse
+
+          import requests
+          from scripts.ci.gitcode_release_upload import backup_release_asset, publish_stable_manifest
+
+          session = requests.Session()
+          api = os.environ["GITCODE_API_BASE"].rstrip("/")
+          token = os.environ["GITCODE_TOKEN"]
+
+          def request(method, path, *, expected=(200, 201), allow_404=False, **kwargs):
+              params = kwargs.pop("params", {})
+              params["access_token"] = token
+              response = session.request(method, f"{api}{path}", params=params, timeout=300, **kwargs)
+              if allow_404 and response.status_code == 404:
+                  return None
+              if response.status_code not in expected:
+                  raise RuntimeError(f"GitCode API {method} {path}: HTTP {response.status_code}")
+              if method == "DELETE":
+                  return None
+              return response.json() if response.text.strip() else None
+
+          owner = urllib.parse.quote(os.environ["GITCODE_OWNER"], safe="")
+          repo = urllib.parse.quote(os.environ["GITCODE_REPO"], safe="")
+          tag = urllib.parse.quote(os.environ["TAG"], safe="")
+          releases_path = f"/repos/{owner}/{repo}/releases"
+          mirrored = request("GET", f"{releases_path}/tags/{tag}", allow_404=True)
+          manifest = pathlib.Path(os.environ["RUNNER_TEMP"]) / "stable-release/latest.json"
+          data = json.loads(manifest.read_text(encoding="utf-8"))
+          if f"v{data['version']}" != os.environ["TAG"]:
+              raise RuntimeError("GitHub latest manifest does not match its release tag")
+          required = {"latest.json"}
+          required.update(
+              pathlib.PurePosixPath(urllib.parse.urlsplit(artifact["url"]).path).name
+              for artifact in data["platforms"].values()
+          )
+          present = {
+              asset["name"] for asset in (mirrored or {}).get("assets", [])
+              if asset.get("type") == "attach"
+          }
+          if not required.issubset(present):
+              print(f"GitCode {os.environ['TAG']} lacks update assets: {sorted(required - present)}")
+              raise SystemExit(0)
+          version_manifest = next(
+              asset for asset in mirrored["assets"]
+              if asset.get("type") == "attach" and asset.get("name") == "latest.json"
+          )
+          mirrored_manifest = pathlib.Path(os.environ["RUNNER_TEMP"]) / "stable-release/mirrored.json"
+          backup_release_asset(session, version_manifest, mirrored_manifest)
+          if mirrored_manifest.read_bytes() != manifest.read_bytes():
+              print(f"GitCode {os.environ['TAG']} has not finished mirroring latest.json")
+              raise SystemExit(0)
+          publish_stable_manifest(
+              session, request, releases_path, manifest, os.environ["EXPECTED_SHA"],
+          )
+          print("GitCode stable update channel refreshed")
+          PY

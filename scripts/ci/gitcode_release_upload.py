@@ -1,7 +1,10 @@
 """Upload a release asset using GitCode's signed URL contract."""
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
+import json
+import re
 import time
 
 
@@ -66,10 +69,11 @@ def backup_release_asset(session, asset: dict, destination: Path) -> None:
 
 def replace_asset_with_backup(
     session, request, release_path: str, previous: dict, asset: Path,
-    backup: Path, *, sleep=time.sleep,
+    backup: Path, *, sleep=time.sleep, backup_ready=False,
 ) -> tuple[bool, str, bool]:
     """Replace one attachment, restoring the old bytes if replacement fails."""
-    backup_release_asset(session, previous, backup)
+    if not backup_ready:
+        backup_release_asset(session, previous, backup)
     releases_path, tag = release_path.rsplit("/", 1)
     try:
         replace_release_assets(
@@ -126,6 +130,62 @@ def _upload_and_confirm(session, request, release_path: str, asset: Path, *, sle
         if attempt < 3:
             sleep(5 * attempt)
     return False, reason
+
+
+def publish_stable_manifest(
+    session, request, releases_path: str, manifest: Path, target: str, *, sleep=time.sleep,
+) -> None:
+    """Advance the fixed GitCode update endpoint after the version release is complete."""
+    new_version = _stable_version(json.loads(manifest.read_text(encoding="utf-8")))
+    release_path = f"{releases_path}/update-stable"
+    existing = request("GET", f"{releases_path}/tags/update-stable", allow_404=True)
+    if existing is None:
+        request("POST", releases_path, data={
+            "tag_name": "update-stable",
+            "name": "Stable update channel",
+            "body": "Stable update manifest for installed applications.",
+            "target_commitish": target,
+            "prerelease": "true",
+        })
+        success, reason = _upload_and_confirm(
+            session, request, release_path, manifest, sleep=sleep,
+        )
+    else:
+        previous = next(
+            (asset for asset in existing.get("assets", [])
+             if asset.get("type") == "attach" and asset.get("name") == manifest.name),
+            None,
+        )
+        if previous is None:
+            success, reason = _upload_and_confirm(
+                session, request, release_path, manifest, sleep=sleep,
+            )
+        else:
+            with TemporaryDirectory() as directory:
+                backup = Path(directory) / manifest.name
+                backup_release_asset(session, previous, backup)
+                old_version = _stable_version(json.loads(backup.read_text(encoding="utf-8")))
+                if new_version < old_version:
+                    raise RuntimeError("GitCode stable update manifest would move to an older version")
+                success, reason, restored = replace_asset_with_backup(
+                    session, request, release_path, previous, manifest,
+                    backup, sleep=sleep, backup_ready=True,
+                )
+                if not success and not restored:
+                    reason += "; previous manifest could not be restored"
+    if not success:
+        raise RuntimeError(f"GitCode stable update manifest failed: {reason}")
+
+
+def _stable_version(manifest: dict) -> tuple[int, int, int]:
+    version = manifest.get("version")
+    match = re.fullmatch(
+        r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?",
+        version if isinstance(version, str) else "",
+    )
+    if match is None:
+        raise RuntimeError("GitCode stable update manifest has an invalid version")
+    return tuple(int(part) for part in match.groups())
 
 
 def upload_asset(session, request, release_path: str, asset: Path) -> tuple[bool, str]:
