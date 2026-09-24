@@ -3023,6 +3023,9 @@
     "waitingFrame": "첫 데스크톱 프레임을 기다리는 중..."
   },
   "updater": {
+    "source": "업데이트 소스",
+    "sourceAuto": "자동",
+    "activeSource": "현재 소스",
     "saveEditorsFirst": "업데이트 설치 전에 수정한 파일을 저장하거나 닫으세요.",
     "installFailed": "업데이트 설치 프로그램을 시작할 수 없습니다.",
     "installAndRestart": "설치 후 재시작",

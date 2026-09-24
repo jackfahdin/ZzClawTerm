@@ -3023,6 +3023,9 @@
     "waitingFrame": "正在等待首個桌面畫面…"
   },
   "updater": {
+    "source": "更新來源",
+    "sourceAuto": "自動",
+    "activeSource": "目前來源",
     "saveEditorsFirst": "安裝更新前請儲存或關閉已修改的檔案。",
     "installFailed": "無法啟動更新安裝程式。",
     "installAndRestart": "安裝並重新啟動",

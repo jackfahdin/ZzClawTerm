@@ -2,7 +2,9 @@ use rust_i18n::t;
 
 use gpui::{Context, FontWeight, IntoElement, div, prelude::*, px, relative, rgb};
 use zzclawterm_core::RuntimeMode;
-use zzclawterm_ui::{ZzClawMarkdown, ZzClawScrollable};
+use zzclawterm_core::app_identity::AppFlavor;
+use zzclawterm_core::updater::{UpdateRepository, UpdateSource};
+use zzclawterm_ui::{ZzClawMarkdown, ZzClawScrollable, ZzClawTabItem, ZzClawTabs};
 
 use crate::features::ZzClawTermApp;
 use crate::features::update::UpdatePhase;
@@ -33,9 +35,14 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let (update_info, phase) = {
+        let (update_info, phase, source, repository) = {
             let update = self.update.read(cx);
-            (update.info().cloned(), update.phase().clone())
+            (
+                update.info().cloned(),
+                update.phase().clone(),
+                update.source(),
+                update.repository(),
+            )
         };
         let checking = matches!(phase, UpdatePhase::Checking);
         let available = update_info.as_ref().is_some_and(|info| info.available);
@@ -137,6 +144,58 @@ impl ZzClawTermApp {
                         )
                     }),
             )
+            .when(AppFlavor::current() == AppFlavor::Stable, |this| {
+                let locked = downloading || ready || applying;
+                let selected_index = match source {
+                    UpdateSource::Auto => 0,
+                    UpdateSource::GitCode => 1,
+                    UpdateSource::GitHub => 2,
+                };
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(palette.text_muted))
+                                .child(t!("updater.source")),
+                        )
+                        .child(
+                            ZzClawTabs::new("update-source")
+                                .items([
+                                    ZzClawTabItem::new(t!("updater.sourceAuto")).disabled(locked),
+                                    ZzClawTabItem::new("GitCode").disabled(locked),
+                                    ZzClawTabItem::new("GitHub").disabled(locked),
+                                ])
+                                .selected_index(selected_index)
+                                .on_select(cx.listener(|app, index: &usize, _, cx| {
+                                    let source = match index {
+                                        1 => UpdateSource::GitCode,
+                                        2 => UpdateSource::GitHub,
+                                        _ => UpdateSource::Auto,
+                                    };
+                                    app.set_update_source(source, cx);
+                                })),
+                        )
+                        .when(
+                            source == UpdateSource::Auto && repository.is_some(),
+                            |this| {
+                                let label = match repository {
+                                    Some(UpdateRepository::GitCode) => "GitCode",
+                                    _ => "GitHub",
+                                };
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(palette.text_muted))
+                                        .child(format!("{}: {label}", t!("updater.activeSource"))),
+                                )
+                            },
+                        ),
+                )
+            })
             .when_some(
                 available
                     .then(|| update_info.as_ref()?.release_notes.clone())

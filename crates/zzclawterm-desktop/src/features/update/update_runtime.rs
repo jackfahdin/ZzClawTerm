@@ -1,6 +1,7 @@
 use rust_i18n::t;
 
 use gpui::{Context, IntoElement, Window};
+use zzclawterm_core::updater::UpdateSource;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use super::UpdateCheckKind;
@@ -52,5 +53,22 @@ impl ZzClawTermApp {
             });
         }
         cx.notify();
+    }
+
+    pub(in crate::features) fn set_update_source(
+        &mut self,
+        source: UpdateSource,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.update.update(cx, |update, cx| {
+            let changed = update.set_source(source);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            self.start_update_check(cx);
+        }
     }
 }

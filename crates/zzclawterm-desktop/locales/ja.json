@@ -3032,6 +3032,9 @@
     "waitingFrame": "最初のデスクトップフレームを待機中..."
   },
   "updater": {
+    "source": "更新元",
+    "sourceAuto": "自動",
+    "activeSource": "現在の更新元",
     "saveEditorsFirst": "更新をインストールする前に編集したファイルを保存または閉じてください。",
     "installFailed": "更新インストーラーを起動できませんでした。",
     "installAndRestart": "インストールして再起動",

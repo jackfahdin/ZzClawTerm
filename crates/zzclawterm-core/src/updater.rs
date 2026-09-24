@@ -11,6 +11,67 @@ pub const STABLE_MANIFEST_URL: &str =
     "https://github.com/jackfahdin/ZzClawTerm/releases/latest/download/latest.json";
 pub const PREVIEW_MANIFEST_URL: &str =
     "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/latest.json";
+pub const GITCODE_STABLE_MANIFEST_URL: &str =
+    "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateSource {
+    Auto,
+    GitCode,
+    GitHub,
+}
+
+impl UpdateSource {
+    pub fn repositories(self, channel: UpdateChannel) -> &'static [UpdateRepository] {
+        if channel == UpdateChannel::Preview {
+            return &[UpdateRepository::GitHub];
+        }
+        match self {
+            Self::Auto => &[UpdateRepository::GitCode, UpdateRepository::GitHub],
+            Self::GitCode => &[UpdateRepository::GitCode],
+            Self::GitHub => &[UpdateRepository::GitHub],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateRepository {
+    GitCode,
+    GitHub,
+}
+
+impl UpdateRepository {
+    pub fn version_manifest_url(self, version: &Version) -> String {
+        if !version.pre.is_empty() {
+            return PREVIEW_MANIFEST_URL.to_string();
+        }
+        format!(
+            "{}/releases/download/v{version}/latest.json",
+            self.base_url()
+        )
+    }
+
+    pub fn artifact_url(self, version: &Version, filename: &str) -> String {
+        format!(
+            "{}/releases/download/v{version}/{filename}",
+            self.base_url()
+        )
+    }
+
+    pub fn release_url(self, version: &Version) -> String {
+        match self {
+            Self::GitCode => format!("{}/releases/v{version}", self.base_url()),
+            Self::GitHub => format!("{}/releases/tag/v{version}", self.base_url()),
+        }
+    }
+
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::GitCode => "https://gitcode.com/Jackfahdin/ZzClawTerm",
+            Self::GitHub => "https://github.com/jackfahdin/ZzClawTerm",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateChannel {
@@ -27,6 +88,13 @@ impl UpdateChannel {
         match self {
             Self::Stable => STABLE_MANIFEST_URL,
             Self::Preview => PREVIEW_MANIFEST_URL,
+        }
+    }
+
+    pub fn manifest_url_for(self, repository: UpdateRepository) -> &'static str {
+        match (self, repository) {
+            (Self::Stable, UpdateRepository::GitCode) => GITCODE_STABLE_MANIFEST_URL,
+            _ => self.manifest_url(),
         }
     }
 }
@@ -71,15 +139,20 @@ impl UpdateManifest {
     }
 
     pub fn update_info(&self, current: &Version) -> NativeUpdateInfo {
+        self.update_info_from(current, UpdateRepository::GitHub)
+    }
+
+    pub fn update_info_from(
+        &self,
+        current: &Version,
+        repository: UpdateRepository,
+    ) -> NativeUpdateInfo {
         NativeUpdateInfo {
             current_version: current.to_string(),
             latest_version: self.version.to_string(),
             release_date: non_empty(self.pub_date.clone()),
             release_notes: non_empty(self.notes.clone()),
-            html_url: Some(format!(
-                "https://github.com/jackfahdin/ZzClawTerm/releases/tag/v{}",
-                self.version
-            )),
+            html_url: Some(repository.release_url(&self.version)),
             available: self.version > *current,
         }
     }
@@ -123,6 +196,24 @@ impl UpdateManifest {
             signature: artifact.signature.clone(),
             filename,
         })
+    }
+
+    pub fn select_artifact_from(
+        &self,
+        expected_version: &Version,
+        target: UpdateTarget,
+        package: UpdatePackageKind,
+        repository: UpdateRepository,
+        auto_fallback: bool,
+    ) -> Result<SelectedUpdateArtifact, UpdaterError> {
+        let mut selected = self.select_artifact(expected_version, target, package)?;
+        if repository == UpdateRepository::GitCode {
+            selected.url = repository.artifact_url(expected_version, &selected.filename);
+            selected.fallback_url = auto_fallback.then(|| {
+                UpdateRepository::GitHub.artifact_url(expected_version, &selected.filename)
+            });
+        }
+        Ok(selected)
     }
 }
 
@@ -319,7 +410,8 @@ mod tests {
 
     use super::{
         PREVIEW_MANIFEST_URL, STABLE_MANIFEST_URL, UpdateChannel, UpdateManifest,
-        UpdatePackageKind, UpdateTarget, UpdaterError, parse_update_manifest,
+        UpdatePackageKind, UpdateRepository, UpdateSource, UpdateTarget, UpdaterError,
+        parse_update_manifest,
     };
 
     fn manifest(version: &str, platform: &str, url: &str, signature: &str) -> String {
@@ -346,6 +438,86 @@ mod tests {
         assert_eq!(UpdateChannel::for_version(&preview), UpdateChannel::Preview);
         assert_eq!(UpdateChannel::Stable.manifest_url(), STABLE_MANIFEST_URL);
         assert_eq!(UpdateChannel::Preview.manifest_url(), PREVIEW_MANIFEST_URL);
+    }
+
+    #[test]
+    fn stable_auto_prefers_gitcode_and_preview_uses_github() {
+        assert_eq!(
+            UpdateSource::Auto.repositories(UpdateChannel::Stable),
+            &[UpdateRepository::GitCode, UpdateRepository::GitHub]
+        );
+        assert_eq!(
+            UpdateSource::GitCode.repositories(UpdateChannel::Preview),
+            &[UpdateRepository::GitHub]
+        );
+        assert_eq!(
+            UpdateChannel::Stable.manifest_url_for(UpdateRepository::GitCode),
+            "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json"
+        );
+    }
+
+    #[test]
+    fn gitcode_download_uses_verified_version_and_filename() {
+        let version = Version::parse("2.1.0").unwrap();
+        assert_eq!(
+            UpdateRepository::GitCode.release_url(&version),
+            "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/v2.1.0"
+        );
+        let filename = "ZzClawTerm_2.1.0_linux_x64.AppImage";
+        let github_url = format!(
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+        );
+        let target = UpdateTarget::from_rust_target("linux", "x86_64").unwrap();
+        let valid =
+            UpdateManifest::parse(&manifest("2.1.0", "linux-x86_64", &github_url, "signed"))
+                .unwrap();
+        let selected = valid
+            .select_artifact_from(
+                &version,
+                target,
+                UpdatePackageKind::Installed,
+                UpdateRepository::GitCode,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.url,
+            format!(
+                "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/v2.1.0/{filename}"
+            )
+        );
+        assert_eq!(selected.fallback_url.as_deref(), Some(github_url.as_str()));
+        assert_eq!(
+            valid
+                .select_artifact_from(
+                    &version,
+                    target,
+                    UpdatePackageKind::Installed,
+                    UpdateRepository::GitCode,
+                    false,
+                )
+                .unwrap()
+                .fallback_url,
+            None
+        );
+
+        let malicious = UpdateManifest::parse(&manifest(
+            "2.1.0",
+            "linux-x86_64",
+            "https://example.com/payload",
+            "signed",
+        ))
+        .unwrap();
+        assert!(matches!(
+            malicious.select_artifact_from(
+                &version,
+                target,
+                UpdatePackageKind::Installed,
+                UpdateRepository::GitCode,
+                false,
+            ),
+            Err(UpdaterError::InvalidArtifactUrl)
+        ));
     }
 
     #[test]

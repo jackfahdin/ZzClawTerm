@@ -196,12 +196,12 @@ impl DesktopController {
     }
 
     pub(crate) fn start_update_check(&mut self, kind: UpdateCheckKind, cx: &mut Context<Self>) {
-        let Some((tx, generation)) = self.update_store.update(cx, |store, cx| {
+        let Some((tx, generation, source)) = self.update_store.update(cx, |store, cx| {
             let request = store.begin_check(kind);
             if request.is_some() {
                 cx.notify();
             }
-            request
+            request.map(|(tx, generation)| (tx, generation, store.source()))
         }) else {
             return;
         };
@@ -209,7 +209,7 @@ impl DesktopController {
         if let Err(error) = std::thread::Builder::new()
             .name("zzclawterm-update-check".to_string())
             .spawn(move || {
-                let result = crate::http::update::check_native_update();
+                let result = crate::http::update::check_native_update(source);
                 let _ = tx.unbounded_send(UpdateEvent::Check {
                     generation,
                     kind,

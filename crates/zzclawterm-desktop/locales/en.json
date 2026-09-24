@@ -3070,6 +3070,9 @@
     "waitingFrame": "Waiting for the first desktop frame..."
   },
   "updater": {
+    "source": "Update source",
+    "sourceAuto": "Auto",
+    "activeSource": "Current source",
     "saveEditorsFirst": "Save or close edited files before installing the update.",
     "installFailed": "Could not start the update installer.",
     "installAndRestart": "Install and restart",

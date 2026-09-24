@@ -3023,6 +3023,9 @@
     "waitingFrame": "En attente de la première trame du bureau…"
   },
   "updater": {
+    "source": "Source des mises à jour",
+    "sourceAuto": "Auto",
+    "activeSource": "Source actuelle",
     "saveEditorsFirst": "Enregistrez ou fermez les fichiers modifiés avant la mise à jour.",
     "installFailed": "Impossible de démarrer le programme de mise à jour.",
     "installAndRestart": "Installer et redémarrer",

@@ -3,6 +3,7 @@
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use zzclawterm_core::NativeUpdateInfo;
+use zzclawterm_core::updater::{UpdateRepository, UpdateSource, parse_current_version};
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
 use super::download::DownloadState;
@@ -29,17 +30,24 @@ pub(crate) enum UpdateEvent {
     Check {
         generation: u64,
         kind: UpdateCheckKind,
-        result: Result<NativeUpdateInfo, String>,
+        result: Result<(NativeUpdateInfo, UpdateRepository), String>,
     },
     Download {
         generation: u64,
         state: DownloadState,
+    },
+    DownloadSource {
+        generation: u64,
+        repository: UpdateRepository,
     },
 }
 
 pub(crate) struct UpdateStore {
     phase: UpdatePhase,
     info: Option<NativeUpdateInfo>,
+    source: UpdateSource,
+    repository: Option<UpdateRepository>,
+    download_repository: Option<UpdateRepository>,
     status: String,
     last_silent_error: Option<String>,
     check_generation: u64,
@@ -58,6 +66,9 @@ impl UpdateStore {
         Self {
             phase: UpdatePhase::Idle,
             info: None,
+            source: UpdateSource::Auto,
+            repository: None,
+            download_repository: None,
             status: format!("Current version {}", env!("CARGO_PKG_VERSION")),
             last_silent_error: None,
             check_generation: 0,
@@ -82,6 +93,32 @@ impl UpdateStore {
 
     pub(in crate::features) fn info(&self) -> Option<&NativeUpdateInfo> {
         self.info.as_ref()
+    }
+
+    pub(crate) fn source(&self) -> UpdateSource {
+        self.source
+    }
+
+    pub(in crate::features) fn repository(&self) -> Option<UpdateRepository> {
+        self.download_repository.or(self.repository)
+    }
+
+    pub(in crate::features) fn set_source(&mut self, source: UpdateSource) -> bool {
+        if self.source == source
+            || matches!(
+                self.phase,
+                UpdatePhase::Downloading { .. } | UpdatePhase::Ready | UpdatePhase::Applying
+            )
+        {
+            return false;
+        }
+        self.source = source;
+        self.check_generation = self.check_generation.wrapping_add(1);
+        self.phase = UpdatePhase::Idle;
+        self.info = None;
+        self.repository = None;
+        self.download_repository = None;
+        true
     }
 
     pub(in crate::features) fn is_pending(&self) -> bool {
@@ -113,6 +150,8 @@ impl UpdateStore {
         self.phase = UpdatePhase::Checking;
         self.status = "checking for updates...".to_string();
         self.info = None;
+        self.repository = None;
+        self.download_repository = None;
         self.download = DownloadState::Idle;
         self.install_requested = false;
         Some((self.tx.clone(), self.check_generation))
@@ -125,7 +164,12 @@ impl UpdateStore {
     pub(crate) fn begin_download(
         &mut self,
         cancel: ConnectionAttempt,
-    ) -> Option<(NativeUpdateInfo, u64, UnboundedSender<UpdateEvent>)> {
+    ) -> Option<(
+        NativeUpdateInfo,
+        UpdateRepository,
+        u64,
+        UnboundedSender<UpdateEvent>,
+    )> {
         if matches!(
             self.phase,
             UpdatePhase::Downloading { .. } | UpdatePhase::Applying
@@ -133,8 +177,10 @@ impl UpdateStore {
             return None;
         }
         let info = self.info.as_ref().filter(|info| info.available)?.clone();
+        let repository = self.repository?;
         self.download_generation = self.download_generation.wrapping_add(1);
         self.download_cancel = cancel;
+        self.download_repository = None;
         self.download = DownloadState::Downloading {
             received: 0,
             total: None,
@@ -144,13 +190,14 @@ impl UpdateStore {
             total: None,
         };
         self.status = "downloading update...".to_string();
-        Some((info, self.download_generation, self.tx.clone()))
+        Some((info, repository, self.download_generation, self.tx.clone()))
     }
 
     pub(crate) fn cancel_download(&mut self) {
         self.download_cancel.cancel();
         self.download_generation = self.download_generation.wrapping_add(1);
         self.download = DownloadState::Idle;
+        self.download_repository = None;
         self.phase = if self.info.as_ref().is_some_and(|info| info.available) {
             UpdatePhase::Available
         } else {
@@ -186,7 +233,7 @@ impl UpdateStore {
                     return false;
                 }
                 match result {
-                    Ok(info) => {
+                    Ok((info, repository)) => {
                         self.last_silent_error = None;
                         self.status = if info.available {
                             format!(
@@ -202,12 +249,16 @@ impl UpdateStore {
                             UpdatePhase::UpToDate
                         };
                         self.info = Some(info);
+                        self.repository = Some(repository);
+                        self.download_repository = None;
                     }
                     Err(error) if kind == UpdateCheckKind::Silent => {
                         self.last_silent_error = Some(error);
                         self.phase = UpdatePhase::Idle;
                         self.status = format!("Current version {}", env!("CARGO_PKG_VERSION"));
                         self.info = None;
+                        self.repository = None;
+                        self.download_repository = None;
                     }
                     Err(error) => {
                         self.status = format!("update check failed: {error}");
@@ -216,6 +267,8 @@ impl UpdateStore {
                             download: false,
                         };
                         self.info = None;
+                        self.repository = None;
+                        self.download_repository = None;
                     }
                 }
                 true
@@ -245,6 +298,23 @@ impl UpdateStore {
                 self.download = state;
                 true
             }
+            UpdateEvent::DownloadSource {
+                generation,
+                repository,
+            } => {
+                if generation != self.download_generation
+                    || !matches!(self.phase, UpdatePhase::Downloading { .. })
+                {
+                    return false;
+                }
+                self.download_repository = Some(repository);
+                if let Some(info) = self.info.as_mut()
+                    && let Ok(version) = parse_current_version(&info.latest_version)
+                {
+                    info.html_url = Some(repository.release_url(&version));
+                }
+                true
+            }
         }
     }
 }
@@ -252,6 +322,8 @@ impl UpdateStore {
 #[cfg(test)]
 mod tests {
     use super::{UpdateCheckKind, UpdateEvent, UpdatePhase, UpdateStore};
+    use zzclawterm_core::updater::{UpdateRepository, UpdateSource};
+    use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
     fn check_event(
         generation: u64,
@@ -261,7 +333,7 @@ mod tests {
         UpdateEvent::Check {
             generation,
             kind,
-            result,
+            result: result.map(|info| (info, UpdateRepository::GitHub)),
         }
     }
 
@@ -315,5 +387,76 @@ mod tests {
             }
         ));
         assert!(state.status().contains("offline"));
+    }
+
+    #[test]
+    fn changing_source_rejects_an_in_flight_check_result() {
+        let mut state = UpdateStore::new();
+        let (_, old_generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        assert!(state.set_source(UpdateSource::GitHub));
+        assert_eq!(state.source(), UpdateSource::GitHub);
+        assert!(matches!(state.phase(), UpdatePhase::Idle));
+        assert!(!state.apply_event(check_event(
+            old_generation,
+            UpdateCheckKind::Manual,
+            Err("old source failed".to_string()),
+        )));
+        assert!(state.begin_check(UpdateCheckKind::Manual).is_some());
+    }
+
+    #[test]
+    fn download_uses_the_repository_selected_by_the_completed_check() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        let info = zzclawterm_core::NativeUpdateInfo {
+            current_version: "0.0.5".into(),
+            latest_version: "0.0.6".into(),
+            release_date: None,
+            release_notes: None,
+            html_url: None,
+            available: true,
+        };
+        assert!(state.apply_event(UpdateEvent::Check {
+            generation,
+            kind: UpdateCheckKind::Manual,
+            result: Ok((info, UpdateRepository::GitCode)),
+        }));
+        let (_, repository, _, _) = state.begin_download(ConnectionAttempt::default()).unwrap();
+        assert_eq!(repository, UpdateRepository::GitCode);
+        assert!(!state.set_source(UpdateSource::GitHub));
+    }
+
+    #[test]
+    fn automatic_download_fallback_updates_the_visible_repository() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        let info = zzclawterm_core::NativeUpdateInfo {
+            current_version: "0.0.5".into(),
+            latest_version: "0.0.6".into(),
+            release_date: None,
+            release_notes: None,
+            html_url: None,
+            available: true,
+        };
+        assert!(state.apply_event(UpdateEvent::Check {
+            generation,
+            kind: UpdateCheckKind::Manual,
+            result: Ok((info, UpdateRepository::GitCode)),
+        }));
+        let (_, _, download_generation, _) =
+            state.begin_download(ConnectionAttempt::default()).unwrap();
+        assert!(state.apply_event(UpdateEvent::DownloadSource {
+            generation: download_generation,
+            repository: UpdateRepository::GitHub,
+        }));
+        assert_eq!(state.repository(), Some(UpdateRepository::GitHub));
+        assert_eq!(
+            state.info().and_then(|info| info.html_url.as_deref()),
+            Some("https://github.com/jackfahdin/ZzClawTerm/releases/tag/v0.0.6")
+        );
+        assert!(!state.apply_event(UpdateEvent::DownloadSource {
+            generation: download_generation.wrapping_add(1),
+            repository: UpdateRepository::GitCode,
+        }));
     }
 }

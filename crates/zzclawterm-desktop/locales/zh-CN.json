@@ -3070,6 +3070,9 @@
     "waitingFrame": "正在等待首个桌面画面…"
   },
   "updater": {
+    "source": "更新来源",
+    "sourceAuto": "自动",
+    "activeSource": "当前来源",
     "saveEditorsFirst": "安装更新前请保存或关闭已修改的文件。",
     "installFailed": "无法启动更新安装程序。",
     "installAndRestart": "安装并重启",

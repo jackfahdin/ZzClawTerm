@@ -4,7 +4,8 @@ use gpui::{Context, Window};
 use std::io::{Read as _, Write as _};
 use std::path::Path;
 use zzclawterm_core::updater::{
-    UpdateManifest, UpdatePackageKind, UpdateTarget, parse_current_version,
+    UpdateManifest, UpdatePackageKind, UpdateRepository, UpdateSource, UpdateTarget,
+    parse_current_version,
 };
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
@@ -16,6 +17,11 @@ pub(crate) enum DownloadState {
     Downloading { received: u64, total: Option<u64> },
     Ready(super::install::PreparedUpdate),
     Failed(String),
+}
+
+enum DownloadProgress {
+    Source(UpdateRepository),
+    Bytes { received: u64, total: Option<u64> },
 }
 
 pub(in crate::features) fn supports_native_install(portable: bool) -> bool {
@@ -70,10 +76,12 @@ fn decode_update_signature(value: &str) -> Result<minisign_verify::Signature, St
 
 fn download_signed_update(
     version: &str,
+    repository: UpdateRepository,
+    source: UpdateSource,
     directory: &Path,
     portable: bool,
     cancel: &ConnectionAttempt,
-    mut progress: impl FnMut(u64, Option<u64>),
+    mut progress: impl FnMut(DownloadProgress),
 ) -> Result<super::install::PreparedUpdate, String> {
     let version = parse_current_version(version).map_err(|error| error.to_string())?;
     if !zzclawterm_core::app_identity::AppFlavor::current().accepts_update(&version) {
@@ -91,30 +99,47 @@ fn download_signed_update(
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|error| error.to_string())?;
-    let manifest_url = if version.pre.is_empty() {
-        format!("https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/latest.json")
-    } else {
-        "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/latest.json"
-            .to_string()
-    };
-    let mut manifest_body = String::new();
-    client
-        .get(&manifest_url)
-        .send()
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .take(1024 * 1024 + 1)
-        .read_to_string(&mut manifest_body)
-        .map_err(|error| error.to_string())?;
-    if manifest_body.len() > 1024 * 1024 {
-        return Err("update manifest too large".into());
+    let mut candidates = vec![repository];
+    if source == UpdateSource::Auto && repository == UpdateRepository::GitCode {
+        candidates.push(UpdateRepository::GitHub);
     }
-    let manifest = UpdateManifest::parse_for_version(&manifest_body, &version)
-        .map_err(|error| error.to_string())?;
-    let selected = manifest
-        .select_artifact(&version, target, package)
-        .map_err(|error| error.to_string())?;
+    let mut last_error = String::new();
+    let mut selected = None;
+    for candidate in candidates {
+        let result = (|| {
+            let mut manifest_body = String::new();
+            client
+                .get(candidate.version_manifest_url(&version))
+                .send()
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?
+                .take(1024 * 1024 + 1)
+                .read_to_string(&mut manifest_body)
+                .map_err(|error| error.to_string())?;
+            if manifest_body.len() > 1024 * 1024 {
+                return Err("update manifest too large".into());
+            }
+            UpdateManifest::parse_for_version(&manifest_body, &version)
+                .map_err(|error| error.to_string())?
+                .select_artifact_from(
+                    &version,
+                    target,
+                    package,
+                    candidate,
+                    source == UpdateSource::Auto,
+                )
+                .map_err(|error| error.to_string())
+        })();
+        match result {
+            Ok(artifact) => {
+                selected = Some((artifact, candidate));
+                break;
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let (selected, selected_repository) = selected.ok_or(last_error)?;
     let signature = decode_update_signature(&selected.signature)?;
     let public_key = STANDARD
         .decode(PUBLIC_KEY)
@@ -123,75 +148,79 @@ fn download_signed_update(
         std::str::from_utf8(&public_key).map_err(|_| "invalid public key")?,
     )
     .map_err(|_| "invalid public key")?;
-    let mut verifier = public_key
-        .verify_stream(&signature)
-        .map_err(|_| "unsupported update signature")?;
     cancel.check()?;
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let name = selected.filename;
     let partial = directory.join(format!("{name}.partial"));
     let artifact = directory.join(&name);
-    let result = (|| {
-        let mut response = None;
-        let mut last_error = None;
-        for url in std::iter::once(selected.url.as_str()).chain(selected.fallback_url.as_deref()) {
-            match client
+    let mut last_error = "no update download URL is available".to_string();
+    for (url, candidate) in std::iter::once((selected.url.as_str(), selected_repository)).chain(
+        selected
+            .fallback_url
+            .as_deref()
+            .map(|url| (url, UpdateRepository::GitHub)),
+    ) {
+        cancel.check()?;
+        progress(DownloadProgress::Source(candidate));
+        let result = (|| -> Result<(), String> {
+            let mut response = client
                 .get(url)
                 .send()
                 .and_then(|response| response.error_for_status())
-            {
-                Ok(candidate) => {
-                    response = Some(candidate);
-                    break;
-                }
-                Err(error) => last_error = Some(error.to_string()),
-            }
-        }
-        let mut response = response.ok_or_else(|| {
-            last_error.unwrap_or_else(|| "no update download URL is available".to_string())
-        })?;
-        let total = response.content_length();
-        if total.is_some_and(|total| total > 1024 * 1024 * 1024) {
-            return Err("update too large".into());
-        }
-        let mut output = std::fs::File::create(&partial).map_err(|error| error.to_string())?;
-        let mut buffer = vec![0; 256 * 1024];
-        let mut received = 0;
-        loop {
-            cancel.check()?;
-            let count = response
-                .read(&mut buffer)
                 .map_err(|error| error.to_string())?;
-            if count == 0 {
-                break;
-            }
-            received += count as u64;
-            if received > 1024 * 1024 * 1024 {
+            let total = response.content_length();
+            if total.is_some_and(|total| total > 1024 * 1024 * 1024) {
                 return Err("update too large".into());
             }
-            verifier.update(&buffer[..count]);
-            output
-                .write_all(&buffer[..count])
-                .map_err(|error| error.to_string())?;
-            progress(received, total);
+            let mut verifier = public_key
+                .verify_stream(&signature)
+                .map_err(|_| "unsupported update signature")?;
+            let mut output = std::fs::File::create(&partial).map_err(|error| error.to_string())?;
+            let mut buffer = vec![0; 256 * 1024];
+            let mut received = 0;
+            loop {
+                cancel.check()?;
+                let count = response
+                    .read(&mut buffer)
+                    .map_err(|error| error.to_string())?;
+                if count == 0 {
+                    break;
+                }
+                received += count as u64;
+                if received > 1024 * 1024 * 1024 {
+                    return Err("update too large".into());
+                }
+                verifier.update(&buffer[..count]);
+                output
+                    .write_all(&buffer[..count])
+                    .map_err(|error| error.to_string())?;
+                progress(DownloadProgress::Bytes { received, total });
+            }
+            if total.is_some_and(|total| received != total) {
+                return Err("update download truncated".into());
+            }
+            verifier
+                .finalize()
+                .map_err(|_| "update signature verification failed")?;
+            output.sync_all().map_err(|error| error.to_string())?;
+            drop(output);
+            cancel.check()?;
+            std::fs::rename(&partial, &artifact).map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                let target = std::env::current_exe().map_err(|error| error.to_string())?;
+                return super::install::prepare_artifact(artifact, target, portable);
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&partial);
+                cancel.check()?;
+                last_error = error;
+            }
         }
-        if total.is_some_and(|total| received != total) {
-            return Err("update download truncated".into());
-        }
-        verifier
-            .finalize()
-            .map_err(|_| "update signature verification failed")?;
-        output.sync_all().map_err(|error| error.to_string())?;
-        drop(output);
-        cancel.check()?;
-        std::fs::rename(&partial, &artifact).map_err(|error| error.to_string())?;
-        let target = std::env::current_exe().map_err(|error| error.to_string())?;
-        super::install::prepare_artifact(artifact, target, portable)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(partial);
     }
-    result
+    Err(last_error)
 }
 
 impl ZzClawTermApp {
@@ -200,13 +229,17 @@ impl ZzClawTermApp {
             return;
         }
         let cancel = ConnectionAttempt::default();
-        let Some((info, generation, event_tx)) = self.update.update(cx, |update, cx| {
-            let request = update.begin_download(cancel.clone());
-            if request.is_some() {
-                cx.notify();
-            }
-            request
-        }) else {
+        let Some((info, repository, generation, event_tx, source)) =
+            self.update.update(cx, |update, cx| {
+                let request = update.begin_download(cancel.clone());
+                if request.is_some() {
+                    cx.notify();
+                }
+                request.map(|(info, repository, generation, tx)| {
+                    (info, repository, generation, tx, update.source())
+                })
+            })
+        else {
             return;
         };
         let directory = self
@@ -222,14 +255,27 @@ impl ZzClawTermApp {
             .spawn(move || {
                 let result = download_signed_update(
                     &info.latest_version,
+                    repository,
+                    source,
                     &directory,
                     portable,
                     &cancel,
-                    |received, total| {
-                        let _ = progress_tx.unbounded_send(super::UpdateEvent::Download {
-                            generation,
-                            state: DownloadState::Downloading { received, total },
-                        });
+                    |progress| {
+                        let event = match progress {
+                            DownloadProgress::Source(repository) => {
+                                super::UpdateEvent::DownloadSource {
+                                    generation,
+                                    repository,
+                                }
+                            }
+                            DownloadProgress::Bytes { received, total } => {
+                                super::UpdateEvent::Download {
+                                    generation,
+                                    state: DownloadState::Downloading { received, total },
+                                }
+                            }
+                        };
+                        let _ = progress_tx.unbounded_send(event);
                     },
                 );
                 let state = match result {
