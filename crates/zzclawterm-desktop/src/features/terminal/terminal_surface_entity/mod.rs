@@ -208,6 +208,7 @@ pub(in crate::features) struct TerminalSurfacePaintChrome {
     pub cell_width: f32,
     pub cell_height: f32,
     pub show_line_numbers: bool,
+    pub max_line_number_digits: usize,
     pub show_timestamps: bool,
     pub timestamp_format: String,
     pub is_active: bool,
@@ -315,6 +316,7 @@ pub(in crate::features) struct TerminalSurface {
     cursor_style: String,
     layout_cache: Arc<Mutex<ZzClawTerminalLayoutCache>>,
     show_line_numbers: bool,
+    max_line_number_digits: usize,
     show_timestamps: bool,
     timestamp_format: String,
     scroll_offset: usize,
@@ -384,6 +386,7 @@ impl TerminalSurface {
             cursor_style: "block".to_string(),
             layout_cache: Arc::new(Mutex::new(ZzClawTerminalLayoutCache::default())),
             show_line_numbers: false,
+            max_line_number_digits: 1,
             show_timestamps: false,
             timestamp_format: zzclawterm_core::DEFAULT_TERMINAL_TIMESTAMP_FORMAT.to_string(),
             scroll_offset: 0,
@@ -1285,6 +1288,7 @@ impl TerminalSurface {
             cell_width,
             cell_height,
             show_line_numbers,
+            max_line_number_digits,
             show_timestamps,
             timestamp_format,
             is_active,
@@ -1301,6 +1305,7 @@ impl TerminalSurface {
             && (self.cell_width - cell_width).abs() < f32::EPSILON * 8.0
             && (self.cell_height - cell_height).abs() < f32::EPSILON * 8.0
             && self.show_line_numbers == show_line_numbers
+            && self.max_line_number_digits == max_line_number_digits
             && self.show_timestamps == show_timestamps
             && self.timestamp_format == timestamp_format
             && self.is_active == is_active;
@@ -1317,6 +1322,7 @@ impl TerminalSurface {
         self.cell_width = cell_width;
         self.cell_height = cell_height;
         self.show_line_numbers = show_line_numbers;
+        self.max_line_number_digits = max_line_number_digits;
         self.show_timestamps = show_timestamps;
         self.timestamp_format = timestamp_format;
         self.is_active = is_active;
@@ -1846,7 +1852,10 @@ impl TerminalSurface {
             ScrollDelta::Lines(delta) => delta.y,
             ScrollDelta::Pixels(delta) => f32::from(delta.y) / self.cell_height.max(1.0),
         };
-        if self.can_handle_scroll_wheel_locally()
+        if !app
+            .read(cx)
+            .terminal_selection_dragging_for_session(&session_id)
+            && self.can_handle_scroll_wheel_locally()
             && let Some(result) = self.apply_local_scroll_wheel_visual_state(raw_lines)
         {
             if result.visual_changed {
@@ -1917,6 +1926,9 @@ impl TerminalSurface {
         cx: &mut Context<Self>,
     ) {
         if let Some(state) = result.visual_state {
+            self.pending_local_scroll_sync = None;
+            self.scroll_interaction_generation =
+                self.scroll_interaction_generation.saturating_add(1);
             let repaint_needed = self.scroll_visual_state_needs_repaint(&state);
             let text_updated = self.apply_scroll_visual_state(state.clone());
             let needs_text_first_repaint =
@@ -2011,6 +2023,14 @@ impl TerminalSurface {
             performance_overlay: self.performance_overlay,
             skipped_output_chars: self.skipped_output_chars,
         }
+    }
+
+    pub(in crate::features) fn take_scroll_state_for_selection(
+        &mut self,
+    ) -> Option<TerminalScrollVisualState> {
+        self.pending_local_scroll_sync.take()?;
+        self.scroll_interaction_generation = self.scroll_interaction_generation.saturating_add(1);
+        Some(self.current_scroll_visual_state())
     }
 
     fn queue_local_scroll_app_sync(
@@ -2559,10 +2579,13 @@ impl Render for TerminalSurface {
                 self.show_timestamps,
                 terminal_timestamp_format_width_chars(&self.timestamp_format),
                 self.show_line_numbers,
-                terminal_line_number_digits(snapshot.as_ref()),
+                self.max_line_number_digits
+                    .max(terminal_line_number_digits(snapshot.as_ref())),
             );
             let timestamp_formatter = TerminalTimestampFormatter::new(&self.timestamp_format);
-            let line_number_digits = terminal_line_number_digits(snapshot.as_ref());
+            let line_number_digits = self
+                .max_line_number_digits
+                .max(terminal_line_number_digits(snapshot.as_ref()));
             let ts_w = gutter_metrics.timestamp_width;
             let ln_w = gutter_metrics.line_number_width;
             let gutter_viewport_width = (gutter_metrics.total_width() - 10.0).max(1.0);

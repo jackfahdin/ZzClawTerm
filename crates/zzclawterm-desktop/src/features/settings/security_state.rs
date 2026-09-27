@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use gpui::{FocusHandle, ScrollHandle};
+use gpui::FocusHandle;
 use zzclawterm_core::{OtpEntry, SavedCredential, SavedPassword, SecretString, SshKey};
 use zzclawterm_store::KnownHostEntry;
 
@@ -31,7 +31,6 @@ pub(in crate::features) struct SecurityFeatureState {
     known_hosts_generation: u64,
     known_hosts_loading: bool,
     known_hosts_pending: Option<(u64, Option<String>)>,
-    tabs_scroll: ScrollHandle,
 }
 
 /// Persisted secret-adjacent catalogs loaded through `ConnectionStore`.
@@ -215,16 +214,11 @@ impl SecurityFeatureState {
             known_hosts_generation: 0,
             known_hosts_loading: false,
             known_hosts_pending: None,
-            tabs_scroll: ScrollHandle::new(),
         }
     }
 
     pub(in crate::features) fn known_hosts(&self) -> &[KnownHostEntry] {
         &self.known_hosts
-    }
-
-    pub(in crate::features) fn tabs_scroll(&self) -> &ScrollHandle {
-        &self.tabs_scroll
     }
 
     pub(in crate::features) fn known_hosts_loading(&self) -> bool {
@@ -1502,6 +1496,25 @@ mod tests {
         assert!(security.revealed_password("password-id").is_none());
         assert!(security.revealed_credential("credential-id").is_none());
         assert!(security.revealed_otp_code("otp-id").is_none());
+    }
+
+    #[test]
+    fn successful_save_hides_only_the_returned_secret_id() {
+        let mut security = security_state();
+        security.reveal_password("saved".to_string(), "old value".to_string());
+        security.reveal_password("other".to_string(), "keep".to_string());
+        security.reveal_credential("saved".to_string(), "old credential".to_string());
+        security.reveal_credential("other".to_string(), "keep credential".to_string());
+
+        assert!(security.hide_revealed_password("saved"));
+        assert!(security.hide_revealed_credential("saved"));
+        assert!(security.revealed_password("saved").is_none());
+        assert!(security.revealed_credential("saved").is_none());
+        assert_eq!(security.revealed_password("other"), Some("keep"));
+        assert_eq!(
+            security.revealed_credential("other"),
+            Some("keep credential")
+        );
     }
 
     #[test]

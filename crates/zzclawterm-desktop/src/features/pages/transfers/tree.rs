@@ -151,7 +151,9 @@ pub(super) fn transfer_tree_view(
                                                         cx,
                                                     );
                                                     if event.click_count() == 2 {
-                                                        app.navigate_transfer_tree_row(window, cx);
+                                                        app.double_click_transfer_tree_row(
+                                                            window, cx,
+                                                        );
                                                     }
                                                 });
                                             },
@@ -175,7 +177,7 @@ pub(super) fn transfer_tree_view(
                                                 });
                                             }),
                                         )
-                                        .child(div().w(px(22.)).h(px(24.)).flex_none().when(
+                                        .child(div().w(px(24.)).h(px(24.)).flex_none().when(
                                             row.expandable,
                                             |this| {
                                                 this.child(
@@ -191,6 +193,7 @@ pub(super) fn transfer_tree_view(
                                                     } else {
                                                         "icons/menu/chevron-right.svg"
                                                     })
+                                                    .small()
                                                     .compact()
                                                     .variant(ZzClawButtonVariant::Ghost)
                                                     .loading(row.loading)

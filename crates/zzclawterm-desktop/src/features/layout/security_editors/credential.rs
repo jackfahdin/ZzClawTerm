@@ -83,6 +83,7 @@ impl ZzClawTermApp {
                             placeholder: password_placeholder.into(),
                             masked: !editor.show_password,
                             multi_line: false,
+                            submit_on_enter: false,
                             code: false,
                         },
                         cx,

@@ -73,6 +73,7 @@ pub(super) struct TerminalViewRuntimeState {
     pub scroll_delta_residuals: HashMap<String, f32>,
     pub scrollbar_drag: Option<TerminalScrollbarDragState>,
     pub pending_frame_events: VecDeque<TerminalFrameEvent>,
+    pub retired_session_ids: VecDeque<String>,
 }
 
 /// Keyboard focus and IME composition for the terminal surface.
@@ -95,10 +96,21 @@ pub(super) struct TerminalSelectionState {
     pub(super) session_id: Option<String>,
     pub(super) selected_occurrence: TerminalSelectedOccurrenceState,
     pub(super) dragging: bool,
+    pub(super) drag_pointer_position: Option<gpui::Point<gpui::Pixels>>,
+    pub(super) autoscroll: Option<TerminalSelectionAutoscroll>,
+    pub(super) autoscroll_generation: u64,
+    pub(super) scroll_rehit_armed: bool,
     pub(super) mouse_report_button: Option<u8>,
     pub(super) mouse_report_session_id: Option<String>,
     pub(super) mouse_report_peer_session_ids: Vec<String>,
     pub(super) mouse_report_position: Option<(u16, u16)>,
+}
+
+#[derive(Clone)]
+pub(super) struct TerminalSelectionAutoscroll {
+    pub(super) session_id: String,
+    pub(super) position: gpui::Point<gpui::Pixels>,
+    pub(super) direction: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +226,7 @@ impl TerminalFeatureState {
                 scroll_delta_residuals: HashMap::new(),
                 scrollbar_drag: None,
                 pending_frame_events: VecDeque::new(),
+                retired_session_ids: VecDeque::new(),
             },
             input: TerminalInputState {
                 focus: focus.terminal,
@@ -232,6 +245,10 @@ impl TerminalFeatureState {
                     generation: 0,
                 },
                 dragging: false,
+                drag_pointer_position: None,
+                autoscroll: None,
+                autoscroll_generation: 0,
+                scroll_rehit_armed: false,
                 mouse_report_button: None,
                 mouse_report_session_id: None,
                 mouse_report_peer_session_ids: Vec::new(),
@@ -376,6 +393,9 @@ impl TerminalFeatureState {
             || self.menus.action_link_menu.is_some()
             || self.menus.action_link_tooltip.is_some();
         self.selection.dragging = false;
+        self.selection.drag_pointer_position = None;
+        self.selection.autoscroll = None;
+        self.selection.scroll_rehit_armed = false;
         self.menus.action_link_menu = None;
         self.menus.action_link_tooltip = None;
         self.menus.action_link_hover_pending = None;
@@ -389,6 +409,9 @@ impl TerminalFeatureState {
             return LostTerminalSelectionRecovery::None;
         }
         self.selection.dragging = false;
+        self.selection.drag_pointer_position = None;
+        self.selection.autoscroll = None;
+        self.selection.scroll_rehit_armed = false;
         if self
             .selection
             .selection
@@ -669,6 +692,28 @@ mod tests {
 
         state.remove_frame_session("session-a");
         assert_eq!(state.session_output("session-a"), None);
+    }
+
+    #[test]
+    fn reconnect_view_rekey_preserves_scroll_and_selection() {
+        let mut state = terminal_state();
+        state.ensure_frame_session("old".to_string(), "UTF-8".to_string(), 1_000);
+        state.append_session_text_or_create("old", "UTF-8", "earlier output");
+        state.view.views.get_mut("old").unwrap().scroll_offset = 7;
+        state.selection.session_id = Some("old".to_string());
+        state.selection.selection = Some(crate::models::TerminalSelection::from_range(
+            crate::models::TerminalBufferCellPos::new(0, 0),
+            crate::models::TerminalBufferCellPos::new(0, 3),
+        ));
+
+        state.rekey_session_view("old", "new", "UTF-8");
+
+        assert!(!state.view.views.contains_key("old"));
+        assert_eq!(state.session_output("new"), Some("earlier output"));
+        assert_eq!(state.session_scroll_offset("new"), 7);
+        assert_eq!(state.selection.session_id.as_deref(), Some("new"));
+        assert!(state.selection.selection.is_some());
+        assert!(state.session_id_is_retired("old"));
     }
 
     #[test]

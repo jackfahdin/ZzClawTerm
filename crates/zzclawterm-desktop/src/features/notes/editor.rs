@@ -170,6 +170,7 @@ impl NoteEditorWindow {
                         this.save_now(false, cx);
                     }
                 }
+                ZzClawDocumentEditorEvent::Updated => {}
             },
         );
         let title_subscription =

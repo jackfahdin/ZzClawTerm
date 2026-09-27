@@ -2,11 +2,11 @@ use rust_i18n::t;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FontWeight, IntoElement, KeyDownEvent,
-    SharedString, Window, div, prelude::*, px, rgb, rgba, svg,
+    SharedString, Stateful, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::RemoteTextGeneration;
-use zzclawterm_ui::ZzClawScrollable;
+use zzclawterm_ui::{ZzClawScrollable, ZzClawTooltip};
 
 use crate::features::transfers::RemoteTextEditor;
 use crate::features::view_widgets::full_window_input_layer;
@@ -24,6 +24,15 @@ enum ExternalSyncButtonStyle {
     Ghost,
     Outline,
     Primary,
+}
+
+fn editor_surface_shell(standalone: bool) -> Stateful<gpui::Div> {
+    div()
+        .id("transfer-editor-overlay")
+        .when(!standalone, |this| {
+            this.absolute().top_0().bottom_0().left_0().right_0()
+        })
+        .when(standalone, |this| this.size_full())
 }
 
 fn external_sync_button(
@@ -396,6 +405,7 @@ impl ZzClawTermApp {
                 base_label.to_string()
             };
             let tab_group_name = SharedString::from(format!("transfer-editor-tab-group-{index}"));
+            let tooltip_path = tab.remote_path.clone();
             tab_list = tab_list.child(
                 div()
                     .id(SharedString::from(format!("transfer-editor-tab-{index}")))
@@ -422,6 +432,9 @@ impl ZzClawTermApp {
                     })
                     .cursor_pointer()
                     .hover(|this| this.bg(rgb(palette.hover)).text_color(rgb(palette.text)))
+                    .tooltip(move |window, cx| {
+                        ZzClawTooltip::new(tooltip_path.clone()).build(window, cx)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.activate_transfer_editor_tab(&tab_id, cx);
                     }))
@@ -591,13 +604,7 @@ impl ZzClawTermApp {
                 )
             });
 
-        div()
-            .id(SharedString::from("transfer-editor-overlay"))
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left_0()
-            .right_0()
+        editor_surface_shell(standalone)
             .bg(if standalone {
                 rgb(palette.bg)
             } else {
@@ -647,21 +654,10 @@ impl ZzClawTermApp {
                             .px_3()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .gap_2()
+                            .justify_end()
                             .border_b_1()
                             .border_color(rgb(palette.border))
                             .bg(rgb(palette.surface))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .font_family(crate::features::shell::gpui_code_font_family())
-                                    .text_xs()
-                                    .text_color(rgb(palette.text_muted))
-                                    .child(truncate_preview(&state.remote_path, 96)),
-                            )
                             .child(
                                 div()
                                     .flex_none()
@@ -1044,4 +1040,69 @@ fn transfer_editor_alert_dialog(
                 )
                 .child(actions),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Render,
+        StatefulInteractiveElement as _, Styled as _, TestAppContext, VisualTestContext, Window,
+        div, point, px,
+    };
+
+    use super::editor_surface_shell;
+
+    struct EditorWindowLayoutFixture {
+        header_clicks: Arc<AtomicUsize>,
+    }
+
+    impl Render for EditorWindowLayoutFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let header_clicks = self.header_clicks.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("editor-window-header")
+                        .h(px(40.))
+                        .flex_none()
+                        .debug_selector(|| "editor-window-header".to_string())
+                        .on_click(move |_, _, _| {
+                            header_clicks.fetch_add(1, Ordering::SeqCst);
+                        }),
+                )
+                .child(
+                    div().flex_1().min_h_0().overflow_hidden().child(
+                        editor_surface_shell(true)
+                            .debug_selector(|| "editor-window-surface".to_string())
+                            .on_click(|_, _, _| {}),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn standalone_editor_surface_stays_below_window_header(cx: &mut TestAppContext) {
+        let header_clicks = Arc::new(AtomicUsize::new(0));
+        let fixture = EditorWindowLayoutFixture {
+            header_clicks: header_clicks.clone(),
+        };
+        let (_, cx) = cx.add_window_view(|_, _| fixture);
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        let header = cx.debug_bounds("editor-window-header").unwrap();
+        let surface = cx.debug_bounds("editor-window-surface").unwrap();
+        assert_eq!(surface.top(), header.bottom());
+        cx.simulate_click(point(px(20.), px(20.)), Modifiers::default());
+        assert_eq!(header_clicks.load(Ordering::SeqCst), 1);
+    }
 }

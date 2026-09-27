@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use gpui::{Context, KeyDownEvent, Window};
-use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
+use zzclawterm_transport::{
+    FileBrowserBackendKind, RemoteFilePath, SftpFileEntry, file_browser_join,
+};
 
 use crate::features::ZzClawTermApp;
 use crate::models::{
@@ -87,7 +89,17 @@ impl ZzClawTermApp {
         let Some(backend) = self.session.active_file_browser_backend() else {
             return;
         };
-        let path = self.transfer.browser_remote_file_path();
+        let mut path = self.transfer.browser_remote_file_path();
+        if backend == FileBrowserBackendKind::Remote && !path.display_path.starts_with('/') {
+            let home = self.transfer.browser_view().home_dir;
+            if home.starts_with('/') && path.raw_path_token.is_none() {
+                path = RemoteFilePath::new(if path.display_path == "." {
+                    home.to_string()
+                } else {
+                    file_browser_join(backend, home, &path.display_path)
+                });
+            }
+        }
         let missing = self.transfer.reveal_tree_path(&session_id, backend, path);
         for path in missing {
             self.request_transfer_tree_listing(path, cx);
@@ -178,6 +190,24 @@ impl ZzClawTermApp {
             }
         } else if let Some(entry) = row.entry {
             self.open_transfer_default(entry, window, cx);
+        }
+    }
+
+    pub(in crate::features) fn double_click_transfer_tree_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.active_id_owned() else {
+            return;
+        };
+        let Some(row) = self.transfer.selected_tree_row(&session) else {
+            return;
+        };
+        if row.directory && row.expanded {
+            self.expand_transfer_tree_row(&row.key, Some(false), cx);
+        } else {
+            self.navigate_transfer_tree_row(window, cx);
         }
     }
 

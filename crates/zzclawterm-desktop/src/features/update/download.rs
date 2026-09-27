@@ -250,41 +250,39 @@ impl ZzClawTermApp {
         let portable = self.runtime.mode() == zzclawterm_core::RuntimeMode::Portable;
         let progress_tx = event_tx.clone();
         let result_tx = event_tx.clone();
-        let scheduled = std::thread::Builder::new()
-            .name("zzclawterm-update-download".to_string())
-            .spawn(move || {
-                let result = download_signed_update(
-                    &info.latest_version,
-                    repository,
-                    source,
-                    &directory,
-                    portable,
-                    &cancel,
-                    |progress| {
-                        let event = match progress {
-                            DownloadProgress::Source(repository) => {
-                                super::UpdateEvent::DownloadSource {
-                                    generation,
-                                    repository,
-                                }
+        let blocking_jobs = self.update.read(cx).blocking_jobs();
+        let scheduled = blocking_jobs.submit_detached("update-download", move |_| {
+            let result = download_signed_update(
+                &info.latest_version,
+                repository,
+                source,
+                &directory,
+                portable,
+                &cancel,
+                |progress| {
+                    let event = match progress {
+                        DownloadProgress::Source(repository) => {
+                            super::UpdateEvent::DownloadSource {
+                                generation,
+                                repository,
                             }
-                            DownloadProgress::Bytes { received, total } => {
-                                super::UpdateEvent::Download {
-                                    generation,
-                                    state: DownloadState::Downloading { received, total },
-                                }
+                        }
+                        DownloadProgress::Bytes { received, total } => {
+                            super::UpdateEvent::Download {
+                                generation,
+                                state: DownloadState::Downloading { received, total },
                             }
-                        };
-                        let _ = progress_tx.unbounded_send(event);
-                    },
-                );
-                let state = match result {
-                    Ok(prepared) => DownloadState::Ready(prepared),
-                    Err(error) => DownloadState::Failed(error),
-                };
-                let _ =
-                    result_tx.unbounded_send(super::UpdateEvent::Download { generation, state });
-            });
+                        }
+                    };
+                    let _ = progress_tx.unbounded_send(event);
+                },
+            );
+            let state = match result {
+                Ok(prepared) => DownloadState::Ready(prepared),
+                Err(error) => DownloadState::Failed(error),
+            };
+            let _ = result_tx.unbounded_send(super::UpdateEvent::Download { generation, state });
+        });
         if let Err(error) = scheduled {
             let _ = event_tx.unbounded_send(super::UpdateEvent::Download {
                 generation,

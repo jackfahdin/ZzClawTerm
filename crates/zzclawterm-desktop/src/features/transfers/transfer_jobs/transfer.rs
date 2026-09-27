@@ -1,7 +1,8 @@
 use rust_i18n::t;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::Duration;
 
 use gpui::{Context, Window};
 use zzclawterm_transport::{
@@ -150,6 +151,7 @@ impl ZzClawTermApp {
         local_path: PathBuf,
         remote_path: String,
         path_options: SftpPathTransferOptions,
+        target_lock: Arc<Mutex<()>>,
         cx: &mut Context<Self>,
     ) {
         let id = self.transfer.next_transfer_job_id("sftp-upload");
@@ -186,32 +188,37 @@ impl ZzClawTermApp {
             id.clone(),
             finished_tx.clone(),
             move || {
+                // Siblings in one selection may have the same basename. Hold the
+                // target lock through conflict resolution and the upload itself.
                 let mut progress_sender = TransferProgressEventSender::new(id.clone(), progress_tx);
                 let service = session.service;
-                let result = service
-                    .upload_path_with_progress_and_path_options(
-                        local_path,
-                        &remote_path,
-                        control,
-                        path_options,
-                        move |progress| {
-                            progress_sender.send(progress);
-                        },
-                    )
-                    .map(|summary| {
-                        if summary.skipped {
-                            return TransferJobOutput::Summary(summary);
-                        }
-                        let parent_path = transfer_job_remote_parent_path(&summary.remote_path);
-                        match service.list_dir(&parent_path) {
-                            Ok(entries) => TransferJobOutput::Uploaded {
-                                summary,
-                                parent_path,
-                                entries,
+                let result = (|| {
+                    let _target_guard = lock_upload_target(&target_lock, &control)?;
+                    service
+                        .upload_path_with_progress_and_path_options(
+                            local_path,
+                            &remote_path,
+                            control,
+                            path_options,
+                            move |progress| {
+                                progress_sender.send(progress);
                             },
-                            Err(_) => TransferJobOutput::Summary(summary),
-                        }
-                    });
+                        )
+                        .map(|summary| {
+                            if summary.skipped {
+                                return TransferJobOutput::Summary(summary);
+                            }
+                            let parent_path = transfer_job_remote_parent_path(&summary.remote_path);
+                            match service.list_dir(&parent_path) {
+                                Ok(entries) => TransferJobOutput::Uploaded {
+                                    summary,
+                                    parent_path,
+                                    entries,
+                                },
+                                Err(_) => TransferJobOutput::Summary(summary),
+                            }
+                        })
+                })();
                 if let Err(error) = &result {
                     log_sftp_upload_job_failure(&id, error);
                 }
@@ -242,6 +249,26 @@ impl ZzClawTermApp {
         ) {
             self.shell
                 .set_status(format!("transfer {} is not running", job.id));
+            cx.notify();
+            return;
+        }
+
+        if matches!(job.kind, TransferJobKind::RdpClipboard { .. }) {
+            let id = job.id.clone();
+            let session_id = job.session_id.clone();
+            job.status = TransferJobStatus::Cancelling;
+            job.detail = "Cancelling".to_string();
+            if let Some(session_id) = session_id
+                && let Err(error) = self
+                    .remote_desktop
+                    .cancel_clipboard_transfer(&session_id, &id)
+            {
+                job.status = TransferJobStatus::Cancelled;
+                job.detail = error.message;
+            } else if job.session_id.is_none() {
+                job.status = TransferJobStatus::Cancelled;
+                job.detail = "RDP session unavailable".to_string();
+            }
             cx.notify();
             return;
         }
@@ -581,10 +608,21 @@ impl ZzClawTermApp {
         let active_session_id = self.session.active_id_owned();
         let xymodem_jobs =
             visible_xymodem_job_ids(self.transfer.transfer_jobs(), active_session_id.as_deref());
+        let rdp_jobs = self
+            .transfer
+            .transfer_jobs()
+            .iter()
+            .filter(|job| {
+                job.is_visible_for_session(active_session_id.as_deref())
+                    && job.status == TransferJobStatus::Running
+                    && matches!(job.kind, TransferJobKind::RdpClipboard { .. })
+            })
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let mut changed = self
             .transfer
             .cancel_visible_transfer_jobs(active_session_id.as_deref());
-        for job_id in xymodem_jobs {
+        for job_id in xymodem_jobs.into_iter().chain(rdp_jobs) {
             self.cancel_transfer_job(&job_id, cx);
             changed += 1;
         }
@@ -620,6 +658,47 @@ impl ZzClawTermApp {
             format!("cleared {removed} stopped transfer job(s)")
         });
         cx.notify();
+    }
+}
+
+fn lock_upload_target<'a>(
+    lock: &'a Mutex<()>,
+    control: &SftpTransferControl,
+) -> anyhow::Result<MutexGuard<'a, ()>> {
+    loop {
+        control.check_cancelled()?;
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod upload_target_tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use zzclawterm_transport::SftpTransferControl;
+
+    use super::lock_upload_target;
+
+    #[test]
+    fn queued_same_target_upload_can_be_cancelled_before_it_starts() {
+        let lock = Mutex::new(());
+        let guard = lock.lock().unwrap();
+        let control = SftpTransferControl::new();
+
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| lock_upload_target(&lock, &control).is_err());
+            std::thread::sleep(Duration::from_millis(50));
+            control.cancel();
+            assert!(waiting.join().unwrap());
+        });
+
+        drop(guard);
+        assert!(lock_upload_target(&lock, &SftpTransferControl::new()).is_ok());
     }
 }
 

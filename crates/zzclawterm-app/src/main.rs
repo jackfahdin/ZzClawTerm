@@ -20,7 +20,6 @@ fn main() -> anyhow::Result<()> {
     if zzclawterm_desktop::run_update_helper_if_requested() {
         return Ok(());
     }
-    zzclawterm_desktop::schedule_update_cleanup();
     let runtime = AppRuntime::resolve().context("resolve zzclawterm runtime")?;
     runtime
         .ensure_directories()

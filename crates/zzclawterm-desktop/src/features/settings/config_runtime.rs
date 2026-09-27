@@ -60,7 +60,32 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        self.open_snapshot_password_dialog(SnapshotPasswordPromptKind::Import, window, cx);
+        self.open_confirm_dialog(
+            (
+                t!("savedConnections.restoreBackupConfirmTitle").to_string(),
+                t!("savedConnections.restoreBackupConfirmDesc").to_string(),
+                t!("savedConnections.restoreBackupConfirmAction").to_string(),
+                true,
+                |_app: &mut ZzClawTermApp, window: &mut Window, cx: &mut Context<ZzClawTermApp>| {
+                    let app = cx.weak_entity();
+                    let window = window.window_handle();
+                    cx.defer(move |cx| {
+                        let _ = window.update(cx, |_, window, cx| {
+                            let _ = app.update(cx, |app, cx| {
+                                app.open_snapshot_password_dialog(
+                                    SnapshotPasswordPromptKind::Import,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        });
+                    });
+                    true
+                },
+            ),
+            window,
+            cx,
+        );
     }
 
     fn open_snapshot_password_dialog(

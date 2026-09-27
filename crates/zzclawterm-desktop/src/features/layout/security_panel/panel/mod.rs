@@ -18,6 +18,13 @@ mod passwords;
 
 const SECURITY_LIST_HORIZONTAL_PADDING: f32 = 24.;
 const SECURITY_LIST_COMPACT_BREAKPOINT: f32 = 224.;
+const SECURITY_AUTH_TABS: [SecurityAuthTab; 5] = [
+    SecurityAuthTab::Keys,
+    SecurityAuthTab::Passwords,
+    SecurityAuthTab::Otp,
+    SecurityAuthTab::Credentials,
+    SecurityAuthTab::KnownHosts,
+];
 
 impl ZzClawTermApp {
     pub(in crate::features) fn security_auth_panel(
@@ -36,44 +43,33 @@ impl ZzClawTermApp {
         }
         .overflow_y_scrollbar();
 
+        let panel_width = self.security_panel_width();
+        let tab_width = ((panel_width - SECURITY_LIST_HORIZONTAL_PADDING) / 5.).max(1.);
+        let tabs = ZzClawTabs::new("security-auth-tabs")
+            .max_tab_width(px(tab_width))
+            .items(SECURITY_AUTH_TABS.map(|tab| {
+                let label = t!(tab.i18n_key());
+                ZzClawTabItem::new(label.clone()).accessible_label(label)
+            }))
+            .selected_index(
+                SECURITY_AUTH_TABS
+                    .iter()
+                    .position(|tab| *tab == active_tab)
+                    .unwrap_or(0),
+            )
+            .on_select(cx.listener(|this, index, window, cx| {
+                if let Some(tab) = SECURITY_AUTH_TABS.get(*index) {
+                    this.set_security_auth_tab(*tab, window, cx);
+                }
+            }));
+
         div()
             .size_full()
             .relative()
             .flex()
             .flex_col()
             .bg(self.shell_transparent_color(palette.surface))
-            .child(
-                div().px_3().pt_3().pb_0().flex().flex_col().child(
-                    div().id("security-auth-tabs-scroll").w_full().child(
-                        ZzClawTabs::new("security-auth-tabs")
-                            .scrollable(self.security.tabs_scroll())
-                            .items([
-                                ZzClawTabItem::new(t!(SecurityAuthTab::Keys.i18n_key())),
-                                ZzClawTabItem::new(t!(SecurityAuthTab::Passwords.i18n_key())),
-                                ZzClawTabItem::new(t!(SecurityAuthTab::Otp.i18n_key())),
-                                ZzClawTabItem::new(t!(SecurityAuthTab::Credentials.i18n_key())),
-                                ZzClawTabItem::new(t!(SecurityAuthTab::KnownHosts.i18n_key())),
-                            ])
-                            .selected_index(match active_tab {
-                                SecurityAuthTab::Keys => 0,
-                                SecurityAuthTab::Passwords => 1,
-                                SecurityAuthTab::Otp => 2,
-                                SecurityAuthTab::Credentials => 3,
-                                SecurityAuthTab::KnownHosts => 4,
-                            })
-                            .on_select(cx.listener(|this, index, window, cx| {
-                                let tab = match *index {
-                                    0 => SecurityAuthTab::Keys,
-                                    1 => SecurityAuthTab::Passwords,
-                                    2 => SecurityAuthTab::Otp,
-                                    3 => SecurityAuthTab::Credentials,
-                                    _ => SecurityAuthTab::KnownHosts,
-                                };
-                                this.set_security_auth_tab(tab, window, cx);
-                            })),
-                    ),
-                ),
-            )
+            .child(div().px_3().pt_3().pb_0().flex().flex_col().child(tabs))
             .child(body)
             .when(
                 matches!(
@@ -93,11 +89,15 @@ impl ZzClawTermApp {
     }
 
     fn security_list_compact(&self) -> bool {
+        security_list_compact_for_panel_width(self.security_panel_width())
+    }
+
+    fn security_panel_width(&self) -> f32 {
         let side = self
             .panel_side_for_item(NavItem::SecurityAuth)
             .unwrap_or(PanelSide::Left);
         let viewport_width = self.shell.viewport_size().0;
-        let panel_width = match side {
+        match side {
             PanelSide::Left => {
                 let width = self.shell.left_panel_width().clamp(160., 720.);
                 if !cfg!(target_os = "macos") && viewport_width < 1024. {
@@ -114,8 +114,7 @@ impl ZzClawTermApp {
                     width
                 }
             }
-        };
-        security_list_compact_for_panel_width(panel_width)
+        }
     }
 }
 

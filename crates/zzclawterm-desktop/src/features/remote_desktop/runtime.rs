@@ -9,19 +9,21 @@ use zzclawterm_remote_desktop::{
     CertificateDecision, CertificateMatchState, CertificatePromptReason, ClipboardOrigin,
     DirtyRect, DisplayScaleMode, DisplayTransform, Framebuffer, FramebufferLimits, LogicalPoint,
     LogicalRect, LogicalSize, RDP_FRAMEBUFFER_LIMITS, RdpCapability, RdpCertificatePolicy,
-    RdpCertificateRequest, RdpCertificateResponse, RdpClipboardMode, RdpDisplayMetrics,
-    RdpDisplayMode, RdpError, RdpErrorKind, RdpFrameEvent, RdpInputEvent, RdpRuntimeEvent,
-    RdpServerCapabilities, RdpSessionConfig, RdpSessionState, RemoteCursorEvent,
+    RdpCertificateRequest, RdpCertificateResponse, RdpClipboardMode, RdpClipboardTransferStatus,
+    RdpDisplayMetrics, RdpDisplayMode, RdpError, RdpErrorKind, RdpFrameEvent, RdpInputEvent,
+    RdpRuntimeEvent, RdpServerCapabilities, RdpSessionConfig, RdpSessionState, RemoteCursorEvent,
     RemoteDesktopError, RemoteDesktopViewState, RemotePoint, RemotePointerButton,
     RemotePointerEvent, RemoteWheelAxis, VNC_FRAMEBUFFER_LIMITS, VncError, VncInputEvent,
     VncRuntimeEvent, VncScaleMode, VncServerCapabilities, VncSessionConfig, VncSessionState,
     evaluate_certificate_match,
 };
 use zzclawterm_store::{RdpCertificateMetadata, RdpKnownHostCheck, StoreDomain, store_request};
+use zzclawterm_transport::SftpTransferProgress;
 
 use super::state::RdpCertificatePrompt;
 
 use crate::features::ZzClawTermApp;
+use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
 
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(150);
 const RESIZE_FAILURE_WINDOW: Duration = Duration::from_secs(3);
@@ -197,6 +199,7 @@ impl ZzClawTermApp {
                     window.modifiers(),
                     Some(window.capslock().on),
                 );
+                this.sync_rdp_keyboard_capture(window);
             }
         });
         let focus_out = cx.on_focus_out(
@@ -894,23 +897,26 @@ impl ZzClawTermApp {
 
     fn sync_rdp_keyboard_capture(&self, window: &Window) {
         let target = self.session.active_id().and_then(|session_id| {
-            (self.remote_desktop.focus.is_focused(window)
+            let is_vnc = self.session.metadata(session_id).is_some_and(|metadata| {
+                matches!(
+                    metadata.launch_config,
+                    crate::models::SessionLaunchConfig::Vnc(_)
+                )
+            });
+            (window.is_window_active()
+                && self.remote_desktop.focus.is_focused(window)
                 && self
                     .remote_desktop
                     .sessions
                     .get(session_id)
                     .is_some_and(|session| {
                         matches!(session.state, RemoteDesktopViewState::Connected)
+                            && (is_vnc
+                                || session.viewport.is_some_and(|bounds| {
+                                    bounds.contains(&window.mouse_position())
+                                }))
                     }))
-            .then(|| {
-                let is_vnc = self.session.metadata(session_id).is_some_and(|metadata| {
-                    matches!(
-                        metadata.launch_config,
-                        crate::models::SessionLaunchConfig::Vnc(_)
-                    )
-                });
-                (session_id.to_string(), is_vnc)
-            })
+            .then(|| (session_id.to_string(), is_vnc))
         });
         super::keyboard_capture::set_keyboard_capture(
             self.remote_desktop.manager.clone(),
@@ -1562,6 +1568,12 @@ impl ZzClawTermApp {
                 if let Some(message) = message {
                     self.shell.set_status(message);
                 }
+                if matches!(
+                    state,
+                    RdpSessionState::Disconnected | RdpSessionState::Failed(_)
+                ) {
+                    self.stop_rdp_clipboard_jobs(session_id, cx);
+                }
             }
             RdpRuntimeEvent::Frame {
                 event:
@@ -1605,6 +1617,45 @@ impl ZzClawTermApp {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
+            RdpRuntimeEvent::ClipboardTransfer { progress, .. } => {
+                let status = match progress.status {
+                    RdpClipboardTransferStatus::Running => TransferJobStatus::Running,
+                    RdpClipboardTransferStatus::Completed => TransferJobStatus::Completed,
+                    RdpClipboardTransferStatus::Failed => TransferJobStatus::Failed,
+                    RdpClipboardTransferStatus::Cancelled => TransferJobStatus::Cancelled,
+                };
+                let sample = SftpTransferProgress {
+                    remote_path: "RDP clipboard".to_string(),
+                    local_path: std::path::PathBuf::new(),
+                    bytes_transferred: progress.transferred_bytes,
+                    total_bytes: Some(progress.total_bytes),
+                    item_count_completed: Some(progress.completed_files),
+                    item_count_total: Some(progress.total_files),
+                };
+                if let Some(job) = self.transfer.transfer_job_mut(&progress.id) {
+                    job.status = status;
+                    job.detail = progress.error.unwrap_or_default();
+                    job.update_progress(sample);
+                } else {
+                    self.transfer.enqueue_transfer_job(TransferJobState {
+                        id: progress.id,
+                        session_id: Some(session_id.to_string()),
+                        kind: TransferJobKind::RdpClipboard {
+                            file_name: progress.name.clone(),
+                        },
+                        status,
+                        detail: progress.error.unwrap_or_default(),
+                        created_at_ms: TransferJobState::now_ms(),
+                        display_name: progress.name,
+                        entries: Vec::new(),
+                        summary: None,
+                        progress: Some(sample),
+                        control: None,
+                        speed: Default::default(),
+                    });
+                }
+                self.defer_transfer_panel_snapshot_flush(cx);
+            }
             RdpRuntimeEvent::CertificateRequest(request) => {
                 self.handle_rdp_certificate_request(session_id, request, cx);
             }
@@ -1618,6 +1669,9 @@ impl ZzClawTermApp {
                 }
             }
             RdpRuntimeEvent::Error { error, fatal, .. } => {
+                if fatal {
+                    self.stop_rdp_clipboard_jobs(session_id, cx);
+                }
                 let should_reconnect = fatal && self.schedule_rdp_reconnect(session_id, &error);
                 if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
                     session.error = Some(error.clone().into());
@@ -1634,6 +1688,26 @@ impl ZzClawTermApp {
                     self.shell.set_status(format_rdp_error(&error));
                 }
             }
+        }
+    }
+
+    fn stop_rdp_clipboard_jobs(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let mut changed = false;
+        self.transfer.visit_transfer_jobs_mut(|job| {
+            if job.session_id.as_deref() == Some(session_id)
+                && matches!(job.kind, TransferJobKind::RdpClipboard { .. })
+                && matches!(
+                    job.status,
+                    TransferJobStatus::Running | TransferJobStatus::Cancelling
+                )
+            {
+                job.status = TransferJobStatus::Cancelled;
+                job.detail = "RDP session disconnected".to_string();
+                changed = true;
+            }
+        });
+        if changed {
+            self.defer_transfer_panel_snapshot_flush(cx);
         }
     }
 
@@ -2140,7 +2214,7 @@ impl ZzClawTermApp {
                 .metadata(&session_id)
                 .and_then(|metadata| match &metadata.launch_config {
                     crate::models::SessionLaunchConfig::Rdp(config)
-                        if config.clipboard.mode == RdpClipboardMode::TextOnly =>
+                        if config.clipboard.mode != RdpClipboardMode::Disabled =>
                     {
                         Some(RemoteDesktopClipboardTarget::Rdp)
                     }

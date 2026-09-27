@@ -5,6 +5,7 @@ use gpui::{
     SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::{Cancel, Confirm};
 use gpui_kit::component::menu::{
     ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuAppearance, PopupMenuItem,
 };
@@ -16,6 +17,8 @@ type MenuClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type ContextMenuItemsBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Vec<ZzClawMenuItem>>;
 
 const NYA_MENU_WIDTH: f32 = 220.;
+const NYA_MENU_ICON_SLOT_WIDTH: f32 = 24.;
+const NYA_MENU_ITEM_GAP: f32 = 8.;
 const NYA_SUBMENU_OVERLAP: f32 = 8.;
 const NYA_MENU_ICON_OPTICAL_OFFSET_Y: f32 = 1.;
 
@@ -46,9 +49,9 @@ pub(crate) fn zzclaw_popup_menu_appearance() -> PopupMenuAppearance {
         .row_height(px(28.))
         .font_size(px(12.))
         .icon_size(px(16.))
-        .icon_slot_width(px(24.))
+        .icon_slot_width(px(NYA_MENU_ICON_SLOT_WIDTH))
         .horizontal_padding(px(8.))
-        .item_gap(px(8.))
+        .item_gap(px(NYA_MENU_ITEM_GAP))
         .content_padding(px(4.))
         .row_gap(px(0.))
         .separator_thickness(px(1.))
@@ -104,6 +107,7 @@ impl ZzClawMenuAnchor {
 #[derive(Clone)]
 enum ZzClawMenuItemKind {
     Action,
+    ActionBar(Vec<ZzClawMenuItem>),
     Label,
     Separator,
     Submenu(Vec<ZzClawMenuItem>),
@@ -149,6 +153,15 @@ impl ZzClawMenuItem {
         Self {
             kind: ZzClawMenuItemKind::Label,
             ..Self::action(label)
+        }
+    }
+
+    /// A compact row of commands inside a context menu. Each command keeps its
+    /// own disabled state and click handler.
+    pub fn action_bar(items: [Self; 5]) -> Self {
+        Self {
+            kind: ZzClawMenuItemKind::ActionBar(items.into()),
+            ..Self::action("")
         }
     }
 
@@ -249,6 +262,10 @@ impl ZzClawMenuItem {
         }
     }
 
+    fn is_action_bar(&self) -> bool {
+        matches!(self.kind, ZzClawMenuItemKind::ActionBar(_))
+    }
+
     #[doc(hidden)]
     pub fn test_icon_color(&self) -> Option<u32> {
         self.icon_color
@@ -276,6 +293,97 @@ impl ZzClawMenuItem {
             ZzClawMenuItemKind::Separator => menu.separator(),
             ZzClawMenuItemKind::Label => menu.label(self.label.clone()),
             ZzClawMenuItemKind::Action => menu.item(self.popup_item(cx)),
+            ZzClawMenuItemKind::ActionBar(items) => {
+                let items = items.clone();
+                let menu_id = cx.entity().entity_id();
+                menu.item(PopupMenuItem::element(move |_, cx| {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .relative()
+                        // PopupMenu reserves an icon slot for the other rows.
+                        .ml(px(-(NYA_MENU_ICON_SLOT_WIDTH + NYA_MENU_ITEM_GAP)))
+                        .h(px(48.))
+                        // Cover the parent menu item's row hover so only each button highlights.
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(-8.))
+                                .right(px(-8.))
+                                .bg(cx.theme().popover),
+                        )
+                        .children(items.iter().enumerate().map(|(index, item)| {
+                            let label = item.label.clone();
+                            let on_click = item.on_click.clone();
+                            let on_confirm = on_click.clone();
+                            let mut button = Button::new(format!("menu-{menu_id}-action-{index}"))
+                                .ghost()
+                                .compact()
+                                .accessibility_label(label.clone())
+                                .tooltip(label.clone())
+                                .disabled(item.disabled)
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(48.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .gap_1()
+                                        .children(
+                                            item.component_icon(cx)
+                                                .map(|icon| icon.with_size(px(16.))),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .text_center()
+                                                .text_size(px(10.))
+                                                .child(label),
+                                        ),
+                                );
+                            if item.danger {
+                                button = button.text_color(cx.theme().danger);
+                            }
+                            if let Some(on_click) = on_click {
+                                button = button.on_click(move |event, window, cx| {
+                                    cx.stop_propagation();
+                                    window.dispatch_action(Box::new(Cancel), cx);
+                                    on_click(event, window, cx);
+                                });
+                            }
+                            div()
+                                .flex()
+                                .items_center()
+                                .flex_1()
+                                .min_w_0()
+                                .when(index > 0, |this| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(1.))
+                                            .h(px(24.))
+                                            .bg(cx.theme().border),
+                                    )
+                                })
+                                .when_some(
+                                    on_confirm.filter(|_| !item.disabled),
+                                    |this, handler| {
+                                        this.on_action(move |_: &Confirm, window, cx| {
+                                            cx.stop_propagation();
+                                            window.dispatch_action(Box::new(Cancel), cx);
+                                            handler(&ClickEvent::default(), window, cx);
+                                        })
+                                    },
+                                )
+                                .child(button)
+                        }))
+                }))
+            }
             ZzClawMenuItemKind::Submenu(items) => {
                 let items = items.clone();
                 let min_width = self.submenu_min_width;
@@ -357,7 +465,9 @@ impl ZzClawMenuItem {
             return None;
         };
 
-        let icon = if let Some(color) = self.icon_color {
+        let icon = if self.danger {
+            icon.text_color(cx.theme().danger)
+        } else if let Some(color) = self.icon_color {
             icon.text_color(rgb(color))
         } else {
             icon.text_color(cx.theme().muted_foreground)
@@ -631,6 +741,11 @@ where
         self.element
             .context_menu(move |menu, window, cx| {
                 let items = items_builder(window, cx);
+                let min_width = if items.iter().any(ZzClawMenuItem::is_action_bar) {
+                    Some(px(256.))
+                } else {
+                    min_width
+                };
                 let direction_probe_width = submenu_direction_probe_width(
                     &items,
                     min_width,
@@ -756,6 +871,61 @@ mod tests {
         assert!(item.disabled);
         assert!(item.checked);
         assert!(item.danger);
+    }
+
+    struct ActionBarFixture {
+        invoked: Rc<Cell<u8>>,
+    }
+
+    impl Render for ActionBarFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let invoked = self.invoked.clone();
+            ZzClawContextMenu::new_dynamic(
+                div().id("action-bar-context-menu").size(px(100.)),
+                move |_, _| {
+                    let invoked = invoked.clone();
+                    vec![
+                        ZzClawMenuItem::action_bar([
+                            ZzClawMenuItem::action("Cut").disabled(true),
+                            ZzClawMenuItem::action("Copy").on_click(move |_, _, _| {
+                                invoked.set(1);
+                            }),
+                            ZzClawMenuItem::action("Paste").disabled(true),
+                            ZzClawMenuItem::action("Rename").disabled(true),
+                            ZzClawMenuItem::action("Delete").disabled(true),
+                        ]),
+                        ZzClawMenuItem::separator(),
+                        ZzClawMenuItem::action("Open"),
+                    ]
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn action_bar_preserves_each_command_state() {
+        let bar = ZzClawMenuItem::action_bar([
+            ZzClawMenuItem::action("Cut").disabled(true),
+            ZzClawMenuItem::action("Copy"),
+            ZzClawMenuItem::action("Paste").disabled(true),
+            ZzClawMenuItem::action("Rename"),
+            ZzClawMenuItem::action("Delete").danger(),
+        ]);
+        let ZzClawMenuItemKind::ActionBar(items) = &bar.kind else {
+            panic!("expected action bar");
+        };
+        assert_eq!(items.len(), 5);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_ref())
+                .collect::<Vec<_>>(),
+            ["Cut", "Copy", "Paste", "Rename", "Delete"]
+        );
+        assert!(items[0].disabled);
+        assert!(items[2].disabled);
+        assert!(items[4].danger);
+        assert!(bar.is_action_bar());
     }
 
     #[test]
@@ -889,6 +1059,38 @@ mod tests {
             panic!("expected submenu");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[gpui::test]
+    fn action_bar_enabled_button_can_be_used_with_keyboard(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let invoked = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let invoked = invoked.clone();
+            move |_, _| ActionBarFixture {
+                invoked: invoked.clone(),
+            }
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: point(px(10.), px(10.)),
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(invoked.get(), 1);
     }
 
     #[gpui::test]
