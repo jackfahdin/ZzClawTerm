@@ -97,11 +97,13 @@ def replace_asset_with_backup(
         return False, f"{type(error).__name__} while backing up the old attachment", True
     if backup.stat().st_size == asset.stat().st_size:
         with backup.open("rb") as old_file, asset.open("rb") as new_file:
-            if hashlib.file_digest(old_file, "sha256").digest() == hashlib.file_digest(
-                new_file, "sha256"
-            ).digest():
-                backup.unlink()
-                return True, "", False
+            # Windows 不允许删掉还被占用的句柄，比对必须在关闭文件之后才 unlink。
+            identical = hashlib.file_digest(
+                old_file, "sha256"
+            ).digest() == hashlib.file_digest(new_file, "sha256").digest()
+        if identical:
+            backup.unlink()
+            return True, "", False
     releases_path, tag = release_path.rsplit("/", 1)
     try:
         replace_release_assets(
