@@ -218,6 +218,17 @@ def _stable_version(manifest: dict) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
+def _upload_timeout(size_bytes: int) -> int:
+    """Scale the signed-URL timeout to the payload size.
+
+    The fixed 300s bound is fine for a manifest, but a ~60MB installer on a slow
+    link to GitCode needs far longer for the server to accept and confirm the
+    object; keep a floor for small files and a ceiling so a wedged connection
+    still gives up.
+    """
+    return max(300, min(1800, size_bytes // 60_000))
+
+
 def upload_asset(session, request, release_path: str, asset: Path) -> tuple[bool, str]:
     info = request(
         "GET",
@@ -241,7 +252,10 @@ def upload_asset(session, request, release_path: str, asset: Path) -> tuple[bool
     host = urlsplit(url).hostname or "GitCode upload host"
     try:
         with asset.open("rb") as handle:
-            response = session.put(url, data=handle, headers=headers, timeout=300)
+            response = session.put(
+                url, data=handle, headers=headers,
+                timeout=_upload_timeout(asset.stat().st_size),
+            )
     except Exception as error:
         return False, f"{type(error).__name__} while uploading to {host}"
     if response.status_code in (200, 201, 204):

@@ -200,6 +200,7 @@ jobs:
           import urllib.parse
 
           import requests
+          from concurrent.futures import ThreadPoolExecutor
           from scripts.ci.gitcode_release_upload import (
               replace_asset_with_backup,
               replace_release_assets,
@@ -217,19 +218,23 @@ jobs:
           assets = sorted(pathlib.Path("release-assets").iterdir(), key=lambda path: path.name.lower())
           session = requests.Session()
 
-          def request(method, path, *, expected=(200, 201), allow_404=False, **kwargs):
-              params = kwargs.pop("params", {})
-              params["access_token"] = token
-              response = session.request(method, f"{api}{path}", params=params, timeout=300, **kwargs)
-              if allow_404 and response.status_code == 404:
-                  return None
-              if response.status_code not in expected:
-                  raise RuntimeError(
-                      f"GitCode API {method} {path}: HTTP {response.status_code}"
-                  )
-              if method == "DELETE":
-                  return None
-              return response.json() if response.text.strip() else None
+          def make_request(session):
+              def request(method, path, *, expected=(200, 201), allow_404=False, **kwargs):
+                  params = kwargs.pop("params", {})
+                  params["access_token"] = token
+                  response = session.request(method, f"{api}{path}", params=params, timeout=300, **kwargs)
+                  if allow_404 and response.status_code == 404:
+                      return None
+                  if response.status_code not in expected:
+                      raise RuntimeError(
+                          f"GitCode API {method} {path}: HTTP {response.status_code}"
+                      )
+                  if method == "DELETE":
+                      return None
+                  return response.json() if response.text.strip() else None
+              return request
+
+          request = make_request(session)
 
           owner_q = urllib.parse.quote(owner, safe="")
           repo_q = urllib.parse.quote(repo, safe="")
@@ -265,23 +270,25 @@ jobs:
           }
           backup_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gitcode-release-backup"
 
-          for asset in assets:
+          def process_asset(asset):
               if not upload_small or asset.stat().st_size > max_bytes:
-                  fallbacks.append((asset.name, github_asset_url(asset.name), "附件过大，从 GitHub Releases 下载"))
-                  continue
-              print(f"Synchronizing GitCode attachment {asset.name}", flush=True)
+                  return asset.name, "too_big", "附件过大，从 GitHub Releases 下载", False
+              # requests.Session 不是线程安全的，每个 worker 自带一个，互不共享。
+              worker = requests.Session()
+              request = make_request(worker)
               previous = old_assets.get(asset.name)
               backup = backup_dir / asset.name if previous else None
+              restored = False
               if previous:
                   success, reason, restored = replace_asset_with_backup(
-                      session, request, release_path, previous, asset, backup,
+                      worker, request, release_path, previous, asset, backup,
                   )
               else:
                   success = False
                   reason = ""
                   for attempt in range(1, 4):
                       try:
-                          success, reason = upload_asset(session, request, release_path, asset)
+                          success, reason = upload_asset(worker, request, release_path, asset)
                           if success:
                               for poll in range(20):
                                   current = request("GET", f"{releases_path}/tags/{tag_q}")
@@ -302,13 +309,28 @@ jobs:
                       if attempt < 3:
                           time.sleep(5 * attempt)
               if success:
-                  uploaded.append(asset.name)
+                  return asset.name, "uploaded", "", restored
+              return asset.name, "failed", reason, restored
+
+          # GitCode 按连接限速，单个 60MB 安装包就能吃掉整个 120 分钟 job 超时；
+          # 用少量 worker 并行上传把吞吐抬上来（可由 GITCODE_UPLOAD_WORKERS 覆盖）。
+          max_workers = max(1, int(os.environ.get("GITCODE_UPLOAD_WORKERS", "4")))
+          results = []
+          with ThreadPoolExecutor(max_workers=max_workers) as pool:
+              for result in pool.map(process_asset, assets):
+                  results.append(result)
+          for name, outcome, reason, restored in sorted(results):
+              if outcome == "too_big":
+                  fallbacks.append((name, github_asset_url(name), reason))
+              elif outcome == "uploaded":
+                  print(f"Synchronized GitCode attachment {name}")
+                  uploaded.append(name)
               else:
-                  if backup and not restored:
-                      print(f"::error::Could not restore the previous GitCode attachment {asset.name}")
-                  print(f"::warning::GitCode attachment failed for {asset.name}: {reason}")
-                  failed.append(asset.name)
-                  fallbacks.append((asset.name, github_asset_url(asset.name), "GitCode 附件同步失败"))
+                  if name in old_assets and not restored:
+                      print(f"::error::Could not restore the previous GitCode attachment {name}")
+                  print(f"::warning::GitCode attachment failed for {name}: {reason}")
+                  failed.append(name)
+                  fallbacks.append((name, github_asset_url(name), "GitCode 附件同步失败"))
 
           if not failed:
               current = request("GET", f"{releases_path}/tags/{tag_q}")

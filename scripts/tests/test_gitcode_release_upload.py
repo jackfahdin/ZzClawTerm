@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from scripts.ci.gitcode_release_upload import (
+    _upload_timeout,
     backup_release_asset,
     publish_stable_manifest,
     replace_release_assets,
@@ -393,3 +394,9 @@ class GitCodeReleaseUploadTests(unittest.TestCase):
                 sleep=lambda _: None,
             )
         self.assertEqual(len(session.calls), 1)
+
+    def test_upload_timeout_scales_with_payload_size(self) -> None:
+        # 小清单走下限，大安装包按 60KB/s 的慢链路预留时间，再大封顶在 30 分钟。
+        self.assertEqual(_upload_timeout(5_000), 300)
+        self.assertEqual(_upload_timeout(65 * 1024 * 1024), 65 * 1024 * 1024 // 60_000)
+        self.assertEqual(_upload_timeout(200 * 1024 * 1024), 1800)
