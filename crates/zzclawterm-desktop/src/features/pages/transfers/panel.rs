@@ -29,6 +29,7 @@ pub(in crate::features) struct TransferChrome {
     pub transparent_surface: Rgba,
     pub transparent_section_header: Rgba,
     pub surface: Rgba,
+    pub panel_width: f32,
 }
 
 /// The browser's render state, owned.

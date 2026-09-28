@@ -937,4 +937,32 @@ mod tests {
         tree.select_all("a");
         assert_eq!(tree.selected_entries("a").len(), 3);
     }
+
+    #[test]
+    fn hiding_hidden_files_clears_their_tree_selection() {
+        let mut tree = TransferTreeState::default();
+        tree.seed(
+            "a",
+            FileBrowserBackendKind::Remote,
+            RemoteFilePath::new("/"),
+            Arc::new(vec![file(".secret", "/.secret")]),
+        );
+        tree.reveal(
+            "a",
+            FileBrowserBackendKind::Remote,
+            RemoteFilePath::new("/"),
+        );
+        let shown = tree.presentation(Some("a"), true);
+        let hidden = shown
+            .rows
+            .iter()
+            .find(|row| row.label == ".secret")
+            .unwrap();
+        tree.select("a", hidden.key.clone(), false, false);
+        assert_eq!(tree.selected_entries("a").len(), 1);
+
+        let view = tree.presentation(Some("a"), false);
+        assert!(!view.rows.iter().any(|row| row.label == ".secret"));
+        assert!(tree.selected_entries("a").is_empty());
+    }
 }

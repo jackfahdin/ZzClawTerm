@@ -703,13 +703,7 @@ impl ZzClawTermApp {
                 };
                 SharedString::from(count.to_string())
             }
-            NavItem::Transfers => {
-                if self.transfer.browser_view().entries.is_empty() {
-                    SharedString::from("")
-                } else {
-                    SharedString::from(self.transfer.browser_view().entries.len().to_string())
-                }
-            }
+            NavItem::Transfers => SharedString::from(""),
             NavItem::Processes => self
                 .session
                 .active_ssh_config()

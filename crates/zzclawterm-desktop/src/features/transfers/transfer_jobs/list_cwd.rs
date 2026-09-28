@@ -1,7 +1,9 @@
 use std::time::{Duration, Instant};
 
 use gpui::Context;
-use zzclawterm_transport::{FileBrowserBackendKind, SftpCwdFollowMode, SshProcessService};
+use zzclawterm_transport::{
+    FileBrowserBackendKind, SftpCwdFollowMode, SftpFileEntry, SshProcessService,
+};
 
 use crate::features::ZzClawTermApp;
 use crate::models::{
@@ -13,6 +15,62 @@ use crate::models::{
 use super::helpers::submit_transfer_blocking_job;
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn start_transfer_initial_directory_job(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        let service = match self.active_file_browser_service() {
+            Ok(service) => service,
+            Err(error) => {
+                self.transfer.browser.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let Some(session_id) = self.session.active_id_owned() else {
+            return;
+        };
+        let id = self.transfer.next_transfer_job_id("sftp-initial-directory");
+        self.transfer
+            .browser
+            .navigation_jobs
+            .insert(session_id.clone(), id.clone());
+        self.transfer.begin_browser_directory_load("/".to_string());
+        self.transfer.set_remote_path("/");
+        self.transfer.enqueue_transfer_job(TransferJobState {
+            id: id.clone(),
+            session_id: Some(session_id),
+            kind: TransferJobKind::InitialDirectory,
+            status: TransferJobStatus::Running,
+            detail: "Resolving initial remote directory".to_string(),
+            created_at_ms: TransferJobState::now_ms(),
+            display_name: String::new(),
+            entries: Vec::new(),
+            summary: None,
+            progress: None,
+            control: None,
+            speed: Default::default(),
+        });
+        let transfer_tx = self.transfer.transfer_event_sender();
+        submit_transfer_blocking_job(
+            &self.blocking_jobs,
+            "sftp-initial-directory",
+            id.clone(),
+            transfer_tx.clone(),
+            move || {
+                let result = resolve_initial_directory(
+                    || service.home_dir().map_err(|error| error.to_string()),
+                    |path| service.list_dir(path).map_err(|error| error.to_string()),
+                );
+                let _ = transfer_tx.unbounded_send(TransferJobResult {
+                    id,
+                    event: TransferJobEvent::Finished(result),
+                });
+            },
+        );
+        cx.notify();
+    }
+
     pub(in crate::features) fn start_transfer_browser_children_job(
         &mut self,
         remote_path: String,
@@ -339,7 +397,13 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        if self.transfer.browser.home_dir_pending || !self.transfer.browser.home_dir.is_empty() {
+        if self.transfer.browser.home_dir_pending
+            || !self.transfer.browser.home_dir.is_empty()
+            || self.session.active_id().is_some_and(|session_id| {
+                self.transfer
+                    .browser_navigation_job_running_for_session(session_id)
+            })
+        {
             return;
         }
         let service = match self.active_file_browser_service() {
@@ -470,6 +534,28 @@ impl ZzClawTermApp {
     }
 }
 
+fn resolve_initial_directory(
+    home_dir: impl FnOnce() -> Result<String, String>,
+    mut list_dir: impl FnMut(&str) -> Result<Vec<SftpFileEntry>, String>,
+) -> Result<TransferJobOutput, String> {
+    if let Ok(home) = home_dir() {
+        let home = home.trim();
+        if home.starts_with('/')
+            && home != "/"
+            && let Ok(entries) = list_dir(home)
+        {
+            return Ok(TransferJobOutput::InitialDirectory {
+                path: home.to_string(),
+                entries,
+            });
+        }
+    }
+    list_dir("/").map(|entries| TransferJobOutput::InitialDirectory {
+        path: "/".to_string(),
+        entries,
+    })
+}
+
 fn transfer_cwd_sync_should_show_loading(
     current_path: &str,
     loading: bool,
@@ -481,7 +567,64 @@ fn transfer_cwd_sync_should_show_loading(
 
 #[cfg(test)]
 mod tests {
-    use super::transfer_cwd_sync_should_show_loading;
+    use super::{resolve_initial_directory, transfer_cwd_sync_should_show_loading};
+    use crate::models::TransferJobOutput;
+
+    #[test]
+    fn initial_directory_uses_home_when_it_can_be_listed() {
+        let result = resolve_initial_directory(
+            || Ok("/home/user".to_string()),
+            |path| {
+                assert_eq!(path, "/home/user");
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, TransferJobOutput::InitialDirectory { path, .. } if path == "/home/user")
+        );
+    }
+
+    #[test]
+    fn initial_directory_falls_back_to_root_after_home_error() {
+        let result = resolve_initial_directory(
+            || Err("home unavailable".to_string()),
+            |path| {
+                assert_eq!(path, "/");
+                Ok(Vec::new())
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, TransferJobOutput::InitialDirectory { path, .. } if path == "/"));
+    }
+
+    #[test]
+    fn initial_directory_falls_back_to_root_after_home_listing_error() {
+        let mut attempted = Vec::new();
+        let result = resolve_initial_directory(
+            || Ok("/home/user".to_string()),
+            |path| {
+                attempted.push(path.to_string());
+                if path == "/" {
+                    Ok(Vec::new())
+                } else {
+                    Err("denied".to_string())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempted, vec!["/home/user", "/"]);
+        assert!(matches!(result, TransferJobOutput::InitialDirectory { path, .. } if path == "/"));
+    }
+
+    #[test]
+    fn initial_directory_reports_root_error_when_both_locations_fail() {
+        let result = resolve_initial_directory(
+            || Ok("/home/user".to_string()),
+            |_| Err("root unavailable".to_string()),
+        );
+        assert!(matches!(result, Err(error) if error == "root unavailable"));
+    }
 
     #[test]
     fn cwd_poll_keeps_a_loaded_empty_directory_quiet() {

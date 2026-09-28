@@ -27,10 +27,30 @@ impl ZzClawTermApp {
 
     fn transfer_chrome(&self) -> TransferChrome {
         let palette = self.theme_palette();
+        let viewport_width = self.shell.viewport_size().0;
+        let panel_width = match self.panel_side_for_item(crate::models::NavItem::Transfers) {
+            Some(crate::models::PanelSide::Right) => {
+                let width = self.shell.right_panel_width().clamp(200., 720.);
+                if !cfg!(target_os = "macos") && viewport_width < 768. {
+                    width.min((viewport_width - 80.).max(120.))
+                } else {
+                    width
+                }
+            }
+            _ => {
+                let width = self.shell.left_panel_width().clamp(160., 720.);
+                if !cfg!(target_os = "macos") && viewport_width < 1024. {
+                    width.min((viewport_width - 80.).max(120.))
+                } else {
+                    width
+                }
+            }
+        };
         TransferChrome {
             transparent_surface: self.shell_transparent_color(palette.surface),
             transparent_section_header: self.shell_transparent_color(palette.section_header),
             surface: self.shell_surface_color(palette.surface),
+            panel_width,
             palette,
         }
     }

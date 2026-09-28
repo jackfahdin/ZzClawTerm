@@ -244,9 +244,10 @@ pub(in crate::features) enum TransferEditorDiscardOutcome {
     WorkspaceDiscarded,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::features) enum TransferEditorSaveOutcome {
     Saved,
+    SavedWithWarning(String),
     Conflict,
     SavedAndClosed,
 }

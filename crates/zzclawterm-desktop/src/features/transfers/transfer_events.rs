@@ -238,7 +238,9 @@ impl ZzClawTermApp {
         let job_session_id = job.session_id.clone();
         let reveal_tree_after_navigation = matches!(
             &job.kind,
-            TransferJobKind::ListDir { .. } | TransferJobKind::ResolveHome
+            TransferJobKind::InitialDirectory
+                | TransferJobKind::ListDir { .. }
+                | TransferJobKind::ResolveHome
         ) || matches!(&event.event, TransferJobEvent::Finished(Ok(TransferJobOutput::CwdSynced { remote_path, .. })) if remote_path != &self.transfer.browser.path)
             || job_session_id
                 .as_deref()
@@ -261,7 +263,9 @@ impl ZzClawTermApp {
         }
         let navigation_job_key = matches!(
             &job.kind,
-            TransferJobKind::ListDir { .. } | TransferJobKind::SyncCwd
+            TransferJobKind::InitialDirectory
+                | TransferJobKind::ListDir { .. }
+                | TransferJobKind::SyncCwd
         )
         .then(|| job_session_id.clone().unwrap_or_default());
         if transfer_navigation_job_is_stale(
@@ -361,6 +365,27 @@ impl ZzClawTermApp {
                     job.detail = format_transfer_progress(&progress);
                 }
                 job.update_progress(progress);
+            }
+            TransferJobEvent::Finished(Ok(TransferJobOutput::InitialDirectory {
+                path,
+                entries,
+            })) => {
+                browser_listing_completed = true;
+                job.status = TransferJobStatus::Completed;
+                job.detail = format!("{} item(s)", entries.len());
+                self.transfer.set_remote_path(path.clone());
+                self.transfer.browser.path = path.clone();
+                self.transfer.browser.home_dir = if path == "/" {
+                    String::new()
+                } else {
+                    path.clone()
+                };
+                self.transfer.browser.entries = Arc::new(entries.clone());
+                self.transfer.browser.loading = false;
+                self.transfer.browser.error = None;
+                self.transfer.browser.status = job.detail.clone();
+                self.transfer.record_browser_history(path);
+                job.entries = entries;
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Entries(entries))) => {
                 browser_listing_completed = true;
@@ -966,6 +991,9 @@ impl ZzClawTermApp {
                         TransferEditorSaveOutcome::Saved => {
                             format!("remote text file saved: {remote_path}")
                         }
+                        TransferEditorSaveOutcome::SavedWithWarning(backup_path) => {
+                            t!("fileEditor.backupCleanupWarning", path = backup_path).to_string()
+                        }
                         TransferEditorSaveOutcome::Conflict => {
                             format!("remote text save conflict: {remote_path}")
                         }
@@ -1116,7 +1144,8 @@ impl ZzClawTermApp {
                 }
                 let browser_load_failed = matches!(
                     &job.kind,
-                    TransferJobKind::ListDir { .. }
+                    TransferJobKind::InitialDirectory
+                        | TransferJobKind::ListDir { .. }
                         | TransferJobKind::ResolveHome
                         | TransferJobKind::SyncCwd
                 );
@@ -2047,26 +2076,32 @@ mod tests {
     }
 
     #[test]
-    fn superseded_transfer_navigation_result_is_stale_per_session() {
-        let latest_jobs = HashMap::from([
-            ("session-a".to_string(), "job-a2".to_string()),
-            ("session-b".to_string(), "job-b1".to_string()),
+    fn initial_directory_result_is_rejected_after_new_navigation_or_session_removal() {
+        let mut latest_jobs = HashMap::from([
+            ("session-a".to_string(), "list-after-initial".to_string()),
+            ("session-b".to_string(), "initial-b".to_string()),
         ]);
 
         assert!(transfer_navigation_job_is_stale(
             &latest_jobs,
             Some("session-a"),
-            "job-a1"
+            "initial-a"
         ));
         assert!(!transfer_navigation_job_is_stale(
             &latest_jobs,
             Some("session-a"),
-            "job-a2"
+            "list-after-initial"
         ));
         assert!(!transfer_navigation_job_is_stale(
             &latest_jobs,
             Some("session-b"),
-            "job-b1"
+            "initial-b"
+        ));
+        latest_jobs.remove("session-a");
+        assert!(transfer_navigation_job_is_stale(
+            &latest_jobs,
+            Some("session-a"),
+            "initial-a"
         ));
         assert!(!transfer_navigation_job_is_stale(
             &latest_jobs,

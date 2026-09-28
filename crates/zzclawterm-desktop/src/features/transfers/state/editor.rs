@@ -292,6 +292,7 @@ impl TransferFeatureState {
         }
         tab.saving = true;
         tab.error = None;
+        tab.backup_warning_path = None;
         tab.conflict = false;
         tab.reload_confirm = false;
         true
@@ -349,6 +350,7 @@ impl TransferFeatureState {
         tab.close_after_save = false;
         tab.reload_confirm = false;
         tab.error = None;
+        tab.backup_warning_path = None;
         true
     }
 
@@ -404,7 +406,25 @@ impl TransferFeatureState {
                 tab.close_after_save = false;
                 tab.reload_confirm = false;
                 tab.error = None;
+                tab.backup_warning_path = None;
                 TransferEditorSaveOutcome::Saved
+            }
+            RemoteTextWriteResult::SavedWithBackup {
+                revision,
+                backup_path,
+            } => {
+                tab.revision = Some(revision);
+                tab.saving = false;
+                tab.dirty = false;
+                tab.conflict = false;
+                tab.close_after_save = false;
+                tab.reload_confirm = false;
+                tab.error = None;
+                tab.backup_warning_path = Some(backup_path.clone());
+                workspace.close_after_save_all = false;
+                workspace.close_confirm = false;
+                workspace.pending_close_tab_id = None;
+                TransferEditorSaveOutcome::SavedWithWarning(backup_path)
             }
             RemoteTextWriteResult::Conflict => {
                 tab.saving = false;
@@ -453,6 +473,7 @@ impl TransferFeatureState {
         tab.saving = false;
         tab.close_after_save = false;
         tab.error = Some(error);
+        tab.backup_warning_path = None;
         workspace.close_after_save_all = false;
         true
     }
@@ -515,6 +536,7 @@ impl TransferFeatureState {
         tab.close_after_save = false;
         tab.reload_confirm = false;
         tab.error = None;
+        tab.backup_warning_path = None;
         true
     }
 

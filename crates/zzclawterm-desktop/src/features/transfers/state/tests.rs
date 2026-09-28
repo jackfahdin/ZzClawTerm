@@ -815,6 +815,7 @@ fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
         close_after_save: false,
         reload_confirm: false,
         error: None,
+        backup_warning_path: None,
         focused_field: TransferEditorField::Content,
     }
 }
@@ -1584,6 +1585,55 @@ fn transfer_editor_cannot_discard_a_save_in_flight() {
     );
     assert!(transfer.editor_has_workspace());
     assert!(transfer.active_editor_tab().is_some_and(|tab| tab.saving));
+}
+
+#[test]
+fn transfer_editor_keeps_warning_visible_after_successful_save() {
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    let tab = editor_tab("session-a", "/srv/a.txt");
+    let tab_id = tab.id.clone();
+    let generation = tab.generation;
+    transfer.open_editor_tab(tab);
+    assert!(transfer.sync_editor_content(&tab_id, "local edit".to_string()));
+    assert_eq!(
+        transfer.request_editor_tab_close(&tab_id),
+        TransferEditorCloseOutcome::ConfirmationRequired
+    );
+    assert_eq!(
+        transfer.prepare_editor_close_after_save(),
+        TransferEditorCloseAfterSave::Ready(tab_id.clone())
+    );
+    assert!(transfer.begin_editor_tab_save(&tab_id));
+    let backup_path = "/srv/a.txt.zzclawterm-backup-1".to_string();
+    let revision = RemoteTextRevision::from_bytes(
+        b"local edit",
+        RemoteTextMetadata {
+            size: 10,
+            modified_at: Some(4),
+        },
+    );
+    let outcome = transfer.complete_editor_save_tab(
+        &tab_id,
+        generation,
+        RemoteTextWriteResult::SavedWithBackup {
+            revision: revision.clone(),
+            backup_path: backup_path.clone(),
+        },
+    );
+    assert!(matches!(
+        outcome,
+        Some(TransferEditorSaveOutcome::SavedWithWarning(_))
+    ));
+    let tab = transfer.active_editor_tab().unwrap();
+    assert!(!tab.dirty);
+    assert!(!tab.saving);
+    assert_eq!(tab.revision, Some(revision));
+    assert_eq!(
+        tab.backup_warning_path.as_deref(),
+        Some(backup_path.as_str())
+    );
+    assert!(!transfer.editor_close_confirmation_is_open());
 }
 
 fn preview_tab(session_id: &str, remote_path: &str) -> crate::models::TransferPreviewState {

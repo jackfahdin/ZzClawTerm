@@ -29,6 +29,18 @@ fn format_download_bytes(bytes: u64) -> String {
     }
 }
 
+fn update_dialog_title_key(phase: &UpdatePhase) -> &'static str {
+    match phase {
+        UpdatePhase::Checking => "updater.checking",
+        UpdatePhase::Downloading { .. } => "updater.downloading",
+        UpdatePhase::Ready => "updater.readyToRestart",
+        UpdatePhase::Applying => "updater.installing",
+        UpdatePhase::Failed { .. } => "updater.updateFailed",
+        UpdatePhase::Available => "updater.newVersionAvailable",
+        UpdatePhase::Idle | UpdatePhase::UpToDate => "updater.noUpdate",
+    }
+}
+
 impl ZzClawTermApp {
     pub(in crate::features) fn update_dialog_content(
         &mut self,
@@ -68,15 +80,7 @@ impl ZzClawTermApp {
             .as_ref()
             .and_then(|info| info.html_url.clone())
             .unwrap_or_else(|| RELEASES_URL.to_string());
-        let title = match &phase {
-            UpdatePhase::Checking => t!("updater.checking"),
-            UpdatePhase::Downloading { .. } => t!("updater.downloading"),
-            UpdatePhase::Ready => t!("updater.readyToRestart"),
-            UpdatePhase::Applying => t!("updater.installing"),
-            UpdatePhase::Failed { .. } => t!("updater.updateFailed"),
-            UpdatePhase::Available => t!("updater.newVersionAvailable"),
-            UpdatePhase::Idle | UpdatePhase::UpToDate => t!("updater.noUpdate"),
-        };
+        let title = t!(update_dialog_title_key(&phase));
 
         div()
             .id("update-dialog-content")
@@ -358,5 +362,49 @@ impl ZzClawTermApp {
                         }),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_dialog_title_key;
+    use crate::features::update::UpdatePhase;
+
+    #[test]
+    fn update_dialog_heading_tracks_check_download_ready_and_failure() {
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Checking),
+            "updater.checking"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Available),
+            "updater.newVersionAvailable"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Downloading {
+                received: 1,
+                total: Some(2),
+            }),
+            "updater.downloading"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Ready),
+            "updater.readyToRestart"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Applying),
+            "updater.installing"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::UpToDate),
+            "updater.noUpdate"
+        );
+        assert_eq!(
+            update_dialog_title_key(&UpdatePhase::Failed {
+                message: "offline".into(),
+                download: false,
+            }),
+            "updater.updateFailed"
+        );
     }
 }

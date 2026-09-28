@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui::{
-    Action as _, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    Action as _, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
     IntoElement, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Redo, Undo};
@@ -27,7 +27,7 @@ pub struct ZzClawDocumentEditorState {
     silent_content: Option<SharedString>,
     read_only: bool,
     font_size: Option<f32>,
-    font_family: Option<SharedString>,
+    font: Option<Font>,
 }
 
 impl ZzClawDocumentEditorState {
@@ -110,7 +110,7 @@ impl ZzClawDocumentEditorState {
             silent_content: None,
             read_only: false,
             font_size: None,
-            font_family: None,
+            font: None,
         }
     }
 
@@ -128,14 +128,9 @@ impl ZzClawDocumentEditorState {
         }
     }
 
-    pub fn set_font_family(
-        &mut self,
-        font_family: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
-        let font_family = font_family.into();
-        if self.font_family.as_ref() != Some(&font_family) {
-            self.font_family = Some(font_family);
+    pub fn set_font(&mut self, font: Font, cx: &mut Context<Self>) {
+        if self.font.as_ref() != Some(&font) {
+            self.font = Some(font);
             cx.notify();
         }
     }
@@ -247,8 +242,8 @@ impl Render for ZzClawDocumentEditorState {
         if let Some(font_size) = self.font_size {
             editor = editor.text_size(px(font_size));
         }
-        if let Some(font_family) = &self.font_family {
-            editor = editor.font_family(font_family.clone());
+        if let Some(font) = &self.font {
+            editor = editor.font(font.clone());
         }
         div().size_full().min_h_0().min_w_0().child(editor)
     }

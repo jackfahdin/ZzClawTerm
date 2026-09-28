@@ -107,7 +107,7 @@ pub(super) fn compact_transfer_upload_menu_button(
     // Tauri: single Upload icon opens DropdownMenu (Upload Files / Upload Folder).
     div()
         .id(SharedString::from("transfer-browser-upload"))
-        .size(px(28.))
+        .size(px(26.))
         .flex_none()
         .flex()
         .items_center()
@@ -145,10 +145,10 @@ pub(super) fn compact_transfer_toolbar_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let tooltip = tooltip.into();
-    // Tauri FileExplorerToolbar: h-7 ghost icon buttons, muted until hover.
+    // Keep the full action row visible at common sidebar widths.
     div()
         .id(SharedString::from(id.into()))
-        .size(px(28.))
+        .size(px(26.))
         .flex_none()
         .flex()
         .items_center()
@@ -182,7 +182,7 @@ pub(super) fn compact_transfer_toolbar_button_enabled(
     let tooltip = tooltip.into();
     div()
         .id(SharedString::from(id.into()))
-        .size(px(28.))
+        .size(px(26.))
         .flex_none()
         .flex()
         .items_center()
@@ -232,7 +232,7 @@ pub(super) fn compact_transfer_toolbar_button_active(
     };
     div()
         .id(SharedString::from(id.into()))
-        .size(px(28.))
+        .size(px(26.))
         .flex_none()
         .flex()
         .items_center()

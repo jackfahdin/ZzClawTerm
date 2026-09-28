@@ -555,6 +555,8 @@ pub struct SftpWriteTextResult {
     pub mtime_nanos: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -713,8 +715,17 @@ pub fn validate_tool_result(name: &str, value: &Value) -> Result<(), ToolContrac
         tool::SFTP_READ_TEXT => parse_contract::<SftpReadTextResult>(name, value).map(drop),
         tool::SFTP_WRITE_TEXT => {
             let result = parse_contract::<SftpWriteTextResult>(name, value)?;
-            if !matches!(result.status.as_str(), "saved" | "conflict") {
-                return contract_error(name, "status must be saved or conflict");
+            if !matches!(
+                result.status.as_str(),
+                "saved" | "saved_with_backup" | "conflict"
+            ) {
+                return contract_error(
+                    name,
+                    "status must be saved, saved_with_backup, or conflict",
+                );
+            }
+            if result.status == "saved_with_backup" && result.backup_path.is_none() {
+                return contract_error(name, "saved_with_backup requires backupPath");
             }
             Ok(())
         }
@@ -853,9 +864,47 @@ mod tests {
 mod contract_tests {
     use super::{
         MAX_INLINE_OUTPUT_BYTES, MAX_RPC_LINE_BYTES, MAX_TEXT_READ_BYTES, MAX_TEXT_WRITE_BYTES,
-        MCP_TOOL_REGISTRY, RpcError, RpcResponse, tool, validate_tool_arguments,
-        validate_tool_result,
+        MCP_TOOL_REGISTRY, RpcError, RpcResponse, SftpWriteTextResult, tool,
+        validate_tool_arguments, validate_tool_result,
     };
+
+    #[test]
+    fn write_text_result_accepts_older_payloads_and_reports_retained_backups() {
+        let old = serde_json::json!({
+            "status": "saved",
+            "mtime": 1,
+            "size": 3,
+            "contentHash": "abc"
+        });
+        let parsed: SftpWriteTextResult = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(parsed.backup_path, None);
+        assert_eq!(serde_json::to_value(parsed).unwrap(), old);
+
+        let warning = SftpWriteTextResult {
+            status: "saved_with_backup".into(),
+            mtime: Some(2),
+            size: Some(3),
+            mtime_nanos: None,
+            content_hash: Some("abc".into()),
+            backup_path: Some("/file.txt.zzclawterm-backup-1".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(warning).unwrap()["backupPath"],
+            "/file.txt.zzclawterm-backup-1"
+        );
+        assert!(
+            validate_tool_result(
+                tool::SFTP_WRITE_TEXT,
+                &serde_json::json!({
+                    "status": "saved_with_backup",
+                    "mtime": 2,
+                    "size": 3,
+                    "backupPath": "/file.txt.zzclawterm-backup-1"
+                })
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn registry_contains_exactly_the_required_sixteen_tools_and_limits() {

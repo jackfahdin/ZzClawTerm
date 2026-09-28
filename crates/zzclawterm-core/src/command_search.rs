@@ -1,4 +1,5 @@
 use crate::{CommandHistoryEntry, FuzzyResult, QuickCommand};
+use std::collections::HashSet;
 
 const EMPTY_MANUAL_HISTORY_LIMIT: usize = 8;
 const EMPTY_MANUAL_QUICK_COMMAND_LIMIT: usize = 8;
@@ -52,6 +53,7 @@ pub fn search_command_sources(
             .then(left.source.cmp(&right.source))
             .then(left.command.cmp(&right.command))
     });
+    deduplicate_commands(&mut results);
     results.truncate(limit);
     results
 }
@@ -110,8 +112,14 @@ pub fn manual_empty_command_suggestions(
                 source: "quickCommand".to_string(),
             }),
     );
+    deduplicate_commands(&mut results);
     results.truncate(limit);
     results
+}
+
+fn deduplicate_commands(results: &mut Vec<FuzzyResult>) {
+    let mut seen = HashSet::new();
+    results.retain(|result| seen.insert(result.command.clone()));
 }
 
 pub fn fuzzy_search_items(
@@ -240,6 +248,34 @@ mod tests {
     use super::{fuzzy_search_items, manual_empty_command_suggestions, search_command_sources};
     use crate::{CommandHistoryEntry, QuickCommand};
 
+    fn history_entry(command: &str) -> CommandHistoryEntry {
+        CommandHistoryEntry {
+            command: command.to_string(),
+            last_used_at_ms: 10,
+            use_count: 1,
+        }
+    }
+
+    fn quick_command(id: &str, command: &str) -> QuickCommand {
+        QuickCommand {
+            id: id.to_string(),
+            label: command.to_string(),
+            command: command.to_string(),
+            category_id: None,
+            description: None,
+            color_tag: None,
+            icon_tag: None,
+            pinned: None,
+            execution_mode: None,
+            source: None,
+            risk_level: None,
+            updated_at: None,
+            created_at: None,
+            use_count: None,
+            sort_order: None,
+        }
+    }
+
     #[test]
     fn fuzzy_search_items_scores_contiguous_and_filters_length() {
         let items = [
@@ -284,6 +320,37 @@ mod tests {
         assert_eq!(results[0].command, "docker ps");
         assert_eq!(results[0].display, "Docker PS");
         assert_eq!(results[0].source, "quickCommand");
+    }
+
+    #[test]
+    fn command_search_shows_used_quick_command_only_once() {
+        let history = vec![history_entry("ls -la")];
+        let quick_commands = vec![
+            quick_command("ls-all", "ls -la"),
+            quick_command("ls-long", "ls -lh"),
+        ];
+
+        let results = search_command_sources(&history, &quick_commands, "ls", 2, None, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].command, "ls -la");
+        assert_eq!(results[0].source, "history");
+        assert_eq!(results[1].command, "ls -lh");
+    }
+
+    #[test]
+    fn manual_empty_suggestions_show_used_quick_command_only_once() {
+        let history = vec![history_entry("ls -la")];
+        let quick_commands = vec![
+            quick_command("ls-all", "ls -la"),
+            quick_command("ls-long", "ls -lh"),
+        ];
+
+        let results = manual_empty_command_suggestions(&history, &quick_commands, 2, None, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].command, "ls -la");
+        assert_eq!(results[1].command, "ls -lh");
     }
 
     #[test]

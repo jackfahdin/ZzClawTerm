@@ -20,9 +20,9 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, KeyBinding,
-    Menu, MenuItem, MouseButton, OsAction, ParentElement, Render, Styled, Subscription,
-    SystemMenuType, WeakEntity, Window, actions, div, prelude::FluentBuilder, px, rgb,
+    AnimationExt, AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement,
+    KeyBinding, Menu, MenuItem, MouseButton, OsAction, ParentElement, Render, Styled, Subscription,
+    SystemMenuType, WeakEntity, Window, actions, div, prelude::FluentBuilder, px, rgb, svg,
 };
 use rust_i18n::t;
 use zzclawterm_core::{
@@ -353,6 +353,7 @@ impl AppShell {
             )
         });
         let title_menu_bar = build_title_menu_bar(app.downgrade(), cx);
+        let update_menu_bar = title_menu_bar.clone();
         let screen_locked = self.controller.read(cx).screen_locked();
         app.update(cx, |app, cx| {
             app.set_workspace_identity(self.workspace_id, workspace_revision);
@@ -429,10 +430,11 @@ impl AppShell {
         });
         self._subscriptions.push(shutdown_subscription);
         self.app = Some(app);
-        let update_subscription = cx.observe(&update_store, |this, _, cx| {
+        let update_subscription = cx.observe(&update_store, move |this, _, cx| {
             if let Some(app) = this.app.clone() {
                 app.update(cx, |_, cx| cx.notify());
             }
+            update_menu_bar.update(cx, |bar, cx| bar.refresh_badges(cx));
         });
         self._subscriptions.push(update_subscription);
         self.lifecycle = AppShellLifecycle::Ready;
@@ -972,6 +974,10 @@ impl AppShell {
             }
             AppShellLifecycle::Flushing => {
                 debug_assert!(self.flushing_view_ready);
+                let updating = self
+                    .app
+                    .as_ref()
+                    .is_some_and(|app| app.read(cx).native_update_install_requested(cx));
                 div()
                     .size_full()
                     .flex()
@@ -979,7 +985,33 @@ impl AppShell {
                     .justify_center()
                     .bg(rgb(0x101214))
                     .text_color(rgb(0xe7e9ea))
-                    .child(t!("appShell.savingBeforeClose"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                svg()
+                                    .size(px(28.))
+                                    .path("icons/conn/spinner-arc.svg")
+                                    .text_color(rgb(0x3fb950))
+                                    .with_animation(
+                                        "shutdown-progress-spinner",
+                                        gpui::Animation::new(Duration::from_secs(1)).repeat(),
+                                        |icon, progress| {
+                                            icon.with_transformation(gpui::Transformation::rotate(
+                                                gpui::percentage(progress),
+                                            ))
+                                        },
+                                    ),
+                            )
+                            .child(if updating {
+                                t!("appShell.preparingUpdate")
+                            } else {
+                                t!("appShell.savingBeforeClose")
+                            }),
+                    )
                     .into_any_element()
             }
             AppShellLifecycle::FlushFailed(message) => {
@@ -1134,7 +1166,7 @@ fn build_title_menu_bar(
         let label_app = app.clone();
         let items_app = app.clone();
         let open_app = app.clone();
-        ZzClawAppMenu::new(
+        let mut entry = ZzClawAppMenu::new(
             menu.label(),
             move |cx| {
                 label_app
@@ -1149,8 +1181,23 @@ fn build_title_menu_bar(
         )
         .min_width(px(220.))
         .on_open(move |_, cx| {
-            _ = open_app.update(cx, |app, cx| app.prepare_title_menu(cx));
-        })
+            _ = open_app.update(cx, |app, cx| {
+                app.prepare_title_menu(cx);
+                if menu == TitleMenu::Help {
+                    app.acknowledge_help_update(cx);
+                }
+            });
+        });
+        if menu == TitleMenu::Help {
+            let badge_app = app.clone();
+            entry = entry.badge(move |cx| {
+                badge_app
+                    .read_with(cx, |app, cx| app.help_update_attention(cx))
+                    .ok()
+                    .flatten()
+            });
+        }
+        entry
     })
     .collect::<Vec<_>>();
     ZzClawAppMenuBar::new(menus, cx)

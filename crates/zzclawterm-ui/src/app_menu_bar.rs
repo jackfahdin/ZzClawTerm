@@ -1,10 +1,11 @@
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
-    Anchor, App, AppContext, ClickEvent, Context, DismissEvent, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Render,
-    Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, anchored,
-    deferred, div, prelude::FluentBuilder as _, px,
+    Anchor, AnimationExt, App, AppContext, ClickEvent, Context, DismissEvent, Entity, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Render, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, anchored,
+    deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::component::{
     Selectable as _, Sizable as _,
@@ -37,6 +38,7 @@ const MENU_POPUP_PRIORITY: usize = 100;
 type MenuLabelBuilder = Rc<dyn Fn(&App) -> SharedString>;
 type MenuItemsBuilder = Rc<dyn Fn(&mut Window, &mut App) -> Vec<ZzClawMenuItem>>;
 type MenuOpenHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+type MenuBadgeBuilder = Rc<dyn Fn(&App) -> Option<u32>>;
 
 /// A top-level application menu with lazily-built menu contents.
 ///
@@ -49,6 +51,7 @@ pub struct ZzClawAppMenu {
     label: MenuLabelBuilder,
     items: MenuItemsBuilder,
     on_open: Option<MenuOpenHandler>,
+    badge: Option<MenuBadgeBuilder>,
     min_width: Option<Pixels>,
 }
 
@@ -63,12 +66,18 @@ impl ZzClawAppMenu {
             label: Rc::new(label),
             items: Rc::new(items),
             on_open: None,
+            badge: None,
             min_width: None,
         }
     }
 
     pub fn on_open(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_open = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn badge(mut self, builder: impl Fn(&App) -> Option<u32> + 'static) -> Self {
+        self.badge = Some(Rc::new(builder));
         self
     }
 
@@ -110,6 +119,14 @@ impl ZzClawAppMenuBar {
             cx.notify();
         });
         bar
+    }
+
+    pub fn refresh_badges(&mut self, cx: &mut Context<Self>) {
+        for menu in &self.menus {
+            if menu.read(cx).menu.badge.is_some() {
+                menu.update(cx, |_, cx| cx.notify());
+            }
+        }
     }
 
     /// Whether focus is still on the popup the bar opened, or on a submenu of it.
@@ -366,6 +383,7 @@ impl Render for ZzClawAppMenuEntry {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_selected = self.is_selected(cx);
         let label = (self.menu.label)(cx);
+        let badge = self.menu.badge.as_ref().and_then(|builder| builder(cx));
         let popup = is_selected.then(|| self.build_popup_menu(window, cx));
 
         div()
@@ -389,6 +407,36 @@ impl Render for ZzClawAppMenuEntry {
                     )
                     .on_click(cx.listener(Self::handle_trigger_click)),
             )
+            .when_some(badge, |this, color| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(-2.))
+                        .right(px(-2.))
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(rgb(color))
+                        .with_animation(
+                            "menu-update-badge-pulse",
+                            gpui::Animation::new(Duration::from_millis(1200)).repeat(),
+                            |dot, progress| {
+                                dot.top(px(-2. - 4. * progress))
+                                    .right(px(-2. - 4. * progress))
+                                    .size(px(8. + 8. * progress))
+                                    .opacity(0.65 * (1. - progress))
+                            },
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-2.))
+                        .right(px(-2.))
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(rgb(color)),
+                )
+            })
             .on_hover(cx.listener(Self::handle_hover))
             .when_some(popup, |this, popup| {
                 this.child(

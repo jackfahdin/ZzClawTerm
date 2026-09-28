@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use std::borrow::Cow;
 
-use gpui::Context;
+use gpui::{App, Context};
 use zzclawterm_ui::{ZzClawAppMenuBar, ZzClawDialogWindowExt as _, ZzClawMenuItem};
 
 use crate::app_shell::NativeMenuCommand;
@@ -48,6 +48,21 @@ impl ZzClawTermApp {
         self.shell.close_open_tabs_menu();
         self.shell.close_new_session_menu();
         cx.notify();
+    }
+
+    pub(crate) fn acknowledge_help_update(&mut self, cx: &mut Context<Self>) {
+        self.update.update(cx, |update, cx| {
+            if update.acknowledge_update() {
+                cx.notify();
+            }
+        });
+    }
+
+    pub(crate) fn help_update_attention(&self, cx: &App) -> Option<u32> {
+        self.update
+            .read(cx)
+            .update_attention()
+            .then(|| self.theme_palette().success)
     }
 
     pub(crate) fn perform_native_menu_command(
@@ -313,13 +328,19 @@ impl ZzClawTermApp {
 
     fn title_help_menu_items(&self, cx: &mut Context<Self>) -> Vec<ZzClawMenuItem> {
         let update = self.update.read(cx);
-        let update_label = if update.is_pending() {
-            t!("updater.checking")
-        } else if update.info().is_some_and(|info| info.available) {
-            t!("updater.newVersionAvailable")
-        } else {
-            t!("menu.checkForUpdates")
-        };
+        let has_update = update.has_available_update();
+        let success = self.theme_palette().success;
+        let mut update_item =
+            ZzClawMenuItem::action(t!("menu.checkForUpdates")).icon(if has_update {
+                "icons/menu/upgrade.svg"
+            } else {
+                "icons/menu/update.svg"
+            });
+        if has_update {
+            update_item = update_item
+                .icon_color(success)
+                .status(t!("updater.hasNewVersion"), success);
+        }
 
         vec![
             ZzClawMenuItem::action(t!("menu.documentation"))
@@ -327,11 +348,9 @@ impl ZzClawTermApp {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.open_documentation(cx);
                 })),
-            ZzClawMenuItem::action(update_label)
-                .icon("icons/menu/update.svg")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_update_dialog(window, cx);
-                })),
+            update_item.on_click(cx.listener(|this, _, window, cx| {
+                this.open_update_dialog(window, cx);
+            })),
             ZzClawMenuItem::action(t!("menu.viewLogs"))
                 .icon("icons/menu/article.svg")
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -581,11 +600,13 @@ mod tests {
     use std::path::PathBuf;
 
     use gpui::{AppContext as _, TestAppContext};
-    use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
+    use zzclawterm_core::updater::UpdateRepository;
+    use zzclawterm_core::{AppRuntime, NativeUpdateInfo, RuntimeMode, uuid};
     use zzclawterm_ui::ZzClawMenuItem;
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
+    use crate::features::update::{UpdateCheckKind, UpdateEvent};
     use crate::models::TitleMenu;
 
     fn unique_test_dir() -> PathBuf {
@@ -628,6 +649,54 @@ mod tests {
 
         assert_eq!(labels, ["File", "View", "Terminal", "Help"]);
         assert!(!labels.contains(&"Edit"));
+    }
+
+    #[test]
+    fn help_menu_keeps_check_command_and_shows_available_status() {
+        let mut cx = TestAppContext::single();
+        let app = menu_app(&mut cx);
+        let update = cx.read_entity(&app, |app, _| app.update.clone());
+        cx.update_entity(&update, |update, _| {
+            let (_, generation) = update.begin_check(UpdateCheckKind::Silent).unwrap();
+            update.apply_event(UpdateEvent::Check {
+                generation,
+                kind: UpdateCheckKind::Silent,
+                result: Ok((
+                    NativeUpdateInfo {
+                        current_version: "0.0.5".into(),
+                        latest_version: "0.0.6".into(),
+                        release_date: None,
+                        release_notes: None,
+                        html_url: None,
+                        available: true,
+                    },
+                    UpdateRepository::GitHub,
+                )),
+            });
+        });
+        let (item, color) = cx.update_entity(&app, |app, cx| {
+            let item = app
+                .title_menu_items_for_test(TitleMenu::Help, cx)
+                .into_iter()
+                .nth(1)
+                .expect("check update item");
+            (item, app.theme_palette().success)
+        });
+        let check_labels = ["en", "zh-CN", "zh-TW", "ja", "ko", "fr"]
+            .map(|locale| rust_i18n::t!("menu.checkForUpdates", locale = locale).to_string());
+        let statuses = ["en", "zh-CN", "zh-TW", "ja", "ko", "fr"]
+            .map(|locale| rust_i18n::t!("updater.hasNewVersion", locale = locale).to_string());
+        assert!(check_labels.iter().any(|label| label == item.test_label()));
+        assert_eq!(
+            item.test_presentation().1.as_deref(),
+            Some("icons/menu/upgrade.svg")
+        );
+        assert_eq!(item.test_icon_color(), Some(color));
+        assert!(
+            item.test_status()
+                .is_some_and(|(label, status_color)| status_color == color
+                    && statuses.iter().any(|status| status == label))
+        );
     }
 
     #[test]

@@ -9,10 +9,10 @@ use zzclawterm_ui::{
     ZzClawContextMenu, ZzClawHorizontalScrollbar, ZzClawSearchInput, ZzClawUniformListScrollbar,
 };
 
-use crate::features::transfers::format_file_size;
 use crate::models::TransferBrowserSortColumn;
 
 use super::super::browser_filter::{TransferBrowserFooterStats, transfer_browser_footer_stats};
+use super::super::entry_row::format_browser_file_size;
 use super::super::panel::TransferPanel;
 use super::super::{
     FILE_BROWSER_HEADER_HEIGHT_PX, TransferBrowserAvailability,
@@ -161,11 +161,11 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
             if footer_stats.selected_item_count > 0 && footer_stats.selected_file_size > 0 {
                 format!(
                     "{}/{}",
-                    format_file_size(Some(footer_stats.selected_file_size)),
-                    format_file_size(Some(footer_stats.total_file_size))
+                    format_browser_file_size(Some(footer_stats.selected_file_size)),
+                    format_browser_file_size(Some(footer_stats.total_file_size))
                 )
             } else {
-                format_file_size(Some(footer_stats.total_file_size))
+                format_browser_file_size(Some(footer_stats.total_file_size))
             };
         let search_active = !browser.search.trim().is_empty();
         let search_expanded = browser.search_expanded || search_active;
@@ -416,88 +416,118 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                         .bg(section_header)
                         .flex()
                         .items_center()
-                        .gap(px(2.))
-                        .child(compact_transfer_toolbar_button(
-                            palette,
-                            "transfer-browser-new-file",
-                            "icons/fe/new-file.svg",
-                            t!("fileExplorer.newFile"),
-                            cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                this.open_transfer_new_file_dialog(window, cx);
-                            })),
-                        ))
-                        .child(compact_transfer_toolbar_button(
-                            palette,
-                            "transfer-browser-new-folder",
-                            "icons/fe/new-folder.svg",
-                            t!("fileExplorer.newFolder"),
-                            cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                this.open_transfer_new_folder_dialog(window, cx);
-                            })),
-                        ))
-                        .when(!local_backend, |toolbar| {
-                            toolbar
-                                .child(transfer_toolbar_divider(palette))
-                                .child(compact_transfer_upload_menu_button(
+                        .child(
+                            div()
+                                .size_full()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .child(compact_transfer_toolbar_button(
                                     palette,
-                                    t!("fileExplorer.upload"),
-                                    cx,
+                                    "transfer-browser-new-file",
+                                    "icons/fe/new-file.svg",
+                                    t!("fileExplorer.newFile"),
+                                    cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                        this.open_transfer_new_file_dialog(window, cx);
+                                    })),
                                 ))
+                                .child(compact_transfer_toolbar_button(
+                                    palette,
+                                    "transfer-browser-new-folder",
+                                    "icons/fe/new-folder.svg",
+                                    t!("fileExplorer.newFolder"),
+                                    cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                        this.open_transfer_new_folder_dialog(window, cx);
+                                    })),
+                                ))
+                                .when(!local_backend, |toolbar| {
+                                    toolbar
+                                        .child(transfer_toolbar_divider(palette))
+                                        .child(compact_transfer_upload_menu_button(
+                                            palette,
+                                            t!("fileExplorer.upload"),
+                                            cx,
+                                        ))
+                                        .child(compact_transfer_toolbar_button_enabled(
+                                            palette,
+                                            "transfer-browser-download-selected",
+                                            "icons/fe/download.svg",
+                                            t!("fileExplorer.downloadSelected"),
+                                            footer_stats.selected_item_count > 0,
+                                            cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                                this.start_selected_sftp_download_jobs(window, cx);
+                                            })),
+                                        ))
+                                })
                                 .child(compact_transfer_toolbar_button_enabled(
                                     palette,
-                                    "transfer-browser-download-selected",
-                                    "icons/fe/download.svg",
-                                    t!("fileExplorer.downloadSelected"),
+                                    "transfer-browser-delete-selected",
+                                    "icons/fe/delete.svg",
+                                    t!("fileExplorer.delete"),
                                     footer_stats.selected_item_count > 0,
                                     cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                        this.start_selected_sftp_download_jobs(window, cx);
+                                        this.open_selected_transfer_delete_dialog(window, cx);
                                     })),
                                 ))
-                        })
-                        .child(compact_transfer_toolbar_button_enabled(
-                            palette,
-                            "transfer-browser-delete-selected",
-                            "icons/fe/delete.svg",
-                            t!("fileExplorer.delete"),
-                            footer_stats.selected_item_count > 0,
-                            cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                this.open_selected_transfer_delete_dialog(window, cx);
-                            })),
-                        ))
-                        .child(transfer_toolbar_divider(palette))
-                        .when(!tree_mode, |toolbar| {
-                            toolbar.child(compact_transfer_toolbar_button(
-                                palette,
-                                "transfer-browser-go-up",
-                                "icons/fe/up.svg",
-                                t!("fileExplorer.goUp"),
-                                cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                    this.open_transfer_parent_directory(window, cx);
-                                })),
-                            ))
-                        })
-                        .child(compact_transfer_toolbar_button(
-                            palette,
-                            "transfer-browser-refresh",
-                            "icons/fe/refresh.svg",
-                            t!("fileExplorer.refresh"),
-                            cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                this.refresh_transfer_browser(window, cx);
-                            })),
-                        ))
-                        .child(div().flex_1())
-                        .when(!tree_mode, |toolbar| {
-                            toolbar
-                                .child(compact_transfer_toolbar_button_active(
+                                .child(transfer_toolbar_divider(palette))
+                                .when(!tree_mode, |toolbar| {
+                                    toolbar.child(compact_transfer_toolbar_button(
+                                        palette,
+                                        "transfer-browser-go-up",
+                                        "icons/fe/up.svg",
+                                        t!("fileExplorer.goUp"),
+                                        cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                            this.open_transfer_parent_directory(window, cx);
+                                        })),
+                                    ))
+                                })
+                                .child(compact_transfer_toolbar_button(
                                     palette,
-                                    "transfer-browser-expand-search",
-                                    "icons/fe/search.svg",
-                                    t!("fileExplorer.search"),
-                                    search_active || search_expanded,
+                                    "transfer-browser-refresh",
+                                    "icons/fe/refresh.svg",
+                                    t!("fileExplorer.refresh"),
                                     cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
-                                        this.focus_transfer_browser_search(None, window, cx);
+                                        this.refresh_transfer_browser(window, cx);
                                     })),
                                 ))
+                                .when(tree_mode, |toolbar| {
+                                    toolbar.child(compact_transfer_toolbar_button(
+                                        palette,
+                                        "transfer-browser-reveal-tree-path",
+                                        "icons/fe/locate.svg",
+                                        t!("fileExplorer.revealCurrentPath"),
+                                        cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
+                                            this.reveal_transfer_tree_current_path(cx);
+                                        })),
+                                    ))
+                                })
+                                .child(transfer_toolbar_divider(palette))
+                                .child(compact_transfer_toolbar_button(
+                                    palette,
+                                    "transfer-browser-toggle-view-mode",
+                                    if tree_mode { "icons/view-list.svg" } else { "icons/view-tree.svg" },
+                                    if tree_mode {
+                                        t!("fileExplorer.switchToListView")
+                                    } else {
+                                        t!("fileExplorer.switchToTreeView")
+                                    },
+                                    cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
+                                        this.toggle_transfer_browser_view_mode(cx);
+                                    })),
+                                ))
+                                .when(!tree_mode, |toolbar| {
+                                    toolbar.child(compact_transfer_toolbar_button_active(
+                                        palette,
+                                        "transfer-browser-expand-search",
+                                        "icons/fe/search.svg",
+                                        t!("fileExplorer.search"),
+                                        search_active || search_expanded,
+                                        cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                            this.focus_transfer_browser_search(None, window, cx);
+                                        })),
+                                    ))
+                                })
                                 .child(compact_transfer_toolbar_button_active(
                                     palette,
                                     "transfer-browser-toggle-hidden-files",
@@ -511,40 +541,8 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                     cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
                                         this.toggle_transfer_browser_hidden_files(cx);
                                     })),
-                                ))
-                                .child(compact_transfer_toolbar_button(
-                                    palette,
-                                    "transfer-browser-toggle-view-mode",
-                                    "icons/view-tree.svg",
-                                    t!("fileExplorer.switchToTreeView"),
-                                    cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
-                                        this.toggle_transfer_browser_view_mode(cx);
-                                    })),
-                                ))
-                        })
-                        .when(tree_mode, |toolbar| {
-                            toolbar
-                                .child(transfer_toolbar_divider(palette))
-                                .child(compact_transfer_toolbar_button(
-                                    palette,
-                                    "transfer-browser-reveal-tree-path",
-                                    "icons/fe/locate.svg",
-                                    t!("fileExplorer.revealCurrentPath"),
-                                    cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
-                                        this.reveal_transfer_tree_current_path(cx);
-                                    })),
-                                ))
-                                .child(transfer_toolbar_divider(palette))
-                                .child(compact_transfer_toolbar_button(
-                                    palette,
-                                    "transfer-browser-toggle-view-mode",
-                                    "icons/view-list.svg",
-                                    t!("fileExplorer.switchToListView"),
-                                    cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
-                                        this.toggle_transfer_browser_view_mode(cx);
-                                    })),
-                                ))
-                        })
+                                )),
+                        )
                         .when(search_expanded && !tree_mode, |toolbar| {
                             toolbar.child(
                                 div()
@@ -751,7 +749,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                 },
                             ),
                     )
-                    .child(
+                    .when(!tree_mode, |this| this.child(
                         div()
                             .flex()
                             .items_center()
@@ -797,7 +795,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                     this.send_current_transfer_browser_path_to_terminal(cx);
                                 })),
                             )),
-                    ),
+                    )),
             )
             .when(external_drop_hover, |this| {
                 this.child(

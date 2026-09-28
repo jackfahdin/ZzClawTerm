@@ -12,7 +12,8 @@
     "unavailable": "このデスクトップではトレイに非表示にできません。通常の最小化を行いました。"
 },
   "appShell": {
-    "savingBeforeClose": "終了前に変更を保存しています..."
+    "savingBeforeClose": "終了前に変更を保存しています...",
+    "preparingUpdate": "データを保存し、更新を準備しています..."
   },
   "documentEditor": {
     "fold": "カーソル位置を折りたたむ",
@@ -778,6 +779,7 @@
     "somethingWentWrong": "問題が発生しました"
   },
   "fileEditor": {
+    "backupCleanupWarning": "ファイルは保存されましたが、バックアップを削除できませんでした: %{path}",
     "bytes": "バイト",
     "clearSearch": "検索をクリア",
     "conflictDesc": "開いた後にリモートファイルが変更されました。再読み込みしてリモート版を保持するか、強制保存して上書きしてください。",
@@ -3053,6 +3055,11 @@
     "source": "更新元",
     "sourceAuto": "自動",
     "activeSource": "現在の更新元",
+    "waitingForExit": "ZzClawTerm の終了を待っています...",
+    "backingUpInstall": "現在のインストールをバックアップしています...",
+    "applyingInstall": "新しいバージョンをインストールしています...",
+    "replacingFiles": "アプリケーションファイルを置き換えています...",
+    "startingUpdatedApp": "ZzClawTerm を起動しています...",
     "saveEditorsFirst": "更新をインストールする前に編集したファイルを保存または閉じてください。",
     "installFailed": "更新インストーラーを起動できませんでした。",
     "installAndRestart": "インストールして再起動",

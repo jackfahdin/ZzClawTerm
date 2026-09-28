@@ -12,7 +12,8 @@
     "unavailable": "目前桌面工作階段不支援隱藏至系統匣，視窗已正常最小化。"
 },
   "appShell": {
-    "savingBeforeClose": "正在儲存資料..."
+    "savingBeforeClose": "正在儲存資料...",
+    "preparingUpdate": "正在儲存資料並準備更新..."
   },
   "documentEditor": {
     "fold": "摺疊游標處程式碼",
@@ -776,6 +777,7 @@
     "somethingWentWrong": "出現錯誤"
   },
   "fileEditor": {
+    "backupCleanupWarning": "檔案已儲存，但無法刪除備份：%{path}",
     "bytes": "位元組",
     "clearSearch": "清除搜尋",
     "conflictDesc": "檔案在開啟後已被修改。取消會保留尚未儲存的變更；捨棄並重新載入會以最新檔案取代它們；強制儲存會以目前變更覆蓋最新檔案。",
@@ -3044,6 +3046,11 @@
     "source": "更新來源",
     "sourceAuto": "自動",
     "activeSource": "目前來源",
+    "waitingForExit": "正在等待 ZzClawTerm 結束...",
+    "backingUpInstall": "正在備份目前的安裝...",
+    "applyingInstall": "正在安裝新版本...",
+    "replacingFiles": "正在替換程式檔案...",
+    "startingUpdatedApp": "正在啟動 ZzClawTerm...",
     "saveEditorsFirst": "安裝更新前請儲存或關閉已修改的檔案。",
     "installFailed": "無法啟動更新安裝程式。",
     "installAndRestart": "安裝並重新啟動",

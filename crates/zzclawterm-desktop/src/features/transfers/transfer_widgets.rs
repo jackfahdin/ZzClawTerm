@@ -13,6 +13,7 @@ pub(in crate::features) fn duplicate_policy_label(policy: SftpDuplicatePolicy) -
 
 pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String {
     match kind {
+        TransferJobKind::InitialDirectory => "List initial remote directory".to_string(),
         TransferJobKind::ListTree { path, .. } => format!("List tree {}", path.display_path),
         TransferJobKind::ListDir { remote_path, .. } => format!("List {remote_path}"),
         TransferJobKind::ListChildren { remote_path } => {

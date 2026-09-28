@@ -53,6 +53,7 @@ pub(crate) struct UpdateStore {
     last_silent_error: Option<String>,
     check_generation: u64,
     startup_check_started: bool,
+    update_attention: bool,
     pub(in crate::features) download: DownloadState,
     pub(in crate::features) download_generation: u64,
     pub(in crate::features) download_cancel: ConnectionAttempt,
@@ -75,6 +76,7 @@ impl UpdateStore {
             last_silent_error: None,
             check_generation: 0,
             startup_check_started: false,
+            update_attention: false,
             download: DownloadState::Idle,
             download_generation: 0,
             download_cancel: Default::default(),
@@ -124,8 +126,18 @@ impl UpdateStore {
         true
     }
 
-    pub(in crate::features) fn is_pending(&self) -> bool {
-        matches!(self.phase, UpdatePhase::Checking)
+    pub(in crate::features) fn has_available_update(&self) -> bool {
+        self.info.as_ref().is_some_and(|info| info.available)
+    }
+
+    pub(in crate::features) fn update_attention(&self) -> bool {
+        self.update_attention && self.has_available_update()
+    }
+
+    pub(in crate::features) fn acknowledge_update(&mut self) -> bool {
+        let was_visible = self.update_attention();
+        self.update_attention = false;
+        was_visible
     }
 
     pub(crate) fn blocking_jobs(&self) -> BlockingJobScheduler {
@@ -241,6 +253,8 @@ impl UpdateStore {
                 }
                 match result {
                     Ok((info, repository)) => {
+                        self.update_attention = info.available
+                            && (kind == UpdateCheckKind::Silent || self.update_attention);
                         self.last_silent_error = None;
                         self.status = if info.available {
                             format!(
@@ -260,6 +274,7 @@ impl UpdateStore {
                         self.download_repository = None;
                     }
                     Err(error) if kind == UpdateCheckKind::Silent => {
+                        self.update_attention = false;
                         self.last_silent_error = Some(error);
                         self.phase = UpdatePhase::Idle;
                         self.status = format!("Current version {}", env!("CARGO_PKG_VERSION"));
@@ -268,6 +283,7 @@ impl UpdateStore {
                         self.download_repository = None;
                     }
                     Err(error) => {
+                        self.update_attention = false;
                         self.status = format!("update check failed: {error}");
                         self.phase = UpdatePhase::Failed {
                             message: error,
@@ -331,6 +347,17 @@ mod tests {
     use super::{UpdateCheckKind, UpdateEvent, UpdatePhase, UpdateStore};
     use zzclawterm_core::updater::{UpdateRepository, UpdateSource};
     use zzclawterm_transport::connection_attempt::ConnectionAttempt;
+
+    fn update_info(available: bool) -> zzclawterm_core::NativeUpdateInfo {
+        zzclawterm_core::NativeUpdateInfo {
+            current_version: "2.0.0-preview.2".to_string(),
+            latest_version: "2.0.0-preview.3".to_string(),
+            release_date: None,
+            release_notes: None,
+            html_url: None,
+            available,
+        }
+    }
 
     fn check_event(
         generation: u64,
@@ -465,5 +492,61 @@ mod tests {
             generation: download_generation.wrapping_add(1),
             repository: UpdateRepository::GitCode,
         }));
+    }
+
+    #[test]
+    fn silent_update_attention_clears_when_help_is_opened() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Silent).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Silent,
+            Ok(update_info(true)),
+        )));
+        assert!(state.has_available_update());
+        assert!(state.update_attention());
+        state.acknowledge_update();
+        assert!(!state.update_attention());
+        assert!(state.has_available_update());
+    }
+
+    #[test]
+    fn manual_checks_and_no_update_results_do_not_show_attention() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Manual,
+            Ok(update_info(true)),
+        )));
+        assert!(state.has_available_update());
+        assert!(!state.update_attention());
+
+        let (_, generation) = state.begin_check(UpdateCheckKind::Silent).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Silent,
+            Ok(update_info(false)),
+        )));
+        assert!(!state.has_available_update());
+        assert!(!state.update_attention());
+    }
+
+    #[test]
+    fn manual_recheck_does_not_dismiss_unread_background_update() {
+        let mut state = UpdateStore::new();
+        let (_, generation) = state.begin_check(UpdateCheckKind::Silent).unwrap();
+        state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Silent,
+            Ok(update_info(true)),
+        ));
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Manual,
+            Ok(update_info(true)),
+        ));
+        assert!(state.update_attention());
     }
 }

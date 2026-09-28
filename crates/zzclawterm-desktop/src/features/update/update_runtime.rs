@@ -1,5 +1,3 @@
-use rust_i18n::t;
-
 use gpui::{Context, IntoElement, Window};
 use zzclawterm_core::updater::UpdateSource;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
@@ -18,7 +16,7 @@ impl ZzClawTermApp {
             return;
         }
         self.open_content_dialog(
-            t!("updater.checking").to_string(),
+            String::new(),
             560.,
             |app, _, cx| app.update_dialog_content(cx).into_any_element(),
             |_, _| {},

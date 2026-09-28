@@ -41,6 +41,7 @@ pub use gpui_kit::component::input::{
 pub use gpui_kit::component::kbd::Kbd as ZzClawKbd;
 pub use gpui_kit::component::scroll::ScrollableElement as ZzClawScrollable;
 pub use gpui_kit::component::scroll::ScrollbarAxis as ZzClawScrollbarAxis;
+pub use gpui_kit::component::tag::Tag as ZzClawTag;
 pub use hover_card::ZzClawHoverCard;
 pub use input::{
     ZzClawInput, ZzClawInputEvent, ZzClawInputShell, ZzClawInputState, ZzClawSearchInput,

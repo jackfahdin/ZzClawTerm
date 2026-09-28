@@ -12,7 +12,8 @@
     "unavailable": "Le masquage dans la zone de notification est indisponible. La fenêtre a été réduite normalement."
 },
   "appShell": {
-    "savingBeforeClose": "Enregistrement des modifications avant la fermeture..."
+    "savingBeforeClose": "Enregistrement des modifications avant la fermeture...",
+    "preparingUpdate": "Enregistrement des données et préparation de la mise à jour..."
   },
   "documentEditor": {
     "fold": "Replier au curseur",
@@ -776,6 +777,7 @@
     "somethingWentWrong": "Une erreur s'est produite"
   },
   "fileEditor": {
+    "backupCleanupWarning": "Fichier enregistré, mais la sauvegarde n'a pas pu être supprimée : %{path}",
     "bytes": "octets",
     "clearSearch": "Effacer la recherche",
     "conflictDesc": "Le fichier distant a changé après que vous l'avez ouvert. Rechargez pour conserver la version distante, ou forcez l'enregistrement pour l'écraser.",
@@ -3044,6 +3046,11 @@
     "source": "Source des mises à jour",
     "sourceAuto": "Auto",
     "activeSource": "Source actuelle",
+    "waitingForExit": "Attente de la fermeture de ZzClawTerm...",
+    "backingUpInstall": "Sauvegarde de l'installation actuelle...",
+    "applyingInstall": "Installation de la nouvelle version...",
+    "replacingFiles": "Remplacement des fichiers de l'application...",
+    "startingUpdatedApp": "Démarrage de ZzClawTerm...",
     "saveEditorsFirst": "Enregistrez ou fermez les fichiers modifiés avant la mise à jour.",
     "installFailed": "Impossible de démarrer le programme de mise à jour.",
     "installAndRestart": "Installer et redémarrer",

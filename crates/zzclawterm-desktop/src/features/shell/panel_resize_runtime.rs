@@ -99,6 +99,7 @@ impl ZzClawTermApp {
                     .set_status(format!("right panel: {:.0}px", width.round()));
             }
         }
+        self.defer_transfer_panel_snapshot_flush(cx);
         cx.notify();
     }
 

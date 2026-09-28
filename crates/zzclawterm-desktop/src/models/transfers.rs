@@ -12,6 +12,7 @@ use zzclawterm_transport::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransferJobKind {
+    InitialDirectory,
     ListDir {
         remote_path: String,
         select_after: Option<String>,
@@ -258,7 +259,9 @@ impl TransferJobState {
             | TransferJobKind::TrzszDownload { file_name, .. }
             | TransferJobKind::RdpClipboard { file_name }
             | TransferJobKind::TrzszUpload { file_name, .. } => file_name.clone(),
-            TransferJobKind::ResolveHome | TransferJobKind::SyncCwd => String::new(),
+            TransferJobKind::InitialDirectory
+            | TransferJobKind::ResolveHome
+            | TransferJobKind::SyncCwd => String::new(),
             TransferJobKind::ZmodemConflictProbe { remote_dir, .. } => remote_file_name(remote_dir),
         }
     }
@@ -498,6 +501,10 @@ pub(crate) enum TransferJobEvent {
 
 #[derive(Debug)]
 pub(crate) enum TransferJobOutput {
+    InitialDirectory {
+        path: String,
+        entries: Vec<SftpFileEntry>,
+    },
     Entries(Vec<SftpFileEntry>),
     TreeEntries(Vec<SftpFileEntry>),
     ChildEntries {

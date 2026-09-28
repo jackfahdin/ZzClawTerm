@@ -1551,21 +1551,39 @@ impl SftpService {
                     format!(".zzclawterm-edit-{}", uuid::Uuid::new_v4().simple()).as_bytes(),
                 );
                 let operation = async {
-                    let mut temporary = session.sftp.create_bytes(temporary_path.clone()).await?;
-                    temporary.write_all(content.as_bytes()).await?;
-                    temporary.flush().await?;
-                    temporary.shutdown().await?;
-                    let temporary_attrs =
-                        session.sftp.metadata_bytes(temporary_path.clone()).await?;
+                    let mut temporary = session
+                        .sftp
+                        .create_bytes(temporary_path.clone())
+                        .await
+                        .map_err(|error| editor_save_error("create temporary file", error))?;
+                    temporary
+                        .write_all(content.as_bytes())
+                        .await
+                        .map_err(|error| editor_save_io_error("write temporary file", error))?;
+                    temporary
+                        .flush()
+                        .await
+                        .map_err(|error| editor_save_io_error("flush temporary file", error))?;
+                    temporary
+                        .shutdown()
+                        .await
+                        .map_err(|error| editor_save_io_error("close temporary file", error))?;
+                    let temporary_attrs = session
+                        .sftp
+                        .metadata_bytes(temporary_path.clone())
+                        .await
+                        .map_err(|error| editor_save_error("verify temporary file", error))?;
                     if temporary_attrs.size != Some(content.len() as u64) {
-                        anyhow::bail!("Remote temporary file size verification failed");
+                        tracing::error!(stage = "verify temporary file", "SFTP editor size mismatch");
+                        anyhow::bail!("Remote save failed during temporary file verification (size mismatch)");
                     }
 
                     if let Some(expected) = expected_revision.as_ref() {
                         let before_attrs = session
                             .sftp
                             .metadata_bytes(remote_path_bytes.clone())
-                            .await?;
+                            .await
+                            .map_err(|error| editor_save_error("check original revision", error))?;
                         let before_metadata = RemoteTextMetadata {
                             size: before_attrs.size.unwrap_or(0),
                             modified_at: Some(u64::from(before_attrs.mtime.unwrap_or(0))),
@@ -1573,15 +1591,25 @@ impl SftpService {
                         if before_metadata != expected.metadata {
                             return Ok(RemoteTextWriteResult::Conflict);
                         }
-                        let mut current_file =
-                            session.sftp.open_bytes(remote_path_bytes.clone()).await?;
+                        let mut current_file = session
+                            .sftp
+                            .open_bytes(remote_path_bytes.clone())
+                            .await
+                            .map_err(|error| editor_save_error("read original file", error))?;
                         let mut current = Vec::with_capacity(before_metadata.size as usize);
-                        current_file.read_to_end(&mut current).await?;
-                        current_file.shutdown().await?;
+                        current_file
+                            .read_to_end(&mut current)
+                            .await
+                            .map_err(|error| editor_save_io_error("read original file", error))?;
+                        current_file
+                            .shutdown()
+                            .await
+                            .map_err(|error| editor_save_io_error("close original file", error))?;
                         let after_attrs = session
                             .sftp
                             .metadata_bytes(remote_path_bytes.clone())
-                            .await?;
+                            .await
+                            .map_err(|error| editor_save_error("recheck original revision", error))?;
                         let after_metadata = RemoteTextMetadata {
                             size: after_attrs.size.unwrap_or(0),
                             modified_at: Some(u64::from(after_attrs.mtime.unwrap_or(0))),
@@ -1599,7 +1627,8 @@ impl SftpService {
                     let replacement_attrs = session
                         .sftp
                         .metadata_bytes(remote_path_bytes.clone())
-                        .await?;
+                        .await
+                        .map_err(|error| editor_save_error("check replacement target", error))?;
                     let replacement_metadata = RemoteTextMetadata {
                         size: replacement_attrs.size.unwrap_or(0),
                         modified_at: Some(u64::from(replacement_attrs.mtime.unwrap_or(0))),
@@ -1620,31 +1649,123 @@ impl SftpService {
                                     ..russh_sftp::protocol::FileAttributes::empty()
                                 },
                             )
-                            .await?;
+                            .await
+                            .map_err(|error| editor_save_error("copy original permissions", error))?;
                     }
                     // SFTP has no portable conditional rename. The full revision and final
                     // metadata check above narrow the race to this replacement operation.
-                    session
+                    let backup_suffix =
+                        format!(".zzclawterm-backup-{}", uuid::Uuid::new_v4().simple());
+                    let backup_path = format!("{}{backup_suffix}", remote_path.display_path);
+                    let mut backup_path_bytes = remote_path_bytes.clone();
+                    backup_path_bytes.extend_from_slice(backup_suffix.as_bytes());
+                    let used_backup = match session
                         .sftp
-                        .rename_bytes(temporary_path.clone(), remote_path_bytes.clone())
-                        .await?;
-                    let attrs = session
+                        .posix_rename_bytes(temporary_path.clone(), remote_path_bytes.clone())
+                        .await
+                    {
+                        Ok(()) => false,
+                        Err(error) if posix_rename_unsupported(&error) =>
+                        {
+                            session
+                                .sftp
+                                .rename_bytes(remote_path_bytes.clone(), backup_path_bytes.clone())
+                                .await
+                                .map_err(|error| editor_save_error("backup original", error))?;
+                            if let Err(error) = session
+                                .sftp
+                                .rename_bytes(temporary_path.clone(), remote_path_bytes.clone())
+                                .await
+                            {
+                                let restore = session
+                                    .sftp
+                                    .rename_bytes(
+                                        backup_path_bytes.clone(),
+                                        remote_path_bytes.clone(),
+                                    )
+                                    .await;
+                                if let Err(restore_error) = restore {
+                                    let restore_error = anyhow::Error::from(restore_error);
+                                    tracing::error!(
+                                        stage = "restore original",
+                                        category = sftp_error_category(&restore_error),
+                                        "SFTP editor recovery failed"
+                                    );
+                                    anyhow::bail!(
+                                        "Remote save failed; original file is preserved at {backup_path} (automatic restore failed)"
+                                    );
+                                }
+                                return Err(editor_save_error("replace original", error));
+                            }
+                            true
+                        }
+                        Err(error) => return Err(editor_save_error("atomic replacement", error)),
+                    };
+                    let verification = session
                         .sftp
                         .metadata_bytes(remote_path_bytes.clone())
-                        .await?;
-                    let metadata = RemoteTextMetadata {
-                        size: attrs.size.unwrap_or(0),
-                        modified_at: Some(u64::from(attrs.mtime.unwrap_or(0))),
+                        .await
+                        .map_err(|error| editor_save_error("verify replacement", error))
+                        .and_then(|attrs| {
+                            let metadata = RemoteTextMetadata {
+                                size: attrs.size.unwrap_or(0),
+                                modified_at: Some(u64::from(attrs.mtime.unwrap_or(0))),
+                            };
+                            if metadata.size != content.len() as u64 {
+                                tracing::error!(stage = "verify replacement", "SFTP editor size mismatch");
+                                anyhow::bail!("Remote save failed during replacement verification (size mismatch)");
+                            }
+                            Ok(metadata)
+                        });
+                    let metadata = match verification {
+                        Ok(metadata) => metadata,
+                        Err(error) if used_backup => {
+                            if let Err(remove_error) = session
+                                .sftp
+                                .remove_file_bytes(remote_path_bytes.clone())
+                                .await
+                            {
+                                let _ = editor_save_error("remove unverified replacement", remove_error);
+                                anyhow::bail!(
+                                    "Remote save verification failed; original file is preserved at {backup_path} (automatic restore failed)"
+                                );
+                            }
+                            if let Err(restore_error) = session
+                                .sftp
+                                .rename_bytes(backup_path_bytes.clone(), remote_path_bytes.clone())
+                                .await
+                            {
+                                let _ = editor_save_error("restore original", restore_error);
+                                anyhow::bail!(
+                                    "Remote save verification failed; original file is preserved at {backup_path} (automatic restore failed)"
+                                );
+                            }
+                            return Err(error);
+                        }
+                        Err(error) => return Err(error),
                     };
-                    if metadata.size != content.len() as u64 {
-                        anyhow::bail!("Remote text save verification failed");
+                    let revision = RemoteTextRevision::from_bytes(content.as_bytes(), metadata);
+                    if used_backup
+                        && let Err(error) = session.sftp.remove_file_bytes(backup_path_bytes).await
+                    {
+                        let error = anyhow::Error::from(error);
+                        tracing::warn!(
+                            stage = "cleanup backup",
+                            category = sftp_error_category(&error),
+                            "SFTP editor backup cleanup failed"
+                        );
+                        return Ok(RemoteTextWriteResult::SavedWithBackup {
+                            revision,
+                            backup_path,
+                        });
                     }
-                    Ok(RemoteTextWriteResult::Saved {
-                        revision: RemoteTextRevision::from_bytes(content.as_bytes(), metadata),
-                    })
+                    Ok(RemoteTextWriteResult::Saved { revision })
                 }
                 .await;
-                if !matches!(&operation, Ok(RemoteTextWriteResult::Saved { .. })) {
+                if !matches!(
+                    &operation,
+                    Ok(RemoteTextWriteResult::Saved { .. } | RemoteTextWriteResult::SavedWithBackup { .. })
+                ) {
                     let _ = session.sftp.remove_file_bytes(temporary_path).await;
                 }
                 operation
@@ -2536,6 +2657,34 @@ fn log_sftp_upload_failure(operation: &'static str, attempts: u32, error: &anyho
     );
 }
 
+fn editor_save_error(
+    stage: &'static str,
+    error: russh_sftp::client::error::Error,
+) -> anyhow::Error {
+    let error = anyhow::Error::from(error);
+    let category = sftp_error_category(&error);
+    tracing::error!(stage, category, "SFTP editor save failed");
+    error.context(format!("Remote save failed during {stage} ({category})"))
+}
+
+fn posix_rename_unsupported(error: &russh_sftp::client::error::Error) -> bool {
+    match error {
+        russh_sftp::client::error::Error::UnexpectedBehavior(message) => {
+            message == "server does not support atomic POSIX rename"
+        }
+        russh_sftp::client::error::Error::Status(status) => {
+            status.status_code == russh_sftp::protocol::StatusCode::OpUnsupported
+        }
+        _ => false,
+    }
+}
+
+fn editor_save_io_error(stage: &'static str, error: std::io::Error) -> anyhow::Error {
+    let kind = error.kind();
+    tracing::error!(stage, ?kind, "SFTP editor I/O failed");
+    anyhow::Error::from(error).context(format!("Remote save failed during {stage} ({kind:?})"))
+}
+
 fn sftp_error_category(error: &anyhow::Error) -> &'static str {
     if is_sftp_transfer_cancelled(error) {
         "cancelled"
@@ -2594,6 +2743,8 @@ fn sftp_error_is_stream_closed(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod compatibility_tests;
+#[cfg(test)]
+mod editor_save_tests;
 
 fn last_sftp_retry_error(last_error: Option<anyhow::Error>) -> anyhow::Error {
     last_error.unwrap_or_else(|| anyhow::anyhow!("SFTP transfer failed before starting"))

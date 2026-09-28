@@ -1421,8 +1421,20 @@ impl ZzClawTermApp {
                                     size: Some(revision.metadata.size),
                                     mtime_nanos: None,
                                     content_hash: Some(hex::encode(revision.content_sha256)),
+                                    backup_path: None,
                                 })
                             }
+                            zzclawterm_transport::RemoteTextWriteResult::SavedWithBackup {
+                                revision,
+                                backup_path,
+                            } => to_value_string(SftpWriteTextResult {
+                                status: "saved_with_backup".to_string(),
+                                mtime: revision.metadata.modified_at,
+                                size: Some(revision.metadata.size),
+                                mtime_nanos: None,
+                                content_hash: Some(hex::encode(revision.content_sha256)),
+                                backup_path: Some(backup_path),
+                            }),
                             zzclawterm_transport::RemoteTextWriteResult::Conflict => {
                                 to_value_string(SftpWriteTextResult {
                                     status: "conflict".to_string(),
@@ -1430,6 +1442,7 @@ impl ZzClawTermApp {
                                     size: None,
                                     mtime_nanos: None,
                                     content_hash: None,
+                                    backup_path: None,
                                 })
                             }
                         }

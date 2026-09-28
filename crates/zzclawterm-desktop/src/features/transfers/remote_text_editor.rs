@@ -4,7 +4,7 @@ use gpui::{
 };
 use zzclawterm_ui::{ZzClawDocumentEditor, ZzClawDocumentEditorEvent, ZzClawDocumentEditorState};
 
-use crate::features::{ZzClawTermApp, shell::gpui_code_font_family};
+use crate::features::ZzClawTermApp;
 use crate::models::{TransferEditorField, TransferEditorState};
 
 pub(in crate::features) struct RemoteTextEditor {
@@ -140,23 +140,25 @@ impl Focusable for RemoteTextEditor {
 
 impl Render for RemoteTextEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let font_size = self
-            .app
-            .read(cx)
-            .settings
-            .summary()
-            .transfer_internal_editor_font_size
-            .clamp(8, 72) as f32;
+        let (font_size, font) = self.app.read_with(cx, |app, _| {
+            (
+                app.settings
+                    .summary()
+                    .transfer_internal_editor_font_size
+                    .clamp(8, 72) as f32,
+                app.gpui_terminal_font().font(),
+            )
+        });
         self.document.update(cx, |document, cx| {
             document.set_read_only(self.read_only, cx);
             document.set_font_size(font_size, cx);
-            document.set_font_family(gpui_code_font_family(), cx);
+            document.set_font(font.clone(), cx);
         });
         div()
             .size_full()
             .min_h_0()
             .min_w_0()
-            .font_family(gpui_code_font_family())
+            .font(font)
             .text_size(px(font_size))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {

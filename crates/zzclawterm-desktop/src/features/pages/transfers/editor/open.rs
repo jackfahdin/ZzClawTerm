@@ -288,6 +288,7 @@ impl ZzClawTermApp {
             close_after_save: false,
             reload_confirm: false,
             error: None,
+            backup_warning_path: None,
             focused_field: TransferEditorField::Content,
         };
         self.transfer.open_editor_tab(tab);

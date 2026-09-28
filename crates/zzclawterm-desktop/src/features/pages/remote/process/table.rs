@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, ClickEvent, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px, rgb,
+    App, ClickEvent, FontWeight, IntoElement, SharedString, Window, deferred, div, prelude::*, px,
+    rgb,
 };
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::RemoteProcess;
 
+use crate::features::view_widgets::APP_OVERLAY_PRIORITY;
 use crate::models::RemoteProcessSortDirection;
 use crate::theme::ThemePalette;
 
@@ -148,67 +150,73 @@ where
         ))
         .when(menu_open, |this| {
             this.child(
-                div()
-                    .id(gpui::SharedString::from(format!(
-                        "process-menu-pop-{}",
-                        process.pid
-                    )))
-                    .absolute()
-                    .top(px(26.))
-                    .right_0()
-                    .w(px(148.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(menu_bg)
-                    .shadow_lg()
-                    .py_1()
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, _| {})
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-copy-pid-{}", process.pid),
-                        labels.copy_pid.clone(),
-                        on_copy_pid,
-                    ))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-copy-cmd-{}", process.pid),
-                        labels.copy_command.clone(),
-                        on_copy_command,
-                    ))
-                    .child(process_menu_sep(palette))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-term-{}", process.pid),
-                        labels.signal_term.clone(),
-                        on_term,
-                    ))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-hup-{}", process.pid),
-                        labels.signal_hup.clone(),
-                        on_hup,
-                    ))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-stop-{}", process.pid),
-                        labels.signal_stop.clone(),
-                        on_stop,
-                    ))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-cont-{}", process.pid),
-                        labels.signal_cont.clone(),
-                        on_cont,
-                    ))
-                    .child(process_menu_item(
-                        palette,
-                        format!("process-kill-{}", process.pid),
-                        labels.signal_kill.clone(),
-                        on_kill,
-                    )),
+                deferred(
+                    div()
+                        .id(gpui::SharedString::from(format!(
+                            "process-menu-pop-{}",
+                            process.pid
+                        )))
+                        .absolute()
+                        .top(px(26.))
+                        .right_0()
+                        .w(px(148.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .bg(menu_bg)
+                        .shadow_lg()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .occlude()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-copy-pid-{}", process.pid),
+                            labels.copy_pid.clone(),
+                            on_copy_pid,
+                        ))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-copy-cmd-{}", process.pid),
+                            labels.copy_command.clone(),
+                            on_copy_command,
+                        ))
+                        .child(process_menu_sep(palette))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-term-{}", process.pid),
+                            labels.signal_term.clone(),
+                            on_term,
+                        ))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-hup-{}", process.pid),
+                            labels.signal_hup.clone(),
+                            on_hup,
+                        ))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-stop-{}", process.pid),
+                            labels.signal_stop.clone(),
+                            on_stop,
+                        ))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-cont-{}", process.pid),
+                            labels.signal_cont.clone(),
+                            on_cont,
+                        ))
+                        .child(process_menu_item(
+                            palette,
+                            format!("process-kill-{}", process.pid),
+                            labels.signal_kill.clone(),
+                            on_kill,
+                        )),
+                )
+                .with_priority(APP_OVERLAY_PRIORITY),
             )
         });
 

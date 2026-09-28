@@ -5,17 +5,25 @@ use gpui::{
 };
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::{SftpFileEntry, SftpFileType};
+use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
 use std::collections::HashSet;
 
-use crate::features::{
-    shell::gpui_code_font_family, transfers::format_file_size, view_widgets::transfer_entry_icon,
-};
+use crate::features::{shell::gpui_code_font_family, view_widgets::transfer_entry_icon};
 use crate::models::{TransferBrowserColumnWidths, TransferRenameState};
 use crate::theme::ThemePalette;
 
 use super::{format_permissions_octal, format_sftp_modified};
 use crate::features::pages::transfers::panel::TransferPanel;
+
+pub(super) fn format_browser_file_size(size: Option<u64>) -> String {
+    match size {
+        None | Some(0) => "-".to_string(),
+        Some(size) if size < 1024 => format!("{size} B"),
+        Some(size) if size < 1024 * 1024 => format!("{:.1} KB", size as f64 / 1024.),
+        Some(size) => format!("{:.1} MB", size as f64 / (1024. * 1024.)),
+    }
+}
 
 pub(super) fn transfer_browser_parent_entry_row(
     palette: ThemePalette,
@@ -31,10 +39,12 @@ pub(super) fn transfer_browser_parent_entry_row(
         .bg(gpui::rgba(0x00000000))
         .cursor_pointer()
         .hover(|this| this.bg(rgb(palette.hover)))
-        .on_click(cx.listener(|panel, _: &ClickEvent, window, cx| {
-            panel.with_app(cx, |this, cx| {
-                this.open_transfer_parent_directory(window, cx);
-            })
+        .on_click(cx.listener(|panel, event: &ClickEvent, window, cx| {
+            if event.click_count() >= 2 && !event.modifiers().modified() {
+                panel.with_app(cx, |this, cx| {
+                    this.open_transfer_parent_directory(window, cx);
+                });
+            }
         }))
         .on_mouse_down(
             MouseButton::Right,
@@ -124,8 +134,58 @@ pub(super) fn transfer_browser_entry_row(
     let size_display = if is_directory {
         "-".to_string()
     } else {
-        format_file_size(entry.size)
+        format_browser_file_size(entry.size)
     };
+    let modified_display = format_sftp_modified(entry.modified_at);
+    let permissions_display = entry
+        .permissions
+        .map(format_permissions_octal)
+        .unwrap_or_else(|| "-".to_string());
+    let detail = div()
+        .w(px(320.))
+        .max_w(px(320.))
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_xs()
+        .text_color(rgb(palette.text))
+        .child(
+            div()
+                .text_sm()
+                .whitespace_normal()
+                .child(entry.name.clone()),
+        )
+        .child(format!(
+            "{}: {modified_display}",
+            rust_i18n::t!("fileExplorer.mtime")
+        ))
+        .child(format!(
+            "{}: {size_display}",
+            rust_i18n::t!("fileExplorer.size")
+        ))
+        .child(format!(
+            "{}: {permissions_display}",
+            rust_i18n::t!("fileExplorer.permissions")
+        ))
+        .child(format!(
+            "{}: {}",
+            rust_i18n::t!("fileExplorer.owner"),
+            if entry.owner.is_empty() {
+                "-"
+            } else {
+                &entry.owner
+            }
+        ))
+        .child(format!(
+            "{}: {}",
+            rust_i18n::t!("fileExplorer.group"),
+            if entry.group.is_empty() {
+                "-"
+            } else {
+                &entry.group
+            }
+        ));
     div()
         .id(SharedString::from(format!(
             "transfer-browser-entry-{entry_identity}"
@@ -274,23 +334,31 @@ pub(super) fn transfer_browser_entry_row(
                 })
                 .when(!is_renaming, |this| {
                     this.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "transfer-browser-entry-name-{name_click_path}"
-                            )))
-                            .min_w_0()
-                            .flex_1()
-                            .on_click(cx.listener(move |panel, event: &ClickEvent, _, cx| {
-                                panel.with_app(cx, |this, cx| {
-                                    this.schedule_transfer_browser_name_rename(
-                                        name_click_path.clone(),
-                                        event,
-                                        cx,
-                                    );
-                                })
-                            }))
-                            .truncate()
-                            .child(truncate_preview(&entry.name, 42)),
+                        ZzClawHoverCard::new(
+                            format!("transfer-browser-entry-detail-{name_click_path}"),
+                            div()
+                                .id(SharedString::from(format!(
+                                    "transfer-browser-entry-name-{name_click_path}"
+                                )))
+                                .min_w_0()
+                                .flex_1()
+                                .on_click(cx.listener(move |panel, event: &ClickEvent, _, cx| {
+                                    panel.with_app(cx, |this, cx| {
+                                        this.schedule_transfer_browser_name_rename(
+                                            name_click_path.clone(),
+                                            event,
+                                            cx,
+                                        );
+                                    })
+                                }))
+                                .truncate()
+                                .child(truncate_preview(&entry.name, 42)),
+                            detail,
+                        )
+                        .placement(ZzClawPopoverPlacement::Top)
+                        .align(ZzClawPopoverAlign::Start)
+                        .open_delay(std::time::Duration::from_millis(800))
+                        .close_delay(std::time::Duration::from_millis(100)),
                     )
                 }),
         )
@@ -303,7 +371,7 @@ pub(super) fn transfer_browser_entry_row(
                 .text_xs()
                 .font_family(gpui_code_font_family())
                 .text_color(rgb(palette.text_muted))
-                .child(format_sftp_modified(entry.modified_at)),
+                .child(modified_display),
         )
         .child(
             div()
@@ -325,12 +393,7 @@ pub(super) fn transfer_browser_entry_row(
                 .text_xs()
                 .font_family(gpui_code_font_family())
                 .text_color(rgb(palette.text_muted))
-                .child(
-                    entry
-                        .permissions
-                        .map(format_permissions_octal)
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
+                .child(permissions_display),
         )
         .child(
             div()
@@ -370,4 +433,17 @@ pub(super) struct TransferBrowserEntryRowPresentation<'a> {
     pub column_widths: TransferBrowserColumnWidths,
     pub rename_state: Option<TransferRenameState>,
     pub rename_input: Option<AnyElement>,
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::format_browser_file_size;
+
+    #[test]
+    fn browser_sizes_follow_tauri_labels_without_changing_transfer_progress() {
+        assert_eq!(format_browser_file_size(Some(0)), "-");
+        assert_eq!(format_browser_file_size(Some(512)), "512 B");
+        assert_eq!(format_browser_file_size(Some(1536)), "1.5 KB");
+        assert_eq!(format_browser_file_size(Some(1024 * 1024)), "1.0 MB");
+    }
 }

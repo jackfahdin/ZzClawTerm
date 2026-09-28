@@ -43,7 +43,13 @@ pub struct RemoteTextDocument {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteTextWriteResult {
-    Saved { revision: RemoteTextRevision },
+    Saved {
+        revision: RemoteTextRevision,
+    },
+    SavedWithBackup {
+        revision: RemoteTextRevision,
+        backup_path: String,
+    },
     Conflict,
 }
 

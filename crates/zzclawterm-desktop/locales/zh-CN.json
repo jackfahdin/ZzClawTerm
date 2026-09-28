@@ -12,7 +12,8 @@
     "unavailable": "当前桌面会话不支持隐藏到托盘，窗口已正常最小化。"
 },
   "appShell": {
-    "savingBeforeClose": "正在保存数据..."
+    "savingBeforeClose": "正在保存数据...",
+    "preparingUpdate": "正在保存数据并准备更新..."
   },
   "documentEditor": {
     "fold": "折叠光标处代码",
@@ -823,6 +824,7 @@
     "somethingWentWrong": "出现错误"
   },
   "fileEditor": {
+    "backupCleanupWarning": "文件已保存，但无法删除备份：%{path}",
     "bytes": "字节",
     "clearSearch": "清除搜索",
     "conflictDesc": "远程文件在打开后已被修改。重新加载可保留远程版本，强制保存会覆盖远程内容。",
@@ -3091,6 +3093,11 @@
     "source": "更新来源",
     "sourceAuto": "自动",
     "activeSource": "当前来源",
+    "waitingForExit": "正在等待 ZzClawTerm 退出...",
+    "backingUpInstall": "正在备份当前安装...",
+    "applyingInstall": "正在安装新版本...",
+    "replacingFiles": "正在替换程序文件...",
+    "startingUpdatedApp": "正在启动 ZzClawTerm...",
     "saveEditorsFirst": "安装更新前请保存或关闭已修改的文件。",
     "installFailed": "无法启动更新安装程序。",
     "installAndRestart": "安装并重启",

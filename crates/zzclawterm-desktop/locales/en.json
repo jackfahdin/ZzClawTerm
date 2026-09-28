@@ -12,7 +12,8 @@
     "unavailable": "Tray hiding is unavailable in this desktop session. The window was minimized normally."
 },
   "appShell": {
-    "savingBeforeClose": "Saving changes before closing..."
+    "savingBeforeClose": "Saving changes before closing...",
+    "preparingUpdate": "Saving data and preparing the update..."
   },
   "documentEditor": {
     "fold": "Fold at cursor",
@@ -823,6 +824,7 @@
     "somethingWentWrong": "Something went wrong"
   },
   "fileEditor": {
+    "backupCleanupWarning": "File saved, but the backup could not be removed: %{path}",
     "bytes": "bytes",
     "clearSearch": "Clear search",
     "conflictDesc": "The remote file changed after you opened it. Reload to keep the remote version, or force save to overwrite it.",
@@ -3091,6 +3093,11 @@
     "source": "Update source",
     "sourceAuto": "Auto",
     "activeSource": "Current source",
+    "waitingForExit": "Waiting for ZzClawTerm to close...",
+    "backingUpInstall": "Backing up the current installation...",
+    "applyingInstall": "Installing the new version...",
+    "replacingFiles": "Replacing application files...",
+    "startingUpdatedApp": "Starting ZzClawTerm...",
     "saveEditorsFirst": "Save or close edited files before installing the update.",
     "installFailed": "Could not start the update installer.",
     "installAndRestart": "Install and restart",

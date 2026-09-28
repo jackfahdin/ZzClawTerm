@@ -105,6 +105,7 @@ impl ZzClawTermApp {
             || self.session.is_disconnected(&session_id)
             || self.transfer.has_browser_session_cache(&session_id)
             || self.transfer.browser_view().loading
+            || self.transfer.browser_view().error.is_some()
             || self
                 .transfer
                 .browser_navigation_job_running_for_session(&session_id)
@@ -112,13 +113,16 @@ impl ZzClawTermApp {
             return;
         }
 
-        let initial_path = match self.session.active_file_browser_backend() {
-            Some(zzclawterm_transport::FileBrowserBackendKind::Local) => dirs::home_dir()
-                .or_else(|| std::env::current_dir().ok())
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".to_string()),
-            _ => ".".to_string(),
-        };
+        if self.session.active_file_browser_backend()
+            == Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+        {
+            self.start_transfer_initial_directory_job(cx);
+            return;
+        }
+        let initial_path = dirs::home_dir()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".to_string());
         let rollback = self.prepare_transfer_browser_navigation();
         self.transfer
             .begin_browser_directory_load(initial_path.clone());

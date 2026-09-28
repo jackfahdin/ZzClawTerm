@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use gpui::{
     ClipboardItem, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
-    StatefulInteractiveElement as _, Window, div, prelude::*, px, rgb, svg,
+    StatefulInteractiveElement as _, Window, deferred, div, prelude::*, px, rgb, svg,
 };
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::SftpFileEntry;
@@ -80,11 +80,13 @@ pub(in crate::features::pages::transfers) fn transfer_browser_path_row(
                 .into_any_element()
         });
     let breadcrumbs = build_transfer_browser_breadcrumbs(&current_browser_path, &browser.home_dir);
+    let breadcrumb_width = (chrome.panel_width - 52.).max(32.);
     let (visible_breadcrumbs, overflow_breadcrumbs) =
-        collapse_transfer_browser_breadcrumbs(&breadcrumbs);
+        collapse_transfer_browser_breadcrumbs(&breadcrumbs, breadcrumb_width);
 
     // Tauri FileExplorerPathBar: minHeight ~26px, mono path, favorites on the right.
     div()
+        .relative()
         .flex()
         .flex_col()
         .gap_0()
@@ -140,6 +142,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_path_row(
                             visible_segments: visible_breadcrumbs.clone(),
                             overflow_segments: overflow_breadcrumbs.clone(),
                             overflow_label: t!("fileExplorer.breadcrumbOverflow").to_string(),
+                            available_width: breadcrumb_width,
                         },
                         cx,
                     ))
@@ -198,14 +201,25 @@ pub(in crate::features::pages::transfers) fn transfer_browser_path_row(
                 ),
         )
         .when(browser.path_editing && !history_paths.is_empty(), |this| {
-            this.child(transfer_browser_path_history_list(
-                palette,
-                chrome.surface,
-                current_browser_path,
-                browser.home_dir.clone(),
-                history_paths,
-                cx,
-            ))
+            this.child(
+                deferred(
+                    div()
+                        .absolute()
+                        .top(px(26.))
+                        .left_0()
+                        .right_0()
+                        .occlude()
+                        .child(transfer_browser_path_history_list(
+                            palette,
+                            chrome.surface,
+                            current_browser_path,
+                            browser.home_dir.clone(),
+                            history_paths,
+                            cx,
+                        )),
+                )
+                .with_priority(1),
+            )
         })
 }
 
@@ -541,6 +555,7 @@ fn transfer_browser_breadcrumb_row(
         visible_segments,
         overflow_segments,
         overflow_label,
+        available_width,
     } = presentation;
     let mut row = div()
         .id(SharedString::from("transfer-browser-path-display"))
@@ -621,7 +636,18 @@ fn transfer_browser_breadcrumb_row(
                             segment.path
                         )))
                         .h(px(20.))
-                        .max_w(px(128.))
+                        .max_w(px(if is_current {
+                            (available_width
+                                - if overflow_segments.is_empty() {
+                                    0.
+                                } else {
+                                    24.
+                                }
+                                - 16.)
+                                .clamp(16., 128.)
+                        } else {
+                            128.
+                        }))
                         .px_1()
                         .flex()
                         .items_center()
@@ -709,6 +735,7 @@ struct TransferBrowserBreadcrumbRowPresentation {
     visible_segments: Vec<TransferBrowserBreadcrumbSegment>,
     overflow_segments: Vec<TransferBrowserBreadcrumbSegment>,
     overflow_label: String,
+    available_width: f32,
 }
 
 fn transfer_browser_path_menu_entries(
@@ -786,7 +813,7 @@ fn transfer_browser_child_directories(
 
 fn build_transfer_browser_breadcrumbs(
     current_path: &str,
-    home_dir: &str,
+    _home_dir: &str,
 ) -> Vec<TransferBrowserBreadcrumbSegment> {
     let current_path = normalized_transfer_browser_path(current_path);
     if current_path.contains('\\') || current_path.as_bytes().get(1) == Some(&b':') {
@@ -834,15 +861,9 @@ fn build_transfer_browser_breadcrumbs(
             .collect();
     }
 
-    let home_dir = normalized_transfer_browser_path(home_dir);
-    let use_home = home_dir.starts_with('/')
-        && (current_path == home_dir
-            || current_path
-                .strip_prefix(&home_dir)
-                .is_some_and(|suffix| suffix.starts_with('/')));
-    let root_path = if use_home { home_dir.as_str() } else { "/" };
+    let root_path = "/";
     let mut segments = vec![TransferBrowserBreadcrumbSegment {
-        label: if use_home { "~" } else { "/" }.to_string(),
+        label: "/".to_string(),
         path: root_path.to_string(),
     }];
     let suffix = current_path
@@ -861,18 +882,44 @@ fn build_transfer_browser_breadcrumbs(
 
 fn collapse_transfer_browser_breadcrumbs(
     segments: &[TransferBrowserBreadcrumbSegment],
+    available_width: f32,
 ) -> (
     Vec<TransferBrowserBreadcrumbSegment>,
     Vec<TransferBrowserBreadcrumbSegment>,
 ) {
-    if segments.len() <= 4 {
-        return (segments.to_vec(), Vec::new());
+    let mut shown = vec![true; segments.len()];
+    let segment_width = |segment: &TransferBrowserBreadcrumbSegment| {
+        (segment.label.chars().count() as f32 * 6. + 24.).min(152.)
+    };
+    loop {
+        let hidden = shown.iter().filter(|shown| !**shown).count();
+        let width = segments
+            .iter()
+            .zip(&shown)
+            .filter(|(_, shown)| **shown)
+            .map(|(segment, _)| segment_width(segment))
+            .sum::<f32>()
+            + if hidden > 0 { 24. } else { 0. };
+        if width <= available_width.max(0.) {
+            break;
+        }
+        let last = segments.len().saturating_sub(1);
+        let to_hide = (1..last.saturating_sub(1))
+            .find(|&index| shown[index])
+            .or_else(|| (last > 1 && shown[0]).then_some(0))
+            .or_else(|| (last > 0 && shown[last - 1]).then_some(last - 1));
+        let Some(index) = to_hide else { break };
+        shown[index] = false;
     }
-    let split = segments.len() - 2;
-    let mut visible = Vec::with_capacity(3);
-    visible.push(segments[0].clone());
-    visible.extend_from_slice(&segments[split..]);
-    (visible, segments[1..split].to_vec())
+    let (mut visible, mut overflow) = (Vec::new(), Vec::new());
+    for (segment, shown) in segments.iter().zip(shown) {
+        if shown {
+            visible.push(segment.clone());
+        } else {
+            overflow.push(segment.clone());
+        }
+    }
+    (visible, overflow)
 }
 
 fn transfer_browser_path_history_list(
@@ -993,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn breadcrumbs_use_home_as_root_for_descendants() {
+    fn breadcrumbs_show_filesystem_root_inside_home() {
         let segments = build_transfer_browser_breadcrumbs("/home/nya/work/src", "/home/nya");
         let labels = segments
             .iter()
@@ -1004,10 +1051,16 @@ mod tests {
             .map(|segment| segment.path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(labels, vec!["~", "work", "src"]);
+        assert_eq!(labels, vec!["/", "home", "nya", "work", "src"]);
         assert_eq!(
             paths,
-            vec!["/home/nya", "/home/nya/work", "/home/nya/work/src"]
+            vec![
+                "/",
+                "/home",
+                "/home/nya",
+                "/home/nya/work",
+                "/home/nya/work/src"
+            ]
         );
     }
 
@@ -1032,7 +1085,7 @@ mod tests {
     #[test]
     fn long_breadcrumbs_keep_root_and_last_two_segments_visible() {
         let segments = build_transfer_browser_breadcrumbs("/a/b/c/d/e", "");
-        let (visible, overflow) = collapse_transfer_browser_breadcrumbs(&segments);
+        let (visible, overflow) = collapse_transfer_browser_breadcrumbs(&segments, 120.);
 
         assert_eq!(
             visible
@@ -1048,6 +1101,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"]
         );
+    }
+
+    #[test]
+    fn narrow_breadcrumbs_keep_current_directory_reachable() {
+        let segments = build_transfer_browser_breadcrumbs("/a/b/c/d/e", "");
+        let (visible, overflow) = collapse_transfer_browser_breadcrumbs(&segments, 55.);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["e"]
+        );
+        assert_eq!(overflow.len(), segments.len() - 1);
+    }
+
+    #[test]
+    fn wide_breadcrumbs_show_every_segment() {
+        let segments = build_transfer_browser_breadcrumbs("/a/b/c", "");
+        let (visible, overflow) = collapse_transfer_browser_breadcrumbs(&segments, 400.);
+        assert_eq!(visible.len(), segments.len());
+        assert!(overflow.is_empty());
     }
 
     #[test]

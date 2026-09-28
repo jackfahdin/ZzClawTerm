@@ -202,6 +202,7 @@ pub(crate) struct TransferEditorState {
     pub(crate) close_after_save: bool,
     pub(crate) reload_confirm: bool,
     pub(crate) error: Option<String>,
+    pub(crate) backup_warning_path: Option<String>,
     pub(crate) focused_field: TransferEditorField,
 }
 
@@ -342,6 +343,7 @@ mod tests {
             close_after_save: false,
             reload_confirm: false,
             error: None,
+            backup_warning_path: None,
             focused_field: TransferEditorField::Content,
         }
     }

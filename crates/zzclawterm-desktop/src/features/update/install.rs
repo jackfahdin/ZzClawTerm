@@ -9,6 +9,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+mod progress;
+
 const PORTABLE_HELPER_FLAG: &str = "--zzclawterm-portable-update-helper";
 const INSTALLED_HELPER_FLAG: &str = "--zzclawterm-installed-update-helper";
 const UPDATE_CLEANUP_ENV: &str = "ZZCLAWTERM_UPDATE_CLEANUP";
@@ -284,7 +287,7 @@ fn extract_windows_portable(archive_path: &Path, destination: &Path) -> Result<(
 
 /// Start a detached installer only after the existing application close guards pass.
 /// The helper waits for this process before touching the installed application.
-pub(super) fn launch_installer(prepared: &PreparedUpdate) -> Result<(), String> {
+pub(super) fn launch_installer(prepared: &PreparedUpdate, language: &str) -> Result<(), String> {
     #[cfg(windows)]
     if let PreparedUpdate::WindowsInstalled {
         helper,
@@ -301,6 +304,7 @@ pub(super) fn launch_installer(prepared: &PreparedUpdate) -> Result<(), String> 
                 installer.as_os_str().to_owned(),
                 target.as_os_str().to_owned(),
                 work_dir.as_os_str().to_owned(),
+                language.into(),
             ],
         );
     }
@@ -320,11 +324,13 @@ pub(super) fn launch_installer(prepared: &PreparedUpdate) -> Result<(), String> 
                 staged_dir.as_os_str().to_owned(),
                 target_dir.as_os_str().to_owned(),
                 work_dir.as_os_str().to_owned(),
+                language.into(),
             ],
         );
     }
     #[cfg(unix)]
     {
+        let _ = language;
         let PreparedUpdate::Installed { artifact, target } = prepared;
         let script = r#"parent=$1; staged=$2; target=$3; mode=$4
 while kill -0 "$parent" 2>/dev/null; do sleep 0.2; done
@@ -383,28 +389,53 @@ pub fn run_update_helper_if_requested() -> bool {
     }
     #[cfg(windows)]
     {
-        let result = match flag {
-            PORTABLE_HELPER_FLAG => run_windows_portable_helper(&args),
-            INSTALLED_HELPER_FLAG => run_windows_installed_helper(&args),
-            _ => unreachable!(),
-        };
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::System::Threading::WaitForInputIdle;
+
+        let portable = flag == PORTABLE_HELPER_FLAG;
         let target = args.get(4).map(PathBuf::from).map(|path| {
-            if flag == PORTABLE_HELPER_FLAG {
+            if portable {
                 path.join("ZzClawTerm.exe")
             } else {
                 path
             }
         });
         let work_dir = args.get(5).map(PathBuf::from);
-        if let Some(target) = target {
-            if let Err(error) = &result
-                && let Some(target_dir) = target.parent()
-            {
+        let recovery_work_dir = work_dir.clone();
+        let language = args
+            .get(6)
+            .and_then(|value| value.to_str())
+            .unwrap_or("en")
+            .to_string();
+        let launch_target = target.clone();
+        let result = progress::run(&language, move |report| {
+            if portable {
+                run_windows_portable_helper(&args, report)?;
+            } else {
+                run_windows_installed_helper(&args, report)?;
+            }
+            report(progress::Stage::Starting);
+            let target = launch_target.ok_or("updated application path is unavailable")?;
+            let mut command = Command::new(target);
+            if let Some(work_dir) = work_dir {
+                command.env(UPDATE_CLEANUP_ENV, work_dir);
+            }
+            let child = command
+                .spawn()
+                .map_err(|error| format!("failed to restart ZzClawTerm: {error}"))?;
+            // Keep the helper's progress window visible while the new GUI initializes.
+            unsafe { WaitForInputIdle(child.as_raw_handle(), 30_000) };
+            Ok(())
+        });
+        if let Err(error) = &result
+            && let Some(target) = target
+        {
+            if let Some(target_dir) = target.parent() {
                 write_update_error(target_dir, error);
             }
             if target.is_file() {
                 let mut command = Command::new(target);
-                if let Some(work_dir) = work_dir {
+                if let Some(work_dir) = recovery_work_dir {
                     command.env(UPDATE_CLEANUP_ENV, work_dir);
                 }
                 let _ = command.spawn();
@@ -425,8 +456,11 @@ pub(crate) fn cleanup_update_work_dir(path: PathBuf) {
 }
 
 #[cfg(windows)]
-fn run_windows_portable_helper(args: &[OsString]) -> Result<(), String> {
-    if args.len() != 6 {
+fn run_windows_portable_helper(
+    args: &[OsString],
+    report: &mut dyn FnMut(progress::Stage),
+) -> Result<(), String> {
+    if args.len() != 7 {
         return Err("invalid portable update helper arguments".into());
     }
     let parent = args[2]
@@ -441,15 +475,20 @@ fn run_windows_portable_helper(args: &[OsString]) -> Result<(), String> {
     {
         return Err("portable update paths failed validation".into());
     }
+    report(progress::Stage::Waiting);
     wait_for_process_exit(parent)?;
+    report(progress::Stage::Replacing);
     commit_portable_files(&staged_dir, &target_dir, &work_dir)
 }
 
 #[cfg(windows)]
-fn run_windows_installed_helper(args: &[OsString]) -> Result<(), String> {
+fn run_windows_installed_helper(
+    args: &[OsString],
+    report: &mut dyn FnMut(progress::Stage),
+) -> Result<(), String> {
     use std::os::windows::process::CommandExt as _;
 
-    if args.len() != 6 {
+    if args.len() != 7 {
         return Err("invalid installed update helper arguments".into());
     }
     let parent = parse_helper_parent(args)?;
@@ -467,10 +506,13 @@ fn run_windows_installed_helper(args: &[OsString]) -> Result<(), String> {
     {
         return Err("installed update target failed validation".into());
     }
+    report(progress::Stage::Waiting);
     wait_for_process_exit(parent)?;
 
+    report(progress::Stage::BackingUp);
     let backup = target_dir.with_extension(format!("previous-{}", zzclawterm_core::uuid()));
     copy_directory(target_dir, &backup)?;
+    report(progress::Stage::Installing);
     let status = Command::new(&installer)
         .args(installed_setup_arguments(target_dir))
         .creation_flags(0x08000000)

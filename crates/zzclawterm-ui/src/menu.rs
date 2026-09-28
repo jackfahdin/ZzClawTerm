@@ -120,6 +120,7 @@ pub struct ZzClawMenuItem {
     icon_path: Option<SharedString>,
     icon_color: Option<u32>,
     shortcut: Option<SharedString>,
+    status: Option<(SharedString, u32)>,
     disabled: bool,
     checked: bool,
     danger: bool,
@@ -138,6 +139,7 @@ impl ZzClawMenuItem {
             icon_path: None,
             icon_color: None,
             shortcut: None,
+            status: None,
             disabled: false,
             checked: false,
             danger: false,
@@ -191,6 +193,11 @@ impl ZzClawMenuItem {
 
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    pub fn status(mut self, label: impl Into<SharedString>, color: u32) -> Self {
+        self.status = Some((label.into(), color));
         self
     }
 
@@ -269,6 +276,13 @@ impl ZzClawMenuItem {
     #[doc(hidden)]
     pub fn test_icon_color(&self) -> Option<u32> {
         self.icon_color
+    }
+
+    #[doc(hidden)]
+    pub fn test_status(&self) -> Option<(&str, u32)> {
+        self.status
+            .as_ref()
+            .map(|(label, color)| (label.as_ref(), *color))
     }
 
     #[doc(hidden)]
@@ -408,9 +422,14 @@ impl ZzClawMenuItem {
     }
 
     fn popup_item(&self, cx: &App) -> PopupMenuItem {
-        let mut item = if self.danger || self.shortcut.is_some() || self.label_indent.is_some() {
+        let mut item = if self.danger
+            || self.shortcut.is_some()
+            || self.status.is_some()
+            || self.label_indent.is_some()
+        {
             let label = self.label.clone();
             let shortcut = self.shortcut.clone();
+            let status = self.status.clone();
             let danger = self.danger;
             let label_indent = self.label_indent;
             PopupMenuItem::element(move |_, cx| {
@@ -439,6 +458,15 @@ impl ZzClawMenuItem {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(shortcut),
+                        )
+                    })
+                    .when_some(status.clone(), |this, (label, color)| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(rgb(color))
+                                .child(label),
                         )
                     })
             })
