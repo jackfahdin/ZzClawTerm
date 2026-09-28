@@ -307,61 +307,79 @@ fn every_session_scoped_message_with_a_foreign_id_fails_closed() {
 
 #[test]
 fn unreachable_server_reports_a_fatal_transport_error_and_still_disconnects() {
-    let mut child = spawn_helper();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
+    // closed_port() 是 bind→drop 的临时端口，helper 去连之前它有极小概率被别的
+    // 进程（往往是并行测试绑临时端口的进程）抢占；抢了就会 TCP 连上、helper 进
+    // 入 Authenticating 而不是报 fatal Transport error。端口抢占是环境性的，不
+    // 是代码错误，所以在拿不到预期错误时换一个 helper 和新的 closed_port() 重试，
+    // 而不是放宽对错误形态的要求。
+    let mut last_outcome = String::from("(no outcome)");
+    for _ in 0..3 {
+        let mut child = spawn_helper();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
 
-    handshake(&mut stdin, &mut stdout);
+        handshake(&mut stdin, &mut stdout);
 
-    send(
-        &mut stdin,
-        &VncControlMessage::Connect {
-            session_id: "unreachable".to_string(),
-            config: config(closed_port()),
-        },
-    );
-    assert!(matches!(
-        recv(&mut stdout),
-        VncControlMessage::State {
-            state: VncSessionState::Connecting,
-            ..
+        send(
+            &mut stdin,
+            &VncControlMessage::Connect {
+                session_id: "unreachable".to_string(),
+                config: config(closed_port()),
+            },
+        );
+        let connecting = recv(&mut stdout);
+        if !matches!(
+            connecting,
+            VncControlMessage::State {
+                state: VncSessionState::Connecting,
+                ..
+            }
+        ) {
+            last_outcome = format!("expected Connecting, got {connecting:?}");
+            let _ = child.kill();
+            continue;
         }
-    ));
-    let VncControlMessage::Error {
-        session_id,
-        error,
-        fatal,
-    } = recv(&mut stdout)
-    else {
-        panic!("expected a fatal connection error");
-    };
-    assert_eq!(session_id, "unreachable");
-    assert_eq!(error.kind, VncErrorKind::Transport);
-    assert!(fatal);
+        let outcome = recv(&mut stdout);
+        let VncControlMessage::Error {
+            session_id,
+            error,
+            fatal,
+        } = outcome
+        else {
+            last_outcome = format!("expected a fatal connection error, got {outcome:?}");
+            let _ = child.kill();
+            continue;
+        };
+        assert_eq!(session_id, "unreachable");
+        assert_eq!(error.kind, VncErrorKind::Transport);
+        assert!(fatal);
 
-    // A dead worker must not wedge the control channel.
-    send(
-        &mut stdin,
-        &VncControlMessage::Disconnect {
-            session_id: "unreachable".to_string(),
-        },
-    );
-    assert!(matches!(
-        recv(&mut stdout),
-        VncControlMessage::State {
-            state: VncSessionState::Disconnecting,
-            ..
-        }
-    ));
-    assert!(matches!(
-        recv(&mut stdout),
-        VncControlMessage::State {
-            state: VncSessionState::Disconnected,
-            ..
-        }
-    ));
-    drop(stdin);
-    assert!(child.wait().unwrap().success());
+        // A dead worker must not wedge the control channel.
+        send(
+            &mut stdin,
+            &VncControlMessage::Disconnect {
+                session_id: "unreachable".to_string(),
+            },
+        );
+        assert!(matches!(
+            recv(&mut stdout),
+            VncControlMessage::State {
+                state: VncSessionState::Disconnecting,
+                ..
+            }
+        ));
+        assert!(matches!(
+            recv(&mut stdout),
+            VncControlMessage::State {
+                state: VncSessionState::Disconnected,
+                ..
+            }
+        ));
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        return;
+    }
+    panic!("expected a fatal connection error after retries; last outcome: {last_outcome}");
 }
 
 #[test]
