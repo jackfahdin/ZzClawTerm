@@ -3,9 +3,10 @@ use std::sync::{Arc, Weak};
 use super::{
     CursorShape, GraphicsProtocol, ScreenLineState, ShellCommandMark, ShellInputLineKind,
     TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT, TerminalOutputDecoder, TerminalScreen,
-    TerminalSearchDirection, TerminalSearchQuery, TerminalSnapshot, TerminalSnapshotRowCache,
-    TerminalSnapshotRowCacheEntry, TerminalSnapshotRowCacheKey, alternate_scroll_key_bytes,
-    encode_mouse_report, encode_mouse_report_with_modifiers, render_row_signature,
+    TerminalSearchDirection, TerminalSearchQuery, TerminalSearchRangeMode, TerminalSnapshot,
+    TerminalSnapshotRowCache, TerminalSnapshotRowCacheEntry, TerminalSnapshotRowCacheKey,
+    alternate_scroll_key_bytes, encode_mouse_report, encode_mouse_report_with_modifiers,
+    render_row_signature,
 };
 
 fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
@@ -91,6 +92,170 @@ fn grid_search_splits_soft_wrapped_match_into_row_segments() {
             .map(|m| (m.line_index, m.start_col, m.end_col))
             .collect::<Vec<_>>(),
         vec![(0, 3, 5), (1, 0, 2)]
+    );
+}
+
+#[test]
+fn occurrence_search_groups_soft_wrapped_segments_and_respects_range_mode() {
+    let mut screen = TerminalScreen::new(5, 3);
+    screen.advance(b"abcde12345");
+    let query = search_query("de12");
+
+    let starts = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            1..2,
+            TerminalSearchRangeMode::StartsWithin,
+        )
+        .unwrap();
+    assert!(starts.is_empty());
+    let intersects = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            1..2,
+            TerminalSearchRangeMode::Intersects,
+        )
+        .unwrap();
+    assert_eq!(intersects.len(), 1);
+    assert_eq!(
+        intersects[0]
+            .segments
+            .iter()
+            .map(|segment| (segment.line_index, segment.start_col, segment.end_col,))
+            .collect::<Vec<_>>(),
+        vec![(0, 3, 5), (1, 0, 2)]
+    );
+}
+
+#[test]
+fn occurrence_search_preserves_regex_and_wide_cell_positions_across_wrap() {
+    let mut screen = TerminalScreen::new(5, 3);
+    screen.advance("猫abcz".as_bytes());
+    let mut query = search_query("猫.*z");
+    query.regex = true;
+
+    let matches = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            0..1,
+            TerminalSearchRangeMode::StartsWithin,
+        )
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0]
+            .segments
+            .iter()
+            .map(|segment| (segment.line_index, segment.start_col, segment.end_col,))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 5), (1, 0, 1)]
+    );
+}
+
+#[test]
+fn occurrence_search_limit_counts_logical_matches() {
+    let mut screen = TerminalScreen::new(5, 3);
+    screen.advance(b"abcde12345\r\nabcde12345");
+    let mut query = search_query("de12");
+    query.limit = 1;
+
+    let matches = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            0..screen.total_rows(),
+            TerminalSearchRangeMode::StartsWithin,
+        )
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].segments.len(), 2);
+}
+
+#[test]
+fn occurrence_search_honors_case_whole_word_and_invalid_regex() {
+    let mut screen = TerminalScreen::new(40, 3);
+    screen.advance(b"cat scatter CAT cat_");
+    let mut query = search_query("cat");
+    query.case_sensitive = false;
+    query.whole_word = true;
+    let matches = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            0..screen.total_rows(),
+            TerminalSearchRangeMode::StartsWithin,
+        )
+        .unwrap();
+    assert_eq!(matches.len(), 2);
+    query.regex = true;
+    query.pattern = "[".to_string();
+    assert!(
+        screen
+            .search_grid_occurrences_in_absolute_range(
+                &query,
+                0..screen.total_rows(),
+                TerminalSearchRangeMode::StartsWithin,
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn occurrence_search_follows_reflow_and_scrollback_eviction() {
+    let mut screen = TerminalScreen::new(5, 3);
+    screen.set_scrollback_limit(3);
+    let output = format!("de123\r\n{}needle", "plain\r\n".repeat(10));
+    screen.advance(output.as_bytes());
+    let query = search_query("de123");
+    assert!(
+        screen
+            .search_grid_occurrences_in_absolute_range(
+                &query,
+                0..screen.total_rows(),
+                TerminalSearchRangeMode::StartsWithin,
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    let query = search_query("needle");
+    screen.resize(10, 3);
+    let matches = screen
+        .search_grid_occurrences_in_absolute_range(
+            &query,
+            0..screen.total_rows(),
+            TerminalSearchRangeMode::StartsWithin,
+        )
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert!(matches[0].segments[0].line_index < screen.total_rows());
+}
+
+#[test]
+fn occurrence_search_uses_current_alternate_screen() {
+    let mut screen = TerminalScreen::new(20, 3);
+    screen.advance(b"primary");
+    let query = search_query("primary");
+    screen.advance(b"\x1b[?1049halt-only");
+    assert!(
+        screen
+            .search_grid_occurrences_in_absolute_range(
+                &query,
+                0..screen.total_rows(),
+                TerminalSearchRangeMode::StartsWithin,
+            )
+            .unwrap()
+            .is_empty()
+    );
+    screen.advance(b"\x1b[?1049l");
+    assert_eq!(
+        screen
+            .search_grid_occurrences_in_absolute_range(
+                &query,
+                0..screen.total_rows(),
+                TerminalSearchRangeMode::StartsWithin,
+            )
+            .unwrap()
+            .len(),
+        1
     );
 }
 
@@ -501,6 +666,31 @@ fn snapshots_mark_wrapped_continuation_rows() {
 
     assert_eq!(snapshot.row(0).map(|row| row.wrapped), Some(false));
     assert_eq!(snapshot.row(1).map(|row| row.wrapped), Some(true));
+}
+
+#[test]
+fn all_text_rows_preserve_wraps_across_scrollback_boundary() {
+    let mut screen = TerminalScreen::new(5, 2);
+    screen.advance(b"abcdef\r\nghij");
+
+    let rows = screen.all_text_rows();
+    assert_eq!(rows[0], ("abcde".to_string(), false));
+    assert_eq!(rows[1], ("f".to_string(), true));
+    assert_eq!(rows[2], ("ghij".to_string(), false));
+}
+
+#[test]
+fn all_text_rows_match_snapshot_text_for_wide_and_combining_cells() {
+    let mut screen = TerminalScreen::new(5, 2);
+    screen.advance("ab好e\u{301}f\r\ng".as_bytes());
+
+    let rows = screen.all_text_rows();
+    let snapshot = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+    assert_eq!(rows.len(), snapshot.row_count());
+    for (text_row, snapshot_row) in rows.iter().zip(snapshot.rows()) {
+        assert_eq!(&text_row.0, &snapshot_row.text);
+        assert_eq!(text_row.1, snapshot_row.wrapped);
+    }
 }
 
 #[test]

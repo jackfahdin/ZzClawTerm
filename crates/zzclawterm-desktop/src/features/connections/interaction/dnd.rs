@@ -1,6 +1,6 @@
 use gpui::Context;
 use zzclawterm_core::{Group, SavedConnection};
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use crate::features::ZzClawTermApp;
 
@@ -350,7 +350,7 @@ impl ZzClawTermApp {
     ) {
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 for (index, connection) in ordered.iter().enumerate() {
                     let mut updated = connection.clone();
                     updated.sort_order = index as i32;
@@ -384,7 +384,7 @@ impl ZzClawTermApp {
     ) {
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 for (index, group) in ordered.iter().enumerate() {
                     let mut updated = group.clone();
                     updated.sort_order = index as i32;

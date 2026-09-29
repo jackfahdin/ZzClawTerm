@@ -5,7 +5,7 @@ use crate::http::cloud_sync::{
 use zzclawterm_core::{
     CloudSyncError, CloudSyncResult, CloudSyncSettings, CloudSyncState, GiteeSnippetHttpBackend,
     GithubGistHttpBackend, LocalCloudSyncOptions, RemoteSyncPointer, SnippetRemote,
-    cleanup_sync_snapshots_with_remote, pull_local_snapshot, pull_snapshot_with_remote,
+    check_local_snapshot, check_snapshot_with_remote, cleanup_sync_snapshots_with_remote,
     push_local_snapshot, push_snapshot_with_remote, recover_current_snapshot_with_remote,
 };
 
@@ -53,6 +53,37 @@ macro_rules! with_provider_remote {
             ))),
         }
     }};
+}
+
+pub(crate) fn check_provider_snapshot(
+    local_store: &zzclawterm_store::StoreBlockingClient,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    state: &CloudSyncState,
+) -> Result<
+    (
+        zzclawterm_core::CloudRemoteCheckDecision,
+        Option<RemoteSyncPointer>,
+    ),
+    CloudSyncError,
+> {
+    if settings.provider == "local_directory" {
+        return check_local_snapshot(
+            local_store,
+            options,
+            state,
+            settings.auto_pull_remote_changes,
+        );
+    }
+    with_provider_remote!(settings, remote, {
+        check_snapshot_with_remote(
+            local_store,
+            options,
+            &remote,
+            state,
+            settings.auto_pull_remote_changes,
+        )
+    })
 }
 
 pub(in crate::features) fn test_provider_connection(
@@ -104,7 +135,7 @@ pub(in crate::features) fn test_provider_connection(
     Ok(())
 }
 
-pub(in crate::features) fn push_provider_snapshot(
+pub(crate) fn push_provider_snapshot(
     local_store: &zzclawterm_store::StoreBlockingClient,
     settings: &CloudSyncSettings,
     options: &LocalCloudSyncOptions,
@@ -153,33 +184,79 @@ pub(in crate::features) fn push_provider_snapshot(
     }
 }
 
-pub(in crate::features) fn pull_provider_snapshot(
+pub(crate) fn pull_provider_snapshot(
     local_store: &zzclawterm_store::StoreBlockingClient,
     settings: &CloudSyncSettings,
     options: &LocalCloudSyncOptions,
     state: &CloudSyncState,
     force: bool,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    pull_provider_snapshot_guarded(local_store, settings, options, state, force, &|| Ok(()))
+}
+
+pub(crate) fn pull_provider_snapshot_guarded(
+    local_store: &zzclawterm_store::StoreBlockingClient,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    state: &CloudSyncState,
+    force: bool,
+    before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+) -> Result<CloudSyncResult, CloudSyncError> {
     match settings.provider.as_str() {
         "webdav" => {
             let remote = NativeWebdavRemote::new(&settings.webdav)?;
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "s3" => {
             let remote = NativeS3Remote::new(&settings.s3)?;
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "google_drive" => {
             let remote = NativeGoogleDriveRemote::new(&settings.google_drive)?;
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "onedrive" => {
             let remote = NativeOneDriveRemote::new(&settings.onedrive)?;
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "aliyun_drive" => {
             let remote = NativeAliyunDriveRemote::new(&settings.aliyun_drive)?;
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "gitee_snippet" => {
             let backend = GiteeSnippetHttpBackend::new(
@@ -187,15 +264,39 @@ pub(in crate::features) fn pull_provider_snapshot(
                 NativeSnippetHttpClient::new()?,
             )?;
             let remote = SnippetRemote::new("gitee_snippet", backend);
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
         "github_gist" => {
             let backend =
                 GithubGistHttpBackend::new(&settings.github_gist, NativeSnippetHttpClient::new()?)?;
             let remote = SnippetRemote::new("github_gist", backend);
-            pull_snapshot_with_remote(local_store, options, &remote, state, force)
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
         }
-        "local_directory" => pull_local_snapshot(local_store, options, state, force),
+        "local_directory" => {
+            let remote = zzclawterm_core::LocalDirectoryRemote::new(options.remote_dir.clone());
+            zzclawterm_core::pull_snapshot_with_remote_guarded(
+                local_store,
+                options,
+                &remote,
+                state,
+                force,
+                before_apply,
+            )
+        }
         provider => Err(CloudSyncError::Remote(format!(
             "native cloud provider '{provider}' is not wired yet"
         ))),

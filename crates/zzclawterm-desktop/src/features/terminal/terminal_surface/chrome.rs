@@ -188,30 +188,39 @@ impl ZzClawTermApp {
         let search_focus = search_input.read(cx).focus_handle();
         let search_focused = search_input.read(cx).has_focus();
         let buffer_matches = self.terminal_buffer_matches();
+        let buffer_occurrence_count = self.terminal_buffer_occurrence_ranges().len();
+        let buffer_search_complete = self.terminal_buffer_search_complete();
+        let buffer_search_truncated = self.terminal_buffer_search_truncated();
         let history_results = self.terminal_history_search_results();
         let history_pending = self.terminal_history_search_pending_for_current_query();
         let (status, is_error) = match self.terminal.search.mode {
             TerminalSearchMode::Buffer => match &buffer_matches {
-                Ok(matches) if self.terminal.search.query.trim().is_empty() => {
-                    (String::new(), false)
+                Ok(_) if self.terminal.search.query.trim().is_empty() => (String::new(), false),
+                Ok(_) if buffer_occurrence_count == 0 && !buffer_search_complete => {
+                    ("searching".to_string(), false)
                 }
-                Ok(matches) if matches.is_empty() => ("not found".to_string(), false),
-                Ok(matches) => {
-                    let count = matches.len();
-                    let count_label = if count >= 1000 {
+                Ok(_) if buffer_occurrence_count == 0 => ("not found".to_string(), false),
+                Ok(_) => {
+                    let count = buffer_occurrence_count;
+                    let count_label = if buffer_search_truncated {
                         "1000+".to_string()
                     } else {
                         count.to_string()
                     };
                     (
                         format!(
-                            "{}/{}",
+                            "{}/{}{}",
                             self.terminal
                                 .search
                                 .active_index
                                 .min(count.saturating_sub(1))
                                 + 1,
-                            count_label
+                            count_label,
+                            if buffer_search_complete {
+                                ""
+                            } else {
+                                " searching"
+                            },
                         ),
                         false,
                     )
@@ -374,6 +383,11 @@ impl ZzClawTermApp {
                     cx.stop_propagation();
                 }
             }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+            .on_mouse_move(|_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .flex()

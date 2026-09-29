@@ -142,15 +142,18 @@ impl ZzClawTermApp {
                                     return QuickCommandImportPathPromptResult::Failed(error);
                                 }
                             };
-                            match store.request_fn(StoreDomain::Commands, move |database| {
-                                let mut config = database.load_quick_commands()?;
-                                let mut summary = merge_import(&mut config, import_config)
-                                    .map_err(StorageError::InvalidData)?;
-                                database.save_quick_commands(config.clone())?;
-                                summary.total_commands = config.commands.len();
-                                summary.total_categories = config.categories.len();
-                                Ok(summary)
-                            }) {
+                            match store.request_mutation_fn(
+                                StoreDomain::Commands,
+                                move |database| {
+                                    let mut config = database.load_quick_commands()?;
+                                    let mut summary = merge_import(&mut config, import_config)
+                                        .map_err(StorageError::InvalidData)?;
+                                    database.save_quick_commands(config.clone())?;
+                                    summary.total_commands = config.commands.len();
+                                    summary.total_categories = config.categories.len();
+                                    Ok(summary)
+                                },
+                            ) {
                                 Ok(summary) => QuickCommandImportPathPromptResult::Imported {
                                     imported_commands: summary.imported_commands,
                                     imported_categories: summary.imported_categories,

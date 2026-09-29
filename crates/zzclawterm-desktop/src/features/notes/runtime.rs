@@ -127,7 +127,7 @@ impl ZzClawTermApp {
             .unique_name_for_parent(parent_id.as_deref(), &rust_i18n::t!("notes.newNote"));
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.create_note(parent_id, Some(default_title), None)
             }),
             |app, event, cx| match event.outcome {
@@ -179,7 +179,7 @@ impl ZzClawTermApp {
             .unique_name_for_parent(parent_id.as_deref(), &rust_i18n::t!("notes.newFolder"));
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.create_note_folder(parent_id, Some(default_name))
             }),
             |app, event, cx| match event.outcome {
@@ -223,7 +223,7 @@ impl ZzClawTermApp {
         };
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.delete_note_node(kind, &node_id)
             }),
             |app, event, cx| match event.outcome {
@@ -322,7 +322,7 @@ impl ZzClawTermApp {
         };
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.rename_note_node(kind, &node_id, name)
             }),
             |app, event, cx| match event.outcome {
@@ -368,7 +368,7 @@ impl ZzClawTermApp {
         let expanded_parent_id = target_parent_id.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.move_note_node(kind, &node_id, target_parent_id, sort_order)
             }),
             move |app, event, cx| match event.outcome {
@@ -410,7 +410,7 @@ impl ZzClawTermApp {
         let revision = note.revision;
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Notes, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Notes, move |store| {
                 store.update_note(&id, title, markdown, revision, force)
             }),
             move |app, event, cx| match event.outcome {

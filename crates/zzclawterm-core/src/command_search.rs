@@ -12,6 +12,9 @@ pub fn search_command_sources(
     min_history_command_length: Option<usize>,
     max_history_command_length: Option<usize>,
 ) -> Vec<FuzzyResult> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let mut results = Vec::new();
     let history_items: Vec<(&str, &str)> = history
         .iter()
@@ -21,7 +24,7 @@ pub fn search_command_sources(
         &history_items,
         pattern,
         "history",
-        limit,
+        history_items.len(),
         min_history_command_length,
         max_history_command_length,
     ));
@@ -41,7 +44,7 @@ pub fn search_command_sources(
         &quick_items,
         pattern,
         "quickCommand",
-        limit,
+        quick_items.len(),
         None,
         None,
     ));
@@ -69,6 +72,7 @@ pub fn manual_empty_command_suggestions(
         return Vec::new();
     }
     let mut results = Vec::new();
+    let mut seen = HashSet::new();
     results.extend(
         history
             .iter()
@@ -79,6 +83,7 @@ pub fn manual_empty_command_suggestions(
                     max_history_command_length,
                 )
             })
+            .filter(|entry| seen.insert(entry.command.clone()))
             .take(EMPTY_MANUAL_HISTORY_LIMIT)
             .enumerate()
             .map(|(index, entry)| FuzzyResult {
@@ -98,6 +103,7 @@ pub fn manual_empty_command_suggestions(
     results.extend(
         quick
             .into_iter()
+            .filter(|command| seen.insert(command.command.clone()))
             .take(EMPTY_MANUAL_QUICK_COMMAND_LIMIT)
             .enumerate()
             .map(|(index, command)| FuzzyResult {
@@ -351,6 +357,30 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].command, "ls -la");
         assert_eq!(results[1].command, "ls -lh");
+    }
+
+    #[test]
+    fn command_search_deduplicates_before_applying_result_limit() {
+        let mut history = vec![history_entry("ps -ef"); 12];
+        history.push(history_entry("ps aux"));
+
+        let results = search_command_sources(&history, &[], "ps", 2, None, None);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|result| result.command == "ps -ef"));
+        assert!(results.iter().any(|result| result.command == "ps aux"));
+    }
+
+    #[test]
+    fn manual_suggestions_skip_duplicates_before_source_limits() {
+        let mut history = vec![history_entry("ps -ef"); 8];
+        history.push(history_entry("ps aux"));
+
+        let results = manual_empty_command_suggestions(&history, &[], 2, None, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].command, "ps -ef");
+        assert_eq!(results[1].command, "ps aux");
     }
 
     #[test]

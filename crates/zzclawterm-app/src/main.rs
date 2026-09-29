@@ -17,6 +17,9 @@ use zzclawterm_desktop::{AppShellStartup, DesktopController, DesktopControllerGl
 use single_instance::{SingleInstanceOutcome, acquire};
 
 fn main() -> anyhow::Result<()> {
+    if let Some(status) = zzclawterm_store::run_cloud_snapshot_decode_helper_if_requested() {
+        std::process::exit(status);
+    }
     if zzclawterm_desktop::run_update_helper_if_requested() {
         return Ok(());
     }

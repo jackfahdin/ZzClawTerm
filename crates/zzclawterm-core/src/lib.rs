@@ -129,14 +129,15 @@ pub use cloud_sync::{
     SnippetBlobBackend, SnippetHttpClient, SnippetHttpDocument, SnippetHttpFile, SnippetHttpMethod,
     SnippetHttpRequest, SnippetHttpResponse, SnippetRemote, WebdavSyncSettings,
     append_cloud_sync_history, build_s3_signed_request, build_s3_signed_request_with_query,
-    cleanup_sync_snapshots_with_remote, decide_cloud_remote_check, decode_snippet_blob,
-    drive_remote_segments, encode_snippet_blob, gitee_snippet_patch_body, github_gist_patch_body,
-    github_gist_update_conflict_is_retryable, google_drive_query_literal,
-    legacy_sync_snapshot_file, load_sync_pointer, load_sync_pointer_from_remote,
-    mask_cloud_sync_settings, merge_masked_cloud_sync_settings, pull_local_snapshot,
-    pull_snapshot_with_remote, push_local_snapshot, push_snapshot_with_remote,
-    read_cloud_sync_history, recover_current_snapshot_with_remote, recover_local_current_snapshot,
-    remote_path, s3_payload_sha256, snippet_remote_filename, snippet_remote_path,
+    check_local_snapshot, check_snapshot_with_remote, cleanup_sync_snapshots_with_remote,
+    decide_cloud_remote_check, decode_snippet_blob, drive_remote_segments, encode_snippet_blob,
+    gitee_snippet_patch_body, github_gist_patch_body, github_gist_update_conflict_is_retryable,
+    google_drive_query_literal, legacy_sync_snapshot_file, load_sync_pointer,
+    load_sync_pointer_from_remote, mask_cloud_sync_settings, merge_masked_cloud_sync_settings,
+    pull_local_snapshot, pull_snapshot_with_remote, pull_snapshot_with_remote_guarded,
+    push_local_snapshot, push_snapshot_with_remote, read_cloud_sync_history,
+    recover_current_snapshot_with_remote, recover_local_current_snapshot, remote_path,
+    s3_payload_sha256, snippet_remote_filename, snippet_remote_path,
 };
 pub use command_search::{
     fuzzy_search_items, manual_empty_command_suggestions, search_command_sources,
@@ -182,7 +183,7 @@ pub use terminal::file_drop::{
 };
 pub use terminal::input_fanout::terminal_input_fanout_status;
 pub use terminal::input_tracker::{
-    InputSelectionRange, TerminalInputState, apply_terminal_input_data,
+    InputSelectionRange, MAX_TRACKED_INPUT_BYTES, TerminalInputState, apply_terminal_input_data,
     apply_terminal_input_data_in_place, build_move_input_cursor_data, byte_index_to_char,
     can_register_command_from_tracker, can_suggest_from_tracked_command, can_suggest_from_tracker,
     char_index_to_byte, delete_terminal_input_range, get_tracked_command,

@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use gpui::{Context, Window};
 use zzclawterm_core::{TunnelConfig, uuid};
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use super::helpers::{network_section_key, parse_port};
 use crate::features::ZzClawTermApp;
@@ -290,7 +290,7 @@ impl ZzClawTermApp {
         let persisted = next_tunnels.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_tunnels(&persisted)
             }),
             move |this, event, cx| {

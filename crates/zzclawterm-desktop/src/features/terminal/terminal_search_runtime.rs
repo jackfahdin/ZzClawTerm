@@ -1,6 +1,7 @@
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use gpui::{Context, KeyDownEvent, Window};
@@ -12,7 +13,7 @@ use crate::features::terminal::terminal_surface::{
 use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
 use crate::models::{
     RecordingHistorySearchKey, RecordingWriteEvent, TerminalFrameSearchKey,
-    TerminalFrameSearchPurpose, TerminalSearchMode, TerminalSelection,
+    TerminalFrameSearchPurpose, TerminalFrameSearchResult, TerminalSearchMode, TerminalSelection,
     terminal_frame_search_result_is_current,
 };
 use crate::terminal::TerminalBufferMatch;
@@ -61,6 +62,20 @@ pub(in crate::features) fn terminal_matches_in_absolute_range(
     &matches[start..end]
 }
 
+pub(in crate::features) fn terminal_search_index_for_position(
+    matches: &[TerminalBufferMatch],
+    occurrences: &[Range<usize>],
+    position: (usize, usize),
+) -> usize {
+    occurrences
+        .partition_point(|range| {
+            matches
+                .get(range.start)
+                .is_some_and(|m| (m.line_index, m.start_col) < position)
+        })
+        .min(occurrences.len().saturating_sub(1))
+}
+
 impl ZzClawTermApp {
     pub(in crate::features) fn open_terminal_search(
         &mut self,
@@ -88,6 +103,17 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(session_id) = self.session.active_id_owned() {
+            self.terminal
+                .view
+                .frame_pipeline
+                .cancel_find_search(session_id.clone());
+            if let Some(view) = self.terminal.view.views.get_mut(&session_id) {
+                view.pending_search_key = None;
+                view.pending_search_at = None;
+                view.pending_search_visible = None;
+            }
+        }
         self.terminal.search.open = false;
         self.terminal.search.active_index = 0;
         self.forget_text_inputs("terminal.search.");
@@ -98,7 +124,27 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn refresh_terminal_search_state(&mut self, cx: &mut Context<Self>) {
+        self.terminal.search.full_search_ready_at = Instant::now() + Duration::from_millis(100);
+        if (self.terminal.search.mode != TerminalSearchMode::Buffer
+            || self.terminal_search_key().is_none())
+            && let Some(session_id) = self.session.active_id_owned()
+        {
+            self.terminal
+                .view
+                .frame_pipeline
+                .cancel_find_search(session_id);
+        }
         self.request_active_terminal_search();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let _ = this.request_active_terminal_buffer_search();
+                cx.notify();
+            });
+        })
+        .detach();
         self.notify_active_terminal_surface(cx);
         cx.notify();
     }
@@ -139,7 +185,42 @@ impl ZzClawTermApp {
         let Some(key) = self.terminal_search_key() else {
             return false;
         };
-        self.request_terminal_frame_search(&session_id, TerminalFrameSearchPurpose::Find, key)
+        let Some(view) = self.terminal.view.views.get(&session_id) else {
+            return false;
+        };
+        if view.search_result.as_ref().is_some_and(|result| {
+            terminal_frame_search_result_is_current(result, &key, view.screen_revision)
+        }) {
+            return false;
+        }
+        let total = view.total_rows_for_ui();
+        let end = total.saturating_sub(view.scroll_offset);
+        let start = end.saturating_sub(view.viewport_rows_for_ui());
+        let mut requested = self.request_terminal_frame_search(
+            &session_id,
+            TerminalFrameSearchPurpose::FindVisible {
+                absolute_start: start,
+                absolute_end: end,
+            },
+            key.clone(),
+        );
+        let ready = Instant::now() >= self.terminal.search.full_search_ready_at
+            && self
+                .terminal
+                .view
+                .views
+                .get(&session_id)
+                .is_some_and(|view| {
+                    view.last_screen_change_at.elapsed() >= Duration::from_millis(100)
+                });
+        if ready {
+            requested |= self.request_terminal_frame_search(
+                &session_id,
+                TerminalFrameSearchPurpose::Find,
+                key,
+            );
+        }
+        requested
     }
 
     pub(in crate::features) fn request_active_terminal_search(&mut self) {
@@ -147,26 +228,69 @@ impl ZzClawTermApp {
         self.request_active_terminal_history_search();
     }
 
-    pub(in crate::features) fn terminal_buffer_matches(
-        &self,
-    ) -> Result<Arc<[TerminalBufferMatch]>, String> {
-        let Some(key) = self.terminal_search_key() else {
-            return Ok(Arc::from([]));
-        };
-        let Some(view) = self
+    fn terminal_buffer_search_result(&self) -> Option<&TerminalFrameSearchResult> {
+        let key = self.terminal_search_key()?;
+        let view = self
             .session
             .active_id()
-            .and_then(|session_id| self.terminal.view.views.get(session_id))
-        else {
-            return Ok(Arc::from([]));
-        };
+            .and_then(|session_id| self.terminal.view.views.get(session_id))?;
         view.search_result
             .as_ref()
             .filter(|result| {
                 terminal_frame_search_result_is_current(result, &key, view.screen_revision)
             })
+            .or_else(|| {
+                view.search_visible_result.as_ref().filter(|result| {
+                    let end = view.total_rows_for_ui().saturating_sub(view.scroll_offset);
+                    let start = end.saturating_sub(view.viewport_rows_for_ui());
+                    terminal_frame_search_result_is_current(result, &key, view.screen_revision)
+                        && view.search_visible_range == Some((start, end))
+                })
+            })
+    }
+
+    pub(in crate::features) fn terminal_buffer_matches(
+        &self,
+    ) -> Result<Arc<[TerminalBufferMatch]>, String> {
+        self.terminal_buffer_search_result()
             .map(|result| result.matches.clone())
             .unwrap_or_else(|| Ok(Arc::from([])))
+    }
+
+    pub(in crate::features) fn terminal_buffer_occurrence_ranges(&self) -> Arc<[Range<usize>]> {
+        self.terminal_buffer_search_result()
+            .map(|result| result.occurrences.clone())
+            .unwrap_or_else(|| Arc::from([]))
+    }
+
+    pub(in crate::features) fn terminal_buffer_search_complete(&self) -> bool {
+        let Some(key) = self.terminal_search_key() else {
+            return true;
+        };
+        self.session
+            .active_id()
+            .and_then(|session_id| self.terminal.view.views.get(session_id))
+            .is_some_and(|view| {
+                view.search_result.as_ref().is_some_and(|result| {
+                    terminal_frame_search_result_is_current(result, &key, view.screen_revision)
+                })
+            })
+    }
+
+    pub(in crate::features) fn terminal_buffer_search_needs_wake(&self) -> bool {
+        self.terminal.search.open
+            && self.terminal.search.mode == TerminalSearchMode::Buffer
+            && self.terminal_search_key().is_some()
+            && self
+                .session
+                .active_id()
+                .is_some_and(|session_id| self.terminal.view.views.contains_key(session_id))
+            && !self.terminal_buffer_search_complete()
+    }
+
+    pub(in crate::features) fn terminal_buffer_search_truncated(&self) -> bool {
+        self.terminal_buffer_search_result()
+            .is_some_and(|result| result.truncated)
     }
 
     pub(in crate::features) fn terminal_selected_occurrence_matches_for_session(
@@ -249,15 +373,20 @@ impl ZzClawTermApp {
             && self.terminal.search.mode == TerminalSearchMode::Buffer
             && let Ok(matches) = self.terminal_buffer_matches()
         {
+            let occurrences = self.terminal_buffer_occurrence_ranges();
             let active_index = self
                 .terminal
                 .search
                 .active_index
-                .min(matches.len().saturating_sub(1));
+                .min(occurrences.len().saturating_sub(1));
+            let active_range = occurrences.get(active_index).cloned();
             for (index, m) in matches.iter().enumerate() {
                 markers.push(TerminalOverviewMarker {
                     absolute_line: m.line_index,
-                    kind: if index == active_index {
+                    kind: if active_range
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&index))
+                    {
                         TerminalOverviewMarkerKind::ActiveSearchMatch
                     } else {
                         TerminalOverviewMarkerKind::SearchMatch
@@ -307,14 +436,26 @@ impl ZzClawTermApp {
             if active_buffer_search {
                 let search_key = self.terminal_search_key();
                 search_key.hash(&mut hasher);
-                let search_result = view.search_result.as_ref();
-                let search_is_current = search_key.as_ref().is_some_and(|key| {
-                    search_result.is_some_and(|result| {
+                let search_result = search_key.as_ref().and_then(|key| {
+                    let complete = view.search_result.as_ref().filter(|result| {
                         terminal_frame_search_result_is_current(result, key, view.screen_revision)
+                    });
+                    complete.or_else(|| {
+                        let end = view.total_rows_for_ui().saturating_sub(view.scroll_offset);
+                        let start = end.saturating_sub(view.viewport_rows_for_ui());
+                        (start, end).hash(&mut hasher);
+                        view.search_visible_result.as_ref().filter(|result| {
+                            terminal_frame_search_result_is_current(
+                                result,
+                                key,
+                                view.screen_revision,
+                            ) && view.search_visible_range == Some((start, end))
+                        })
                     })
                 });
+                let search_is_current = search_result.is_some();
                 search_is_current.hash(&mut hasher);
-                if search_is_current && let Some(result) = search_result {
+                if let Some(result) = search_result {
                     result.key.hash(&mut hasher);
                     result.revision.hash(&mut hasher);
                     result.position_fingerprint.hash(&mut hasher);
@@ -518,10 +659,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         let count = match self.terminal.search.mode {
-            TerminalSearchMode::Buffer => self
-                .terminal_buffer_matches()
-                .map(|matches| matches.len())
-                .unwrap_or(0),
+            TerminalSearchMode::Buffer => self.terminal_buffer_occurrence_ranges().len(),
             TerminalSearchMode::History => self
                 .terminal_history_search_results()
                 .map(|response| response.results.len())
@@ -545,7 +683,10 @@ impl ZzClawTermApp {
         self.terminal.search.active_index = next_index;
         if self.terminal.search.mode == TerminalSearchMode::Buffer
             && let Ok(matches) = self.terminal_buffer_matches()
-            && let Some(m) = matches.get(self.terminal.search.active_index)
+            && let Some(range) = self
+                .terminal_buffer_occurrence_ranges()
+                .get(self.terminal.search.active_index)
+            && let Some(m) = matches.get(range.start)
         {
             self.reveal_terminal_absolute_line(m.line_index, cx);
         }
@@ -706,7 +847,8 @@ mod tests {
 
     use super::{
         TerminalSelectedOccurrenceMatches, current_selected_occurrence_matches,
-        terminal_matches_in_absolute_range, terminal_search_next_index,
+        terminal_matches_in_absolute_range, terminal_search_index_for_position,
+        terminal_search_next_index,
     };
     use crate::features::terminal::terminal_surface::{
         TerminalDecorationSources, TerminalOverviewMarker, TerminalOverviewMarkerKind,
@@ -726,6 +868,41 @@ mod tests {
         assert_eq!(terminal_search_next_index(0, -1, 3, false), (0, true));
         assert_eq!(terminal_search_next_index(1, 1, 3, false), (2, false));
         assert_eq!(terminal_search_next_index(8, -1, 3, false), (1, false));
+    }
+
+    #[test]
+    fn full_search_preserves_visible_active_match_position() {
+        let matches = vec![
+            TerminalBufferMatch {
+                line_index: 1,
+                start_col: 0,
+                end_col: 3,
+            },
+            TerminalBufferMatch {
+                line_index: 5,
+                start_col: 3,
+                end_col: 5,
+            },
+            TerminalBufferMatch {
+                line_index: 6,
+                start_col: 0,
+                end_col: 2,
+            },
+            TerminalBufferMatch {
+                line_index: 9,
+                start_col: 0,
+                end_col: 3,
+            },
+        ];
+        let occurrences = vec![0..1, 1..3, 3..4];
+        assert_eq!(
+            terminal_search_index_for_position(&matches, &occurrences, (5, 3)),
+            1
+        );
+        assert_eq!(
+            terminal_search_index_for_position(&matches, &occurrences, (7, 0)),
+            2
+        );
     }
 
     #[test]

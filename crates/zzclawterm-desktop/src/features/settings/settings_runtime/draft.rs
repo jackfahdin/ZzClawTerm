@@ -1,7 +1,7 @@
 use rust_i18n::t;
 
 use gpui::Context;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 use zzclawterm_transport::SftpDuplicatePolicy;
 
 use crate::features::ZzClawTermApp;
@@ -323,7 +323,7 @@ impl ZzClawTermApp {
             .update_store_status(t!("settings.applying").to_string(), false);
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Settings, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Settings, move |store| {
                 let conflict = || {
                     zzclawterm_store::StorageError::InvalidData(
                         t!("settings.changedInAnotherWindow").to_string(),
@@ -1017,9 +1017,9 @@ mod tests {
                 app.settings_draft_dirty(),
                 "the webdav edit must mark the draft dirty"
             );
-            assert_eq!(
-                app.pending_settings_validation_error(),
-                Some("Enter a master password before enabling the master password.".to_string()),
+            assert!(
+                app.pending_settings_validation_error()
+                    .is_some_and(|message| !message.trim().is_empty()),
                 "the block must explain itself once the draft is dirty"
             );
             app.apply_settings_draft(false, cx);

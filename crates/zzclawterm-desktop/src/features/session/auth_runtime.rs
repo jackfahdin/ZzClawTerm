@@ -68,7 +68,7 @@ impl SshHostKeyVerifier for NativeHostKeyVerifier {
                 {
                     Ok(HostKeyPromptChoice::Accept) => {
                         self.store
-                            .request_fn(StoreDomain::Security, move |store| {
+                            .request_mutation_fn(StoreDomain::Security, move |store| {
                                 store.upsert_known_host(&line)
                             })
                             .map_err(|error| error.to_string())?;
@@ -83,7 +83,7 @@ impl SshHostKeyVerifier for NativeHostKeyVerifier {
             }
             KnownHostCheck::UnknownHost => {
                 self.store
-                    .request_fn(StoreDomain::Security, move |store| {
+                    .request_mutation_fn(StoreDomain::Security, move |store| {
                         store.upsert_known_host(&line)
                     })
                     .map_err(|error| error.to_string())?;
@@ -92,7 +92,7 @@ impl SshHostKeyVerifier for NativeHostKeyVerifier {
             KnownHostCheck::HostSeen if self.policy == "accept" => {
                 let host_identifier = host_key.host_identifier.clone();
                 self.store
-                    .request_fn(StoreDomain::Security, move |store| {
+                    .request_mutation_fn(StoreDomain::Security, move |store| {
                         store.replace_known_host_for_host(&host_identifier, &line)
                     })
                     .map_err(|error| error.to_string())?;
@@ -106,7 +106,7 @@ impl SshHostKeyVerifier for NativeHostKeyVerifier {
                     Ok(HostKeyPromptChoice::Accept) => {
                         let host_identifier = host_key.host_identifier.clone();
                         self.store
-                            .request_fn(StoreDomain::Security, move |store| {
+                            .request_mutation_fn(StoreDomain::Security, move |store| {
                                 store.replace_known_host_for_host(&host_identifier, &line)
                             })
                             .map_err(|error| error.to_string())?;
@@ -191,7 +191,7 @@ impl NativeOtpProvider {
     fn increment_counter(&self, otp_id: &str) -> Result<(), String> {
         let otp_id = otp_id.to_string();
         self.store
-            .request_fn(StoreDomain::Security, move |store| {
+            .request_mutation_fn(StoreDomain::Security, move |store| {
                 store.increment_otp_counter(&otp_id)
             })
             .map_err(|error| error.to_string())

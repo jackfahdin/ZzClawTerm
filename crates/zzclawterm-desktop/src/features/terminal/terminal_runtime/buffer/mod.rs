@@ -9,6 +9,7 @@ use zzclawterm_terminal::{TerminalClipboardLoad, TerminalEffects, TerminalSnapsh
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::trim_terminal_output_to;
+use crate::features::terminal::terminal_search_runtime::terminal_search_index_for_position;
 use crate::features::terminal::terminal_surface::terminal_snapshot_absolute_range;
 use crate::features::terminal::terminal_surface_entity::{
     terminal_snapshot_covers_display_offset, terminal_surface_paint_count,
@@ -17,16 +18,32 @@ use crate::models::{
     MainMode, TERMINAL_UI_OUTPUT_TAIL_CAP, TerminalFrameActionLinks, TerminalFrameEvent,
     TerminalFrameOutputEvent, TerminalFrameOutputSubmission, TerminalFrameParts,
     TerminalFrameSearchEvent, TerminalFrameSearchKey, TerminalFrameSearchPurpose,
-    TerminalFrameSnapshotEvent, TerminalPresentation, TerminalSearchMode, TerminalViewState,
-    TerminalWindowNode, TerminalWorkPolicy, WorkspacePaneNode, append_terminal_ui_output_tail,
-    terminal_action_link_matcher_key, terminal_frame_scroll_window_extra_rows,
-    terminal_frame_search_result_is_current, terminal_snapshot_matches_grid_geometry,
+    TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose, TerminalPresentation,
+    TerminalSearchMode, TerminalViewState, TerminalWindowNode, TerminalWorkPolicy,
+    WorkspacePaneNode, append_terminal_ui_output_tail, terminal_action_link_matcher_key,
+    terminal_frame_scroll_window_extra_rows, terminal_frame_search_result_is_current,
+    terminal_geometry_diagnostics_enabled, terminal_snapshot_matches_grid_geometry,
 };
 
 use super::view_io::terminal_visual_display_offset;
 
 const MAX_OSC52_REPLY_CHARS: usize = 1_048_576;
 const TERMINAL_LIVE_PREFETCH_IDLE_DELAY: Duration = Duration::from_millis(80);
+const TERMINAL_FIND_REQUEST_RETRY: Duration = Duration::from_millis(500);
+
+fn terminal_find_request_still_pending(
+    pending_key: Option<&TerminalFrameSearchKey>,
+    pending_revision: u64,
+    pending_at: Option<Instant>,
+    key: &TerminalFrameSearchKey,
+    revision: u64,
+    now: Instant,
+) -> bool {
+    pending_key == Some(key)
+        && pending_revision == revision
+        && pending_at
+            .is_some_and(|at| now.saturating_duration_since(at) < TERMINAL_FIND_REQUEST_RETRY)
+}
 
 fn terminal_live_scrollback_prefetch_offset(view: &TerminalViewState) -> Option<usize> {
     if view.scroll_offset != 0 {
@@ -536,11 +553,45 @@ impl ZzClawTermApp {
             TerminalFrameSearchPurpose::Find => {
                 if view.search_result.as_ref().is_some_and(|result| {
                     terminal_frame_search_result_is_current(result, &key, view.screen_revision)
-                }) || view.pending_search_key.as_ref() == Some(&key)
-                {
+                }) || terminal_find_request_still_pending(
+                    view.pending_search_key.as_ref(),
+                    view.pending_search_revision,
+                    view.pending_search_at,
+                    &key,
+                    view.screen_revision,
+                    Instant::now(),
+                ) {
                     return false;
                 }
                 view.pending_search_key = Some(key.clone());
+                view.pending_search_revision = view.screen_revision;
+                view.pending_search_at = Some(Instant::now());
+            }
+            TerminalFrameSearchPurpose::FindVisible {
+                absolute_start,
+                absolute_end,
+            } => {
+                if view.search_visible_result.as_ref().is_some_and(|result| {
+                    terminal_frame_search_result_is_current(result, &key, view.screen_revision)
+                        && view.search_visible_range == Some((absolute_start, absolute_end))
+                }) || view.pending_search_visible.as_ref().is_some_and(
+                    |(pending, start, end, revision, at)| {
+                        pending == &key
+                            && *start == absolute_start
+                            && *end == absolute_end
+                            && *revision == view.screen_revision
+                            && at.elapsed() < TERMINAL_FIND_REQUEST_RETRY
+                    },
+                ) {
+                    return false;
+                }
+                view.pending_search_visible = Some((
+                    key.clone(),
+                    absolute_start,
+                    absolute_end,
+                    view.screen_revision,
+                    Instant::now(),
+                ));
             }
             TerminalFrameSearchPurpose::SelectedOccurrenceVisible { .. } => {
                 if view
@@ -843,6 +894,19 @@ impl ZzClawTermApp {
             return TerminalFrameApplyResult::default();
         }
         let has_snapshot = snapshot.is_some();
+        if terminal_geometry_diagnostics_enabled() {
+            tracing::info!(
+                diagnostic = "terminal_frame_geometry",
+                frame_kind = "output",
+                session_id = %session_id,
+                revision,
+                snapshot_rows = snapshot.as_ref().map(|snapshot| snapshot.row_count()),
+                viewport_rows = snapshot.as_ref().map(|snapshot| snapshot.viewport_rows),
+                scrollback_len = snapshot.as_ref().map(|snapshot| snapshot.scrollback_len),
+                total_rows = snapshot.as_ref().map(|snapshot| snapshot.total_rows),
+                "terminal output frame geometry"
+            );
+        }
         let is_active = self.session.active_id() == Some(session_id.as_str());
         let presentation = TerminalPresentation::resolve(
             is_active,
@@ -1042,6 +1106,25 @@ impl ZzClawTermApp {
             }
             return TerminalFrameApplyResult::default();
         }
+        if terminal_geometry_diagnostics_enabled() {
+            let frame_kind = match frame.purpose {
+                TerminalFrameSnapshotPurpose::Paint => "snapshot",
+                TerminalFrameSnapshotPurpose::ActionLinkEnrichment => "action_link_enrichment",
+            };
+            tracing::info!(
+                diagnostic = "terminal_frame_geometry",
+                frame_kind,
+                session_id = %frame.session_id,
+                revision = frame.revision,
+                offset = frame.offset,
+                snapshot_rows = frame.snapshot.row_count(),
+                viewport_rows = frame.snapshot.viewport_rows,
+                scrollback_len = frame.snapshot.scrollback_len,
+                total_rows = frame.snapshot.total_rows,
+                action_link_rows = frame.action_links.as_ref().map(|links| links.cell_ranges_by_line.iter().filter(|ranges| !ranges.is_empty()).count()).unwrap_or(0),
+                "terminal snapshot frame geometry"
+            );
+        }
         let Some(view) = self.terminal.view.views.get_mut(&frame.session_id) else {
             return TerminalFrameApplyResult::default();
         };
@@ -1158,6 +1241,23 @@ impl ZzClawTermApp {
     ) -> TerminalFrameApplyResult {
         let session_id = frame.session_id.clone();
         let result_key = frame.result.key.clone();
+        if matches!(
+            frame.purpose,
+            TerminalFrameSearchPurpose::Find | TerminalFrameSearchPurpose::FindVisible { .. }
+        ) && (self.session.active_id() != Some(session_id.as_str())
+            || self.terminal_search_key().as_ref() != Some(&result_key))
+        {
+            return TerminalFrameApplyResult::default();
+        }
+        let previous_position = if frame.purpose == TerminalFrameSearchPurpose::Find {
+            let matches = self.terminal_buffer_matches().unwrap_or_default();
+            self.terminal_buffer_occurrence_ranges()
+                .get(self.terminal.search.active_index)
+                .and_then(|range| matches.get(range.start))
+                .map(|m| (m.line_index, m.start_col))
+        } else {
+            None
+        };
         let selected_occurrence_frame_is_current = terminal_selected_occurrence_frame_is_current(
             self.terminal
                 .selection
@@ -1221,8 +1321,18 @@ impl ZzClawTermApp {
         if !result_applied {
             return TerminalFrameApplyResult::default();
         }
-        let is_visible = self.terminal_session_has_visible_surface(&session_id);
         if frame.purpose == TerminalFrameSearchPurpose::Find {
+            let matches = self.terminal_buffer_matches().unwrap_or_default();
+            let occurrences = self.terminal_buffer_occurrence_ranges();
+            self.terminal.search.active_index = previous_position.map_or(0, |position| {
+                terminal_search_index_for_position(&matches, &occurrences, position)
+            });
+        }
+        let is_visible = self.terminal_session_has_visible_surface(&session_id);
+        if matches!(
+            frame.purpose,
+            TerminalFrameSearchPurpose::Find | TerminalFrameSearchPurpose::FindVisible { .. }
+        ) {
             let current_search_key = self.terminal_search_key();
             terminal_search_frame_apply_result(
                 session_id,
@@ -1942,8 +2052,8 @@ mod frame_event_queue_tests {
     use crate::models::{
         TerminalFrameActionLinks, TerminalFrameEvent, TerminalFrameOutputEvent,
         TerminalFrameSearchEvent, TerminalFrameSearchKey, TerminalFrameSearchPurpose,
-        TerminalFrameSearchResult, TerminalFrameSnapshotEvent, TerminalProtocolState,
-        TerminalViewState, prepare_terminal_frame_action_links,
+        TerminalFrameSearchResult, TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose,
+        TerminalProtocolState, TerminalViewState, prepare_terminal_frame_action_links,
     };
     use zzclawterm_core::ActionLinksMatcherSettings;
 
@@ -2017,6 +2127,7 @@ mod frame_event_queue_tests {
             ),
             action_links: None,
             revision: 1,
+            purpose: TerminalFrameSnapshotPurpose::Paint,
             snapshot_duration: Duration::ZERO,
             snapshot_stats: Default::default(),
             action_link_stats: Default::default(),
@@ -2800,7 +2911,7 @@ fn terminal_selected_occurrence_frame_is_current(
             pending_visible_key == Some(result_key)
         }
         TerminalFrameSearchPurpose::SelectedOccurrence => pending_key == Some(result_key),
-        TerminalFrameSearchPurpose::Find => false,
+        TerminalFrameSearchPurpose::Find | TerminalFrameSearchPurpose::FindVisible { .. } => false,
     };
     current_session_id == Some(frame_session_id)
         && current_query == Some(result_key.query.as_str())
@@ -2817,6 +2928,21 @@ fn terminal_apply_search_result_to_view(
         TerminalFrameSearchPurpose::Find => {
             if view.pending_search_key.as_ref() == Some(&result.key) {
                 view.pending_search_key = None;
+                view.pending_search_at = None;
+            }
+        }
+        TerminalFrameSearchPurpose::FindVisible {
+            absolute_start,
+            absolute_end,
+        } => {
+            if view
+                .pending_search_visible
+                .as_ref()
+                .is_some_and(|(key, start, end, _, _)| {
+                    key == &result.key && *start == absolute_start && *end == absolute_end
+                })
+            {
+                view.pending_search_visible = None;
             }
         }
         TerminalFrameSearchPurpose::SelectedOccurrenceVisible { .. } => {
@@ -2841,6 +2967,13 @@ fn terminal_apply_search_result_to_view(
     }
     match purpose {
         TerminalFrameSearchPurpose::Find => view.search_result = Some(result.clone()),
+        TerminalFrameSearchPurpose::FindVisible {
+            absolute_start,
+            absolute_end,
+        } => {
+            view.search_visible_result = Some(result.clone());
+            view.search_visible_range = Some((absolute_start, absolute_end));
+        }
         TerminalFrameSearchPurpose::SelectedOccurrenceVisible { .. } => {
             view.selected_occurrence_visible_result = Some(result.clone())
         }

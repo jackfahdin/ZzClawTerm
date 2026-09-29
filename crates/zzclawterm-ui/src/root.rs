@@ -1,8 +1,8 @@
 //! Window-root adapter for gpui-kit.
 
 use gpui::{
-    AnyView, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, WindowHandle, deferred, div,
+    AnyView, App, AppContext as _, Context, Font, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Window, WindowHandle, deferred, div,
 };
 
 use crate::input_focus::schedule_nya_input_blur_on_outside_pointer_down;
@@ -74,7 +74,24 @@ pub fn zzclaw_root(
     cx: &mut Context<ZzClawRoot>,
 ) -> ZzClawRoot {
     let content = cx.new(|_| ZzClawRootContent::new(view));
-    gpui_kit::component::Root::new(content, window, cx)
+    // gpui-kit renders managed tooltips beside the content view, so the root
+    // must carry the complete font stack as well.
+    gpui_kit::component::Root::new(content, window, cx).font(component_typography(cx).font)
+}
+
+pub(crate) fn refresh_zzclaw_root_fonts(font: Font, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            if let Some(window) = window.downcast::<ZzClawRoot>() {
+                let _ = window.update(cx, |root, _, cx| {
+                    let text_style = &mut root.style().text;
+                    text_style.font_family = Some(font.family.clone());
+                    text_style.font_fallbacks = font.fallbacks.clone();
+                    cx.notify();
+                });
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -326,6 +343,51 @@ mod tests {
             .expect("dialog content should capture its inherited text style");
         assert_eq!(rendered_font, ui_font);
         assert_eq!(rendered_size, px(19.));
+    }
+
+    #[gpui::test]
+    fn tooltip_root_tracks_ui_font_fallbacks_after_a_settings_change(cx: &mut TestAppContext) {
+        let mut initial_font = font("JetBrains Mono NL");
+        initial_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            "Noto Sans SC".to_string(),
+            "Microsoft YaHei UI".to_string(),
+        ]));
+        cx.update(|cx| {
+            crate::apply_component_theme(
+                crate::theme::theme_palette("github-dark"),
+                initial_font.clone(),
+                px(16.),
+                cx,
+            );
+        });
+
+        let view = cx.new(|_| RootContentFixture);
+        let (root, cx) = cx.add_window_view(move |window, cx| zzclaw_root(view, window, cx));
+        root.update(cx, |root, _| {
+            let style = &root.style().text;
+            assert_eq!(style.font_family.as_deref(), Some("JetBrains Mono NL"));
+            assert_eq!(style.font_fallbacks, initial_font.fallbacks);
+        });
+
+        let mut changed_font = font("Noto Sans SC");
+        changed_font.fallbacks = Some(FontFallbacks::from_fonts(vec![
+            "Microsoft YaHei UI".to_string(),
+        ]));
+        cx.update(|_, cx| {
+            crate::apply_component_theme(
+                crate::theme::theme_palette("github-dark"),
+                changed_font.clone(),
+                px(18.),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        root.update(cx, |root, _| {
+            let style = &root.style().text;
+            assert_eq!(style.font_family.as_deref(), Some("Noto Sans SC"));
+            assert_eq!(style.font_fallbacks, changed_font.fallbacks);
+        });
     }
 
     #[gpui::test]

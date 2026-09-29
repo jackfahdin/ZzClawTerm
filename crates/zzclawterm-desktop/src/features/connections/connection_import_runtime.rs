@@ -134,9 +134,12 @@ impl ZzClawTermApp {
                             match prepare_connection_source(source, Some(path.as_path())).and_then(
                                 |prepared| {
                                     store
-                                        .request_fn(StoreDomain::Connections, move |database| {
-                                            database.commit_session_import(prepared)
-                                        })
+                                        .request_mutation_fn(
+                                            StoreDomain::Connections,
+                                            move |database| {
+                                                database.commit_session_import(prepared)
+                                            },
+                                        )
                                         .map_err(|error| error.to_string())
                                 },
                             ) {
@@ -206,7 +209,7 @@ impl ZzClawTermApp {
                 )
                 .and_then(|prepared| {
                     store
-                        .request_fn(StoreDomain::Connections, move |database| {
+                        .request_mutation_fn(StoreDomain::Connections, move |database| {
                             database.commit_session_import(prepared)
                         })
                         .map_err(|error| error.to_string())

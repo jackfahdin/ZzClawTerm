@@ -70,6 +70,27 @@ fn cloud_sync_debug_output_redacts_all_secret_values() {
     assert!(options_output.contains("<redacted>"));
 }
 
+#[test]
+fn normalized_v2_hash_does_not_create_false_local_change() {
+    let state = CloudSyncState {
+        last_synced_payload_hash: Some("normalized-v3-hash".into()),
+        last_applied_remote_revision: Some("v2-revision".into()),
+        ..CloudSyncState::default()
+    };
+    let pointer = RemoteSyncPointer {
+        schema_version: 1,
+        revision_id: "v2-revision".into(),
+        created_at_ms: 1,
+        payload_hash: "original-v2-hash".into(),
+        device_id: "tauri".into(),
+        app_version: "1.9.0".into(),
+    };
+    assert_eq!(
+        decide_cloud_remote_check(&state, "normalized-v3-hash", &pointer, true),
+        CloudRemoteCheckDecision::UpToDate
+    );
+}
+
 impl ConnectionStore {
     fn open(config_dir: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         Self::open_with_portable_key_path(config_dir, None)
@@ -981,6 +1002,65 @@ fn cloud_sync_algorithm_uses_remote_backend_abstraction() {
 }
 
 #[test]
+fn guarded_auto_pull_preserves_local_data_when_session_becomes_active() {
+    let source_dir = unique_temp_dir("cloud-guard-source");
+    let target_dir = unique_temp_dir("cloud-guard-target");
+    let remote_dir = unique_temp_dir("cloud-guard-remote");
+    let source_options = options(&source_dir, &remote_dir, "source-device");
+    let target_options = options(&target_dir, &remote_dir, "target-device");
+    let remote = MemoryRemote::default();
+    ConnectionStore::open(&source_dir)
+        .expect("source store")
+        .replace_sessions(&SessionsConfig {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            connections: vec![local_connection("remote", "Remote Shell", "bash")],
+        })
+        .expect("seed source");
+    super::push_snapshot_with_remote(
+        &OptionsTestLocalStore(&source_options),
+        &source_options,
+        &remote,
+        &CloudSyncState::default(),
+        false,
+    )
+    .expect("push remote");
+    let target_store = ConnectionStore::open(&target_dir).expect("target store");
+    target_store
+        .replace_sessions(&SessionsConfig {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            connections: vec![local_connection("local", "Local Shell", "bash")],
+        })
+        .expect("seed target");
+    let checked = std::cell::Cell::new(false);
+    let result = super::pull_snapshot_with_remote_guarded(
+        &OptionsTestLocalStore(&target_options),
+        &target_options,
+        &remote,
+        &CloudSyncState::default(),
+        true,
+        &|| {
+            checked.set(true);
+            Err(CloudSyncError::AutoPullDeferred)
+        },
+    );
+    assert!(matches!(result, Err(CloudSyncError::AutoPullDeferred)));
+    assert!(checked.get());
+    assert_eq!(
+        target_store
+            .load_sessions()
+            .expect("load target")
+            .connections[0]
+            .name,
+        "Local Shell"
+    );
+    std::fs::remove_dir_all(source_dir).ok();
+    std::fs::remove_dir_all(target_dir).ok();
+    std::fs::remove_dir_all(remote_dir).ok();
+}
+
+#[test]
 fn snapshot_upload_failure_does_not_commit_latest_pointer() {
     let source_dir = unique_temp_dir("cloud-upload-failure-source");
     let unused_remote = unique_temp_dir("cloud-upload-failure-unused");
@@ -1183,7 +1263,8 @@ fn pull_rejects_hash_revision_and_corrupted_snapshot_data() {
         .expect("write wrong hash pointer");
     assert!(matches!(
         pull_snapshot_with_remote(&target_options, &remote, &CloudSyncState::default(), true),
-        Err(CloudSyncError::HashMismatch { .. })
+        Err(CloudSyncError::Conflict(conflict))
+            if conflict.kind == CloudConflictKind::RemoteInconsistent
     ));
 
     let mut wrong_revision = pointer.clone();
@@ -1207,7 +1288,8 @@ fn pull_rejects_hash_revision_and_corrupted_snapshot_data() {
         .expect("write wrong revision pointer");
     assert!(matches!(
         pull_snapshot_with_remote(&target_options, &remote, &CloudSyncState::default(), true),
-        Err(CloudSyncError::RevisionMismatch { .. })
+        Err(CloudSyncError::Conflict(conflict))
+            if conflict.kind == CloudConflictKind::RemoteInconsistent
     ));
 
     remote
@@ -1221,9 +1303,24 @@ fn pull_rejects_hash_revision_and_corrupted_snapshot_data() {
     remote
         .write(&snapshot_path, b"broken")
         .expect("write corrupt snapshot");
+    let recovered =
+        pull_snapshot_with_remote(&target_options, &remote, &CloudSyncState::default(), true)
+            .expect("matching current repairs corrupt immutable snapshot");
+    assert_eq!(recovered.outcome, CloudSyncOutcome::UpToDate);
+    remote
+        .write(&snapshot_path, b"broken")
+        .expect("break snapshot again");
+    remote
+        .write(
+            &remote_path(&source_options.remote_root, super::SYNC_CURRENT_FILE),
+            b"broken",
+        )
+        .expect("break compatible current");
     assert!(matches!(
         pull_snapshot_with_remote(&target_options, &remote, &CloudSyncState::default(), true),
-        Err(CloudSyncError::CorruptedSnapshot { .. })
+        Err(CloudSyncError::Conflict(conflict))
+            if conflict.kind == CloudConflictKind::RemoteInconsistent
+                && conflict.recovery_revision.is_none()
     ));
 
     std::fs::remove_dir_all(source_dir).ok();

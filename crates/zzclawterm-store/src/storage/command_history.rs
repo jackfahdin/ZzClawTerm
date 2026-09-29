@@ -3,6 +3,8 @@
 //! Split out of `storage.rs` by domain. Table name, key layout and record
 //! shape are unchanged; this only moves the code.
 
+use std::collections::HashMap;
+
 use redb::ReadableTable;
 use sha2::{Digest, Sha256};
 
@@ -17,9 +19,15 @@ impl ConnectionStore {
         let Some(command) = sanitize_history_command(command) else {
             return Ok(());
         };
+        // Read the canonical raw row only. list_command_history also includes
+        // legacy control-prefixed rows, whose counts must not be saved twice.
         let mut entry = self
-            .list_command_history(usize::MAX)?
+            .list_keyed_json_by_prefix::<CommandHistoryEntry>(
+                COMMAND_HISTORY_TABLE,
+                COMMAND_HISTORY_PREFIX,
+            )?
             .into_iter()
+            .map(|(_, entry)| entry)
             .find(|entry| entry.command == command)
             .unwrap_or(CommandHistoryEntry {
                 command,
@@ -43,15 +51,25 @@ impl ConnectionStore {
             self.list_keyed_json_by_prefix(COMMAND_HISTORY_TABLE, COMMAND_HISTORY_PREFIX)?;
         entries.sort_by(|left, right| right.0.cmp(&left.0));
         let mut history = Vec::new();
-        for (_, entry) in entries.into_iter().take(limit) {
+        let mut positions = HashMap::new();
+        for (_, entry) in entries {
             if let Some(command) = sanitize_history_command(&entry.command) {
-                history.push(CommandHistoryEntry {
-                    command,
-                    last_used_at_ms: entry.last_used_at_ms,
-                    use_count: entry.use_count.max(1),
-                });
+                if let Some(&index) = positions.get(&command) {
+                    let existing: &mut CommandHistoryEntry = &mut history[index];
+                    existing.last_used_at_ms = existing.last_used_at_ms.max(entry.last_used_at_ms);
+                    existing.use_count = existing.use_count.saturating_add(entry.use_count.max(1));
+                } else {
+                    positions.insert(command.clone(), history.len());
+                    history.push(CommandHistoryEntry {
+                        command,
+                        last_used_at_ms: entry.last_used_at_ms,
+                        use_count: entry.use_count.max(1),
+                    });
+                }
             }
         }
+        history.sort_by_key(|entry| std::cmp::Reverse(entry.last_used_at_ms));
+        history.truncate(limit);
         Ok(history)
     }
 
@@ -59,8 +77,23 @@ impl ConnectionStore {
         let Some(command) = sanitize_history_command(command) else {
             return Ok(());
         };
+        let keys = self
+            .list_keyed_json_by_prefix::<CommandHistoryEntry>(
+                COMMAND_HISTORY_TABLE,
+                COMMAND_HISTORY_PREFIX,
+            )?
+            .into_iter()
+            .filter_map(|(key, entry)| {
+                (sanitize_history_command(&entry.command).as_deref() == Some(command.as_str()))
+                    .then_some(key)
+            })
+            .collect::<Vec<_>>();
         let txn = self.db.begin_write()?;
-        remove_command_history_id_in_txn(&txn, &command_history_id(&command))?;
+        let mut table = txn.open_table(COMMAND_HISTORY_TABLE)?;
+        for key in keys {
+            table.remove(key.as_str())?;
+        }
+        drop(table);
         txn.commit()?;
         Ok(())
     }
@@ -196,8 +229,14 @@ fn sanitize_history_command(input: &str) -> Option<String> {
         return None;
     }
 
-    let without_prompt = strip_known_prompt_prefix(strip_leading_env_prefixes(trimmed))
-        .unwrap_or(trimmed)
+    // Older suggestion execution recorded the wire rewrite sequence as text.
+    let mut without_rewrite = trimmed;
+    while let Some(rest) = without_rewrite.strip_prefix("\u{05}\u{15}") {
+        without_rewrite = rest;
+    }
+    let without_rewrite = without_rewrite.trim();
+    let without_prompt = strip_known_prompt_prefix(strip_leading_env_prefixes(without_rewrite))
+        .unwrap_or(without_rewrite)
         .trim();
     if without_prompt.is_empty() {
         None

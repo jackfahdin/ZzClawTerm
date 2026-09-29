@@ -30,7 +30,7 @@ impl ZzClawTermApp {
             .set_status("saving custom quick command order".to_string());
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 store.save_quick_commands(config)?;
                 store.save_quick_command_ui_settings(&settings)?;
                 Ok(())

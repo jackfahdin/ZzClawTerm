@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gpui::{ClipboardItem, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
-use zzclawterm_terminal::TerminalSnapshot;
+use zzclawterm_terminal::{TerminalScreen, TerminalSnapshot};
 
 use crate::features::ZzClawTermApp;
 use crate::features::terminal::LostTerminalSelectionRecovery;
@@ -129,7 +129,7 @@ impl ZzClawTermApp {
         {
             return terminal_selected_text_for_view(view, *selection);
         }
-        terminal_selected_text_from_lines(*selection, &self.terminal.view.screen.all_lines(), 0)
+        terminal_selected_text_from_screen(*selection, &self.terminal.view.screen)
     }
 
     pub(in crate::features) fn copy_terminal_selection(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1018,19 +1018,24 @@ fn terminal_selected_text_for_view(
             selection,
             snapshot.row_count(),
             absolute_start,
-            |index| snapshot.line(index),
+            |index| {
+                snapshot
+                    .row(index)
+                    .map(|row| (row.text.as_str(), row.wrapped))
+            },
         );
     }
-    terminal_selected_text_from_lines(selection, &view.screen.all_lines(), 0)
+    terminal_selected_text_from_screen(selection, &view.screen)
 }
 
-fn terminal_selected_text_from_lines(
+fn terminal_selected_text_from_screen(
     selection: TerminalSelection,
-    lines: &[String],
-    absolute_start: usize,
+    screen: &TerminalScreen,
 ) -> Option<String> {
-    terminal_selected_text_from_line_source(selection, lines.len(), absolute_start, |index| {
-        lines.get(index).map(String::as_str)
+    let rows = screen.all_text_rows();
+    terminal_selected_text_from_line_source(selection, rows.len(), 0, |index| {
+        rows.get(index)
+            .map(|(text, wrapped)| (text.as_str(), *wrapped))
     })
 }
 
@@ -1038,15 +1043,16 @@ fn terminal_selected_text_from_line_source<'a>(
     selection: TerminalSelection,
     line_count: usize,
     absolute_start: usize,
-    mut line_at: impl FnMut(usize) -> Option<&'a str>,
+    mut line_at: impl FnMut(usize) -> Option<(&'a str, bool)>,
 ) -> Option<String> {
     if selection.all_buffer {
         let mut text = String::new();
         for index in 0..line_count {
-            if index > 0 {
+            let (line, wrapped) = line_at(index)?;
+            if index > 0 && !wrapped {
                 text.push('\n');
             }
-            text.push_str(line_at(index).unwrap_or_default().trim_end());
+            text.push_str(line.trim_end());
         }
         while text.ends_with('\n') {
             text.pop();
@@ -1061,17 +1067,20 @@ fn terminal_selected_text_from_line_source<'a>(
     let mut text = String::new();
     let mut first_line = true;
     for line_index in start.line..=end.line {
-        let line = line_at(line_index - absolute_start)?;
+        let (line, wrapped) = line_at(line_index - absolute_start)?;
         let cells = terminal_text_cells(line);
         let (col_start, col_end_excl) = selection.cols_for_absolute_line(line_index)?;
         let col_end = col_end_excl.min(cells.len().max(col_start));
         let col_start = col_start.min(col_end);
         let slice = terminal_text_cell_slice(&cells, col_start, col_end);
-        if !first_line {
+        let slice = slice.trim_end();
+        let empty_endpoint_at_row_start =
+            line_index == end.line && end.col == 0 && slice.is_empty();
+        if !first_line && !wrapped && !empty_endpoint_at_row_start {
             text.push('\n');
         }
         first_line = false;
-        text.push_str(slice.trim_end());
+        text.push_str(slice);
     }
     if text.is_empty() { None } else { Some(text) }
 }
@@ -1292,6 +1301,105 @@ mod tests {
             terminal_snapshot_covering_selection(&view, selection)
                 .map(terminal_snapshot_absolute_range),
             Some((absolute_start, absolute_end))
+        );
+    }
+
+    #[test]
+    fn selected_text_joins_soft_wrapped_snapshot_rows() {
+        let mut screen = TerminalScreen::new(5, 3);
+        screen.advance(b"abcdef");
+        let mut view = TerminalViewState::new();
+        view.frame_snapshot = Some(Arc::new(screen.snapshot()));
+        let selection = TerminalSelection::from_range(
+            TerminalBufferCellPos::new(0, 0),
+            TerminalBufferCellPos::new(1, 0),
+        );
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, selection).as_deref(),
+            Some("abcdef")
+        );
+    }
+
+    #[test]
+    fn selected_text_keeps_hard_line_breaks() {
+        let mut screen = TerminalScreen::new(5, 3);
+        screen.advance(b"abcde\r\nf");
+        let mut view = TerminalViewState::new();
+        view.frame_snapshot = Some(Arc::new(screen.snapshot()));
+        let selection = TerminalSelection::from_range(
+            TerminalBufferCellPos::new(0, 0),
+            TerminalBufferCellPos::new(1, 0),
+        );
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, selection).as_deref(),
+            Some("abcde\nf")
+        );
+    }
+
+    #[test]
+    fn select_all_joins_soft_wraps_and_keeps_hard_breaks_in_scrollback() {
+        let mut view = TerminalViewState::new();
+        view.screen = TerminalScreen::new(5, 2);
+        view.screen.advance(b"abcdef\r\nghij");
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, TerminalSelection::all_buffer(5)).as_deref(),
+            Some("abcdef\nghij")
+        );
+    }
+
+    /// Dragging to the start of the row below a full line puts the endpoint on an
+    /// empty row. That row contributes no characters, so the copy must not carry
+    /// a trailing break, otherwise pasting a single line yields two lines.
+    #[test]
+    fn selected_text_omits_break_when_endpoint_row_is_empty() {
+        let mut screen = TerminalScreen::new(5, 3);
+        screen.advance(b"abc\r\n");
+        let mut view = TerminalViewState::new();
+        view.frame_snapshot = Some(Arc::new(screen.snapshot()));
+        let selection = TerminalSelection::from_range(
+            TerminalBufferCellPos::new(0, 0),
+            TerminalBufferCellPos::new(1, 0),
+        );
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, selection).as_deref(),
+            Some("abc")
+        );
+    }
+
+    #[test]
+    fn selected_text_omits_break_when_endpoint_row_is_empty_on_legacy_screen() {
+        let mut view = TerminalViewState::new();
+        view.screen = TerminalScreen::new(5, 3);
+        view.screen.advance(b"abc\r\n");
+        let selection = TerminalSelection::from_range(
+            TerminalBufferCellPos::new(0, 0),
+            TerminalBufferCellPos::new(1, 0),
+        );
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, selection).as_deref(),
+            Some("abc")
+        );
+    }
+
+    #[test]
+    fn selected_text_keeps_break_when_empty_endpoint_row_extends_past_column_zero() {
+        let mut screen = TerminalScreen::new(5, 3);
+        screen.advance(b"abc\r\n");
+        let mut view = TerminalViewState::new();
+        view.frame_snapshot = Some(Arc::new(screen.snapshot()));
+        let selection = TerminalSelection::from_range(
+            TerminalBufferCellPos::new(0, 0),
+            TerminalBufferCellPos::new(1, 1),
+        );
+
+        assert_eq!(
+            terminal_selected_text_for_view(&view, selection).as_deref(),
+            Some("abc\n")
         );
     }
 

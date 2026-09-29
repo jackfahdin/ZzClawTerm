@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{Entity, FocusHandle, Subscription};
 use zzclawterm_core::ResolvedKeywordHighlightRule;
@@ -54,6 +55,7 @@ pub(super) struct TerminalSearchState {
     /// Runtime-only per-session preference; missing sessions use the default `true`.
     pub(super) wrap_around_by_session: HashMap<String, bool>,
     pub(super) active_index: usize,
+    pub(super) full_search_ready_at: Instant,
     pub(super) history_pending_key: Option<RecordingHistorySearchKey>,
     pub(super) history_result: Option<RecordingHistorySearchEvent>,
 }
@@ -210,6 +212,7 @@ impl TerminalFeatureState {
                 whole_word: false,
                 wrap_around_by_session: HashMap::new(),
                 active_index: 0,
+                full_search_ready_at: Instant::now(),
                 history_pending_key: None,
                 history_result: None,
             },

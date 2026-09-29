@@ -1,4 +1,42 @@
-use super::{PortableSnapshotError, RawPortableSnapshot, validate_raw_snapshot};
+use super::{
+    PortableSnapshotError, RawPortableSnapshot, preserve_device_local_sync_settings,
+    project_sync_settings, validate_raw_snapshot,
+};
+
+#[test]
+fn sync_settings_exclude_local_configuration_and_preserve_it_on_apply() {
+    let current = serde_json::json!({
+        "cloud_sync": {"enabled": true, "webdav": {"password": "encrypted"}},
+        "keybindings": {"custom": "binding"},
+        "appearance": {"theme": "dark", "background_image_path": "C:/wallpaper.png"},
+        "transfer": {"duplicate_strategy": "ask", "download_path": "C:/Downloads"},
+        "ui": {"language": "zh-CN", "open_tabs": ["local"]},
+        "security": {"master_password": "encrypted-password"},
+        "future_local_field": {"keep": true}
+    });
+    let mut projected = current.clone();
+    project_sync_settings(&mut projected);
+    assert!(projected.get("cloud_sync").is_none());
+    assert!(projected.get("keybindings").is_none());
+    assert!(
+        projected["appearance"]
+            .get("background_image_path")
+            .is_none()
+    );
+    assert!(projected["transfer"].get("download_path").is_none());
+    assert!(projected["ui"].get("open_tabs").is_none());
+    assert!(projected["security"].get("master_password").is_none());
+    assert_eq!(
+        projected["future_local_field"],
+        current["future_local_field"]
+    );
+
+    projected["appearance"]["theme"] = serde_json::json!("light");
+    preserve_device_local_sync_settings(&mut projected, &current);
+    assert_eq!(projected["appearance"]["theme"], "light");
+    assert_eq!(projected["cloud_sync"], current["cloud_sync"]);
+    assert_eq!(projected["ui"]["open_tabs"], current["ui"]["open_tabs"]);
+}
 
 #[test]
 fn v3_hash_protects_notes_when_the_entity_is_present() {
@@ -18,6 +56,13 @@ fn v3_hash_protects_notes_when_the_entity_is_present() {
         validate_raw_snapshot(&snapshot),
         Err(PortableSnapshotError::PayloadHashMismatch)
     ));
+}
+
+#[test]
+fn compressed_snapshot_rejects_payload_over_fifty_mebibytes() {
+    let oversized = vec![0; 50 * 1024 * 1024 + 1];
+    let encoded = super::encode_compressed_snapshot_payload(&oversized).expect("encode zip");
+    assert!(super::decode_compressed_snapshot_payload(&encoded).is_err());
 }
 
 #[test]

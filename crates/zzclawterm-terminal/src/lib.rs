@@ -134,6 +134,17 @@ pub struct TerminalGridMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalGridOccurrence {
+    pub segments: Vec<TerminalGridMatch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSearchRangeMode {
+    StartsWithin,
+    Intersects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalSearchError {
     InvalidRegex(String),
 }
@@ -1290,11 +1301,117 @@ impl TerminalCore {
         dedup_overlapping_viewports(out, self.rows)
     }
 
+    /// Text and soft-wrap status for every row, oldest scrollback row first.
+    pub fn all_text_rows(&self) -> Vec<(String, bool)> {
+        let cols = self.term.columns();
+        let topmost = self.term.topmost_line();
+        let bottommost = self.term.bottommost_line();
+        let mut rows = Vec::with_capacity(self.total_rows());
+        for line_index in topmost.0..=bottommost.0 {
+            let line = Line(line_index);
+            let wrapped = cols > 0
+                && line > topmost
+                && self.term.grid()[Line(line_index - 1)][Column(cols - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE);
+            let mut text = String::with_capacity(cols);
+            for col in 0..cols {
+                let cell = &self.term.grid()[line][Column(col)];
+                let cell_text = cell_text(cell);
+                if cell_text.is_empty() {
+                    if render_cell_width(cell) != 0 {
+                        text.push(' ');
+                    }
+                } else {
+                    text.push_str(&cell_text);
+                }
+            }
+            text.truncate(text.trim_end().len());
+            rows.push((text, wrapped));
+        }
+        rows
+    }
+
     pub fn search_grid(
         &self,
         query: &TerminalSearchQuery,
     ) -> Result<Vec<TerminalGridMatch>, TerminalSearchError> {
         self.search_grid_in_absolute_range(query, 0..self.total_rows())
+    }
+
+    pub fn search_grid_occurrences_in_absolute_range(
+        &self,
+        query: &TerminalSearchQuery,
+        absolute_lines: Range<usize>,
+        mode: TerminalSearchRangeMode,
+    ) -> Result<Vec<TerminalGridOccurrence>, TerminalSearchError> {
+        if query.pattern.trim().is_empty() || query.limit == 0 {
+            return Ok(Vec::new());
+        }
+        let total_rows = self.total_rows();
+        let absolute_start = absolute_lines.start.min(total_rows);
+        let absolute_end = absolute_lines.end.min(total_rows);
+        if absolute_start >= absolute_end {
+            return Ok(Vec::new());
+        }
+
+        let key = TerminalSearchCacheKey {
+            pattern: query.pattern.clone(),
+            regex: query.regex,
+            case_sensitive: query.case_sensitive,
+            whole_word: query.whole_word,
+        };
+        let mut cache = self
+            .search_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let regex = cache.regex_for(key)?;
+        let history = i64::try_from(self.term.grid().history_size()).unwrap_or(i64::MAX);
+        let absolute_line = |row: usize| {
+            let line = i64::try_from(row)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(history);
+            Line(line.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+        };
+        let first = Point::new(absolute_line(absolute_start), Column(0));
+        let last = Point::new(
+            absolute_line(absolute_end - 1),
+            self.term.grid().last_column(),
+        );
+        let start = self.term.line_search_left(first);
+        let end = self.term.line_search_right(last);
+        let mut occurrences = Vec::new();
+        for found in RegexIter::new(start, end, Direction::Right, &self.term, regex) {
+            if query.whole_word && !terminal_grid_match_is_whole_word(&self.term, &found) {
+                continue;
+            }
+            let mut segments = Vec::new();
+            push_terminal_grid_match_segments(
+                &self.term,
+                found,
+                usize::MAX,
+                TerminalSearchDirection::Forward,
+                &mut segments,
+            );
+            let included = match mode {
+                TerminalSearchRangeMode::StartsWithin => segments.first().is_some_and(|segment| {
+                    (absolute_start..absolute_end).contains(&segment.line_index)
+                }),
+                TerminalSearchRangeMode::Intersects => segments
+                    .iter()
+                    .any(|segment| (absolute_start..absolute_end).contains(&segment.line_index)),
+            };
+            if included {
+                occurrences.push(TerminalGridOccurrence { segments });
+                if occurrences.len() >= query.limit {
+                    break;
+                }
+            }
+        }
+        if query.direction == TerminalSearchDirection::Backward {
+            occurrences.reverse();
+        }
+        Ok(occurrences)
     }
 
     /// Search a half-open range of absolute scrollback + live-screen rows.

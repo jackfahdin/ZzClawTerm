@@ -12955,6 +12955,7 @@ dependencies = [
  "gpui-kit",
  "gpui_platform",
  "rust-embed",
+ "serde_json",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -12963,6 +12964,7 @@ dependencies = [
  "winresource",
  "zzclawterm-core",
  "zzclawterm-desktop",
+ "zzclawterm-store",
  "zzclawterm-ui",
 ]
 

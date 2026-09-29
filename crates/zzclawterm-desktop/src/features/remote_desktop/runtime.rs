@@ -1045,6 +1045,18 @@ impl ZzClawTermApp {
                 crate::models::SessionLaunchConfig::Vnc(_)
             )
         });
+        let modifiers = if is_vnc {
+            modifiers
+        } else {
+            rdp_key_modifiers(
+                key,
+                modifiers,
+                self.remote_desktop
+                    .sessions
+                    .get(session_id)
+                    .is_some_and(|session| session.modifiers.modifiers.shift),
+            )
+        };
         if !self.send_remote_modifier_state(session_id, modifiers, None) {
             return false;
         }
@@ -2102,7 +2114,7 @@ impl ZzClawTermApp {
         };
         let submitted = self.submit_store_request(
             0,
-            store_request(StoreDomain::Security, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Security, move |store| {
                 store.replace_rdp_known_host_if_matches(
                     &host,
                     port,
@@ -2415,6 +2427,38 @@ fn vnc_input_allowed(view_only: bool) -> bool {
     !view_only
 }
 
+fn rdp_key_modifiers(key: &str, mut modifiers: Modifiers, shift_pressed: bool) -> Modifiers {
+    // GPUI reports shifted punctuation as the key name and clears shift on that key event.
+    if shift_pressed
+        && matches!(
+            key,
+            "!" | "@"
+                | "#"
+                | "$"
+                | "%"
+                | "^"
+                | "&"
+                | "*"
+                | "("
+                | ")"
+                | "_"
+                | "+"
+                | "{"
+                | "}"
+                | "|"
+                | ":"
+                | "\""
+                | "~"
+                | "<"
+                | ">"
+                | "?"
+        )
+    {
+        modifiers.shift = true;
+    }
+    modifiers
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RemoteModifierTransition {
     key: &'static str,
@@ -2702,7 +2746,7 @@ mod tests {
     use super::{
         MAINTENANCE_INTERVAL, POINTER_MOVE_INTERVAL, RESIZE_DEBOUNCE,
         clear_rdp_reconnect_after_frame, defer_rdp_pointer_move, inline_remote_desktop_password,
-        rdp_error_is_retryable, rdp_reconnect_delay, rdp_resize_is_material,
+        rdp_error_is_retryable, rdp_key_modifiers, rdp_reconnect_delay, rdp_resize_is_material,
         record_remote_cursor_position_if_sent, remote_committed_text_supported,
         remote_desktop_password_id, remote_desktop_periodic_delay, remote_modifier_transitions,
         remote_state_clears_input, secure_attention_available,
@@ -2916,6 +2960,15 @@ mod tests {
             None,
             Some(vnc_supported),
         ));
+    }
+
+    #[test]
+    fn rdp_shifted_punctuation_keeps_the_reported_modifier_state() {
+        let reported = Modifiers::default();
+        assert!(rdp_key_modifiers("!", reported, true).shift);
+        assert!(rdp_key_modifiers("?", reported, true).shift);
+        assert!(!rdp_key_modifiers("!", reported, false).shift);
+        assert!(!rdp_key_modifiers("a", reported, true).shift);
     }
 
     #[test]

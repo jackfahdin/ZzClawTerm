@@ -82,6 +82,9 @@ impl ZzClawTermApp {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.terminal.input.focus.is_focused(window) {
+            return;
+        }
         self.mark_user_activity();
         let smart_input_selection = self
             .terminal
@@ -380,14 +383,15 @@ impl ZzClawTermApp {
                 std::sync::Arc::from([])
             };
             // Buffer matches use absolute history indices; map into current viewport rows.
-            let active_match_abs = search_matches
+            let occurrences = self.terminal_buffer_occurrence_ranges();
+            let active_range = occurrences
                 .get(
                     self.terminal
                         .search
                         .active_index
-                        .min(search_matches.len().saturating_sub(1)),
+                        .min(occurrences.len().saturating_sub(1)),
                 )
-                .map(|search_match| search_match.line_index);
+                .cloned();
             let mut search_ranges_by_line: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
             let mut active_search_ranges_by_line: HashMap<usize, Vec<(usize, usize)>> =
                 HashMap::new();
@@ -418,13 +422,9 @@ impl ZzClawTermApp {
                     .entry(view_row)
                     .or_default()
                     .push(range);
-                if Some(abs) == active_match_abs
-                    && match_index
-                        == self
-                            .terminal
-                            .search
-                            .active_index
-                            .min(search_matches.len().saturating_sub(1))
+                if active_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&match_index))
                 {
                     active_search_ranges_by_line
                         .entry(view_row)
@@ -547,7 +547,8 @@ impl ZzClawTermApp {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .min_h(px(cell_h))
+                        .h(px(cell_h))
+                        .line_height(px(cell_h))
                         .gap(px(gutter_metrics.gap_width))
                         .flex_none()
                         .pr(px(8.))
@@ -775,23 +776,31 @@ impl ZzClawTermApp {
                         let event = ZzClawTermApp::terminal_control_c_key_event();
                         this.handle_terminal_surface_key_down(&event, window, cx);
                     }))
-                    .on_action(cx.listener(|this, _: &ZzClawCopy, _window, cx| {
-                        this.copy_terminal_selection_or_visible(cx);
-                        cx.stop_propagation();
+                    .on_action(cx.listener(|this, _: &ZzClawCopy, window, cx| {
+                        if this.terminal.input.focus.is_focused(window) {
+                            this.copy_terminal_selection_or_visible(cx);
+                            cx.stop_propagation();
+                        }
                     }))
                     .on_action(cx.listener(|this, _: &ZzClawPaste, window, cx| {
-                        this.paste_from_clipboard(window, cx);
-                        cx.stop_propagation();
+                        if this.terminal.input.focus.is_focused(window) {
+                            this.paste_from_clipboard(window, cx);
+                            cx.stop_propagation();
+                        }
                     }))
-                    .on_action(cx.listener(|this, _: &ZzClawSelectAll, _window, cx| {
-                        this.select_all_terminal(cx);
-                        cx.stop_propagation();
+                    .on_action(cx.listener(|this, _: &ZzClawSelectAll, window, cx| {
+                        if this.terminal.input.focus.is_focused(window) {
+                            this.select_all_terminal(cx);
+                            cx.stop_propagation();
+                        }
                     }))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                         this.handle_terminal_surface_key_down(event, window, cx);
                     }))
-                    .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
-                        if this.send_terminal_key_release_event(event, cx) {
+                    .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, cx| {
+                        if this.terminal.input.focus.is_focused(window)
+                            && this.send_terminal_key_release_event(event, cx)
+                        {
                             cx.stop_propagation();
                             this.mark_user_activity();
                         }

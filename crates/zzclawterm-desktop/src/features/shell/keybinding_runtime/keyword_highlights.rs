@@ -30,7 +30,7 @@ impl ZzClawTermApp {
         let config = self.settings.keyword_config().clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Settings, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Settings, move |store| {
                 store.save_keyword_highlights(&config)
             }),
             |this, event, cx| {
@@ -82,7 +82,7 @@ impl ZzClawTermApp {
                         let task = scheduler.submit_task("keyword-highlight-import", move |_| {
                             match read_keyword_highlight_import_text(&path) {
                                 Ok(raw) => match store
-                                    .request_fn(StoreDomain::Settings, move |database| {
+                                    .request_mutation_fn(StoreDomain::Settings, move |database| {
                                         database.import_keyword_highlights_json(&raw)
                                     }) {
                                     Ok((_, result)) => KeywordHighlightPathPromptResult::Imported {

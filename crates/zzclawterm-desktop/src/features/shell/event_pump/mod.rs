@@ -156,10 +156,17 @@ impl ZzClawTermApp {
             cx.notify();
         }
         let work_remaining = decision.defer || self.runtime_data_plane_work_remaining();
-        let wake_delay = runtime_data_plane_wake_delay(
+        let mut wake_delay = runtime_data_plane_wake_delay(
             work_remaining,
             self.session.has_protocol_runtime_sessions(),
         );
+        if self.terminal_buffer_search_needs_wake() {
+            wake_delay = Some(
+                wake_delay
+                    .unwrap_or(Duration::from_millis(100))
+                    .min(Duration::from_millis(100)),
+            );
+        }
 
         let drain = RuntimeDataPlaneDrain {
             wake_delay,

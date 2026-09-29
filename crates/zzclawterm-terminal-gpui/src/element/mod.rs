@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use gpui::{
@@ -26,6 +26,14 @@ use crate::paint::{
 };
 use crate::terminal_font_features;
 use crate::types::{TerminalHighlightSpan, TerminalPaintGeometry};
+
+fn terminal_geometry_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("ZZCLAWTERM_TERMINAL_GEOMETRY_DIAGNOSTICS")
+            .is_some_and(|value| value == "1")
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct TerminalBufferMatch {
@@ -1864,6 +1872,61 @@ impl Element for ZzClawTerminalElement {
             .as_ref()
             .and_then(|cache| cache.lock().ok())
             .map(|cache| (cache.hits, cache.misses));
+        if terminal_geometry_diagnostics_enabled() {
+            let metrics = |row: &TerminalPaintRow| {
+                let ascent = f32::from(row.line.ascent);
+                let descent = f32::from(row.line.descent);
+                let y = f32::from(row.y);
+                (
+                    y,
+                    ascent,
+                    descent,
+                    y + (cell_h - ascent - descent) / 2.0 + ascent,
+                )
+            };
+            let (first_y, first_ascent, first_descent, first_baseline) =
+                plan.rows.first().map(metrics).unwrap_or_default();
+            let (last_y, last_ascent, last_descent, last_baseline) =
+                plan.rows.last().map(metrics).unwrap_or_default();
+            let first_absolute_row = self
+                .snapshot
+                .total_rows
+                .saturating_sub(self.snapshot.row_count())
+                .saturating_add(visible_row_start);
+            let mut sampled_rows = Vec::new();
+            for (index, row) in plan.rows.iter().enumerate() {
+                if index < 4 || index >= plan.rows.len().saturating_sub(4) {
+                    sampled_rows.push((first_absolute_row.saturating_add(index), metrics(row)));
+                }
+            }
+            tracing::info!(
+                diagnostic = "terminal_element_geometry",
+                bounds_top = f32::from(bounds.top()),
+                bounds_height = f32::from(bounds.size.height),
+                visual_y_offset,
+                cell_height = cell_h,
+                snapshot_rows = self.snapshot.row_count(),
+                viewport_rows = self.snapshot.viewport_rows,
+                total_rows = self.snapshot.total_rows,
+                visible_row_start,
+                visible_row_end,
+                first_absolute_row,
+                first_y,
+                first_ascent,
+                first_descent,
+                first_baseline,
+                last_absolute_row =
+                    first_absolute_row.saturating_add(plan.rows.len().saturating_sub(1)),
+                last_y,
+                last_ascent,
+                last_descent,
+                last_baseline,
+                ?sampled_rows,
+                shaped_rows = plan.rows.len(),
+                underlines = plan.underlines.len(),
+                "terminal element geometry"
+            );
+        }
         let elapsed = started_at.elapsed();
         if elapsed.as_millis() >= TERMINAL_ELEMENT_PREPAINT_SLOW_MS {
             let (cache_hits, cache_misses) = cache_stats_after.unwrap_or((0, 0));

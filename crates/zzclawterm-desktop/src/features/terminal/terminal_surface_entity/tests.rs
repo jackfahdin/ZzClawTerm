@@ -143,6 +143,77 @@ fn painted_hit_test_grid_bounds_start_after_the_rendered_gutter() {
 }
 
 #[test]
+fn enriched_snapshot_keeps_existing_rows_at_the_same_pixel_height() {
+    let mut screen = TerminalScreen::default();
+    screen.advance_decoded_text(&terminal_test_output_lines(50));
+    let plain = Arc::new(screen.viewport_snapshot(0));
+    let enriched = Arc::new(screen.viewport_snapshot_with_window(0, 32, 32));
+    assert!(enriched.row_count() > plain.row_count());
+    let viewport_rows = plain.viewport_rows;
+    let scrollback_len = plain.scrollback_len;
+    let (plain_geometry, enriched_geometry) = {
+        let mut cx = TestAppContext::single();
+        let surface = cx.new(|_| {
+            let mut surface = TerminalSurface::new("session");
+            surface.cell_height = 21.12;
+            surface
+        });
+        let apply_snapshot = |cx: &mut TestAppContext, snapshot: Arc<TerminalSnapshot>| {
+            cx.update_entity(&surface, |surface, cx| {
+                surface.apply_frame_snapshot(TerminalSurfaceFrameSnapshot::new(
+                    snapshot,
+                    TerminalScrollVisualState {
+                        session_id: "session".to_string(),
+                        scroll_offset: 0,
+                        scroll_residual_lines: 0.0,
+                        display_offset: 0,
+                        scrollback_len,
+                        viewport_rows,
+                        has_new_while_scrolled: false,
+                        performance_overlay: None,
+                        skipped_output_chars: 0,
+                    },
+                ));
+                cx.notify();
+            });
+        };
+        apply_snapshot(&mut cx, plain.clone());
+        let window = cx.open_window(size(px(400.0), px(685.0)), {
+            let surface = surface.clone();
+            move |_window, _cx| TerminalSurfaceLayoutTestView {
+                surface,
+                mounted: true,
+            }
+        });
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.read_entity(&surface, |surface, _| {
+                surface.painted_hit_test_geometry.expect("painted geometry")
+            })
+        };
+        let plain_geometry = draw(&mut cx);
+        apply_snapshot(&mut cx, enriched.clone());
+        let enriched_geometry = draw(&mut cx);
+        (plain_geometry, enriched_geometry)
+    };
+    let bottom_absolute_row = plain.total_rows - 1;
+    let row_y = |snapshot: &TerminalSnapshot, geometry: TerminalPaintedHitTestGeometry| {
+        let start = snapshot.total_rows - snapshot.row_count();
+        geometry.visual_y_offset + (bottom_absolute_row - start) as f32 * geometry.cell_height
+    };
+    assert_eq!(plain_geometry.cell_height, 21.0);
+    assert_eq!(enriched_geometry.cell_height, 21.0);
+    assert_eq!(
+        row_y(&plain, plain_geometry),
+        row_y(&enriched, enriched_geometry)
+    );
+}
+
+#[test]
 fn real_window_draw_renders_visible_inactive_but_skips_unmounted_surface() {
     let mut cx = TestAppContext::single();
     let layout_cache = Arc::new(Mutex::new(ZzClawTerminalLayoutCache::default()));

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{AppContext as _, Context, PathPromptOptions, RenderImage, Window};
 use zzclawterm_core::models::sessions::ConnectionCustomIcon;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
 
@@ -151,7 +151,7 @@ impl ZzClawTermApp {
                     let id = record.id.clone();
                     app.submit_store_request(
                         0,
-                        store_request(StoreDomain::Connections, move |store| {
+                        zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                             store.save_connection_custom_icon(&record)?;
                             store.load_sessions()
                         }),
@@ -190,7 +190,7 @@ impl ZzClawTermApp {
     ) {
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 store.delete_connection_custom_icon(&id)?;
                 store.load_sessions()
             }),

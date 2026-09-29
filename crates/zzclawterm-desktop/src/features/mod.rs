@@ -24,7 +24,14 @@ mod session;
 mod settings;
 mod shell;
 mod sync;
+
+pub(crate) fn cloud_sync_operation_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
 mod sync_input;
+
+pub(crate) use sync::{AutoSyncResult, AutoSyncTrigger, run_auto_sync};
 mod tab_transfer;
 mod terminal;
 #[cfg(test)]

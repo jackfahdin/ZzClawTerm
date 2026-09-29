@@ -56,7 +56,7 @@ impl CommandRuntimeState {
                     CommandPersistenceRequest::IncrementQuickCommand(command_id) => {
                         let persisted_id = command_id.clone();
                         let result = store
-                            .request_fn(StoreDomain::Commands, move |database| {
+                            .request_mutation_fn(StoreDomain::Commands, move |database| {
                                 database.increment_quick_command_use_count(&persisted_id)
                             })
                             .map_err(|error| error.to_string());

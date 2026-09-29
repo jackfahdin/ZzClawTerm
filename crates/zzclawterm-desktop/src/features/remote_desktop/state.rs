@@ -115,6 +115,9 @@ impl Default for RemoteDesktopSessionState {
 }
 
 impl RemoteDesktopFeatureState {
+    pub(in crate::features) fn has_active_sessions(&self) -> bool {
+        !self.sessions.is_empty()
+    }
     pub(in crate::features) fn new(focus: FocusHandle) -> Self {
         let (wake, wake_rx) = EventWake::new();
         let manager = Arc::new(RdpSessionManager::new());

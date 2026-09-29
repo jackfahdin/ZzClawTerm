@@ -5,7 +5,7 @@ use zzclawterm_core::{
     Group, RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
     VncClipboardSettings, VncDisplaySettings, VncReconnectSettings, VncSecuritySettings, uuid,
 };
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use super::helpers::{
     ConnectionEditorToggle, ConnectionEditorValidationError, build_saved_connection_from_editor,
@@ -887,7 +887,7 @@ impl ZzClawTermApp {
         self.shell.set_status("saving connection...".to_string());
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 let mut persisted = persisted;
                 if let Some(previous) = store.get_connection(&persisted.id)? {
                     persisted.extensions = previous.extensions;

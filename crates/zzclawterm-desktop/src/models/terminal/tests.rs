@@ -11,7 +11,7 @@ use zzclawterm_terminal::{
 use crate::terminal::{TerminalLineDecorations, terminal_screen_from_output};
 
 use super::{
-    SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS, SelectedOccurrenceSearchJob,
+    FindSearchJob, SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS, SelectedOccurrenceSearchJob,
     TERMINAL_FRAME_COMMAND_QUEUE_CAP, TERMINAL_FRAME_EVENT_WAKE_ALL,
     TERMINAL_FRAME_EVENT_WAKE_OUTPUT, TERMINAL_FRAME_EVENT_WAKE_SEARCH,
     TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT, TERMINAL_FRAME_OUTPUT_BURST_BYTE_LIMIT,
@@ -27,8 +27,9 @@ use super::{
     TerminalFrameSnapshotPurpose, TerminalPerformanceMode, TerminalPerformanceOverlay,
     TerminalPresentation, TerminalProtocolState, TerminalRenderCache, TerminalViewState,
     TerminalWorkPolicy, append_terminal_ui_output_tail, coalesce_terminal_frame_output_command,
-    compact_stale_terminal_frame_commands, next_terminal_frame_command,
-    prepare_terminal_frame_action_links, prepare_terminal_frame_action_links_reusing,
+    compact_stale_terminal_frame_commands, compact_terminal_frame_command_queue,
+    next_terminal_frame_command, prepare_terminal_frame_action_links,
+    prepare_terminal_frame_action_links_reusing, process_next_find_search_chunk,
     process_next_selected_occurrence_search_chunk, process_terminal_frame_output_burst,
     protect_terminal_output_burst, replace_selected_occurrence_search_job,
     terminal_expensive_interactions_enabled, terminal_frame_command_channel,
@@ -553,6 +554,7 @@ fn terminal_frame_snapshot_event_returns_scroll_window() {
         false,
         ActionLinksMatcherSettings::default(),
         false,
+        TerminalFrameSnapshotPurpose::Paint,
     );
 
     assert_eq!(event.offset, offset);
@@ -613,6 +615,7 @@ fn terminal_frame_snapshot_event_covers_multi_viewport_fast_scroll_runs() {
         false,
         ActionLinksMatcherSettings::default(),
         false,
+        TerminalFrameSnapshotPurpose::Paint,
     );
 
     assert_eq!(event.offset, offset);
@@ -653,6 +656,7 @@ fn terminal_priority_snapshot_event_covers_predictive_user_scroll_runs() {
         false,
         ActionLinksMatcherSettings::default(),
         true,
+        TerminalFrameSnapshotPurpose::Paint,
     );
 
     assert_eq!(event.offset, offset);
@@ -692,6 +696,7 @@ fn terminal_live_frame_snapshot_covers_first_scrollback_step() {
         false,
         ActionLinksMatcherSettings::default(),
         false,
+        TerminalFrameSnapshotPurpose::Paint,
     );
 
     assert_eq!(event.offset, offset);
@@ -721,6 +726,7 @@ fn terminal_scroll_window_offsets_live_cursor_by_prepended_rows() {
         false,
         ActionLinksMatcherSettings::default(),
         false,
+        TerminalFrameSnapshotPurpose::Paint,
     );
 
     let prepended_rows = event.snapshot.row_count().saturating_sub(base.row_count());
@@ -1196,6 +1202,7 @@ fn terminal_frame_scroll_request_keeps_normal_scroll_window() {
             false,
             ActionLinksMatcherSettings::default(),
             false,
+            TerminalFrameSnapshotPurpose::Paint,
         )
         .snapshot;
 
@@ -1744,6 +1751,7 @@ fn the_drain_tasks_frame_interest_mask_covers_every_reply_kind() {
         snapshot: Arc::new(screen.snapshot()),
         action_links: None,
         revision: 1,
+        purpose: TerminalFrameSnapshotPurpose::Paint,
         snapshot_duration: Duration::ZERO,
         snapshot_stats: Default::default(),
         action_link_stats: Default::default(),
@@ -1771,6 +1779,7 @@ fn terminal_frame_event_queue_keeps_snapshot_wake_armed_across_output() {
         snapshot: Arc::new(screen.snapshot()),
         action_links: None,
         revision: 1,
+        purpose: TerminalFrameSnapshotPurpose::Paint,
         snapshot_duration: Duration::ZERO,
         snapshot_stats: Default::default(),
         action_link_stats: Default::default(),
@@ -1947,6 +1956,7 @@ fn terminal_frame_event_queue_delivers_snapshot_reply_after_critical_pressure() 
                 snapshot: Arc::new(screen.snapshot()),
                 action_links: None,
                 revision: 1,
+                purpose: TerminalFrameSnapshotPurpose::Paint,
                 snapshot_duration: Duration::ZERO,
                 snapshot_stats: Default::default(),
                 action_link_stats: Default::default(),
@@ -2678,6 +2688,100 @@ fn terminal_frame_command_queue_keeps_latest_search_per_session() {
 }
 
 #[test]
+fn terminal_frame_command_queue_keeps_only_latest_visible_find_range() {
+    let (tx, rx) = terminal_frame_command_channel();
+    for (start, end) in [(0, 24), (24, 48)] {
+        assert!(tx.send(TerminalFrameCommand::RequestSearch {
+            session_id: "s1".to_string(),
+            purpose: TerminalFrameSearchPurpose::FindVisible {
+                absolute_start: start,
+                absolute_end: end,
+            },
+            key: selected_occurrence_test_key("needle", 1000, 0),
+        }));
+    }
+    assert!(matches!(
+        rx.try_recv(),
+        Some(TerminalFrameCommand::RequestSearch {
+            purpose: TerminalFrameSearchPurpose::FindVisible {
+                absolute_start: 24,
+                absolute_end: 48
+            },
+            ..
+        })
+    ));
+    assert!(rx.try_recv().is_none());
+}
+
+#[test]
+fn terminal_frame_command_pressure_can_drop_a_find_request() {
+    let mut commands = VecDeque::from([
+        TerminalFrameCommand::RequestSearch {
+            session_id: "s1".to_string(),
+            purpose: TerminalFrameSearchPurpose::Find,
+            key: selected_occurrence_test_key("needle", 1000, 0),
+        },
+        TerminalFrameCommand::Output {
+            session_id: "s1".to_string(),
+            data: b"one".to_vec(),
+            encoding: "UTF-8".to_string(),
+            scrollback_limit: 1000,
+        },
+        TerminalFrameCommand::Output {
+            session_id: "s2".to_string(),
+            data: b"two".to_vec(),
+            encoding: "UTF-8".to_string(),
+            scrollback_limit: 1000,
+        },
+    ]);
+    compact_terminal_frame_command_queue(&mut commands, 2);
+    assert_eq!(commands.len(), 2);
+    assert!(
+        commands
+            .iter()
+            .all(|command| matches!(command, TerminalFrameCommand::Output { .. }))
+    );
+}
+
+#[test]
+fn find_search_cancels_when_output_changes_the_screen_revision() {
+    let mut session = selected_occurrence_test_session(80, 600, "plain");
+    let job = FindSearchJob::new(
+        "s1".to_string(),
+        selected_occurrence_test_key("needle", 1000, 0),
+        &session,
+    );
+    session.revision += 1;
+    let mut jobs = VecDeque::from([job]);
+    let sessions = HashMap::from([("s1".to_string(), session)]);
+    let event = process_next_find_search_chunk(&mut jobs, &sessions).unwrap();
+    assert!(event.result.matches.is_err());
+    assert!(jobs.is_empty());
+}
+
+#[test]
+fn terminal_output_command_is_taken_between_find_search_chunks() {
+    let session = selected_occurrence_test_session(80, 600, "plain");
+    let mut job = FindSearchJob::new(
+        "s1".to_string(),
+        selected_occurrence_test_key("missing", 1000, 0),
+        &session,
+    );
+    assert!(!job.process_chunk(&session).unwrap());
+    let next_row = job.next_absolute_row;
+    let (tx, rx) = terminal_frame_command_channel();
+    assert!(tx.send(TerminalFrameCommand::Output {
+        session_id: "s1".to_string(),
+        data: b"new output".to_vec(),
+        encoding: "UTF-8".to_string(),
+        scrollback_limit: 1000,
+    }));
+    let command = try_next_terminal_frame_command(&rx, &mut VecDeque::new());
+    assert!(matches!(command, Some(TerminalFrameCommand::Output { .. })));
+    assert_eq!(job.next_absolute_row, next_row);
+}
+
+#[test]
 fn selected_occurrence_search_advances_in_256_row_chunks() {
     let session = selected_occurrence_test_session(80, 600, "needle");
     let mut job = SelectedOccurrenceSearchJob::new(
@@ -2695,6 +2799,49 @@ fn selected_occurrence_search_advances_in_256_row_chunks() {
     );
     assert!(job.process_chunk(&session).unwrap());
     assert_eq!(job.next_absolute_row, job.total_rows);
+}
+
+#[test]
+fn find_search_counts_logical_matches_and_reports_truncation_only_above_limit() {
+    for (lines, expected_truncated) in [(1000, false), (1001, true)] {
+        let session = selected_occurrence_test_session(20, lines, "needle");
+        let mut jobs = VecDeque::from([FindSearchJob::new(
+            "s1".to_string(),
+            selected_occurrence_test_key("needle", 1000, 0),
+            &session,
+        )]);
+        let sessions = HashMap::from([("s1".to_string(), session)]);
+        let result = loop {
+            if let Some(event) = process_next_find_search_chunk(&mut jobs, &sessions) {
+                break event.result;
+            }
+        };
+        assert_eq!(result.occurrences.len(), 1000);
+        assert_eq!(result.truncated, expected_truncated);
+    }
+}
+
+#[test]
+fn find_search_keeps_soft_wrapped_match_together_across_chunks() {
+    let mut session = selected_occurrence_test_session(5, 260, "plain");
+    session.screen = TerminalScreen::new(5, 3);
+    session.screen.set_scrollback_limit(1000);
+    let mut output = "plain\r\n".repeat(255);
+    output.push_str("abcde12345");
+    session.screen.advance(output.as_bytes());
+    let mut jobs = VecDeque::from([FindSearchJob::new(
+        "s1".to_string(),
+        selected_occurrence_test_key("de12", 1000, 0),
+        &session,
+    )]);
+    let sessions = HashMap::from([("s1".to_string(), session)]);
+    let result = loop {
+        if let Some(event) = process_next_find_search_chunk(&mut jobs, &sessions) {
+            break event.result;
+        }
+    };
+    assert_eq!(result.occurrences.len(), 1);
+    assert_eq!(result.occurrences[0].len(), 2);
 }
 
 #[test]
@@ -2857,6 +3004,53 @@ fn selected_occurrence_search_large_scrollback_benchmark() {
             "selected occurrence benchmark: lines={lines} chunks={chunks} total={:?} max_chunk={max_chunk:?}",
             started.elapsed()
         );
+    }
+}
+
+#[test]
+#[ignore = "performance benchmark; run manually with --ignored --nocapture"]
+fn find_search_large_scrollback_benchmark() {
+    for lines in [5000, 100_000] {
+        for (label, text, query) in [
+            ("no-hit", "unique-line", "missing-needle"),
+            ("dense", "needle", "needle"),
+        ] {
+            let session = selected_occurrence_test_session(80, lines, text);
+            let mut job = FindSearchJob::new(
+                "bench".to_string(),
+                selected_occurrence_test_key(query, 1000, 0),
+                &session,
+            );
+            let started = Instant::now();
+            let mut max_chunk = Duration::ZERO;
+            let mut max_output_wait = Duration::ZERO;
+            let mut chunks = 0usize;
+            let (tx, rx) = terminal_frame_command_channel();
+            loop {
+                assert!(tx.send(TerminalFrameCommand::Output {
+                    session_id: "other".to_string(),
+                    data: b"x".to_vec(),
+                    encoding: "UTF-8".to_string(),
+                    scrollback_limit: 1000,
+                }));
+                let chunk_started = Instant::now();
+                let done = job.process_chunk(&session).unwrap();
+                max_chunk = max_chunk.max(chunk_started.elapsed());
+                assert!(matches!(
+                    rx.try_recv(),
+                    Some(TerminalFrameCommand::Output { .. })
+                ));
+                max_output_wait = max_output_wait.max(chunk_started.elapsed());
+                chunks += 1;
+                if done {
+                    break;
+                }
+            }
+            eprintln!(
+                "find benchmark: lines={lines} case={label} chunks={chunks} total={:?} max_chunk={max_chunk:?} max_queued_output_wait={max_output_wait:?}",
+                started.elapsed()
+            );
+        }
     }
 }
 

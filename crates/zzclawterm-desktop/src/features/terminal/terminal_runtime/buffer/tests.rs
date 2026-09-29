@@ -5,6 +5,7 @@ use crate::models::{
     TerminalWorkPolicy,
 };
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use zzclawterm_terminal::{TerminalClipboardLoad, TerminalEffects};
 
 use super::{
@@ -13,7 +14,7 @@ use super::{
     TERMINAL_FRAME_INPUT_WAKE_EVENT_DRAIN_WALL_BUDGET, TerminalFrameSearchKeys,
     TerminalSurfaceFrameNotify, limit_osc52_clipboard_reply_text,
     queue_osc52_clipboard_load_replies, terminal_apply_search_result_to_view,
-    terminal_effects_need_ui_apply, terminal_local_log_text,
+    terminal_effects_need_ui_apply, terminal_find_request_still_pending, terminal_local_log_text,
     terminal_output_frame_needs_chrome_notify, terminal_output_frame_surface_notify,
     terminal_search_frame_apply_result, terminal_selected_occurrence_frame_is_current,
     terminal_snapshot_priority_session_ids, terminal_window_node_visible_tab_ids,
@@ -28,6 +29,36 @@ fn search_key(query: &str) -> TerminalFrameSearchKey {
         limit: 1000,
         request_generation: 0,
     }
+}
+
+#[test]
+fn dropped_find_request_becomes_retryable_and_old_revision_does_not_block() {
+    let key = search_key("needle");
+    let now = Instant::now();
+    assert!(terminal_find_request_still_pending(
+        Some(&key),
+        7,
+        Some(now),
+        &key,
+        7,
+        now
+    ));
+    assert!(!terminal_find_request_still_pending(
+        Some(&key),
+        7,
+        Some(now),
+        &key,
+        7,
+        now + Duration::from_millis(500),
+    ));
+    assert!(!terminal_find_request_still_pending(
+        Some(&key),
+        7,
+        Some(now),
+        &key,
+        8,
+        now
+    ));
 }
 
 #[test]

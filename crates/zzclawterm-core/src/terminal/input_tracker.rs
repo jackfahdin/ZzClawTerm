@@ -109,11 +109,25 @@ fn clamp_cursor(value: &str, cursor: usize) -> usize {
     cursor.min(value.len())
 }
 
+/// Upper bound for the locally tracked input line.
+///
+/// Every keystroke re-derives the tracked command (prompt stripping, suggestion
+/// pattern length, history registration), so an unbounded value turns typing
+/// inside a full-screen program into quadratic work on the UI thread. Past the
+/// bound the tracker stops accumulating and reports itself desynced, which the
+/// suggestion, history and smart-input paths already treat as "not a command
+/// line".
+pub const MAX_TRACKED_INPUT_BYTES: usize = 4096;
+
 fn insert_text(state: &mut TerminalInputState, text: &str) {
     if text.is_empty() {
         return;
     }
     let cursor = clamp_cursor(&state.value, state.cursor);
+    if state.value.len().saturating_add(text.len()) > MAX_TRACKED_INPUT_BYTES {
+        mark_desynced(state, "too_long");
+        return;
+    }
     state.value.insert_str(cursor, text);
     state.cursor = cursor + text.len();
     state.multiline |= text.contains(['\n', '\r']);
@@ -508,11 +522,11 @@ pub fn resync_from_terminal_line(
 #[cfg(test)]
 mod tests {
     use super::{
-        TerminalInputState, apply_terminal_input_data, apply_terminal_input_data_in_place,
-        build_move_input_cursor_data, can_suggest_from_tracked_command, can_suggest_from_tracker,
-        delete_terminal_input_range, get_tracked_command, get_tracked_submission_command,
-        resync_from_terminal_line, sanitize_terminal_command,
-        terminal_input_tracker_below_min_chars,
+        MAX_TRACKED_INPUT_BYTES, TerminalInputState, apply_terminal_input_data,
+        apply_terminal_input_data_in_place, build_move_input_cursor_data,
+        can_suggest_from_tracked_command, can_suggest_from_tracker, delete_terminal_input_range,
+        get_tracked_command, get_tracked_submission_command, resync_from_terminal_line,
+        sanitize_terminal_command, terminal_input_tracker_below_min_chars,
     };
 
     #[test]
@@ -570,6 +584,26 @@ mod tests {
         state = apply_terminal_input_data(&state, "g");
         assert!(terminal_input_tracker_below_min_chars(&state, 2));
         assert!(!terminal_input_tracker_below_min_chars(&state, 1));
+    }
+
+    #[test]
+    fn oversized_tracked_input_stops_tracking_instead_of_growing() {
+        let mut state = TerminalInputState::new();
+        let mut typed = 0usize;
+        while typed <= MAX_TRACKED_INPUT_BYTES {
+            apply_terminal_input_data_in_place(&mut state, "1");
+            typed += 1;
+        }
+
+        assert_eq!(state.value.len(), MAX_TRACKED_INPUT_BYTES);
+        assert!(state.desynced);
+        assert_eq!(state.desync_reason, Some("too_long"));
+        assert!(!can_suggest_from_tracker(&state));
+        assert!(get_tracked_submission_command(&state).is_empty());
+        // A fresh line after Enter must track normally again.
+        apply_terminal_input_data_in_place(&mut state, "\r");
+        apply_terminal_input_data_in_place(&mut state, "ls");
+        assert_eq!(get_tracked_command(&state), "ls");
     }
 
     #[test]

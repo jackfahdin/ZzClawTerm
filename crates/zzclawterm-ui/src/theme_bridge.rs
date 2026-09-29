@@ -6,6 +6,7 @@ use gpui::{App, Font, Global, Hsla, Pixels, font, hsla, px, rgb, transparent_bla
 use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme, ThemeMode, ThemeTokens};
 
+use crate::root::refresh_zzclaw_root_fonts;
 use crate::theme::ThemePalette;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +76,7 @@ pub fn apply_component_theme(
 
     let ui_font_family = ui_font.family.clone();
     cx.set_global(ComponentTypography {
-        font: ui_font,
+        font: ui_font.clone(),
         font_size: ui_font_size,
     });
 
@@ -231,6 +232,7 @@ pub fn apply_component_theme(
     // keeps whatever projection the last `Theme::change` built - which happens
     // only on a light/dark flip, from the built-in palette rather than ours.
     Theme::sync_base(cx);
+    refresh_zzclaw_root_fonts(ui_font, cx);
 }
 
 #[cfg(test)]

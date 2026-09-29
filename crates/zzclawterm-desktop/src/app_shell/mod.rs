@@ -582,17 +582,22 @@ impl AppShell {
     }
 
     pub fn request_new_window(&mut self, cx: &mut Context<Self>) {
-        if let Err(error) = self.controller.update(cx, |controller, cx| {
-            controller.open_workspace(
-                zzclawterm_core::OpenWorkspaceRequest {
-                    layout_source_workspace_id: Some(self.workspace_id),
-                    ..Default::default()
-                },
-                cx,
-            )
-        }) {
-            tracing::error!(%error, "failed to open a new ZzClawTerm window");
-        }
+        let controller = self.controller.clone();
+        let workspace_id = self.workspace_id;
+        // The controller reads this shell to seed the new window's layout.
+        cx.defer(move |cx| {
+            if let Err(error) = controller.update(cx, |controller, cx| {
+                controller.open_workspace(
+                    zzclawterm_core::OpenWorkspaceRequest {
+                        layout_source_workspace_id: Some(workspace_id),
+                        ..Default::default()
+                    },
+                    cx,
+                )
+            }) {
+                tracing::error!(%error, "failed to open a new ZzClawTerm window");
+            }
+        });
     }
 
     pub(super) fn request_application_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {

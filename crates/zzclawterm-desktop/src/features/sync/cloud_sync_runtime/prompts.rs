@@ -30,7 +30,7 @@ impl ZzClawTermApp {
             return;
         }
         if cloud_sync_restore_is_blocked(
-            self.session.active_id().is_some(),
+            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
             self.session.start_has_pending(),
         ) {
             self.shell
@@ -74,7 +74,7 @@ impl ZzClawTermApp {
             return;
         }
         if cloud_sync_restore_is_blocked(
-            self.session.active_id().is_some(),
+            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
             self.session.start_has_pending(),
         ) {
             self.shell
@@ -102,7 +102,7 @@ impl ZzClawTermApp {
             return;
         }
         if cloud_sync_restore_is_blocked(
-            self.session.active_id().is_some(),
+            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
             self.session.start_has_pending(),
         ) {
             self.shell

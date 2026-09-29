@@ -3,7 +3,7 @@ use rust_i18n::t;
 use futures::StreamExt as _;
 use gpui::{ClipboardItem, Context, IntoElement, SharedString, Window, div, prelude::*, px, rgb};
 use zzclawterm_core::TranslationSettings;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 use zzclawterm_ui::ZzClawScrollable;
 
@@ -53,7 +53,7 @@ impl ZzClawTermApp {
         snapshot: TranslationSettings,
         cx: &mut Context<Self>,
     ) {
-        let request = store_request(StoreDomain::Settings, move |store| {
+        let request = zzclawterm_store::store_mutation(StoreDomain::Settings, move |store| {
             store.save_translation_settings(snapshot)
         });
         let task = match self.store_ui.try_submit(generation, request) {

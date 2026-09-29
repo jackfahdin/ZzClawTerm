@@ -51,6 +51,8 @@ pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 2;
 pub enum CloudSyncError {
     #[error("cloud sync is disabled")]
     Disabled,
+    #[error("automatic cloud pull was deferred because a session or settings editor is active")]
+    AutoPullDeferred,
     #[error("cloud sync conflict detected: {}", .0.message)]
     Conflict(Box<CloudConflictPreview>),
     #[error("remote snapshot is newer than local state; pull first")]
@@ -352,13 +354,10 @@ pub fn push_snapshot_with_remote(
     snapshot.recalculate_hash()?;
     let local_hash = snapshot.meta.payload_hash.clone();
     let latest = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
-
-    if let Some(remote_pointer) = &latest
-        && remote_pointer.payload_hash == local_hash
-    {
+    let remote_snapshot = if let Some(remote_pointer) = &latest {
         match protocol::resolve_remote_snapshot(local_store, remote, options, remote_pointer)? {
-            protocol::RemoteSnapshotResolution::Current(_)
-            | protocol::RemoteSnapshotResolution::LegacyMigrated(_) => {}
+            protocol::RemoteSnapshotResolution::Current(snapshot)
+            | protocol::RemoteSnapshotResolution::LegacyMigrated(snapshot) => Some(snapshot),
             protocol::RemoteSnapshotResolution::Inconsistent {
                 pointer,
                 recovery_candidate,
@@ -368,11 +367,20 @@ pub fn push_snapshot_with_remote(
                         remote.provider(),
                         &local_hash,
                         &pointer,
-                        &recovery_candidate,
+                        recovery_candidate.as_ref(),
                     ),
                 )));
             }
         }
+    } else {
+        None
+    };
+
+    if let Some(remote_pointer) = &latest
+        && remote_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.meta.payload_hash == local_hash)
+    {
         next_state.last_synced_payload_hash = Some(local_hash);
         next_state.last_applied_remote_revision = Some(remote_pointer.revision_id.clone());
         next_state.last_checked_at_ms = Some(current_time_ms());
@@ -400,6 +408,20 @@ pub fn push_snapshot_with_remote(
         .last_synced_payload_hash
         .as_deref()
         .is_none_or(|hash| hash != local_hash);
+
+    if !remote_changed && !local_changed {
+        next_state.last_checked_at_ms = Some(current_time_ms());
+        let result = result(
+            next_state,
+            remote.provider(),
+            "Cloud sync is already up to date",
+            latest,
+            None,
+            CloudSyncOutcome::UpToDate,
+        );
+        local_store.persist_cloud_sync_state(&result.state)?;
+        return Ok(result);
+    }
 
     if remote_changed && !force {
         let remote_pointer = latest.expect("remote changed requires remote pointer");
@@ -459,6 +481,17 @@ pub fn pull_snapshot_with_remote(
     state: &CloudSyncState,
     force: bool,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    pull_snapshot_with_remote_guarded(local_store, options, remote, state, force, &|| Ok(()))
+}
+
+pub fn pull_snapshot_with_remote_guarded(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    force: bool,
+    before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+) -> Result<CloudSyncResult, CloudSyncError> {
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
     let latest = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?
@@ -479,7 +512,7 @@ pub fn pull_snapshot_with_remote(
                         remote.provider(),
                         &local_snapshot.meta.payload_hash,
                         &pointer,
-                        &recovery_candidate,
+                        recovery_candidate.as_ref(),
                     ),
                 )));
             }
@@ -487,8 +520,8 @@ pub fn pull_snapshot_with_remote(
     next_state.last_validated_remote_revision = Some(latest.revision_id.clone());
     next_state.last_full_validation_at_ms = Some(current_time_ms());
 
-    if latest.payload_hash == local_snapshot.meta.payload_hash {
-        next_state.last_synced_payload_hash = Some(latest.payload_hash.clone());
+    if remote_snapshot.meta.payload_hash == local_snapshot.meta.payload_hash {
+        next_state.last_synced_payload_hash = Some(local_snapshot.meta.payload_hash.clone());
         next_state.last_applied_remote_revision = Some(latest.revision_id.clone());
         next_state.last_checked_at_ms = Some(current_time_ms());
         let result = result(
@@ -522,13 +555,29 @@ pub fn pull_snapshot_with_remote(
         return Err(CloudSyncError::Conflict(Box::new(conflict)));
     }
     if !remote_changed && !force {
-        return Err(CloudSyncError::NoNewerRemoteSnapshot);
+        if local_changed {
+            return Err(CloudSyncError::NoNewerRemoteSnapshot);
+        }
+        next_state.last_checked_at_ms = Some(current_time_ms());
+        let result = result(
+            next_state,
+            remote.provider(),
+            "Cloud sync is already up to date",
+            Some(latest),
+            None,
+            CloudSyncOutcome::UpToDate,
+        );
+        local_store.persist_cloud_sync_state(&result.state)?;
+        return Ok(result);
     }
 
+    before_apply()?;
     let snapshot = remote_snapshot;
     let backup = local_store.apply_sync_snapshot(options, &snapshot)?;
+    let mut applied_snapshot = local_store.build_sync_snapshot(options)?;
+    applied_snapshot.recalculate_hash()?;
     let _ = protocol::write_current_sync_snapshot_compat(local_store, remote, options, &snapshot);
-    next_state.last_synced_payload_hash = Some(snapshot.meta.payload_hash.clone());
+    next_state.last_synced_payload_hash = Some(applied_snapshot.meta.payload_hash);
     next_state.last_applied_remote_revision = Some(snapshot.meta.revision_id.clone());
     next_state.last_synced_at_ms = Some(current_time_ms());
     next_state.last_checked_at_ms = Some(current_time_ms());
@@ -561,11 +610,13 @@ pub fn recover_current_snapshot_with_remote(
     ensure_remote_layout(remote, &options.remote_root)?;
     let snapshot = protocol::recover_current_remote_snapshot(local_store, remote, options)?;
     let backup = local_store.apply_sync_snapshot(options, &snapshot)?;
+    let mut applied_snapshot = local_store.build_sync_snapshot(options)?;
+    applied_snapshot.recalculate_hash()?;
     let pointer = protocol::pointer_from_snapshot(&snapshot);
     let now = current_time_ms();
     let state = CloudSyncState {
         device_id: options.device_id.clone(),
-        last_synced_payload_hash: Some(pointer.payload_hash.clone()),
+        last_synced_payload_hash: Some(applied_snapshot.meta.payload_hash),
         last_applied_remote_revision: Some(pointer.revision_id.clone()),
         last_checked_at_ms: Some(now),
         last_synced_at_ms: Some(now),
@@ -591,6 +642,64 @@ pub fn load_sync_pointer(
 ) -> Result<Option<RemoteSyncPointer>, CloudSyncError> {
     let remote = LocalDirectoryRemote::new(options.remote_dir.clone());
     load_sync_pointer_from_remote(local_store, &remote, &options.remote_root)
+}
+
+pub fn check_local_snapshot(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    state: &CloudSyncState,
+    allow_auto_pull: bool,
+) -> Result<(CloudRemoteCheckDecision, Option<RemoteSyncPointer>), CloudSyncError> {
+    let remote = LocalDirectoryRemote::new(options.remote_dir.clone());
+    check_snapshot_with_remote(local_store, options, &remote, state, allow_auto_pull)
+}
+
+pub fn check_snapshot_with_remote(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    allow_auto_pull: bool,
+) -> Result<(CloudRemoteCheckDecision, Option<RemoteSyncPointer>), CloudSyncError> {
+    ensure_enabled(options)?;
+    let mut local = local_store.build_sync_snapshot(options)?;
+    local.recalculate_hash()?;
+    let pointer = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
+    let Some(pointer) = pointer else {
+        return Ok((CloudRemoteCheckDecision::LocalChanged, None));
+    };
+    let remote_snapshot =
+        match protocol::resolve_remote_snapshot(local_store, remote, options, &pointer)? {
+            protocol::RemoteSnapshotResolution::Current(snapshot)
+            | protocol::RemoteSnapshotResolution::LegacyMigrated(snapshot) => snapshot,
+            protocol::RemoteSnapshotResolution::Inconsistent {
+                pointer,
+                recovery_candidate,
+            } => {
+                return Err(CloudSyncError::Conflict(Box::new(
+                    remote_inconsistent_preview(
+                        remote.provider(),
+                        &local.meta.payload_hash,
+                        &pointer,
+                        recovery_candidate.as_ref(),
+                    ),
+                )));
+            }
+        };
+    let decision = if remote_snapshot.meta.payload_hash == local.meta.payload_hash {
+        CloudRemoteCheckDecision::UpToDate
+    } else {
+        decide_cloud_remote_check(state, &local.meta.payload_hash, &pointer, allow_auto_pull)
+    };
+    if decision == CloudRemoteCheckDecision::Conflict {
+        return Err(CloudSyncError::Conflict(Box::new(conflict_preview(
+            options,
+            remote.provider(),
+            &local.meta.payload_hash,
+            &pointer,
+        ))));
+    }
+    Ok((decision, Some(pointer)))
 }
 
 pub fn load_sync_pointer_from_remote(
@@ -662,7 +771,7 @@ fn remote_inconsistent_preview(
     provider: &str,
     local_hash: &str,
     pointer: &RemoteSyncPointer,
-    recovery_candidate: &RawPortableSnapshot,
+    recovery_candidate: Option<&RawPortableSnapshot>,
 ) -> CloudConflictPreview {
     CloudConflictPreview {
         detected_at_ms: current_time_ms(),
@@ -673,11 +782,14 @@ fn remote_inconsistent_preview(
         remote_revision: pointer.revision_id.clone(),
         remote_created_at_ms: pointer.created_at_ms,
         remote_device_id: pointer.device_id.clone(),
-        recovery_revision: Some(recovery_candidate.meta.revision_id.clone()),
-        recovery_payload_hash: Some(recovery_candidate.meta.payload_hash.clone()),
-        recovery_created_at_ms: Some(recovery_candidate.meta.created_at_ms),
-        message: "Remote cloud sync metadata is incomplete. The latest pointer references a missing snapshot, but current.redb.enc contains a recoverable snapshot."
-            .to_string(),
+        recovery_revision: recovery_candidate.map(|candidate| candidate.meta.revision_id.clone()),
+        recovery_payload_hash: recovery_candidate.map(|candidate| candidate.meta.payload_hash.clone()),
+        recovery_created_at_ms: recovery_candidate.map(|candidate| candidate.meta.created_at_ms),
+        message: if recovery_candidate.is_some() {
+            "Remote cloud sync metadata is inconsistent. A different current snapshot is available for explicit recovery."
+        } else {
+            "Remote cloud sync metadata is inconsistent and no valid current snapshot is available."
+        }.to_string(),
     }
 }
 

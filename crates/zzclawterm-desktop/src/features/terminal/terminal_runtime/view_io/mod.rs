@@ -1217,14 +1217,15 @@ impl ZzClawTermApp {
                 crate::features::terminal::terminal_surface::terminal_snapshot_absolute_range(
                     &snapshot,
                 );
-            let active_match_abs = search_matches
+            let occurrences = self.terminal_buffer_occurrence_ranges();
+            let active_range = occurrences
                 .get(
                     self.terminal
                         .search
                         .active_index
-                        .min(search_matches.len().saturating_sub(1)),
+                        .min(occurrences.len().saturating_sub(1)),
                 )
-                .map(|search_match| search_match.line_index);
+                .cloned();
             let visible_matches = crate::features::terminal::terminal_search_runtime::terminal_matches_in_absolute_range(
                 &search_matches,
                 abs_start..abs_end,
@@ -1240,13 +1241,9 @@ impl ZzClawTermApp {
                     .entry(view_row)
                     .or_default()
                     .push(range);
-                if Some(abs) == active_match_abs
-                    && match_index
-                        == self
-                            .terminal
-                            .search
-                            .active_index
-                            .min(search_matches.len().saturating_sub(1))
+                if active_range
+                    .as_ref()
+                    .is_some_and(|active| active.contains(&match_index))
                 {
                     active_search_ranges_by_line
                         .entry(view_row)

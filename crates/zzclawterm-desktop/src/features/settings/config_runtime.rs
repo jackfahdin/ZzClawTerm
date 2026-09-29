@@ -439,7 +439,7 @@ impl ZzClawTermApp {
                         tracing::info!(operation = "portable_snapshot_import", "started");
                         let task =
                             scheduler.submit_task("portable-snapshot-import", move |_| match store
-                                .request_fn(StoreDomain::Settings, move |database| {
+                                .request_mutation_fn(StoreDomain::Settings, move |database| {
                                     database.import_encrypted_portable_snapshot_into_open_store(
                                         &path,
                                         master_password.expose_secret(),

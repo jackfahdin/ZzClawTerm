@@ -14,6 +14,16 @@ use zzclawterm_core::{
 };
 
 impl ConnectionStore {
+    pub fn load_cloud_sync_master_password(
+        &self,
+    ) -> Result<Option<zzclawterm_core::SecretString>, StorageError> {
+        let Some(token) = self.load_encrypted_master_password()? else {
+            return Ok(None);
+        };
+        let bootstrap = CredentialCrypto::new(self.portable_key_path.clone(), None);
+        Ok(Some(bootstrap.decrypt_settings_secret(&token)?.into()))
+    }
+
     pub fn load_cloud_sync_state(&self) -> Result<CloudSyncState, StorageError> {
         let mut state = if let Some(state) =
             self.read_json_table::<CloudSyncState>(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC_STATE)?

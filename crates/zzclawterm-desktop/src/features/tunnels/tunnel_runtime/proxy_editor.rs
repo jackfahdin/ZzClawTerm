@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use gpui::{Context, Window};
 use zzclawterm_core::{ProxyConfig, uuid};
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use super::helpers::parse_port;
 use crate::features::ZzClawTermApp;
@@ -229,7 +229,7 @@ impl ZzClawTermApp {
         let persisted = next_proxies.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_proxies(&persisted)
             }),
             move |this, event, cx| {

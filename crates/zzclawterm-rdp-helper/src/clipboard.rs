@@ -291,7 +291,7 @@ impl ClipboardBridge {
         }
     }
 
-    fn advertise_current(&self) {
+    fn current_advertisement(&self) -> ClipboardMessage {
         if self.file_available.load(Ordering::SeqCst)
             && let Some(paths) = read_clipboard_paths().filter(|paths| !paths.is_empty())
             && let Ok(snapshot) = build_local_snapshot(&paths)
@@ -302,12 +302,29 @@ impl ClipboardBridge {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .set_local_snapshot(snapshot, hash);
-            self.send_clipboard_message(ClipboardMessage::SendInitiateFileCopy(descriptors));
-        } else if !self.local_text().is_empty() {
-            self.send_clipboard_message(ClipboardMessage::SendInitiateCopy(vec![
-                ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT),
-            ]));
+            ClipboardMessage::SendInitiateFileCopy(descriptors)
+        } else {
+            self.initial_advertisement()
         }
+    }
+
+    fn initial_advertisement(&self) -> ClipboardMessage {
+        let formats = if self.local_text().is_empty() {
+            Vec::new()
+        } else {
+            vec![ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)]
+        };
+        ClipboardMessage::SendInitiateCopy(formats)
+    }
+
+    fn advertise_initial(&self) {
+        // The initial CLIPRDR FormatList is required even when the clipboard is empty.
+        // File copy is valid only after IronRDP receives the FormatList response.
+        self.send_clipboard_message(self.initial_advertisement());
+    }
+
+    fn advertise_current(&self) {
+        self.send_clipboard_message(self.current_advertisement());
     }
 }
 
@@ -334,12 +351,12 @@ impl CliprdrBackend for TextClipboardBackend {
     }
 
     fn on_ready(&mut self) {
-        self.on_request_format_list();
+        self.bridge.advertise_current();
         self.bridge.start_watcher();
     }
 
     fn on_request_format_list(&mut self) {
-        self.bridge.advertise_current();
+        self.bridge.advertise_initial();
     }
 
     fn on_process_negotiated_capabilities(
@@ -569,8 +586,8 @@ impl CliprdrBackend for TextClipboardBackend {
 mod tests {
     use std::sync::mpsc;
 
-    use ironrdp_cliprdr::backend::CliprdrBackend;
-    use ironrdp_cliprdr::pdu::ClipboardGeneralCapabilityFlags;
+    use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend};
+    use ironrdp_cliprdr::pdu::{ClipboardFormatId, ClipboardGeneralCapabilityFlags};
 
     use super::{ClipboardBridge, TextClipboardBackend};
     use zzclawterm_remote_desktop::MAX_CLIPBOARD_TEXT_BYTES;
@@ -587,6 +604,39 @@ mod tests {
                 .is_err()
         );
         assert_eq!(bridge.local_text(), "hello");
+    }
+
+    #[test]
+    fn initial_clipboard_advertisement_includes_an_empty_format_list() {
+        let (output_tx, _output_rx) = mpsc::sync_channel(1);
+        let bridge = ClipboardBridge::new("session".to_string(), output_tx, false);
+        assert!(matches!(
+            bridge.current_advertisement(),
+            ClipboardMessage::SendInitiateCopy(formats) if formats.is_empty()
+        ));
+
+        bridge.set_local_text("hello".to_string()).unwrap();
+        assert!(matches!(
+            bridge.current_advertisement(),
+            ClipboardMessage::SendInitiateCopy(formats)
+                if formats.len() == 1 && formats[0].id() == ClipboardFormatId::CF_UNICODETEXT
+        ));
+    }
+
+    #[test]
+    fn initial_advertisement_uses_text_format_even_with_file_capability() {
+        let (output_tx, _output_rx) = mpsc::sync_channel(1);
+        let bridge = ClipboardBridge::new("session".to_string(), output_tx, true);
+        bridge.set_local_text("hello".to_string()).unwrap();
+        bridge
+            .file_available
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(matches!(
+            bridge.initial_advertisement(),
+            ClipboardMessage::SendInitiateCopy(formats)
+                if formats.len() == 1 && formats[0].id() == ClipboardFormatId::CF_UNICODETEXT
+        ));
     }
 
     #[test]

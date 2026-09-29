@@ -14,8 +14,10 @@ gpui-kit.workspace = true
 gpui_platform.workspace = true
 zzclawterm-core.workspace = true
 zzclawterm-desktop.workspace = true
+zzclawterm-store.workspace = true
 zzclawterm-ui.workspace = true
 rust-embed.workspace = true
+serde_json.workspace = true
 
 tracing.workspace = true
 tracing-appender.workspace = true

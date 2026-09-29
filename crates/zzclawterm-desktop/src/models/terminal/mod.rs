@@ -1,17 +1,18 @@
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use zzclawterm_core::{
     ActionLinksMatcherSettings, TerminalBackendResize, terminal_backend_resize_changed,
 };
 use zzclawterm_terminal::{
-    TerminalEffects, TerminalLineId, TerminalOutputDecoder, TerminalScreen,
-    TerminalSearchDirection, TerminalSearchQuery, TerminalSnapshot, TerminalSnapshotBuildStats,
-    terminal_cell_col_for_byte_index, terminal_cell_count,
+    TerminalEffects, TerminalGridOccurrence, TerminalLineId, TerminalOutputDecoder, TerminalScreen,
+    TerminalSearchDirection, TerminalSearchQuery, TerminalSearchRangeMode, TerminalSnapshot,
+    TerminalSnapshotBuildStats, terminal_cell_col_for_byte_index, terminal_cell_count,
 };
 
 use crate::{
@@ -40,6 +41,15 @@ const TERMINAL_FRAME_SCROLL_WINDOW_MAX_EXTRA_ROWS: usize = 192;
 const TERMINAL_FRAME_PRIORITY_SCROLL_WINDOW_MIN_EXTRA_ROWS: usize = 64;
 const TERMINAL_FRAME_PRIORITY_SCROLL_WINDOW_MAX_EXTRA_ROWS: usize = 256;
 const TERMINAL_SCROLLBACK_SNAPSHOT_CACHE_LIMIT: usize = 16;
+
+pub(crate) fn terminal_geometry_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("ZZCLAWTERM_TERMINAL_GEOMETRY_DIAGNOSTICS")
+            .is_some_and(|value| value == "1")
+    })
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TerminalFrameActionLinks {
     pub(crate) matcher_key: u64,
@@ -121,6 +131,10 @@ pub(crate) struct TerminalFrameSearchKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TerminalFrameSearchPurpose {
     Find,
+    FindVisible {
+        absolute_start: usize,
+        absolute_end: usize,
+    },
     SelectedOccurrenceVisible {
         absolute_start: usize,
         absolute_end: usize,
@@ -133,6 +147,8 @@ pub(crate) struct TerminalFrameSearchResult {
     pub(crate) key: TerminalFrameSearchKey,
     pub(crate) revision: u64,
     pub(crate) matches: Result<Arc<[TerminalBufferMatch]>, String>,
+    pub(crate) occurrences: Arc<[Range<usize>]>,
+    pub(crate) truncated: bool,
     pub(crate) position_fingerprint: u64,
 }
 
@@ -150,7 +166,44 @@ impl TerminalFrameSearchResult {
             key,
             revision,
             matches: matches.map(Arc::from),
+            occurrences: Arc::from([]),
+            truncated: false,
             position_fingerprint,
+        }
+    }
+
+    pub(crate) fn new_find(
+        key: TerminalFrameSearchKey,
+        revision: u64,
+        occurrences: Result<Vec<TerminalGridOccurrence>, String>,
+    ) -> Self {
+        let mut truncated = false;
+        let matches = occurrences.map(|mut occurrences| {
+            truncated = occurrences.len() > key.limit;
+            occurrences.truncate(key.limit);
+            let mut segments = Vec::new();
+            let mut ranges = Vec::with_capacity(occurrences.len());
+            for occurrence in occurrences {
+                let start = segments.len();
+                segments.extend(occurrence.segments.into_iter().map(|segment| {
+                    TerminalBufferMatch {
+                        line_index: segment.line_index,
+                        start_col: segment.start_col,
+                        end_col: segment.end_col,
+                    }
+                }));
+                ranges.push(start..segments.len());
+            }
+            (segments, ranges)
+        });
+        match matches {
+            Ok((segments, ranges)) => {
+                let mut result = Self::new(key, revision, Ok(segments));
+                result.occurrences = ranges.into();
+                result.truncated = truncated;
+                result
+            }
+            Err(error) => Self::new(key, revision, Err(error)),
         }
     }
 }
@@ -653,7 +706,13 @@ pub(crate) struct TerminalViewState {
     pub(crate) pending_snapshot_offsets: HashSet<usize>,
     pub(crate) priority_pending_snapshot_offsets: HashSet<usize>,
     pub(crate) search_result: Option<TerminalFrameSearchResult>,
+    pub(crate) search_visible_result: Option<TerminalFrameSearchResult>,
     pub(crate) pending_search_key: Option<TerminalFrameSearchKey>,
+    pub(crate) pending_search_revision: u64,
+    pub(crate) pending_search_at: Option<Instant>,
+    pub(crate) pending_search_visible: Option<(TerminalFrameSearchKey, usize, usize, u64, Instant)>,
+    pub(crate) search_visible_range: Option<(usize, usize)>,
+    pub(crate) last_screen_change_at: Instant,
     pub(crate) selected_occurrence_result: Option<TerminalFrameSearchResult>,
     pub(crate) pending_selected_occurrence_key: Option<TerminalFrameSearchKey>,
     pub(crate) selected_occurrence_visible_result: Option<TerminalFrameSearchResult>,
@@ -711,7 +770,13 @@ impl TerminalViewState {
             pending_snapshot_offsets: HashSet::new(),
             priority_pending_snapshot_offsets: HashSet::new(),
             search_result: None,
+            search_visible_result: None,
             pending_search_key: None,
+            pending_search_revision: 0,
+            pending_search_at: None,
+            pending_search_visible: None,
+            search_visible_range: None,
+            last_screen_change_at: Instant::now(),
             selected_occurrence_result: None,
             pending_selected_occurrence_key: None,
             selected_occurrence_visible_result: None,
@@ -756,7 +821,13 @@ impl TerminalViewState {
             pending_snapshot_offsets: HashSet::new(),
             priority_pending_snapshot_offsets: HashSet::new(),
             search_result: None,
+            search_visible_result: None,
             pending_search_key: None,
+            pending_search_revision: 0,
+            pending_search_at: None,
+            pending_search_visible: None,
+            search_visible_range: None,
+            last_screen_change_at: Instant::now(),
             selected_occurrence_result: None,
             pending_selected_occurrence_key: None,
             selected_occurrence_visible_result: None,
@@ -889,6 +960,7 @@ impl TerminalViewState {
         let old_scrollback_len = self.scrollback_len_for_anchor();
         self.screen.advance_decoded_text(text);
         self.screen_revision = self.screen_revision.saturating_add(1);
+        self.last_screen_change_at = Instant::now();
         self.frame_snapshot = Some(self.live_snapshot_with_scroll_window());
         self.grid_resize_pending = false;
         self.frame_action_links = None;
@@ -911,6 +983,7 @@ impl TerminalViewState {
         let old_scrollback_len = self.scrollback_len_for_anchor();
         self.screen.advance(data);
         self.screen_revision = self.screen_revision.saturating_add(1);
+        self.last_screen_change_at = Instant::now();
         self.frame_snapshot = Some(self.live_snapshot_with_scroll_window());
         self.grid_resize_pending = false;
         self.frame_action_links = None;
@@ -1044,6 +1117,7 @@ impl TerminalViewState {
         self.clear_terminal_query_caches();
         self.render_cache.clear();
         self.screen_revision = revision;
+        self.last_screen_change_at = Instant::now();
         self.has_unread = false;
         self.scroll_offset = 0;
         self.has_new_while_scrolled = false;
@@ -1087,6 +1161,7 @@ impl TerminalViewState {
         self.frame_action_links = preserved_action_links;
         self.protocol_state = protocol_state;
         self.screen_revision = revision;
+        self.last_screen_change_at = Instant::now();
         self.grid_resize_pending = false;
         self.output_burst_bytes = self.output_burst_bytes.saturating_add(accepted_bytes);
         if accepted_bytes > 0 {
@@ -1117,6 +1192,7 @@ impl TerminalViewState {
         self.grid_resize_pending = false;
         if revision > self.screen_revision {
             self.screen_revision = revision;
+            self.last_screen_change_at = Instant::now();
         }
         self.anchor_scrollback_after_len_change(old_scrollback_len, new_scrollback_len);
     }
@@ -1143,6 +1219,7 @@ impl TerminalViewState {
         }
         self.protocol_state = protocol_state;
         self.screen_revision = revision;
+        self.last_screen_change_at = Instant::now();
         if skipped_output_bytes > 0 {
             self.note_skipped_output(skipped_output_bytes);
         }
@@ -1231,7 +1308,11 @@ impl TerminalViewState {
     fn clear_terminal_query_caches(&mut self) {
         self.clear_scrollback_query_caches();
         self.search_result = None;
+        self.search_visible_result = None;
         self.pending_search_key = None;
+        self.pending_search_at = None;
+        self.pending_search_visible = None;
+        self.search_visible_range = None;
         self.selected_occurrence_result = None;
         self.pending_selected_occurrence_key = None;
         self.selected_occurrence_visible_result = None;
@@ -1605,6 +1686,12 @@ impl TerminalFramePipeline {
         });
     }
 
+    pub(crate) fn cancel_find_search(&self, session_id: String) {
+        let _ = self
+            .command_tx
+            .send(TerminalFrameCommand::CancelFindSearch { session_id });
+    }
+
     pub(crate) fn set_snapshot_priority(&self, session_ids: Vec<String>) {
         let _ = self
             .command_tx
@@ -1753,6 +1840,9 @@ enum TerminalFrameCommand {
         purpose: TerminalFrameSearchPurpose,
         key: TerminalFrameSearchKey,
     },
+    CancelFindSearch {
+        session_id: String,
+    },
     /// Prefer building full viewport snapshots for these sessions (visible tabs).
     /// Empty list means no session is paint-priority (all background).
     SetSnapshotPriority {
@@ -1765,7 +1855,7 @@ enum TerminalFrameCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalFrameSnapshotPurpose {
+pub(crate) enum TerminalFrameSnapshotPurpose {
     Paint,
     ActionLinkEnrichment,
 }
@@ -2060,6 +2150,7 @@ pub(crate) struct TerminalFrameSnapshotEvent {
     pub(crate) snapshot: Arc<TerminalSnapshot>,
     pub(crate) action_links: Option<TerminalFrameActionLinks>,
     pub(crate) revision: u64,
+    pub(crate) purpose: TerminalFrameSnapshotPurpose,
     pub(crate) snapshot_duration: Duration,
     pub(crate) snapshot_stats: TerminalSnapshotBuildStats,
     pub(crate) action_link_stats: TerminalActionLinkBuildStats,
@@ -2302,6 +2393,7 @@ impl TerminalFrameSession {
             snapshot,
             action_links: None,
             revision: self.revision,
+            purpose: TerminalFrameSnapshotPurpose::Paint,
             snapshot_duration,
             snapshot_stats,
             action_link_stats: TerminalActionLinkBuildStats::default(),
@@ -2392,6 +2484,7 @@ impl TerminalFrameSession {
         action_links_enabled: bool,
         action_link_matchers: ActionLinksMatcherSettings,
         priority: bool,
+        purpose: TerminalFrameSnapshotPurpose,
     ) -> TerminalFrameSnapshotEvent {
         let started_at = Instant::now();
         let (snapshot, snapshot_duration, snapshot_stats) = if priority {
@@ -2431,6 +2524,7 @@ impl TerminalFrameSession {
             snapshot,
             action_links,
             revision: self.revision,
+            purpose,
             snapshot_duration,
             snapshot_stats,
             action_link_stats,
@@ -2453,6 +2547,30 @@ impl TerminalFrameSession {
             direction: TerminalSearchDirection::Forward,
             limit: key.limit,
         };
+        if let TerminalFrameSearchPurpose::FindVisible {
+            absolute_start,
+            absolute_end,
+        } = purpose
+        {
+            let visible_query = TerminalSearchQuery {
+                limit: key.limit.saturating_add(1),
+                ..query
+            };
+            let occurrences = self
+                .screen
+                .search_grid_occurrences_in_absolute_range(
+                    &visible_query,
+                    absolute_start..absolute_end,
+                    TerminalSearchRangeMode::Intersects,
+                )
+                .map_err(|error| error.to_string());
+            return TerminalFrameSearchEvent {
+                session_id,
+                purpose,
+                result: TerminalFrameSearchResult::new_find(key, self.revision, occurrences),
+                process_duration: started_at.elapsed(),
+            };
+        }
         let matches = match purpose {
             TerminalFrameSearchPurpose::SelectedOccurrenceVisible {
                 absolute_start,
@@ -2463,6 +2581,7 @@ impl TerminalFrameSession {
             TerminalFrameSearchPurpose::Find | TerminalFrameSearchPurpose::SelectedOccurrence => {
                 self.screen.search_grid(&query)
             }
+            TerminalFrameSearchPurpose::FindVisible { .. } => unreachable!(),
         }
         .map(|matches| {
             matches
@@ -2485,6 +2604,103 @@ impl TerminalFrameSession {
 }
 
 const SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS: usize = 256;
+
+#[derive(Debug)]
+struct FindSearchJob {
+    session_id: String,
+    key: TerminalFrameSearchKey,
+    query: TerminalSearchQuery,
+    revision: u64,
+    total_rows: usize,
+    next_absolute_row: usize,
+    occurrences: Vec<TerminalGridOccurrence>,
+    started_at: Instant,
+}
+
+impl FindSearchJob {
+    fn new(
+        session_id: String,
+        key: TerminalFrameSearchKey,
+        session: &TerminalFrameSession,
+    ) -> Self {
+        let query = TerminalSearchQuery {
+            pattern: key.query.clone(),
+            regex: key.regex,
+            case_sensitive: key.case_sensitive,
+            whole_word: key.whole_word,
+            direction: TerminalSearchDirection::Forward,
+            limit: key.limit.saturating_add(1),
+        };
+        Self {
+            session_id,
+            key,
+            query,
+            revision: session.revision,
+            total_rows: session.screen.total_rows(),
+            next_absolute_row: 0,
+            occurrences: Vec::new(),
+            started_at: Instant::now(),
+        }
+    }
+
+    fn event(
+        self,
+        occurrences: Result<Vec<TerminalGridOccurrence>, String>,
+    ) -> TerminalFrameSearchEvent {
+        TerminalFrameSearchEvent {
+            session_id: self.session_id,
+            purpose: TerminalFrameSearchPurpose::Find,
+            result: TerminalFrameSearchResult::new_find(self.key, self.revision, occurrences),
+            process_duration: self.started_at.elapsed(),
+        }
+    }
+
+    fn process_chunk(
+        &mut self,
+        session: &TerminalFrameSession,
+    ) -> Result<bool, zzclawterm_terminal::TerminalSearchError> {
+        let end = self
+            .next_absolute_row
+            .saturating_add(SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS)
+            .min(self.total_rows);
+        let found = session.screen.search_grid_occurrences_in_absolute_range(
+            &self.query,
+            self.next_absolute_row..end,
+            TerminalSearchRangeMode::StartsWithin,
+        )?;
+        self.occurrences.extend(found);
+        self.next_absolute_row = end;
+        Ok(end >= self.total_rows || self.occurrences.len() > self.key.limit)
+    }
+}
+
+fn process_next_find_search_chunk(
+    jobs: &mut VecDeque<FindSearchJob>,
+    sessions: &HashMap<String, TerminalFrameSession>,
+) -> Option<TerminalFrameSearchEvent> {
+    let mut job = jobs.pop_front()?;
+    let Some(session) = sessions.get(&job.session_id) else {
+        return Some(job.event(Err("search session was removed".to_string())));
+    };
+    if session.revision != job.revision {
+        return Some(job.event(Err("search was cancelled by terminal output".to_string())));
+    }
+    match job.process_chunk(session) {
+        Ok(true) => {
+            let occurrences = std::mem::take(&mut job.occurrences);
+            Some(job.event(Ok(occurrences)))
+        }
+        Ok(false) => {
+            jobs.push_back(job);
+            None
+        }
+        Err(error) => Some(job.event(Err(error.to_string()))),
+    }
+}
+
+fn cancel_find_search_job_for_session(jobs: &mut VecDeque<FindSearchJob>, session_id: &str) {
+    jobs.retain(|job| job.session_id != session_id);
+}
 
 #[derive(Debug)]
 struct SelectedOccurrenceSearchJob {
@@ -2998,7 +3214,7 @@ fn compact_stale_terminal_frame_commands(commands: &mut VecDeque<TerminalFrameCo
     }
     let mut seen_snapshots: HashSet<(String, usize)> = HashSet::new();
     let mut seen_priority_snapshots: HashSet<String> = HashSet::new();
-    let mut seen_searches: HashSet<(String, TerminalFrameSearchPurpose)> = HashSet::new();
+    let mut seen_searches: HashSet<(String, u8)> = HashSet::new();
     let mut kept_snapshot_priority = false;
     let mut compacted = VecDeque::with_capacity(commands.len());
 
@@ -3024,7 +3240,15 @@ fn compact_stale_terminal_frame_commands(commands: &mut VecDeque<TerminalFrameCo
                 session_id,
                 purpose,
                 ..
-            } => seen_searches.insert((session_id.clone(), *purpose)),
+            } => seen_searches.insert((
+                session_id.clone(),
+                match purpose {
+                    TerminalFrameSearchPurpose::Find => 0,
+                    TerminalFrameSearchPurpose::FindVisible { .. } => 1,
+                    TerminalFrameSearchPurpose::SelectedOccurrence => 2,
+                    TerminalFrameSearchPurpose::SelectedOccurrenceVisible { .. } => 3,
+                },
+            )),
             TerminalFrameCommand::SetSnapshotPriority { .. } => {
                 if kept_snapshot_priority {
                     false
@@ -3117,16 +3341,23 @@ fn run_terminal_frame_processor(
     let mut snapshot_priority: HashSet<String> = HashSet::new();
     let mut priority_initialized = false;
     let mut pending_commands = VecDeque::new();
+    let mut find_search_jobs = VecDeque::new();
     let mut selected_occurrence_search_jobs = VecDeque::new();
     loop {
         let mut command = try_next_terminal_frame_command(&command_rx, &mut pending_commands);
-        if command.is_none() && selected_occurrence_search_jobs.is_empty() {
+        if command.is_none()
+            && find_search_jobs.is_empty()
+            && selected_occurrence_search_jobs.is_empty()
+        {
             command = command_rx.recv();
             if command.is_none() {
                 break;
             }
         }
         let Some(command) = command else {
+            if let Some(event) = process_next_find_search_chunk(&mut find_search_jobs, &sessions) {
+                push_terminal_frame_worker_event(&event_queue, TerminalFrameEvent::Search(event));
+            }
             if let Some(event) = process_next_selected_occurrence_search_chunk(
                 &mut selected_occurrence_search_jobs,
                 &sessions,
@@ -3387,7 +3618,7 @@ fn run_terminal_frame_processor(
                 action_links_enabled,
                 action_link_matchers,
                 priority,
-                purpose: _,
+                purpose,
             } => {
                 if let Some(session) = sessions.get_mut(&session_id) {
                     let event = session.snapshot_event(
@@ -3396,6 +3627,7 @@ fn run_terminal_frame_processor(
                         action_links_enabled,
                         action_link_matchers,
                         priority,
+                        purpose,
                     );
                     push_terminal_frame_worker_event(
                         &event_queue,
@@ -3409,7 +3641,10 @@ fn run_terminal_frame_processor(
                 key,
             } => {
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    if purpose == TerminalFrameSearchPurpose::SelectedOccurrence {
+                    if purpose == TerminalFrameSearchPurpose::Find {
+                        find_search_jobs.clear();
+                        find_search_jobs.push_back(FindSearchJob::new(session_id, key, session));
+                    } else if purpose == TerminalFrameSearchPurpose::SelectedOccurrence {
                         let job = SelectedOccurrenceSearchJob::new(session_id, key, session);
                         if let Some(stale) = replace_selected_occurrence_search_job(
                             &mut selected_occurrence_search_jobs,
@@ -3421,6 +3656,10 @@ fn run_terminal_frame_processor(
                             );
                         }
                     } else {
+                        if matches!(purpose, TerminalFrameSearchPurpose::FindVisible { .. }) {
+                            find_search_jobs
+                                .retain(|job| job.session_id == session_id && job.key == key);
+                        }
                         let event = session.search_event(session_id, purpose, key);
                         push_terminal_frame_worker_event(
                             &event_queue,
@@ -3428,6 +3667,9 @@ fn run_terminal_frame_processor(
                         );
                     }
                 }
+            }
+            TerminalFrameCommand::CancelFindSearch { session_id } => {
+                cancel_find_search_job_for_session(&mut find_search_jobs, &session_id);
             }
             TerminalFrameCommand::SetSnapshotPriority { session_ids } => {
                 priority_initialized = true;

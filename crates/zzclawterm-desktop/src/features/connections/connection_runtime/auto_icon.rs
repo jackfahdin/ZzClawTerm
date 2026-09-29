@@ -6,7 +6,7 @@
 
 use gpui::Context;
 use zzclawterm_core::ConnectionType;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 use zzclawterm_transport::SystemInfo;
 
 use crate::features::{ZzClawTermApp, icons::infer_connection_icon_key_from_remote_system};
@@ -62,7 +62,7 @@ impl ZzClawTermApp {
         let icon_key = icon_key.to_string();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 store.save_connection(&persisted)?;
                 Ok(persisted)
             }),

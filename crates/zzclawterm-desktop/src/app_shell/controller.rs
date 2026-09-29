@@ -1,9 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
+use futures::future::{Either, select};
 use gpui::{
     AnyWindowHandle, AppContext as _, Context, TitlebarOptions, WeakEntity, WindowOptions, point,
     px,
@@ -24,6 +27,7 @@ use super::{
     SharedStateDomain, SharedStateEvent,
 };
 use crate::features::update::{UpdateCheckKind, UpdateEvent, UpdateStore};
+use crate::features::{AutoSyncResult, AutoSyncTrigger, run_auto_sync};
 use crate::features::{SystemTray, TraySnapshot, WorkspaceCloseSnapshot, show_tray_window};
 use crate::models::NavItem;
 
@@ -63,6 +67,99 @@ impl RecentActivationCache {
     }
 }
 
+struct AutoSyncCoordinator {
+    running: bool,
+    pending: Option<AutoSyncTrigger>,
+    next_due: Instant,
+    next_periodic: Instant,
+    last_focus: Option<Instant>,
+    mutation_generation: u64,
+    in_flight_generation: u64,
+    change_since: Option<Instant>,
+    remote_available: bool,
+    failures: usize,
+    paused: bool,
+}
+
+impl AutoSyncCoordinator {
+    fn new(mutation_generation: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            running: false,
+            pending: Some(AutoSyncTrigger::Startup),
+            next_due: now + Duration::from_secs(3),
+            next_periodic: now + Duration::from_secs(15 * 60),
+            last_focus: None,
+            mutation_generation,
+            in_flight_generation: mutation_generation,
+            change_since: None,
+            remote_available: false,
+            failures: 0,
+            paused: false,
+        }
+    }
+
+    fn settings_changed(&mut self) {
+        self.paused = false;
+        self.failures = 0;
+        if self.pending != Some(AutoSyncTrigger::Change) {
+            self.pending = Some(AutoSyncTrigger::Settings);
+            self.next_due = Instant::now();
+        }
+    }
+
+    fn focused(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_focus
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(120))
+        {
+            self.last_focus = Some(now);
+            if self.pending.is_none() {
+                self.pending = Some(AutoSyncTrigger::Focus);
+                self.next_due = now;
+            }
+        }
+    }
+}
+
+fn permanent_auto_sync_error(error: &zzclawterm_core::CloudSyncError) -> bool {
+    match error {
+        zzclawterm_core::CloudSyncError::LocalStore(message)
+            if message == "crypto" || message == "invalid_data" =>
+        {
+            true
+        }
+        zzclawterm_core::CloudSyncError::Disabled
+        | zzclawterm_core::CloudSyncError::PortableSnapshot(
+            zzclawterm_core::PortableSnapshotError::MissingMasterPassword
+            | zzclawterm_core::PortableSnapshotError::Decrypt { .. },
+        ) => true,
+        zzclawterm_core::CloudSyncError::Remote(message) => {
+            let message = message.to_ascii_lowercase();
+            [
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "invalid token",
+                "missing token",
+                "access token is required",
+                "endpoint is required",
+                "bucket is required",
+                "credential is required",
+            ]
+            .iter()
+            .any(|marker| message.contains(marker))
+        }
+        _ => false,
+    }
+}
+
+fn auto_sync_backoff(failures: usize) -> Duration {
+    Duration::from_secs([1, 5, 15, 60][failures.min(3)] * 60)
+}
+
 pub struct DesktopController {
     runtime: AppRuntime,
     startup: AppShellStartup,
@@ -83,12 +180,16 @@ pub struct DesktopController {
     update_store: gpui::Entity<UpdateStore>,
     shared_refresh_generation: u64,
     applied_shared_refresh_generation: u64,
+    auto_sync: AutoSyncCoordinator,
 }
 
 impl DesktopController {
     pub fn new(runtime: AppRuntime, mut startup: AppShellStartup, cx: &mut Context<Self>) -> Self {
         let device_windows = startup.device_windows.clone();
         let pending_bootstrap = startup.take_pending_bootstrap();
+        let mutation_generation = startup
+            .shared_store_runtime()
+            .map_or(0, |store| store.sync_mutation_generation());
         Self {
             runtime,
             session_hub: cx.new(|_| SessionHub::new()),
@@ -112,6 +213,7 @@ impl DesktopController {
             update_store: cx.new(|_| UpdateStore::new()),
             shared_refresh_generation: 0,
             applied_shared_refresh_generation: 0,
+            auto_sync: AutoSyncCoordinator::new(mutation_generation),
         }
     }
 
@@ -156,8 +258,236 @@ impl DesktopController {
         })
         .detach();
         self.start_update_runtime(cx);
+        self.start_auto_sync_runtime(cx);
         self.start_tray(cx);
         Ok(())
+    }
+
+    fn start_auto_sync_runtime(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut events) = self
+            .startup
+            .shared_store_runtime()
+            .and_then(|store| store.take_sync_mutation_events())
+        {
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = events.next().await {
+                    if this
+                        .update(cx, |controller, _| {
+                            controller.record_sync_mutation(event.generation)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this
+                    .update(cx, |controller, cx| controller.tick_auto_sync(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn record_sync_mutation(&mut self, generation: u64) {
+        if generation <= self.auto_sync.mutation_generation {
+            return;
+        }
+        self.auto_sync.mutation_generation = generation;
+        let now = Instant::now();
+        self.auto_sync.change_since = Some(now);
+        self.auto_sync.pending = Some(AutoSyncTrigger::Change);
+        self.auto_sync.next_due = now + Duration::from_secs(1);
+    }
+
+    fn tick_auto_sync(&mut self, cx: &mut Context<Self>) {
+        if self.process_quitting || self.auto_sync.running {
+            return;
+        }
+        let Some(runtime_store) = self.startup.shared_store_runtime() else {
+            return;
+        };
+        let now = Instant::now();
+        let generation = runtime_store.sync_mutation_generation();
+        if generation != self.auto_sync.mutation_generation {
+            self.record_sync_mutation(generation);
+        }
+        if now >= self.auto_sync.next_periodic {
+            self.auto_sync.next_periodic = now + Duration::from_secs(15 * 60);
+            if self.auto_sync.pending.is_none() {
+                self.auto_sync.pending = Some(AutoSyncTrigger::Periodic);
+                self.auto_sync.next_due = now;
+            }
+        }
+        if self.auto_sync.remote_available
+            && self.auto_sync.pending.is_none()
+            && !self.auto_sync.paused
+            && self.auto_sync_pull_safe(cx)
+        {
+            self.auto_sync.pending = Some(AutoSyncTrigger::DeferredPull);
+            self.auto_sync.next_due = now;
+        }
+        if self.auto_sync.paused || now < self.auto_sync.next_due {
+            return;
+        }
+        let Some(trigger) = self.auto_sync.pending.take() else {
+            return;
+        };
+        let change_elapsed = self
+            .auto_sync
+            .change_since
+            .map_or(Duration::ZERO, |since| now.duration_since(since));
+        let pull_safe = self.auto_sync_pull_safe(cx);
+        self.auto_sync.running = true;
+        self.auto_sync.in_flight_generation = self.auto_sync.mutation_generation;
+        let store = runtime_store.blocking_client();
+        let runtime = self.runtime.clone();
+        let scheduler = self.update_store.read(cx).blocking_jobs();
+        let (guard_request, guard_receiver) =
+            futures::channel::oneshot::channel::<std::sync::mpsc::SyncSender<bool>>();
+        let guard_request = Mutex::new(Some(guard_request));
+        let expired = Arc::new(AtomicBool::new(false));
+        let task_expired = expired.clone();
+        let task = scheduler.submit_task("cloud-sync-auto", move |_| {
+            let before_apply = || {
+                if task_expired.load(Ordering::Acquire) {
+                    return Err(zzclawterm_core::CloudSyncError::AutoPullDeferred);
+                }
+                let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+                guard_request
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or(zzclawterm_core::CloudSyncError::AutoPullDeferred)?
+                    .send(reply)
+                    .map_err(|_| zzclawterm_core::CloudSyncError::AutoPullDeferred)?;
+                if receiver
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap_or(false)
+                    && !task_expired.load(Ordering::Acquire)
+                {
+                    Ok(())
+                } else {
+                    Err(zzclawterm_core::CloudSyncError::AutoPullDeferred)
+                }
+            };
+            run_auto_sync(
+                &store,
+                &runtime,
+                trigger,
+                change_elapsed,
+                pull_safe,
+                &before_apply,
+            )
+        });
+        let guard_expired = expired.clone();
+        cx.spawn(async move |this, cx| {
+            if let Ok(reply) = guard_receiver.await {
+                let safe = !guard_expired.load(Ordering::Acquire)
+                    && this
+                        .update(cx, |controller, cx| {
+                            !controller.process_quitting && controller.auto_sync_pull_safe(cx)
+                        })
+                        .unwrap_or(false);
+                let _ = reply.send(safe);
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let result = match task {
+                Ok(task) => {
+                    let timeout = cx.background_executor().timer(Duration::from_secs(300));
+                    match select(Box::pin(task), Box::pin(timeout)).await {
+                        Either::Left((result, _)) => result.unwrap_or_else(|error| {
+                            Err(zzclawterm_core::CloudSyncError::Remote(error.to_string()))
+                        }),
+                        Either::Right((_, task)) => {
+                            expired.store(true, Ordering::Release);
+                            task.cancel();
+                            Err(zzclawterm_core::CloudSyncError::Io(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "automatic cloud sync exceeded 300 seconds",
+                            )))
+                        }
+                    }
+                }
+                Err(error) => Err(zzclawterm_core::CloudSyncError::Remote(error.to_string())),
+            };
+            let _ = this.update(cx, |controller, cx| {
+                controller.complete_auto_sync(trigger, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn auto_sync_pull_safe(&self, cx: &gpui::App) -> bool {
+        self.windows.values().all(|entry| {
+            entry
+                .shell
+                .upgrade()
+                .and_then(|shell| shell.read(cx).app.clone())
+                .is_some_and(|app| !app.read(cx).auto_cloud_sync_pull_blocked())
+        })
+    }
+
+    fn complete_auto_sync(
+        &mut self,
+        trigger: AutoSyncTrigger,
+        result: Result<AutoSyncResult, zzclawterm_core::CloudSyncError>,
+        cx: &mut Context<Self>,
+    ) {
+        let now = Instant::now();
+        self.auto_sync.running = false;
+        match &result {
+            Ok(AutoSyncResult::Debouncing(remaining)) => {
+                self.auto_sync.pending = Some(AutoSyncTrigger::Change);
+                self.auto_sync.next_due = now + *remaining;
+            }
+            Ok(AutoSyncResult::Busy) => {
+                self.auto_sync.pending = Some(trigger);
+                self.auto_sync.next_due = now + Duration::from_secs(5);
+            }
+            Ok(AutoSyncResult::RemoteAvailable { retry_when_safe }) => {
+                self.auto_sync.remote_available = *retry_when_safe;
+                self.auto_sync.failures = 0;
+            }
+            Ok(AutoSyncResult::Synced(_)) | Ok(AutoSyncResult::UpToDate(_)) => {
+                self.auto_sync.remote_available = false;
+                self.auto_sync.failures = 0;
+                if self.auto_sync.mutation_generation == self.auto_sync.in_flight_generation {
+                    self.auto_sync.change_since = None;
+                    if self.auto_sync.pending == Some(AutoSyncTrigger::Change) {
+                        self.auto_sync.pending = None;
+                    }
+                }
+            }
+            Err(zzclawterm_core::CloudSyncError::Conflict(_)) => {
+                self.auto_sync.remote_available = false;
+            }
+            Err(error) => {
+                self.auto_sync.paused = permanent_auto_sync_error(error);
+                let backoff = auto_sync_backoff(self.auto_sync.failures);
+                self.auto_sync.failures = self.auto_sync.failures.saturating_add(1);
+                self.auto_sync.pending = Some(AutoSyncTrigger::Retry);
+                self.auto_sync.next_due = now + backoff;
+            }
+            _ => {}
+        }
+        for entry in self.windows.values() {
+            let _ = entry.shell.update(cx, |shell, cx| {
+                if let Some(app) = shell.app.as_ref() {
+                    app.update(cx, |app, cx| app.apply_auto_cloud_sync_result(&result, cx));
+                }
+            });
+        }
     }
 
     fn start_update_runtime(&mut self, cx: &mut Context<Self>) {
@@ -754,6 +1084,7 @@ impl DesktopController {
         if self.windows.contains_key(&workspace_id) {
             self.most_recent_workspace_id = Some(workspace_id);
             self.device_windows.most_recent_workspace_id = Some(workspace_id);
+            self.auto_sync.focused();
         }
     }
 
@@ -763,6 +1094,7 @@ impl DesktopController {
         settings: AppSettingsSummary,
         cx: &mut Context<Self>,
     ) {
+        self.auto_sync.settings_changed();
         let _ = source;
         let Some(process_state) = self.process_state.clone() else {
             return;
@@ -1576,9 +1908,12 @@ fn _assert_root_type(_: gpui::WindowHandle<ZzClawRoot>) {}
 #[cfg(test)]
 mod tests {
     use super::{
-        RecentActivationCache, next_recent_after_close, normalize_new_workspace_ui,
-        should_enable_startup_screen_lock, workspace_targets_from_order,
+        AutoSyncCoordinator, RecentActivationCache, auto_sync_backoff, next_recent_after_close,
+        normalize_new_workspace_ui, permanent_auto_sync_error, should_enable_startup_screen_lock,
+        workspace_targets_from_order,
     };
+    use crate::features::AutoSyncTrigger;
+    use std::time::Duration;
     use zzclawterm_core::{ACTIVATION_QUEUE_CAPACITY, WorkspaceId, WorkspaceUiState};
 
     #[test]
@@ -1650,5 +1985,40 @@ mod tests {
     #[test]
     fn shared_state_refresh_does_not_retrigger_startup_screen_lock() {
         assert!(!should_enable_startup_screen_lock(true, true));
+    }
+
+    #[test]
+    fn auto_sync_focus_is_throttled_and_settings_resume_paused_checks() {
+        let mut sync = AutoSyncCoordinator::new(0);
+        sync.pending = None;
+        sync.focused();
+        assert_eq!(sync.pending, Some(AutoSyncTrigger::Focus));
+        sync.pending = None;
+        sync.focused();
+        assert_eq!(sync.pending, None);
+        sync.paused = true;
+        sync.failures = 3;
+        sync.settings_changed();
+        assert!(!sync.paused);
+        assert_eq!(sync.failures, 0);
+        assert_eq!(sync.pending, Some(AutoSyncTrigger::Settings));
+    }
+
+    #[test]
+    fn auto_sync_backoff_and_auth_pause_policy() {
+        assert_eq!(auto_sync_backoff(0), Duration::from_secs(60));
+        assert_eq!(auto_sync_backoff(1), Duration::from_secs(300));
+        assert_eq!(auto_sync_backoff(2), Duration::from_secs(900));
+        assert_eq!(auto_sync_backoff(3), Duration::from_secs(3_600));
+        assert_eq!(auto_sync_backoff(99), Duration::from_secs(3_600));
+        assert!(permanent_auto_sync_error(
+            &zzclawterm_core::CloudSyncError::Remote("HTTP 401 Unauthorized".into())
+        ));
+        assert!(!permanent_auto_sync_error(
+            &zzclawterm_core::CloudSyncError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "network timeout"
+            ))
+        ));
     }
 }

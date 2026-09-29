@@ -7,8 +7,8 @@ use zzclawterm_core::{
     AccountAuthError, AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType,
     AssetMetadata, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth,
     ConnectionType, ExistingFileBehavior, MainWindowBounds, MainWindowState, OtpEntry,
-    RecordingMode, RecordingRotationPolicy, SavedCredential, SearchEngineConfig, SshKey,
-    export_quick_commands_json,
+    PortableSnapshotKind, RecordingMode, RecordingRotationPolicy, SavedCredential,
+    SearchEngineConfig, SshKey, export_quick_commands_json,
 };
 
 use super::{
@@ -675,6 +675,69 @@ fn exports_and_imports_portable_snapshot() {
 }
 
 #[test]
+fn sync_snapshot_preserves_local_secrets_history_device_settings_and_unknown_fields() {
+    let source_dir = unique_temp_dir("sync-projection-source");
+    let target_dir = unique_temp_dir("sync-projection-target");
+    let source = ConnectionStore::open(&source_dir).expect("source");
+    let target = ConnectionStore::open(&target_dir).expect("target");
+    source
+        .save_settings_value(&serde_json::json!({
+            "general":{"startup_behavior":"restore"},
+            "security":{"master_password":"source-secret"},
+            "cloud_sync":{"provider":"webdav","password":"source-cloud-secret"},
+            "ui":{"language":"en-US","left_width":410},
+            "future_source":{"value":1}
+        }))
+        .expect("source settings");
+    target
+        .save_settings_value(&serde_json::json!({
+            "general":{"startup_behavior":"empty"},
+            "security":{"master_password":"local-secret"},
+            "cloud_sync":{"provider":"s3","password":"local-cloud-secret"},
+            "ui":{"language":"zh-CN","left_width":260},
+            "future_local":{"value":2}
+        }))
+        .expect("target settings");
+    source
+        .append_command_history("remote-command")
+        .expect("source history");
+    target
+        .append_command_history("local-command")
+        .expect("target history");
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+        .expect("build sync snapshot");
+    snapshot.recalculate_hash().expect("hash snapshot");
+    let exported_settings: serde_json::Value =
+        serde_json::from_str(&snapshot.entities["settings"]).expect("settings entity");
+    assert!(exported_settings.get("cloud_sync").is_none());
+    assert!(
+        exported_settings["security"]
+            .get("master_password")
+            .is_none()
+    );
+    assert!(exported_settings["ui"].get("left_width").is_none());
+    assert_eq!(snapshot.entities["history"], "[]");
+
+    target
+        .apply_raw_portable_snapshot(&snapshot)
+        .expect("apply sync");
+    let restored = target.load_settings_value().expect("restored settings");
+    assert_eq!(restored["general"]["startup_behavior"], "restore");
+    assert_eq!(restored["ui"]["language"], "en-US");
+    assert_eq!(restored["ui"]["left_width"], 260);
+    assert_eq!(restored["security"]["master_password"], "local-secret");
+    assert_eq!(restored["cloud_sync"]["password"], "local-cloud-secret");
+    assert_eq!(restored["future_local"]["value"], 2);
+    assert_eq!(restored["future_source"]["value"], 1);
+    assert_eq!(target.list_command_history(10).expect("history").len(), 1);
+    assert_eq!(
+        target.list_command_history(10).expect("history")[0].command,
+        "local-command"
+    );
+}
+
+#[test]
 fn encrypted_portable_snapshot_requires_master_password() {
     let source_dir = unique_temp_dir("portable-encrypted-source");
     let target_dir = unique_temp_dir("portable-encrypted-target");
@@ -972,6 +1035,92 @@ fn legacy_tauri_snapshot_reencrypts_settings_and_rewraps_master_key() {
     if let Some(parent) = snapshot_path.parent() {
         std::fs::remove_dir_all(parent).ok();
     }
+}
+
+#[test]
+fn legacy_tauri_cloud_pull_rewraps_vault_key_and_preserves_local_master_password() {
+    let source_dir = unique_temp_dir("legacy-cloud-source");
+    let target_dir = unique_temp_dir("legacy-cloud-target");
+    let source = ConnectionStore::open(&source_dir).expect("source");
+    source
+        .save_master_password(Some("shared-cloud-password"))
+        .expect("source master password");
+    source
+        .save_password(zzclawterm_core::SavedPassword {
+            id: "legacy-secret".into(),
+            name: "Legacy".into(),
+            username: "user".into(),
+            password: Some("vault-value".into()),
+            has_password: false,
+        })
+        .expect("source password");
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "1.2.10")
+        .expect("legacy sync snapshot");
+    snapshot.recalculate_hash().expect("hash");
+
+    let target = ConnectionStore::open(&target_dir).expect("target");
+    target
+        .save_master_password(Some("different-local-password"))
+        .expect("target master password");
+    target
+        .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-cloud-password")
+        .expect("apply legacy cloud snapshot");
+    let imported = target
+        .load_decrypted_password_by_id("legacy-secret")
+        .expect("decrypt imported password")
+        .expect("imported password");
+    assert_eq!(imported.password.as_deref(), Some("vault-value"));
+    assert!(
+        target
+            .verify_master_password("different-local-password")
+            .expect("verify local password")
+    );
+}
+
+#[test]
+fn current_gpui_cloud_pull_rewraps_vault_key_for_local_master_password() {
+    let source_dir = unique_temp_dir("gpui-cloud-source");
+    let target_dir = unique_temp_dir("gpui-cloud-target");
+    let source = ConnectionStore::open(&source_dir).expect("source");
+    source
+        .save_master_password(Some("source-password"))
+        .expect("source master password");
+    source
+        .save_password(zzclawterm_core::SavedPassword {
+            id: "shared-account".into(),
+            name: "Shared".into(),
+            username: "user".into(),
+            password: Some("shared-value".into()),
+            has_password: false,
+        })
+        .expect("source password");
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+        .expect("GPUI sync snapshot");
+    snapshot.recalculate_hash().expect("hash");
+
+    let target = ConnectionStore::open(&target_dir).expect("target");
+    target
+        .save_master_password(Some("target-password"))
+        .expect("target master password");
+    target
+        .apply_cloud_sync_snapshot(&target_dir, &snapshot, "source-password")
+        .expect("apply GPUI cloud snapshot");
+    assert_eq!(
+        target
+            .load_decrypted_password_by_id("shared-account")
+            .expect("decrypt imported password")
+            .expect("imported password")
+            .password
+            .as_deref(),
+        Some("shared-value")
+    );
+    assert!(
+        target
+            .verify_master_password("target-password")
+            .expect("verify target password")
+    );
 }
 
 #[test]
@@ -4706,6 +4855,115 @@ fn command_history_uses_legacy_table_and_normalizes_entries() {
     assert_eq!(replaced[1].use_count, 4);
 
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn command_history_merges_legacy_suggestion_rewrites_without_rewriting_raw_data() {
+    let dir = unique_temp_dir("suggestion-history-compat");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let legacy = [
+        (
+            "command_history/00000000000000000010|legacy-1",
+            "\u{05}\u{15}ps -ef",
+            2,
+            10,
+        ),
+        (
+            "command_history/00000000000000000020|legacy-2",
+            "\u{05}\u{15}\u{05}\u{15}ps -ef",
+            3,
+            20,
+        ),
+    ];
+    let txn = store.db.begin_write().expect("write transaction");
+    for (key, command, use_count, last_used_at_ms) in legacy {
+        let mut record = serde_json::json!({
+            "command": command,
+            "last_used_at_ms": last_used_at_ms,
+            "use_count": use_count,
+        });
+        if key.ends_with("legacy-2") {
+            record["future_field"] = serde_json::json!({ "keep": true });
+        }
+        write_json_in_txn(&txn, COMMAND_HISTORY_TABLE, key, &record).expect("write legacy history");
+    }
+    txn.commit().expect("commit legacy history");
+
+    let raw_before_read = store
+        .list_raw_by_prefix(COMMAND_HISTORY_TABLE, COMMAND_HISTORY_PREFIX)
+        .expect("raw history");
+    assert_eq!(raw_before_read.len(), 2);
+
+    let history = store.list_command_history(1).expect("merged history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].command, "ps -ef");
+    assert_eq!(history[0].use_count, 5);
+    assert_eq!(history[0].last_used_at_ms, 20);
+    assert_eq!(
+        store
+            .list_raw_by_prefix(COMMAND_HISTORY_TABLE, COMMAND_HISTORY_PREFIX)
+            .expect("raw history after read"),
+        raw_before_read
+    );
+
+    store
+        .append_command_history("ps -ef")
+        .expect("append canonical");
+    let history = store
+        .list_command_history(10)
+        .expect("merged after first append");
+    assert_eq!(history[0].use_count, 6);
+    assert!(history[0].last_used_at_ms >= 20);
+    assert_eq!(
+        store
+            .list_raw_by_prefix(COMMAND_HISTORY_TABLE, COMMAND_HISTORY_PREFIX)
+            .expect("raw history after append")
+            .len(),
+        3
+    );
+
+    store
+        .append_command_history("ps -ef")
+        .expect("append again");
+    let history = store.list_command_history(10).expect("merged after append");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].use_count, 7);
+
+    store
+        .delete_command_history("ps -ef")
+        .expect("delete all variants");
+    assert!(
+        store
+            .list_command_history(10)
+            .expect("history after delete")
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_raw_by_prefix(COMMAND_HISTORY_TABLE, COMMAND_HISTORY_PREFIX)
+            .expect("raw history after delete")
+            .is_empty()
+    );
+
+    store
+        .replace_command_history(&[
+            CommandHistoryEntry {
+                command: "\u{05}\u{15}ps -ef".to_string(),
+                last_used_at_ms: 30,
+                use_count: 2,
+            },
+            CommandHistoryEntry {
+                command: "ps -ef".to_string(),
+                last_used_at_ms: 40,
+                use_count: 4,
+            },
+        ])
+        .expect("import legacy backup history");
+    let imported = store.list_command_history(10).expect("imported history");
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].command, "ps -ef");
+    assert_eq!(imported[0].use_count, 6);
+    assert_eq!(imported[0].last_used_at_ms, 40);
 }
 
 pub(super) fn unique_temp_dir(name: &str) -> TestTempDir {

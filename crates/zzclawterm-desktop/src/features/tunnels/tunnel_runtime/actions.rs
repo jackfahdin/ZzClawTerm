@@ -3,7 +3,7 @@ use rust_i18n::t;
 use futures::StreamExt as _;
 use gpui::{Context, Window};
 use zzclawterm_core::TunnelConfig;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 use zzclawterm_transport::{SshTunnelConfig, SshTunnelMode};
 
 use super::helpers::network_group_label;
@@ -60,7 +60,7 @@ impl ZzClawTermApp {
         let persisted = next_tunnels.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_tunnels(&persisted)
             }),
             move |this, event, cx| {
@@ -115,7 +115,7 @@ impl ZzClawTermApp {
         let persisted = next_proxies.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_proxies(&persisted)
             }),
             move |this, event, cx| {
@@ -195,7 +195,7 @@ impl ZzClawTermApp {
         let persisted = next_tunnels.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_tunnels(&persisted)
             }),
             move |this, event, cx| {
@@ -236,7 +236,7 @@ impl ZzClawTermApp {
         let persisted = next_proxies.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Tunnels, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Tunnels, move |store| {
                 store.replace_proxies(&persisted)
             }),
             move |this, event, cx| {

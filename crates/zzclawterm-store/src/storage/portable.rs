@@ -32,7 +32,9 @@ use crate::{
     encode_encrypted_raw_portable_snapshot, encode_raw_portable_snapshot,
 };
 use semver::Version;
-use zzclawterm_core::portable_snapshot::validate_raw_snapshot;
+use zzclawterm_core::portable_snapshot::{
+    preserve_device_local_sync_settings, project_sync_settings, validate_raw_snapshot,
+};
 use zzclawterm_core::{
     AiSettings, CloudSyncSettings, CommandHistoryEntry, ConnectionType, CredentialCrypto,
     NotesSnapshot, PortableSnapshotKind, RawPortableSnapshot, SessionsConfig, SshAgentEndpoint,
@@ -46,6 +48,7 @@ impl ConnectionStore {
         &self,
         config_dir: &Path,
         snapshot: &RawPortableSnapshot,
+        snapshot_password: &str,
     ) -> Result<Option<PathBuf>, StorageError> {
         let mut current = self.build_raw_portable_snapshot(
             PortableSnapshotKind::Backup,
@@ -67,7 +70,7 @@ impl ConnectionStore {
             }
         })?;
 
-        self.apply_raw_portable_snapshot(snapshot)?;
+        self.apply_raw_portable_snapshot_with_password(snapshot, Some(snapshot_password))?;
         Ok(Some(safety_backup_path))
     }
 
@@ -355,6 +358,9 @@ impl ConnectionStore {
             &["security", "master_password"],
             serde_json::Value::Null,
         );
+        if snapshot_kind == PortableSnapshotKind::Sync {
+            project_sync_settings(&mut settings);
+        }
 
         snapshot
             .entities
@@ -426,7 +432,11 @@ impl ConnectionStore {
         );
         snapshot.entities.insert(
             "history".to_string(),
-            serde_json::to_string(&self.list_command_history(usize::MAX)?)?,
+            serde_json::to_string(&if snapshot_kind == PortableSnapshotKind::Sync {
+                Vec::new()
+            } else {
+                self.list_command_history(usize::MAX)?
+            })?,
         );
         snapshot.entities.insert(
             "master_key_token".to_string(),
@@ -513,6 +523,15 @@ impl ConnectionStore {
                 &mut master_key_token,
                 snapshot_password,
             )?;
+        } else if let (Some(snapshot_password), Some(token)) =
+            (snapshot_password, master_key_token.as_mut())
+        {
+            let source_crypto = CredentialCrypto::new(
+                self.portable_key_path.clone(),
+                Some(snapshot_password.to_owned().into()),
+            );
+            let target_crypto = self.credential_crypto()?;
+            *token = source_crypto.rewrap_master_key_token_for(token, &target_crypto)?;
         }
         validate_and_migrate_agent_settings(&mut sessions)?;
         match snapshot.meta.snapshot_kind {
@@ -540,14 +559,6 @@ impl ConnectionStore {
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(PORTABLE_OPAQUE_ENTITIES_TABLE)?;
-            let mut existing_keys = Vec::new();
-            for entry in table.iter()? {
-                let (key, _) = entry?;
-                existing_keys.push(key.value().to_string());
-            }
-            for key in existing_keys {
-                table.remove(key.as_str())?;
-            }
             for (entity, raw) in &opaque_entities {
                 table.insert(entity.as_str(), raw.as_str())?;
             }
@@ -619,16 +630,24 @@ impl ConnectionStore {
             "quick_commands",
             std::convert::identity,
         )?;
-        let history: Vec<CommandHistoryEntry> = read_snapshot_entity(snapshot, "history")?;
-        replace_command_history_in_txn(&txn, &history)?;
-        replace_notes_snapshot_in_txn(&txn, &notes).map_err(|error| {
-            StorageError::PortableSnapshotEntity {
-                entity: "notes".to_string(),
-                message: error.to_string(),
-            }
-        })?;
+        if snapshot.meta.snapshot_kind == PortableSnapshotKind::Backup {
+            let history: Vec<CommandHistoryEntry> = read_snapshot_entity(snapshot, "history")?;
+            replace_command_history_in_txn(&txn, &history)?;
+        }
+        if snapshot.entities.contains_key("notes") {
+            replace_notes_snapshot_in_txn(&txn, &notes).map_err(|error| {
+                StorageError::PortableSnapshotEntity {
+                    entity: "notes".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
 
-        let merged_settings = merge_imported_settings(settings, current_settings);
+        let merged_settings = merge_imported_settings(
+            settings,
+            current_settings,
+            snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync,
+        );
         write_json_in_txn(&txn, SETTINGS_TABLE, SETTINGS_DEFAULT, &merged_settings)?;
         match master_key_token {
             Some(token) if !token.trim().is_empty() => {
@@ -639,7 +658,9 @@ impl ConnectionStore {
             }
             _ => {}
         }
-        replace_known_hosts_text_in_txn(&txn, &known_hosts)?;
+        if !known_hosts.is_empty() {
+            replace_known_hosts_text_in_txn(&txn, &known_hosts)?;
+        }
         txn.commit()?;
         bump_ssh_key_revision();
         Ok(())
@@ -949,7 +970,12 @@ fn write_settings_doc_from_entity_in_txn(
 fn merge_imported_settings(
     mut imported: serde_json::Value,
     current: serde_json::Value,
+    sync: bool,
 ) -> serde_json::Value {
+    if sync {
+        merge_unknown_json(&current, &mut imported);
+        preserve_device_local_sync_settings(&mut imported, &current);
+    }
     if let Some(master_password) = current
         .get("security")
         .and_then(|security| security.get("master_password"))

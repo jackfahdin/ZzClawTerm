@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use gpui::{Context, Window};
 use zzclawterm_core::ConnectionType;
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use crate::features::ZzClawTermApp;
 use crate::models::{SessionLaunchConfig, StartupCommandAction};
@@ -223,7 +223,7 @@ impl ZzClawTermApp {
         let patch = entry.last_asset_patch;
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 if !store.merge_connection_asset_from_monitoring(&persisted_id, patch)? {
                     return Ok(None);
                 }

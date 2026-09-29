@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll};
 
+use futures::channel::mpsc as futures_mpsc;
 use futures::channel::oneshot;
 use zzclawterm_core::{
     AiSettings, AppSettingsSummary, CloudSyncSettings, CloudSyncState, CommandHistoryEntry,
@@ -58,6 +59,13 @@ pub enum StoreDomain {
     Transfers,
     Shutdown,
     Barrier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreMutationEvent {
+    pub request_id: RequestId,
+    pub domain: StoreDomain,
+    pub generation: u64,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -145,11 +153,16 @@ pub trait StoreRequest: Send + 'static {
 
     fn domain(&self) -> StoreDomain;
 
+    fn changes_sync_payload(&self) -> bool {
+        false
+    }
+
     fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError>;
 }
 
 pub struct StoreFnRequest<F, T> {
     domain: StoreDomain,
+    changes_sync_payload: bool,
     operation: F,
     response: PhantomData<fn() -> T>,
 }
@@ -161,9 +174,20 @@ where
 {
     StoreFnRequest {
         domain,
+        changes_sync_payload: false,
         operation,
         response: PhantomData,
     }
+}
+
+pub fn store_mutation<F, T>(domain: StoreDomain, operation: F) -> StoreFnRequest<F, T>
+where
+    F: FnOnce(&ConnectionStore) -> Result<T, StorageError> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut request = store_request(domain, operation);
+    request.changes_sync_payload = true;
+    request
 }
 
 impl<F, T> StoreRequest for StoreFnRequest<F, T>
@@ -175,6 +199,10 @@ where
 
     fn domain(&self) -> StoreDomain {
         self.domain
+    }
+
+    fn changes_sync_payload(&self) -> bool {
+        self.changes_sync_payload
     }
 
     fn execute(self, store: &ConnectionStore) -> Result<Self::Response, StorageError> {
@@ -246,6 +274,8 @@ pub struct StoreUiClient {
     next_request_id: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     submission_gate: Arc<Mutex<()>>,
+    sync_mutation_generation: Arc<AtomicU64>,
+    mutation_sender: futures_mpsc::UnboundedSender<StoreMutationEvent>,
 }
 
 impl StoreUiClient {
@@ -280,6 +310,9 @@ impl StoreUiClient {
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let domain = request.domain();
+        let changes_sync_payload = request.changes_sync_payload();
+        let sync_mutation_generation = self.sync_mutation_generation.clone();
+        let mutation_sender = self.mutation_sender.clone();
         let (sender, receiver) = oneshot::channel();
         let job = Box::new(
             move |store: Result<&ConnectionStore, &StoreOperationError>| {
@@ -288,6 +321,14 @@ impl StoreUiClient {
                     Err(error) => Err(error.clone()),
                 };
                 let failure = outcome.as_ref().err().cloned();
+                if changes_sync_payload && outcome.is_ok() {
+                    let generation = sync_mutation_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    let _ = mutation_sender.unbounded_send(StoreMutationEvent {
+                        request_id,
+                        domain,
+                        generation,
+                    });
+                }
                 let _ = sender.send(StoreEvent {
                     request_id,
                     domain,
@@ -314,6 +355,8 @@ pub struct StoreBlockingClient {
     next_request_id: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     submission_gate: Arc<Mutex<()>>,
+    sync_mutation_generation: Arc<AtomicU64>,
+    mutation_sender: futures_mpsc::UnboundedSender<StoreMutationEvent>,
 }
 
 impl StoreBlockingClient {
@@ -326,6 +369,25 @@ impl StoreBlockingClient {
             .map_err(StoreClientError::Submit)?
             .outcome
             .map_err(StoreClientError::Operation)
+    }
+
+    pub fn request_mutation_fn<F, T>(
+        &self,
+        domain: StoreDomain,
+        operation: F,
+    ) -> Result<T, StoreClientError>
+    where
+        F: FnOnce(&ConnectionStore) -> Result<T, StorageError> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.request(0, store_mutation(domain, operation))
+            .map_err(StoreClientError::Submit)?
+            .outcome
+            .map_err(StoreClientError::Operation)
+    }
+
+    pub fn sync_mutation_generation(&self) -> u64 {
+        self.sync_mutation_generation.load(Ordering::Acquire)
     }
 
     pub fn request<R: StoreRequest>(
@@ -352,6 +414,9 @@ impl StoreBlockingClient {
     ) -> Result<StoreEvent<R::Response>, StoreSubmitError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let domain = request.domain();
+        let changes_sync_payload = request.changes_sync_payload();
+        let sync_mutation_generation = self.sync_mutation_generation.clone();
+        let mutation_sender = self.mutation_sender.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
         let job = Box::new(
             move |store: Result<&ConnectionStore, &StoreOperationError>| {
@@ -360,6 +425,14 @@ impl StoreBlockingClient {
                     Err(error) => Err(error.clone()),
                 };
                 let failure = outcome.as_ref().err().cloned();
+                if changes_sync_payload && outcome.is_ok() {
+                    let generation = sync_mutation_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    let _ = mutation_sender.unbounded_send(StoreMutationEvent {
+                        request_id,
+                        domain,
+                        generation,
+                    });
+                }
                 let _ = sender.send(StoreEvent {
                     request_id,
                     domain,
@@ -426,6 +499,7 @@ impl std::error::Error for StoreClientError {}
 pub struct StoreRuntime {
     ui_client: StoreUiClient,
     blocking_client: StoreBlockingClient,
+    mutation_receiver: Arc<Mutex<Option<futures_mpsc::UnboundedReceiver<StoreMutationEvent>>>>,
 }
 
 impl StoreRuntime {
@@ -434,6 +508,8 @@ impl StoreRuntime {
         let next_request_id = Arc::new(AtomicU64::new(1));
         let accepting = Arc::new(AtomicBool::new(true));
         let submission_gate = Arc::new(Mutex::new(()));
+        let sync_mutation_generation = Arc::new(AtomicU64::new(0));
+        let (mutation_sender, mutation_receiver) = futures_mpsc::unbounded();
         std::thread::Builder::new()
             .name("zzclawterm-store".to_string())
             .spawn(move || store_worker(config, receiver))?;
@@ -443,13 +519,18 @@ impl StoreRuntime {
                 next_request_id: next_request_id.clone(),
                 accepting: accepting.clone(),
                 submission_gate: submission_gate.clone(),
+                sync_mutation_generation: sync_mutation_generation.clone(),
+                mutation_sender: mutation_sender.clone(),
             },
             blocking_client: StoreBlockingClient {
                 sender: sender.clone(),
                 next_request_id,
                 accepting,
                 submission_gate,
+                sync_mutation_generation,
+                mutation_sender,
             },
+            mutation_receiver: Arc::new(Mutex::new(Some(mutation_receiver))),
         })
     }
 
@@ -459,6 +540,19 @@ impl StoreRuntime {
 
     pub fn blocking_client(&self) -> StoreBlockingClient {
         self.blocking_client.clone()
+    }
+
+    pub fn sync_mutation_generation(&self) -> u64 {
+        self.blocking_client.sync_mutation_generation()
+    }
+
+    pub fn take_sync_mutation_events(
+        &self,
+    ) -> Option<futures_mpsc::UnboundedReceiver<StoreMutationEvent>> {
+        self.mutation_receiver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
     }
 
     pub fn begin_shutdown(&self) {
@@ -495,8 +589,24 @@ impl zzclawterm_core::CloudLocalStore for StoreBlockingClient {
         bytes: &[u8],
         master_password: &str,
     ) -> Result<zzclawterm_core::RawPortableSnapshot, zzclawterm_core::CloudSyncError> {
-        crate::decode_encrypted_raw_portable_snapshot(bytes, master_password)
-            .map_err(zzclawterm_core::CloudSyncError::PortableSnapshot)
+        #[cfg(test)]
+        let decoded = crate::decode_encrypted_raw_portable_snapshot(bytes, master_password);
+        #[cfg(not(test))]
+        let decoded = if std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_stem()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .is_some_and(|name| name.starts_with("zzclawterm_desktop-"))
+        {
+            // Desktop unit tests run in Cargo's test harness, which cannot dispatch
+            // the application helper argument. The packaged app always uses the helper.
+            crate::decode_encrypted_raw_portable_snapshot(bytes, master_password)
+        } else {
+            crate::portable_decode_helper::decode_remote_snapshot_in_helper(bytes, master_password)
+        };
+        decoded.map_err(zzclawterm_core::CloudSyncError::PortableSnapshot)
     }
 
     fn encode_sync_pointer(
@@ -540,11 +650,16 @@ impl zzclawterm_core::CloudLocalStore for StoreBlockingClient {
     ) -> Result<zzclawterm_core::CloudSyncBackupInfo, zzclawterm_core::CloudSyncError> {
         let config_dir = options.config_dir.clone();
         let snapshot = snapshot.clone();
+        let snapshot_password = options.master_password.clone();
         let database_path = config_dir.join("zzclawterm.redb");
         let safety_backup_path = cloud_store_response(self.request(
             0,
-            store_request(StoreDomain::CloudSync, move |store| {
-                store.apply_cloud_sync_snapshot(&config_dir, &snapshot)
+            store_mutation(StoreDomain::CloudSync, move |store| {
+                store.apply_cloud_sync_snapshot(
+                    &config_dir,
+                    &snapshot,
+                    snapshot_password.expose_secret(),
+                )
             }),
         ))?;
         Ok(zzclawterm_core::CloudSyncBackupInfo {
@@ -850,6 +965,7 @@ mod tests {
         FlushBarrier, LoadBootstrap, LoadMainWindowState, SaveMainWindowState, StoreClientError,
         StoreConfig, StoreDomain, StoreOperationError, StoreRuntime,
     };
+    use futures::StreamExt as _;
     use zzclawterm_core::{MainWindowBounds, MainWindowState};
 
     fn temp_dir(label: &str) -> zzclawterm_core::test_support::TestTempDir {
@@ -901,6 +1017,44 @@ mod tests {
         assert!(second.request_id > first.request_id);
         drop(runtime);
         std::fs::remove_dir_all(config_dir).ok();
+    }
+
+    #[test]
+    fn sync_generation_tracks_only_successful_marked_writes() {
+        let config_dir = temp_dir("sync-generation");
+        let runtime = StoreRuntime::spawn(StoreConfig {
+            config_dir: config_dir.path().to_path_buf(),
+            portable_key_path: None,
+        })
+        .expect("spawn runtime");
+        let client = runtime.blocking_client();
+        assert_eq!(runtime.sync_mutation_generation(), 0);
+        client
+            .request_fn(StoreDomain::Connections, |store| store.load_sessions())
+            .expect("read sessions");
+        assert_eq!(runtime.sync_mutation_generation(), 0);
+        client
+            .request_mutation_fn(StoreDomain::Connections, |store| {
+                store.replace_sessions(&zzclawterm_core::SessionsConfig::default())
+            })
+            .expect("replace sessions");
+        assert_eq!(runtime.sync_mutation_generation(), 1);
+        let mut events = runtime.take_sync_mutation_events().expect("event receiver");
+        let event = futures::executor::block_on(events.next()).expect("mutation event");
+        assert_eq!(event.domain, StoreDomain::Connections);
+        assert_eq!(event.generation, 1);
+        assert!(runtime.take_sync_mutation_events().is_none());
+        assert!(
+            client
+                .request_mutation_fn(
+                    StoreDomain::Connections,
+                    |_| -> Result<(), crate::StorageError> {
+                        Err(crate::StorageError::InvalidData("failed write".to_string()))
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(runtime.sync_mutation_generation(), 1);
     }
 
     #[test]

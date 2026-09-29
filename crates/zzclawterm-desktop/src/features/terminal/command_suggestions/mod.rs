@@ -144,7 +144,31 @@ fn command_history_input_update(state: &mut TerminalInputState, text: &str) -> O
     submitted
 }
 
+fn command_suggestion_input(command: &str, execute: bool) -> (Vec<u8>, Option<String>) {
+    let mut payload = format!("\u{05}\u{15}{command}");
+    if execute {
+        payload.push('\r');
+    }
+    (payload.into_bytes(), execute.then(|| command.to_string()))
+}
+
 impl ZzClawTermApp {
+    /// Whether the active session's program is driving the alternate screen.
+    ///
+    /// Full-screen programs such as vim, less, top and nano own the keyboard
+    /// while they are there: their input is not a shell command line, so command
+    /// suggestions must stay closed and must never consume keys. This is a
+    /// protocol signal, unlike the submitted-command heuristic in
+    /// `command_starts_suggestion_suppressing_program`, which only covers
+    /// programs the shell line happened to reveal.
+    pub(in crate::features) fn active_terminal_uses_alternate_screen(&self) -> bool {
+        self.session
+            .active_id()
+            .filter(|session_id| !session_id.is_empty())
+            .and_then(|session_id| self.terminal.view.views.get(session_id))
+            .is_some_and(|view| view.protocol_state.alternate_screen)
+    }
+
     pub(in crate::features) fn dismiss_command_suggestions(&mut self, cx: &mut Context<Self>) {
         self.terminal.assist.command_suggestion_search_gen = self
             .terminal
@@ -225,6 +249,10 @@ impl ZzClawTermApp {
         if self.session.active_id().is_none() {
             self.clear_command_suggestion_draft(cx);
             return;
+        }
+        if self.active_terminal_uses_alternate_screen() {
+            self.clear_command_suggestion_draft(cx);
+            finish!("alternate_screen", 0);
         }
         let utf8_started_at = Instant::now();
         let text = match std::str::from_utf8(bytes) {
@@ -376,6 +404,12 @@ impl ZzClawTermApp {
         {
             return;
         }
+        if self.active_terminal_uses_alternate_screen() {
+            // Full-screen programs own the keyboard; their input is not a shell
+            // command line, so nothing here may be recorded as command history.
+            self.terminal.assist.command_input_tracker = TerminalInputState::new();
+            return;
+        }
         let Ok(text) = std::str::from_utf8(bytes) else {
             self.terminal.assist.command_input_tracker = TerminalInputState::new();
             return;
@@ -517,6 +551,10 @@ impl ZzClawTermApp {
             self.hide_command_suggestions_if_present(cx);
             return;
         }
+        if self.active_terminal_uses_alternate_screen() {
+            self.hide_command_suggestions_if_present(cx);
+            return;
+        }
 
         self.terminal.assist.command_suggestion_search_gen = self
             .terminal
@@ -629,6 +667,14 @@ impl ZzClawTermApp {
             timing.hide_popup = hide_started_at.elapsed();
             finish_refresh!("suppressed_or_credential", 0, 0);
         }
+        // A search scheduled on the shell line can land after a full-screen
+        // program has taken the alternate screen, so re-check here too.
+        if self.active_terminal_uses_alternate_screen() {
+            let hide_started_at = Instant::now();
+            self.hide_command_suggestions_if_present(cx);
+            timing.hide_popup = hide_started_at.elapsed();
+            finish_refresh!("alternate_screen", 0, 0);
+        }
         if !self
             .settings
             .summary()
@@ -706,6 +752,12 @@ impl ZzClawTermApp {
                 .interaction_command_suggestions_enabled
             || get_tracked_command(&self.terminal.assist.command_input_tracker) != request.pattern
         {
+            return;
+        }
+        // The search was started on the shell line, but a full-screen program
+        // may have taken the alternate screen while it ran.
+        if self.active_terminal_uses_alternate_screen() {
+            self.hide_command_suggestions_if_present(cx);
             return;
         }
         let CommandSuggestionSearchRequest {
@@ -912,6 +964,13 @@ impl ZzClawTermApp {
             cx.notify();
             return false;
         }
+        if self.active_terminal_uses_alternate_screen() {
+            // The popup describes the shell line a full-screen program replaced.
+            // Drop it and let the program own every keystroke, including Escape.
+            self.terminal.assist.command_suggestions = None;
+            cx.notify();
+            return false;
+        }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.alt || keystroke.modifiers.control {
             return false;
@@ -964,17 +1023,14 @@ impl ZzClawTermApp {
         };
         let source = item.source.clone();
         let command = item.command;
-        // Tauri replaceCurrentLine path: Ctrl+E (end) + Ctrl+U (kill line) + command.
-        let mut payload = String::new();
-        payload.push('\u{05}'); // Ctrl+E
-        payload.push('\u{15}'); // Ctrl+U
-        payload.push_str(&command);
-        if execute {
-            payload.push('\r');
-        }
+        let (payload, submission) = command_suggestion_input(&command, execute);
         self.terminal.assist.command_input_tracker = TerminalInputState::new();
         self.terminal.assist.command_suggestions = None;
-        self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
+        self.terminal.assist.pending_command_history_entry = submission;
+        self.send_terminal_input_without_suggestion_track(payload, cx);
+        // A successful write consumes this in record_command_history_for_sessions.
+        // A failed primary write must not attach it to the next Enter.
+        self.terminal.assist.pending_command_history_entry = None;
         if !execute {
             // After fill, tracker becomes the filled command for continued typing.
             self.terminal.assist.command_input_tracker =
@@ -1051,6 +1107,9 @@ impl ZzClawTermApp {
             return div().into_any_element();
         }
         if self.session.active_id() != Some(state.session_id.as_str()) {
+            return div().into_any_element();
+        }
+        if self.active_terminal_uses_alternate_screen() {
             return div().into_any_element();
         }
         let menu_w = 380.0_f32;
@@ -1559,13 +1618,19 @@ fn terminal_line_prefix_for_cell_col(line: &str, cell_col: usize) -> String {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use zzclawterm_core::{TerminalInputState, apply_terminal_input_data};
+    use gpui::{AppContext as _, KeyDownEvent, TestAppContext};
+    use zzclawterm_core::{
+        AppRuntime, RuntimeMode, TerminalInputState, apply_terminal_input_data, uuid,
+    };
 
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
     use crate::features::terminal::terminal_runtime::TERMINAL_INPUT_LATENCY_WINDOW;
     use crate::models::{CommandSuggestionItem, CommandSuggestionState};
+    use crate::test_support::TestConfigDir;
 
     use super::{
-        command_history_input_update, command_suggestion_clamp_selection,
+        command_history_input_update, command_suggestion_clamp_selection, command_suggestion_input,
         command_suggestion_input_can_defer_refresh, command_suggestion_input_candidate_chars,
         command_suggestion_input_obvious_pager_prefix, command_suggestion_item_for_selection,
         command_suggestion_refresh_input_delay, command_suggestion_state_changed,
@@ -1715,5 +1780,253 @@ mod tests {
 
         assert_eq!(submitted.as_deref(), Some("git status"));
         assert!(state.value.is_empty());
+    }
+
+    #[test]
+    fn executing_suggestion_records_plain_command_separately_from_wire_input() {
+        let (wire, submission) = command_suggestion_input("ps -ef", true);
+        assert_eq!(wire, b"\x05\x15ps -ef\r");
+        assert_eq!(submission.as_deref(), Some("ps -ef"));
+
+        let (wire, submission) = command_suggestion_input("ps -ef", false);
+        assert_eq!(wire, b"\x05\x15ps -ef");
+        assert!(submission.is_none());
+    }
+
+    #[test]
+    fn failed_suggestion_write_does_not_leave_a_pending_history_command() {
+        let mut cx = TestAppContext::single();
+        let root = std::env::temp_dir().join(format!(
+            "zzclawterm-suggestion-write-{}-{}",
+            std::process::id(),
+            uuid()
+        ));
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.clone(),
+            root.join("config"),
+            root.join("logs"),
+            root.join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+
+        cx.update_entity(&app, |app, cx| {
+            app.terminal.assist.command_suggestions = Some(CommandSuggestionState {
+                session_id: "missing".to_string(),
+                draft: "ps".to_string(),
+                items: vec![CommandSuggestionItem {
+                    command: "ps -ef".to_string(),
+                    display: "ps -ef".to_string(),
+                    source: "history".to_string(),
+                    score: 1,
+                    indices: Vec::new(),
+                }],
+                selected_index: Some(0),
+                cursor_row: 0,
+                cursor_col: 0,
+            });
+
+            assert!(app.apply_selected_command_suggestion(true, cx));
+            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+        });
+    }
+
+    fn escape_key_event() -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: "escape".to_string(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// A visible surface makes the popup authoritative for the session, so the
+    /// key handler can only bail out for the reason under test.
+    fn show_surface_for_session(app: &mut ZzClawTermApp, session_id: &str) {
+        app.terminal.layout.session_surface_bounds.insert(
+            session_id.to_string(),
+            gpui::Bounds::new(
+                gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                gpui::size(gpui::px(800.0), gpui::px(600.0)),
+            ),
+        );
+    }
+
+    fn open_suggestions_popup(session_id: &str) -> CommandSuggestionState {
+        CommandSuggestionState {
+            session_id: session_id.to_string(),
+            draft: "1".to_string(),
+            items: vec![CommandSuggestionItem {
+                command: "1111".to_string(),
+                display: "1111".to_string(),
+                source: "history".to_string(),
+                score: 1,
+                indices: Vec::new(),
+            }],
+            selected_index: Some(0),
+            cursor_row: 0,
+            cursor_col: 0,
+        }
+    }
+
+    #[test]
+    fn alternate_screen_keeps_command_suggestions_from_intercepting_keys() {
+        let dir = TestConfigDir::new("zzclawterm-alt-screen-suggestions");
+        let mut cx = TestAppContext::single();
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+
+        cx.update_entity(&app, |app, cx| {
+            show_surface_for_session(app, "s1");
+            assert!(!app.active_terminal_uses_alternate_screen());
+
+            app.terminal.assist.command_suggestions = Some(open_suggestions_popup("s1"));
+            // Shell line: the popup owns Escape.
+            assert!(app.handle_command_suggestion_key(&escape_key_event(), cx));
+            assert!(app.terminal.assist.command_suggestions.is_none());
+        });
+
+        cx.update_entity(&app, |app, _| {
+            // A full-screen program (vim, less, top) takes over the terminal.
+            app.terminal
+                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+        });
+
+        cx.update_entity(&app, |app, cx| {
+            assert!(app.active_terminal_uses_alternate_screen());
+
+            app.terminal.assist.command_suggestions = Some(open_suggestions_popup("s1"));
+            // Escape must reach the program instead of closing a stale popup.
+            assert!(!app.handle_command_suggestion_key(&escape_key_event(), cx));
+            assert!(app.terminal.assist.command_suggestions.is_none());
+
+            // Typing inside the program neither suggests nor records history.
+            app.note_command_suggestion_input(b"11", cx);
+            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert_eq!(
+                app.terminal.assist.command_input_tracker,
+                TerminalInputState::new()
+            );
+
+            app.terminal.assist.command_input_tracker =
+                apply_terminal_input_data(&TerminalInputState::new(), "vim ");
+            app.note_command_history_input(b"a.txt\r");
+            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+            assert_eq!(
+                app.terminal.assist.command_input_tracker,
+                TerminalInputState::new()
+            );
+        });
+    }
+
+    #[test]
+    fn alternate_screen_blocks_the_manual_trigger_and_the_deferred_publisher() {
+        let dir = TestConfigDir::new("zzclawterm-alt-screen-manual");
+        let mut cx = TestAppContext::single();
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+
+        cx.update_entity(&app, |app, _| {
+            show_surface_for_session(app, "s1");
+            app.terminal
+                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+        });
+
+        cx.update_entity(&app, |app, cx| {
+            assert!(app.active_terminal_uses_alternate_screen());
+            app.terminal.assist.command_input_tracker =
+                apply_terminal_input_data(&TerminalInputState::new(), "vim 1");
+
+            // An explicit trigger must not open the popup inside a full-screen
+            // program, even with a trackable shell-style line.
+            app.show_manual_command_suggestions(cx);
+            assert!(app.terminal.assist.command_suggestions.is_none());
+
+            // A search deferred on the shell line would otherwise land after the
+            // program has taken the screen; the request must be dropped.
+            assert!(app.prepare_command_suggestion_search(1, cx).is_none());
+            assert!(app.terminal.assist.command_suggestions.is_none());
+        });
+    }
+
+    #[test]
+    fn alternate_screen_drops_a_search_that_was_already_in_flight() {
+        let dir = TestConfigDir::new("zzclawterm-alt-screen-inflight");
+        let mut cx = TestAppContext::single();
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+
+        let request = cx.update_entity(&app, |app, cx| {
+            show_surface_for_session(app, "s1");
+            assert!(!app.active_terminal_uses_alternate_screen());
+            app.terminal.assist.command_input_tracker =
+                apply_terminal_input_data(&TerminalInputState::new(), "vim 1");
+            app.prepare_command_suggestion_search(1, cx)
+                .expect("shell line should still build a request")
+        });
+
+        // The user starts a full-screen program while the search is running.
+        cx.update_entity(&app, |app, _| {
+            app.terminal
+                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+        });
+
+        cx.update_entity(&app, |app, cx| {
+            assert!(app.active_terminal_uses_alternate_screen());
+            let results = vec![zzclawterm_core::FuzzyResult {
+                command: "vim 1111".to_string(),
+                score: 1,
+                indices: Vec::new(),
+                source: "history".to_string(),
+                display: "vim 1111".to_string(),
+            }];
+            app.publish_command_suggestion_search(request, results, Duration::ZERO, cx);
+            assert!(app.terminal.assist.command_suggestions.is_none());
+        });
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_restores_shell_line_suggestions() {
+        let dir = TestConfigDir::new("zzclawterm-alt-screen-return");
+        let mut cx = TestAppContext::single();
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+
+        cx.update_entity(&app, |app, _| {
+            app.terminal
+                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+        });
+        cx.update_entity(&app, |app, _| {
+            assert!(app.active_terminal_uses_alternate_screen());
+            app.terminal
+                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049l");
+        });
+
+        cx.update_entity(&app, |app, cx| {
+            show_surface_for_session(app, "s1");
+            assert!(!app.active_terminal_uses_alternate_screen());
+            app.terminal.assist.command_suggestions = Some(open_suggestions_popup("s1"));
+            assert!(app.handle_command_suggestion_key(&escape_key_event(), cx));
+        });
     }
 }

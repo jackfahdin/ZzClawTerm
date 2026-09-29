@@ -389,6 +389,7 @@ impl Render for ZzClawAppMenuEntry {
         div()
             .id(self.menu.id.clone())
             .relative()
+            .when(badge.is_some(), |this| this.pr(px(6.)))
             .child(
                 Button::new("menu")
                     .small()
@@ -411,8 +412,8 @@ impl Render for ZzClawAppMenuEntry {
                 this.child(
                     div()
                         .absolute()
-                        .top(px(-2.))
-                        .right(px(-2.))
+                        .top(px(4.))
+                        .right(px(4.))
                         .size(px(8.))
                         .rounded_full()
                         .bg(rgb(color))
@@ -420,8 +421,8 @@ impl Render for ZzClawAppMenuEntry {
                             "menu-update-badge-pulse",
                             gpui::Animation::new(Duration::from_millis(1200)).repeat(),
                             |dot, progress| {
-                                dot.top(px(-2. - 4. * progress))
-                                    .right(px(-2. - 4. * progress))
+                                dot.top(px(4. - 4. * progress))
+                                    .right(px(4. - 4. * progress))
                                     .size(px(8. + 8. * progress))
                                     .opacity(0.65 * (1. - progress))
                             },
@@ -430,8 +431,8 @@ impl Render for ZzClawAppMenuEntry {
                 .child(
                     div()
                         .absolute()
-                        .top(px(-2.))
-                        .right(px(-2.))
+                        .top(px(4.))
+                        .right(px(4.))
                         .size(px(8.))
                         .rounded_full()
                         .bg(rgb(color)),

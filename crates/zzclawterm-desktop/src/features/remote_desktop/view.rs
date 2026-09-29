@@ -166,20 +166,27 @@ impl ZzClawTermApp {
         let cursor_texture = session.cursor_texture;
         let app = cx.entity();
         let surface_focus = self.remote_desktop.focus().clone();
-        let input = self
-            .remote_desktop
-            .inputs
-            .entry(session_id.clone())
-            .or_insert_with(|| {
-                cx.new(|_| {
-                    super::input::RemoteDesktopInput::new(
-                        app.downgrade(),
-                        session_id.clone(),
-                        surface_focus.clone(),
-                    )
+        let is_vnc = self.session.metadata(&session_id).is_some_and(|metadata| {
+            matches!(
+                metadata.launch_config,
+                crate::models::SessionLaunchConfig::Vnc(_)
+            )
+        });
+        let input = is_vnc.then(|| {
+            self.remote_desktop
+                .inputs
+                .entry(session_id.clone())
+                .or_insert_with(|| {
+                    cx.new(|_| {
+                        super::input::RemoteDesktopInput::new(
+                            app.downgrade(),
+                            session_id.clone(),
+                            surface_focus.clone(),
+                        )
+                    })
                 })
-            })
-            .clone();
+                .clone()
+        });
         let input_down = input.clone();
         let input_up = input.clone();
 
@@ -284,7 +291,10 @@ impl ZzClawTermApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if input_down.update(cx, |input, _| input.consumes_key(event)) {
+                if input_down
+                    .as_ref()
+                    .is_some_and(|input| input.update(cx, |input, _| input.consumes_key(event)))
+                {
                     return;
                 }
 
@@ -312,7 +322,9 @@ impl ZzClawTermApp {
                 }),
             )
             .on_key_up(cx.listener(move |this, event: &KeyUpEvent, _, cx| {
-                if input_up.update(cx, |input, _| input.consumes_key_up(&event.keystroke.key)) {
+                if input_up.as_ref().is_some_and(|input| {
+                    input.update(cx, |input, _| input.consumes_key_up(&event.keystroke.key))
+                }) {
                     return;
                 }
 
@@ -534,7 +546,7 @@ impl ZzClawTermApp {
                 }),
             )
             .child(canvas)
-            .child(input)
+            .when_some(input, |this, input| this.child(input))
             .into_any_element()
     }
 

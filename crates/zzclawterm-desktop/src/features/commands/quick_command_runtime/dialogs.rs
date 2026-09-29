@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use gpui::{ClipboardItem, Context, ParentElement as _, Window, div};
 use zzclawterm_core::{QuickCommandCategory, uuid};
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::{ZzClawConfirmDialog, ZzClawDialogFooter, ZzClawDialogWindowExt};
 
 use crate::features::ZzClawTermApp;
@@ -233,7 +233,7 @@ impl ZzClawTermApp {
     ) {
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 let mut config = store.load_quick_commands()?;
                 let before = config.commands.len();
                 config.commands.retain(|command| command.id != command_id);
@@ -341,7 +341,7 @@ impl ZzClawTermApp {
         let request_delete = delete.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 let mut config = store.load_quick_commands()?;
                 let before_categories = config.categories.len();
                 let before_commands = config.commands.len();
@@ -475,7 +475,7 @@ impl ZzClawTermApp {
         let request_name = name.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 let mut config = store.load_quick_commands()?;
                 let duplicated = config.categories.iter().any(|category| {
                     category.id != request_rename.id
@@ -622,7 +622,7 @@ impl ZzClawTermApp {
         let status_name = name.clone();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 let mut config = store.load_quick_commands()?;
                 let duplicated = config
                     .categories

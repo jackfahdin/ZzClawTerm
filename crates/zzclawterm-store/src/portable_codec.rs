@@ -12,6 +12,8 @@ use zzclawterm_core::{
 const SNAPSHOT_META_KEY: &str = "meta";
 const SNAPSHOT_META_TABLE: TableDefinition<&str, &str> = TableDefinition::new("snapshot_meta");
 const SNAPSHOT_ENTITIES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("entity_docs");
+const SNAPSHOT_V2_JSON_DOCS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("json_docs");
+const SNAPSHOT_V2_TEXT_DOCS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("text_docs");
 const SYNC_POINTER_TABLE: TableDefinition<&str, &str> = TableDefinition::new("sync_pointer");
 const SYNC_POINTER_KEY: &str = "latest";
 
@@ -137,15 +139,40 @@ fn decode_raw_snapshot_redb_inner(
             .value()
             .to_string();
         let meta: PortableSnapshotMeta = serde_json::from_str(&meta_raw)?;
+        if meta.schema_version == 2 {
+            let json_docs = read_snapshot_docs(&read, SNAPSHOT_V2_JSON_DOCS_TABLE)?;
+            let text_docs = read_snapshot_docs(&read, SNAPSHOT_V2_TEXT_DOCS_TABLE)?;
+            return zzclawterm_core::portable_snapshot::convert_v2_snapshot(
+                meta, json_docs, text_docs,
+            )
+            .map_err(Into::into);
+        }
         let entity_table = read.open_table(SNAPSHOT_ENTITIES_TABLE)?;
         let mut entities = BTreeMap::new();
         for entry in entity_table.iter()? {
             let (key, value) = entry?;
             entities.insert(key.value().to_string(), value.value().to_string());
         }
-        Ok(RawPortableSnapshot { meta, entities })
+        Ok(RawPortableSnapshot {
+            meta,
+            entities,
+            source_payload_hash: None,
+        })
     })();
     result.map_err(|_| PortableSnapshotError::CorruptPayload)
+}
+
+fn read_snapshot_docs(
+    read: &redb::ReadTransaction,
+    definition: TableDefinition<&str, &str>,
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    let table = read.open_table(definition)?;
+    let mut docs = BTreeMap::new();
+    for entry in table.iter()? {
+        let (key, value) = entry?;
+        docs.insert(key.value().to_string(), value.value().to_string());
+    }
+    Ok(docs)
 }
 
 struct TempRedbFile {

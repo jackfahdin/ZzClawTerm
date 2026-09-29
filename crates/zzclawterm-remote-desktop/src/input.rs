@@ -135,18 +135,18 @@ impl KeyMapper {
         let normalized = name.trim().to_ascii_lowercase();
         let (scan_code, extended) = match normalized.as_str() {
             "escape" | "esc" => (0x01, false),
-            "1" => (0x02, false),
-            "2" => (0x03, false),
-            "3" => (0x04, false),
-            "4" => (0x05, false),
-            "5" => (0x06, false),
-            "6" => (0x07, false),
-            "7" => (0x08, false),
-            "8" => (0x09, false),
-            "9" => (0x0a, false),
-            "0" => (0x0b, false),
-            "-" | "minus" => (0x0c, false),
-            "=" | "equal" => (0x0d, false),
+            "1" | "!" => (0x02, false),
+            "2" | "@" => (0x03, false),
+            "3" | "#" => (0x04, false),
+            "4" | "$" => (0x05, false),
+            "5" | "%" => (0x06, false),
+            "6" | "^" => (0x07, false),
+            "7" | "&" => (0x08, false),
+            "8" | "*" => (0x09, false),
+            "9" | "(" => (0x0a, false),
+            "0" | ")" => (0x0b, false),
+            "-" | "_" | "minus" => (0x0c, false),
+            "=" | "+" | "equal" => (0x0d, false),
             "backspace" => (0x0e, false),
             "tab" => (0x0f, false),
             "q" => (0x10, false),
@@ -159,8 +159,8 @@ impl KeyMapper {
             "i" => (0x17, false),
             "o" => (0x18, false),
             "p" => (0x19, false),
-            "[" | "bracketleft" => (0x1a, false),
-            "]" | "bracketright" => (0x1b, false),
+            "[" | "{" | "bracketleft" => (0x1a, false),
+            "]" | "}" | "bracketright" => (0x1b, false),
             "enter" | "return" => (0x1c, false),
             "control" | "ctrl" | "controlleft" => (0x1d, false),
             "a" => (0x1e, false),
@@ -172,11 +172,11 @@ impl KeyMapper {
             "j" => (0x24, false),
             "k" => (0x25, false),
             "l" => (0x26, false),
-            ";" | "semicolon" => (0x27, false),
-            "'" | "quote" => (0x28, false),
-            "`" | "backquote" => (0x29, false),
+            ";" | ":" | "semicolon" => (0x27, false),
+            "'" | "\"" | "quote" => (0x28, false),
+            "`" | "~" | "backquote" => (0x29, false),
             "shift" | "shiftleft" => (0x2a, false),
-            "\\" | "backslash" => (0x2b, false),
+            "\\" | "|" | "backslash" => (0x2b, false),
             "z" => (0x2c, false),
             "x" => (0x2d, false),
             "c" => (0x2e, false),
@@ -184,9 +184,9 @@ impl KeyMapper {
             "b" => (0x30, false),
             "n" => (0x31, false),
             "m" => (0x32, false),
-            "," | "comma" => (0x33, false),
-            "." | "period" => (0x34, false),
-            "/" | "slash" => (0x35, false),
+            "," | "<" | "comma" => (0x33, false),
+            "." | ">" | "period" => (0x34, false),
+            "/" | "?" | "slash" => (0x35, false),
             "shiftright" => (0x36, false),
             "alt" | "altleft" => (0x38, false),
             "space" => (0x39, false),
@@ -219,7 +219,7 @@ impl KeyMapper {
             "delete" => (0x53, true),
             "meta" | "super" | "metaleft" => (0x5b, true),
             "metaright" => (0x5c, true),
-            "contextmenu" => (0x5d, true),
+            "contextmenu" | "menu" => (0x5d, true),
             _ => return None,
         };
         Some(RemoteKey {
@@ -297,6 +297,55 @@ mod tests {
         ));
         assert_eq!(mapper.release_all(), Some(RdpInputEvent::ReleaseAllInputs));
         assert!(!mapper.alt_gr_active());
+    }
+
+    #[test]
+    fn shifted_printable_keys_use_their_physical_scan_codes() {
+        for (key, scan_code) in [
+            ("!", 0x02),
+            ("@", 0x03),
+            ("#", 0x04),
+            ("$", 0x05),
+            ("%", 0x06),
+            ("^", 0x07),
+            ("&", 0x08),
+            ("*", 0x09),
+            ("(", 0x0a),
+            (")", 0x0b),
+            ("_", 0x0c),
+            ("+", 0x0d),
+            ("{", 0x1a),
+            ("}", 0x1b),
+            (":", 0x27),
+            ("\"", 0x28),
+            ("~", 0x29),
+            ("|", 0x2b),
+            ("<", 0x33),
+            (">", 0x34),
+            ("?", 0x35),
+        ] {
+            assert_eq!(
+                KeyMapper::map_key(key).unwrap().scan_code,
+                scan_code,
+                "{key}"
+            );
+        }
+
+        let mut mapper = KeyMapper::default();
+        assert!(matches!(
+            mapper.key_down("n", false),
+            Some(RdpInputEvent::KeyDown {
+                scan_code: 0x31,
+                ..
+            })
+        ));
+        assert!(matches!(
+            mapper.key_up("n"),
+            Some(RdpInputEvent::KeyUp {
+                scan_code: 0x31,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -396,6 +396,29 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
+    fn accept_zmodem_upload(
+        &mut self,
+        session_id: String,
+        files: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.session.zmodem_state_mut(&session_id) else {
+            return;
+        };
+        if let Some(worker) = state.worker.as_ref() {
+            worker.accept_upload(files);
+            cx.notify();
+            return;
+        }
+        let Some(transfer) = state.transfer.take() else {
+            return;
+        };
+        let worker = ZmodemWorker::spawn(transfer);
+        worker.accept_upload(files);
+        state.worker = Some(worker);
+        cx.notify();
+    }
+
     pub(in crate::features) fn drain_zmodem_worker_events(
         &mut self,
         cx: &mut Context<Self>,
@@ -504,6 +527,8 @@ impl ZzClawTermApp {
                 } else {
                     None
                 };
+                let prompt_for_upload =
+                    direction == ZmodemDirection::Upload && prepared_upload.is_none();
                 let transfer = ZmodemTransfer::new(direction, &initial_bytes);
                 {
                     let state = self.zmodem_state_mut(session_id);
@@ -518,18 +543,25 @@ impl ZzClawTermApp {
                         }
                     }
                 }
-                // If upload auto-started with prepared files, bootstrap may already
-                // have driven protocol. For download without a path, wait for dialog.
-                if direction == ZmodemDirection::Download {
-                    self.prompt_zmodem_download_directory(session_id.to_string(), cx);
-                }
-                // Surface detection event status.
+                // Surface detection event status before opening a path picker.
                 self.shell.set_status(match direction {
+                    ZmodemDirection::Upload if prompt_for_upload => {
+                        "ZMODEM upload detected — choose local files".to_string()
+                    }
                     ZmodemDirection::Upload => "ZMODEM upload detected".to_string(),
                     ZmodemDirection::Download => {
                         "ZMODEM download detected — choose save folder".to_string()
                     }
                 });
+                match direction {
+                    ZmodemDirection::Upload if prompt_for_upload => {
+                        self.prompt_zmodem_upload_files(session_id.to_string(), cx);
+                    }
+                    ZmodemDirection::Download => {
+                        self.prompt_zmodem_download_directory(session_id.to_string(), cx);
+                    }
+                    ZmodemDirection::Upload => {}
+                }
                 (passthrough, true)
             }
         }
@@ -809,6 +841,31 @@ impl ZzClawTermApp {
         }
     }
 
+    fn prompt_zmodem_upload_files(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(SharedString::from("Select ZMODEM upload files")),
+        });
+        self.shell
+            .set_status("selecting ZMODEM upload files…".to_string());
+        cx.spawn(async move |this, cx| {
+            let result = match receiver.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => Some(paths),
+                _ => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(files) = result {
+                    this.accept_zmodem_upload(session_id, files, cx);
+                } else {
+                    this.cancel_zmodem_transfer(&session_id, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn prompt_zmodem_download_directory(&mut self, session_id: String, cx: &mut Context<Self>) {
         let options = PathPromptOptions {
             files: false,
@@ -1054,6 +1111,60 @@ mod tests {
             action,
             ZmodemAction::EmitEvent(ZmodemEvent::Failed { reason }) if reason == "stop"
         )));
+    }
+
+    #[test]
+    fn manual_rz_prompts_for_upload_files_and_starts_worker() {
+        let mut cx = TestAppContext::single();
+        let app = app(&mut cx);
+
+        cx.update_entity(&app, |app, cx| {
+            let (passthrough, dirty) =
+                app.process_zmodem_output(SESSION_ID, b"\x18z waiting to receive.**\x18B01", cx);
+            assert_eq!(passthrough, b"\x18z waiting to receive.");
+            assert!(dirty);
+            assert!(
+                app.session
+                    .zmodem_state(SESSION_ID)
+                    .unwrap()
+                    .transfer
+                    .is_some()
+            );
+        });
+        assert!(cx.did_prompt_for_paths());
+
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(options.multiple);
+            Some(vec![std::path::PathBuf::from("upload.txt")])
+        });
+        cx.run_until_parked();
+
+        cx.update_entity(&app, |app, _| {
+            let state = app.session.zmodem_state(SESSION_ID).unwrap();
+            assert!(state.transfer.is_none());
+            assert!(state.worker.is_some());
+        });
+    }
+
+    #[test]
+    fn prepared_zmodem_upload_starts_without_another_picker() {
+        let mut cx = TestAppContext::single();
+        let app = app(&mut cx);
+
+        cx.update_entity(&app, |app, cx| {
+            app.zmodem_state_mut(SESSION_ID).pending_upload =
+                Some(vec![std::path::PathBuf::from("upload.txt")]);
+            let (_, dirty) = app.process_zmodem_output(SESSION_ID, b"**\x18B01", cx);
+            assert!(dirty);
+            let state = app.session.zmodem_state(SESSION_ID).unwrap();
+            assert!(state.pending_upload.is_none());
+            assert!(state.transfer.is_none());
+            assert!(state.worker.is_some());
+        });
+
+        assert!(!cx.did_prompt_for_paths());
     }
 
     #[test]

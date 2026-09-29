@@ -18,6 +18,9 @@ const MAX_COMPRESSED_SNAPSHOT_PAYLOAD_BYTES: u64 = 50 * 1024 * 1024;
 const CLOUD_SNAPSHOT_KEY_PREFIX: &[u8] = b"zzclawterm-cloud-snapshot-v1:";
 const LEGACY_CLOUD_SNAPSHOT_KEY_PREFIX: &[u8] = b"dragonfly-cloud-snapshot-v1:";
 
+mod v2;
+pub use v2::convert_v2_snapshot;
+
 #[derive(Debug, Error)]
 pub enum PortableSnapshotError {
     #[error("master password is not set")]
@@ -79,6 +82,8 @@ pub struct PortableSnapshotMeta {
 pub struct RawPortableSnapshot {
     pub meta: PortableSnapshotMeta,
     pub entities: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub source_payload_hash: Option<String>,
 }
 
 impl RawPortableSnapshot {
@@ -111,13 +116,108 @@ impl RawPortableSnapshot {
                 app_version,
             },
             entities: default_entities(),
+            source_payload_hash: None,
         }
     }
 
     pub fn recalculate_hash(&mut self) -> Result<(), PortableSnapshotError> {
         self.meta.payload_hash = calculate_v3_raw_payload_hash(&self.entities)?;
         self.meta.entities_hash = Some(calculate_entities_hash(&self.entities)?);
+        self.source_payload_hash = None;
         Ok(())
+    }
+
+    pub fn source_payload_hash(&self) -> &str {
+        self.source_payload_hash
+            .as_deref()
+            .unwrap_or(&self.meta.payload_hash)
+    }
+}
+
+const DEVICE_LOCAL_UI_FIELDS: &[&str] = &[
+    "open_tabs",
+    "left_width",
+    "right_width",
+    "quick_cmd_height",
+    "quick_cmd_category_width",
+    "quick_cmd_selected_category",
+    "active_left_panel",
+    "active_right_panel",
+    "show_quick_cmd_bar",
+    "show_serial_send_panel",
+    "serial_send_height",
+    "zoom_level",
+    "transfer_height",
+    "notes_expanded_folder_ids",
+    "notes_last_selected_node_id",
+];
+
+const DEVICE_LOCAL_APPEARANCE_FIELDS: &[&str] = &[
+    "background_image_path",
+    "background_image_fit",
+    "background_image_opacity",
+];
+
+const DEVICE_LOCAL_TRANSFER_FIELDS: &[&str] =
+    &["download_path", "default_editor", "recording_path"];
+
+pub fn project_sync_settings(settings: &mut serde_json::Value) {
+    let Some(root) = settings.as_object_mut() else {
+        return;
+    };
+    root.remove("cloud_sync");
+    root.remove("keybindings");
+    if let Some(ui) = root
+        .get_mut("ui")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in DEVICE_LOCAL_UI_FIELDS {
+            ui.remove(*field);
+        }
+    }
+    if let Some(appearance) = root
+        .get_mut("appearance")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in DEVICE_LOCAL_APPEARANCE_FIELDS {
+            appearance.remove(*field);
+        }
+    }
+    if let Some(transfer) = root
+        .get_mut("transfer")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in DEVICE_LOCAL_TRANSFER_FIELDS {
+            transfer.remove(*field);
+        }
+    }
+    if let Some(security) = root
+        .get_mut("security")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        security.remove("master_password");
+    }
+}
+
+pub fn preserve_device_local_sync_settings(
+    incoming: &mut serde_json::Value,
+    current: &serde_json::Value,
+) {
+    for field in ["cloud_sync", "keybindings"] {
+        if let Some(value) = current.get(field) {
+            incoming[field] = value.clone();
+        }
+    }
+    for (section, fields) in [
+        ("ui", DEVICE_LOCAL_UI_FIELDS),
+        ("appearance", DEVICE_LOCAL_APPEARANCE_FIELDS),
+        ("transfer", DEVICE_LOCAL_TRANSFER_FIELDS),
+    ] {
+        for field in fields {
+            if let Some(value) = current.get(section).and_then(|value| value.get(*field)) {
+                incoming[section][*field] = value.clone();
+            }
+        }
     }
 }
 

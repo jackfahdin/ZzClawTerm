@@ -2,7 +2,7 @@ use gpui::Context;
 use zzclawterm_core::{
     AiCommandCard, AppendAiAuditRequest, QuickCommand, QuickCommandCategory, uuid,
 };
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 
 use crate::features::ZzClawTermApp;
 use crate::models::QuickCommandVariablePromptState;
@@ -57,7 +57,7 @@ impl ZzClawTermApp {
         let response_preview = self.ai.chat_response_preview().to_string();
         self.submit_store_request(
             0,
-            store_request(StoreDomain::Commands, move |store| {
+            zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 let config = store.load_quick_commands()?;
                 let category_name = ai_command_card_category_name(&card);
                 let existing_category = config

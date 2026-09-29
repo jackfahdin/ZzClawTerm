@@ -42,6 +42,21 @@ impl SecurityStoreProxy {
         self.store.request_fn(StoreDomain::Security, operation)
     }
 
+    fn mutate<T>(
+        &self,
+        operation: impl FnOnce(
+            &zzclawterm_store::ConnectionStore,
+        ) -> Result<T, zzclawterm_store::StorageError>
+        + Send
+        + 'static,
+    ) -> Result<T, StoreClientError>
+    where
+        T: Send + 'static,
+    {
+        self.store
+            .request_mutation_fn(StoreDomain::Security, operation)
+    }
+
     pub(super) fn list_ssh_keys(&self) -> Result<Vec<SshKey>, StoreClientError> {
         self.request(|store| store.list_ssh_keys())
     }
@@ -64,15 +79,15 @@ impl SecurityStoreProxy {
 
     pub(super) fn delete_known_host(&self, id: &str) -> Result<(), StoreClientError> {
         let id = id.to_string();
-        self.request(move |store| store.delete_known_host(&id))
+        self.mutate(move |store| store.delete_known_host(&id))
     }
 
     pub(super) fn clear_known_hosts(&self) -> Result<(), StoreClientError> {
-        self.request(|store| store.clear_known_hosts())
+        self.mutate(|store| store.clear_known_hosts())
     }
 
     pub(super) fn save_ssh_key(&self, key: SshKey) -> Result<String, StoreClientError> {
-        self.request(move |store| store.save_ssh_key(key))
+        self.mutate(move |store| store.save_ssh_key(key))
     }
 
     pub(super) fn load_decrypted_ssh_key_by_id(
@@ -85,11 +100,11 @@ impl SecurityStoreProxy {
 
     pub(super) fn delete_ssh_key(&self, key_id: &str) -> Result<(), StoreClientError> {
         let key_id = key_id.to_string();
-        self.request(move |store| store.delete_ssh_key(&key_id))
+        self.mutate(move |store| store.delete_ssh_key(&key_id))
     }
 
     pub(super) fn save_otp_entry(&self, entry: OtpEntry) -> Result<String, StoreClientError> {
-        self.request(move |store| store.save_otp_entry(entry))
+        self.mutate(move |store| store.save_otp_entry(entry))
     }
 
     pub(super) fn load_decrypted_otp_entry_by_id(
@@ -102,11 +117,11 @@ impl SecurityStoreProxy {
 
     pub(super) fn delete_otp_entry(&self, otp_id: &str) -> Result<(), StoreClientError> {
         let otp_id = otp_id.to_string();
-        self.request(move |store| store.delete_otp_entry(&otp_id))
+        self.mutate(move |store| store.delete_otp_entry(&otp_id))
     }
 
     pub(super) fn save_password(&self, entry: SavedPassword) -> Result<String, StoreClientError> {
-        self.request(move |store| store.save_password(entry))
+        self.mutate(move |store| store.save_password(entry))
     }
 
     pub(super) fn load_decrypted_password_by_id(
@@ -119,14 +134,14 @@ impl SecurityStoreProxy {
 
     pub(super) fn delete_password(&self, password_id: &str) -> Result<(), StoreClientError> {
         let password_id = password_id.to_string();
-        self.request(move |store| store.delete_password(&password_id))
+        self.mutate(move |store| store.delete_password(&password_id))
     }
 
     pub(super) fn save_credential(
         &self,
         entry: SavedCredential,
     ) -> Result<String, StoreClientError> {
-        self.request(move |store| store.save_credential(entry))
+        self.mutate(move |store| store.save_credential(entry))
     }
 
     pub(super) fn load_decrypted_credential_by_id(
@@ -142,12 +157,12 @@ impl SecurityStoreProxy {
         updates: &[(String, i32)],
     ) -> Result<(), StoreClientError> {
         let updates = updates.to_vec();
-        self.request(move |store| store.reorder_credentials(&updates))
+        self.mutate(move |store| store.reorder_credentials(&updates))
     }
 
     pub(super) fn delete_credential(&self, credential_id: &str) -> Result<(), StoreClientError> {
         let credential_id = credential_id.to_string();
-        self.request(move |store| store.delete_credential(&credential_id))
+        self.mutate(move |store| store.delete_credential(&credential_id))
     }
 
     pub(super) fn verify_master_password(&self, password: &str) -> Result<bool, StoreClientError> {

@@ -184,8 +184,8 @@ impl ZzClawTermApp {
 
     fn title_file_menu_items(&self, cx: &mut Context<Self>) -> Vec<ZzClawMenuItem> {
         vec![
-            ZzClawMenuItem::action("New Window")
-                .icon("icons/window/restore.svg")
+            ZzClawMenuItem::action(t!("menu.newWindow"))
+                .icon("icons/window/plus.svg")
                 .shortcut("Ctrl+Shift+N")
                 .on_click(cx.listener(|_, _, _, cx| {
                     cx.emit(crate::features::AppLifecycleEvent::NewWindowRequested);
