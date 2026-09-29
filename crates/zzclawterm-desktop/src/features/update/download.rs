@@ -372,7 +372,14 @@ impl ZzClawTermApp {
         });
         self.close_update_dialog(window, cx);
         if let Some(controller) = self.desktop_controller.clone() {
-            let _ = controller.update(cx, |controller, cx| controller.request_quit(cx));
+            // This handler runs inside a mutable borrow of the app entity, and
+            // `Controller::request_quit` reads that same entity while ranking
+            // candidate windows. Defer so the quit runs after the borrow ends;
+            // calling it inline aborts the process on the entity borrow check
+            // and the prepared update is never installed.
+            cx.defer(move |cx| {
+                let _ = controller.update(cx, |controller, cx| controller.request_quit(cx));
+            });
         } else {
             self.handle_window_close_request(window, cx);
         }

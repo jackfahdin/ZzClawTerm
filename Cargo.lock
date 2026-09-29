@@ -12947,7 +12947,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-app"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "futures",
@@ -12968,7 +12968,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-core"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -13004,7 +13004,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-desktop"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -13055,7 +13055,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "dirs",
  "rmcp",
@@ -13072,7 +13072,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp-protocol"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "schemars",
  "serde",
@@ -13085,7 +13085,7 @@ version = "0.1.0"
 
 [[package]]
 name = "zzclawterm-rdp-helper"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -13107,7 +13107,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-remote-desktop"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -13120,7 +13120,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-store"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -13142,7 +13142,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "alacritty_terminal",
  "encoding_rs",
@@ -13154,7 +13154,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal-gpui"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "aho-corasick",
  "gpui",
@@ -13169,7 +13169,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-transport"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "async-http-proxy",
@@ -13202,7 +13202,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-ui"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -13214,7 +13214,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-vnc-helper"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "tokio",
  "vnc-rs",
