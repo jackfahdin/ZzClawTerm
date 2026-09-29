@@ -207,7 +207,11 @@ fn forward_activation(
         .read_to_end(&mut ack)?;
     let ack = decode_activation_ack(&ack)?;
     if ack.request_id != request.request_id {
-        bail!("primary ZzClawTerm instance returned an unrelated activation ACK");
+        bail!(
+            "primary ZzClawTerm instance returned an unrelated activation ACK (expected {:x?}, got {:x?})",
+            request.request_id,
+            ack.request_id
+        );
     }
     match ack.status {
         ActivationAckStatus::Accepted => Ok(()),
