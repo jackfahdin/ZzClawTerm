@@ -1129,11 +1129,6 @@ impl ZzClawTermApp {
             self.connection_state.editor_agent_identity_picker_is_open();
         let credential_overlay = self.connection_state.editor_credential_overlay();
         let baud_popover_open = self.connection_state.editor_baud_popover_is_open();
-        let icon_picker_bg = if native_window {
-            rgb(palette.surface)
-        } else {
-            self.shell_surface_color(palette.surface)
-        };
         let validation_error = self.connection_editor_validation_error(&editor);
         let save_enabled = validation_error.is_none();
         let editor_focus = self.connection_state.editor_focus_handle();
@@ -1143,8 +1138,31 @@ impl ZzClawTermApp {
             fields: &fields,
             baud_popover_open,
         };
-        let mut icon_grid = div().grid().grid_cols(7).gap_1();
-        for icon_key in CONNECTION_ICON_OPTIONS.iter().copied() {
+        let custom_icons = self
+            .connection_state
+            .custom_icons
+            .records
+            .iter()
+            .filter_map(|record| {
+                self.connection_state
+                    .custom_icons
+                    .images
+                    .get(&record.id)
+                    .cloned()
+                    .map(|image| (record.clone(), image))
+            })
+            .collect::<Vec<_>>();
+        let icon_rows = (CONNECTION_ICON_OPTIONS.len() + custom_icons.len()).div_ceil(7);
+        // Every icon cell is 28 px, with a 4 px gap between rows.
+        let icon_grid_height = icon_rows * 28 + icon_rows.saturating_sub(1) * 4;
+        let icon_viewport_height = icon_grid_height.min(280) as f32;
+        let mut icon_grid = div()
+            .grid()
+            .grid_cols(7)
+            .gap_1()
+            .pr_4()
+            .debug_selector(|| "connection-editor-icon-grid".to_string());
+        for (index, icon_key) in CONNECTION_ICON_OPTIONS.iter().copied().enumerate() {
             let icon = resolve_connection_icon(Some(icon_key), editor.kind.label());
             let selected = editor.icon.as_deref().unwrap_or(DEFAULT_CONNECTION_ICON) == icon_key;
             icon_grid = icon_grid.child(
@@ -1168,27 +1186,55 @@ impl ZzClawTermApp {
                         rgba(0x00000000)
                     })
                     .hover(|this| this.bg(rgb(palette.hover)))
+                    .when(index == 6, |this| {
+                        this.debug_selector(|| "connection-editor-icon-rightmost".to_string())
+                    })
                     .child(themed_icon(palette, icon, false, 16.))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_connection_editor_icon(Some(icon_key), cx);
                     })),
             );
         }
-        for record in self.connection_state.custom_icons.records.clone() {
-            let Some(image) = self
-                .connection_state
-                .custom_icons
-                .images
-                .get(&record.id)
-                .cloned()
-            else {
-                continue;
-            };
+        for (index, (record, image)) in custom_icons.into_iter().enumerate() {
             let id = record.id.clone();
+            let selected = editor.icon.as_deref() == Some(record.id.as_str());
             icon_grid = icon_grid.child(
-                zzclawterm_ui::ZzClawButton::new(format!("custom-icon-{}", record.id), "")
-                    .tooltip(record.name)
-                    .content(gpui::img(image).size(px(20.)))
+                div()
+                    .id(SharedString::from(format!("custom-icon-{}", record.id)))
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(if selected {
+                        rgba((palette.primary << 8) | 0x26)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .border_1()
+                    .border_color(if selected {
+                        rgb(palette.primary)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(|this| this.bg(rgb(palette.hover)))
+                    .when(index == 0, |this| {
+                        this.debug_selector(|| "connection-editor-custom-icon-first".to_string())
+                    })
+                    .tooltip(move |window, cx| {
+                        ZzClawTooltip::new(record.name.clone()).build(window, cx)
+                    })
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .when(index == 0, |this| {
+                                this.debug_selector(|| {
+                                    "connection-editor-custom-image-first".to_string()
+                                })
+                            })
+                            .child(gpui::img(image).size(px(16.))),
+                    )
                     .on_click(cx.listener(move |app, _, _, cx| {
                         app.set_connection_editor_icon(Some(&id), cx)
                     })),
@@ -1232,17 +1278,21 @@ impl ZzClawTermApp {
                 themed_icon(palette, icon_def, false, 17.).into_any_element()
             });
         let icon_picker_content = div()
+            .debug_selector(|| "connection-editor-icon-popover-content".to_string())
             .occlude()
-            .w(px(232.))
+            .flex()
+            .flex_col()
+            // Seven 28 px icons plus gaps and a separate 16 px scrollbar track.
+            .w(px(256.))
             .p_2()
             .rounded_md()
             .border_1()
             .border_color(rgb(palette.border))
-            .bg(icon_picker_bg)
+            .bg(rgb(palette.surface))
             .shadow_lg()
             .child(
                 div()
-                    .max_h(px(280.))
+                    .h(px(icon_viewport_height))
                     .overflow_y_scrollbar()
                     .child(icon_grid),
             )
@@ -1270,6 +1320,7 @@ impl ZzClawTermApp {
                 this.child(
                     div()
                         .id("connection-editor-icon-auto-detect")
+                        .debug_selector(|| "connection-editor-icon-auto-detect".to_string())
                         .mt_2()
                         .pt_2()
                         .border_t_1()
@@ -2800,13 +2851,14 @@ fn connection_proxy_jump_would_cycle(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path, sync::Arc};
 
     use gpui::{
         AppContext as _, Entity, InteractiveElement as _, IntoElement, Modifiers,
-        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, div, px,
+        ParentElement as _, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Styled as _,
+        TestAppContext, VisualTestContext, div, point, px,
     };
-    use zzclawterm_core::{AppRuntime, Group, RuntimeMode};
+    use zzclawterm_core::{AppRuntime, Group, RuntimeMode, models::sessions::ConnectionCustomIcon};
 
     use super::{connection_editor_group_menu_options, ordered_connection_groups};
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
@@ -3126,6 +3178,119 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(selected, vec![Some("child".to_string())]);
+    }
+
+    #[gpui::test]
+    fn connection_editor_icon_picker_scrolls_custom_icons_without_moving_actions(
+        cx: &mut TestAppContext,
+    ) {
+        let test_dir = TestConfigDir::new("zzclawterm-connection-icon-picker-scroll");
+        let (app, vcx) = hosted_editor(cx, test_dir.path(), 640., 720., 12.);
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.set_connection_icon_picker_open(true, cx);
+            });
+        });
+        for _ in 0..3 {
+            draw_editor(&app, vcx);
+        }
+        let grid_without_custom = vcx
+            .debug_bounds("connection-editor-icon-grid")
+            .expect("default icons should render inside the picker");
+        let popup_without_custom = vcx
+            .debug_bounds("connection-editor-icon-popover-content")
+            .expect("icon picker should be open");
+
+        let records = (0..14)
+            .map(|index| ConnectionCustomIcon {
+                id: format!("test-icon-{index}"),
+                name: format!("Test icon {index}"),
+                data_url: String::new(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        vcx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let icon = Arc::new(RenderImage::new(vec![image::Frame::new(
+                    image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])),
+                )]));
+                let images = records
+                    .iter()
+                    .map(|record| (record.id.clone(), icon.clone()))
+                    .collect::<HashMap<_, _>>();
+                app.connection_state.custom_icons.records = records[..7].to_vec();
+                app.connection_state.custom_icons.images = Arc::new(images);
+            });
+        });
+        for _ in 0..3 {
+            draw_editor(&app, vcx);
+        }
+        let popup_with_seven_custom = vcx
+            .debug_bounds("connection-editor-icon-popover-content")
+            .expect("icon picker should grow with seven custom icons");
+        let first_custom_icon = vcx
+            .debug_bounds("connection-editor-custom-icon-first")
+            .expect("first custom icon should render");
+        let first_custom_image = vcx
+            .debug_bounds("connection-editor-custom-image-first")
+            .expect("image inside first custom icon should render");
+        assert_eq!(first_custom_image.left() - first_custom_icon.left(), px(6.));
+        assert_eq!(
+            popup_with_seven_custom.size.height - popup_without_custom.size.height,
+            px(32.)
+        );
+
+        vcx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                app.connection_state.custom_icons.records = records;
+            });
+        });
+        for _ in 0..3 {
+            draw_editor(&app, vcx);
+        }
+
+        let grid_before = vcx
+            .debug_bounds("connection-editor-icon-grid")
+            .expect("icon grid should render inside the picker");
+        let popup_before = vcx
+            .debug_bounds("connection-editor-icon-popover-content")
+            .expect("icon picker should be open");
+        let rightmost_icon = vcx
+            .debug_bounds("connection-editor-icon-rightmost")
+            .expect("rightmost icon should render clear of the scrollbar");
+        let auto_detect_before = vcx
+            .debug_bounds("connection-editor-icon-auto-detect")
+            .expect("auto-detect action should render below the icon grid");
+        assert_eq!(grid_without_custom.size.height, px(220.));
+        assert!(grid_before.size.height > px(280.));
+        assert!(popup_before.right() - rightmost_icon.right() >= px(25.));
+        assert_eq!(
+            popup_before.size.height - popup_without_custom.size.height,
+            px(60.)
+        );
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(grid_before.left() + px(20.), grid_before.top() + px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-48.))),
+            ..Default::default()
+        });
+        draw_editor(&app, vcx);
+
+        let grid_after = vcx
+            .debug_bounds("connection-editor-icon-grid")
+            .expect("icon grid should remain scrollable");
+        let popup_after = vcx
+            .debug_bounds("connection-editor-icon-popover-content")
+            .expect("icon picker should remain open");
+        let auto_detect_after = vcx
+            .debug_bounds("connection-editor-icon-auto-detect")
+            .expect("auto-detect action should remain below the icon grid");
+        assert!(
+            grid_after.top() < grid_before.top(),
+            "grid: {grid_before:?} -> {grid_after:?}, popup: {popup_before:?} -> {popup_after:?}, auto-detect: {auto_detect_before:?} -> {auto_detect_after:?}"
+        );
+        assert_eq!(popup_after.top(), popup_before.top());
+        assert_eq!(auto_detect_after.top(), auto_detect_before.top());
     }
 
     #[gpui::test]

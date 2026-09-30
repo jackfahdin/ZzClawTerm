@@ -84,7 +84,7 @@ impl ZzClawTermApp {
 
     fn idle_lock_decision(&self) -> IdleLockDecision {
         idle_lock_decision(
-            self.settings.summary().enable_screen_lock,
+            self.settings.summary().enable_idle_lock,
             self.security.screen_locked(),
             self.settings.summary().idle_lock_minutes,
             self.security.screen_lock_idle_for(),

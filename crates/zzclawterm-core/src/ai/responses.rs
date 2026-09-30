@@ -74,7 +74,7 @@ pub fn build_openai_responses_request_body(
     if let Some(effort) = responses_reasoning_effort(&settings.default_reasoning_effort) {
         body["reasoning"] = serde_json::json!({ "effort": effort });
     }
-    if request.mode == AiMode::Agent {
+    if request.mode == AiMode::Agent && !request.options.agent_json_protocol {
         body["tools"] = responses_tools();
         body["tool_choice"] = serde_json::json!("required");
     }

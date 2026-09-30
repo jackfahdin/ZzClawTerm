@@ -8,7 +8,7 @@ use gpui::{
 };
 use zzclawterm_core::{
     AgentCommandExecutionMode, AiAction, AiAgentKind, AiCommandCard, AiMessage, AiMessageRole,
-    AiMode, AiModelConfigItem, AiSession, truncate_preview,
+    AiMode, AiModelConfigItem, AiReasoningEffort, AiSession, AiSessionScopeType, truncate_preview,
 };
 use zzclawterm_ui::{ZzClawInputShell, ZzClawScrollable, ZzClawSearchInput};
 
@@ -79,7 +79,9 @@ pub(in crate::features) struct AiPanelSnapshot {
     pub agent_mode: bool,
     pub running: bool,
     pub agent_kind: AiAgentKind,
+    pub reasoning_effort: AiReasoningEffort,
     pub external_agent: bool,
+    pub external_model_label: String,
     pub selected_model_id: Option<String>,
     pub selected_model_exists: bool,
     pub model_label: String,
@@ -106,6 +108,10 @@ pub(in crate::features) struct AiPanelSnapshot {
     pub history_open: bool,
     pub history_query: String,
     pub history_sessions: Arc<[AiSession]>,
+    pub history_running_ids: Arc<[String]>,
+    pub current_ai_session_id: String,
+    pub owner_terminal_id: Option<String>,
+    pub owner_connection_id: Option<String>,
     pub history_pending: bool,
     pub history_actions_disabled: bool,
     pub execution_menu_open: bool,
@@ -259,6 +265,10 @@ impl AiPanel {
                     .when(snapshot.mention_open, |this| {
                         this.child(self.ai_mention_popover(&snapshot, cx))
                     })
+                    .child(self.ai_mode_switch(&snapshot, cx))
+                    .when(!snapshot.external_agent, |this| {
+                        this.child(self.ai_reasoning_switch(&snapshot, cx))
+                    })
                     .child(
                         div()
                             .w_full()
@@ -286,7 +296,6 @@ impl AiPanel {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(self.ai_mode_switch(&snapshot, cx))
                                     .when(snapshot.external_agent, |this| {
                                         this.child(ai_agent_status_badge(&snapshot))
                                     })
@@ -628,6 +637,7 @@ impl AiPanel {
         let palette = snapshot.chrome.palette;
         div()
             .h(px(28.))
+            .w_full()
             .flex()
             .items_center()
             .rounded_md()
@@ -643,21 +653,73 @@ impl AiPanel {
                 palette,
                 cx.listener(|panel, _, _, cx| {
                     panel.with_app(cx, |app, cx| {
-                        app.set_ai_mode(AiMode::Ask, cx);
+                        app.set_ai_run_mode(AiMode::Ask, AiAgentKind::Zzclawterm, cx);
                     });
                 }),
             ))
             .child(mode_button(
-                "ai-mode-agent",
-                "Agent",
-                snapshot.agent_mode,
+                "ai-mode-zzclawterm",
+                "ZzClawTerm Agent",
+                snapshot.agent_mode && snapshot.agent_kind == AiAgentKind::Zzclawterm,
                 palette,
                 cx.listener(|panel, _, _, cx| {
                     panel.with_app(cx, |app, cx| {
-                        app.set_ai_mode(AiMode::Agent, cx);
+                        app.set_ai_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm, cx);
                     });
                 }),
             ))
+            .child(mode_button(
+                "ai-mode-codex",
+                "Codex Agent",
+                snapshot.agent_mode && snapshot.agent_kind == AiAgentKind::Codex,
+                palette,
+                cx.listener(|panel, _, _, cx| {
+                    panel.with_app(cx, |app, cx| {
+                        app.set_ai_run_mode(AiMode::Agent, AiAgentKind::Codex, cx);
+                    });
+                }),
+            ))
+            .child(mode_button(
+                "ai-mode-claude",
+                "Claude Code",
+                snapshot.agent_mode && snapshot.agent_kind == AiAgentKind::ClaudeCode,
+                palette,
+                cx.listener(|panel, _, _, cx| {
+                    panel.with_app(cx, |app, cx| {
+                        app.set_ai_run_mode(AiMode::Agent, AiAgentKind::ClaudeCode, cx);
+                    });
+                }),
+            ))
+    }
+
+    fn ai_reasoning_switch(
+        &self,
+        snapshot: &AiPanelSnapshot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let palette = snapshot.chrome.palette;
+        let mut row = div().h(px(25.)).w_full().flex().items_center().gap_1();
+        for (label, effort) in [
+            ("Auto", AiReasoningEffort::Auto),
+            ("None", AiReasoningEffort::None),
+            ("Low", AiReasoningEffort::Low),
+            ("Med", AiReasoningEffort::Medium),
+            ("High", AiReasoningEffort::High),
+            ("XHigh", AiReasoningEffort::XHigh),
+        ] {
+            row = row.child(mode_button(
+                format!("ai-reasoning-{label}"),
+                label,
+                snapshot.reasoning_effort == effort,
+                palette,
+                cx.listener(move |panel, _, _, cx| {
+                    panel.with_app(cx, |app, cx| {
+                        app.set_ai_reasoning_effort(effort.clone(), cx)
+                    });
+                }),
+            ));
+        }
+        row
     }
 
     fn ai_model_selector(
@@ -1245,7 +1307,9 @@ impl AiPanel {
         let (label, fg, bg) = ai_agent_step_status_style(step.status);
         let border = match step.status {
             AiAgentStepStatus::Completed => rgb(palette.success),
-            AiAgentStepStatus::Failed | AiAgentStepStatus::Cancelled => rgb(palette.danger),
+            AiAgentStepStatus::Failed
+            | AiAgentStepStatus::Rejected
+            | AiAgentStepStatus::Cancelled => rgb(palette.danger),
             AiAgentStepStatus::Running | AiAgentStepStatus::Tool => rgb(palette.link),
             AiAgentStepStatus::NeedsApproval => rgb(palette.warning),
             AiAgentStepStatus::Planning => rgb(palette.text_muted),
@@ -1532,6 +1596,11 @@ impl AiPanel {
                     app.run_ai_command_card(index, cx);
                 });
             }),
+            cx.listener(move |panel, _, _, cx| {
+                panel.with_app(cx, move |app, cx| {
+                    app.reject_ai_agent_command_card(index, cx)
+                });
+            }),
             cx,
         )
     }
@@ -1547,6 +1616,7 @@ impl AiPanel {
         let insert_id = card_id.clone();
         let save_id = card_id.clone();
         let run_id = card_id;
+        let reject_id = run_id.clone();
         self.ai_command_card_shell(
             AiCommandCardPresentation::new(palette, key, card),
             cx.listener(move |panel, _, _, cx| {
@@ -1567,6 +1637,12 @@ impl AiPanel {
                     app.run_ai_command_card_by_id(run_id, cx);
                 });
             }),
+            cx.listener(move |panel, _, _, cx| {
+                let reject_id = reject_id.clone();
+                panel.with_app(cx, move |app, cx| {
+                    app.reject_ai_agent_command_card_by_id(reject_id, cx)
+                });
+            }),
             cx,
         )
     }
@@ -1577,6 +1653,7 @@ impl AiPanel {
         on_insert: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         on_save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         on_run: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        on_reject: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let AiCommandCardPresentation {
@@ -1586,6 +1663,8 @@ impl AiPanel {
             title,
             command,
             explanation,
+            risk_reason,
+            agent_command,
             expected,
             rollback,
         } = presentation;
@@ -1647,6 +1726,14 @@ impl AiPanel {
                             .line_height(px(16.))
                             .child(truncate_preview(&explanation, 320)),
                     )
+                    .when(!risk_reason.trim().is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(palette.warning))
+                                .child(truncate_preview(&risk_reason, 320)),
+                        )
+                    })
                     .when(!expected.trim().is_empty(), |this| {
                         this.child(
                             div()
@@ -1702,7 +1789,15 @@ impl AiPanel {
                         format!("ai-command-run-{key}"),
                         "Run",
                         on_run,
-                    )),
+                    ))
+                    .when(agent_command, |this| {
+                        this.child(small_button(
+                            palette,
+                            format!("ai-command-reject-{key}"),
+                            "Reject",
+                            on_reject,
+                        ))
+                    }),
             )
             .into_any_element()
     }
@@ -1950,7 +2045,31 @@ impl AiPanel {
             .collect();
         let total_count = snapshot.history_sessions.len();
         let filtered_count = filtered.len();
-        let grouped = group_ai_sessions_by_date(&filtered);
+        let mut grouped = [
+            ("Current terminal", Vec::new()),
+            ("Same connection", Vec::new()),
+            ("Other sessions", Vec::new()),
+        ];
+        for session in filtered {
+            let group = if session.scope.r#type == AiSessionScopeType::Terminal
+                && session.scope.target_id == snapshot.owner_terminal_id
+                && snapshot.owner_terminal_id.is_some()
+            {
+                0
+            } else if snapshot
+                .owner_connection_id
+                .as_ref()
+                .is_some_and(|connection_id| {
+                    session.connection_id.as_ref() == Some(connection_id)
+                        || session.scope.connection_ids.contains(connection_id)
+                })
+            {
+                1
+            } else {
+                2
+            };
+            grouped[group].1.push(session);
+        }
         let mut search_input = snapshot.history_search_input.as_ref().map(|field| {
             ZzClawSearchInput::new("ai-history-search", field).on_key_down(cx.listener(
                 |panel, event: &gpui::KeyDownEvent, _, cx| {
@@ -2028,77 +2147,89 @@ impl AiPanel {
                         .text_size(px(10.))
                         .font_weight(FontWeight(700.))
                         .text_color(rgb(palette.text_dimmed))
-                        .child(group.label()),
+                        .child(group),
                 );
-                for session in sessions.into_iter().take(48) {
-                    let session_id = session.id.clone();
-                    let delete_id = session.id.clone();
-                    let active = snapshot
-                        .messages
-                        .first()
-                        .is_some_and(|message| message.session_id == session.id);
+                for (date, date_sessions) in group_ai_sessions_by_date(&sessions) {
                     rows = rows.child(
                         div()
-                            .id(SharedString::from(format!("ai-session-{}", session.id)))
-                            .h(px(32.))
                             .px_2()
-                            .rounded_md()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .bg(if active {
-                                rgb(palette.hover)
-                            } else {
-                                rgba(0x00000000)
-                            })
-                            .hover(move |this| this.bg(rgb(palette.surface_elevated)))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "ai-session-open-{}",
-                                        session.id
-                                    )))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(palette.text))
-                                    .overflow_hidden()
-                                    .cursor_pointer()
-                                    .child(truncate_preview(&session.title, 28))
-                                    .on_click(cx.listener(move |panel, _, _, cx| {
-                                        let session_id = session_id.clone();
-                                        panel.with_app(cx, move |app, cx| {
-                                            app.load_ai_session_messages(session_id, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(9.))
-                                    .text_color(rgb(palette.text_dimmed))
-                                    .child(format!(
-                                        "{}{}",
-                                        agent_kind_label(&session.agent_kind),
-                                        if session.external_session_id.is_some() {
-                                            " · resume"
-                                        } else {
-                                            ""
-                                        }
-                                    )),
-                            )
-                            .child(svg_icon_button(
-                                format!("ai-session-delete-{}", session.id),
-                                "icons/fe/delete.svg",
-                                14.,
-                                palette,
-                                cx.listener(move |panel, _, _, cx| {
-                                    let delete_id = delete_id.clone();
-                                    panel.with_app(cx, move |app, cx| {
-                                        app.delete_ai_session(delete_id, cx);
-                                    });
-                                }),
-                            )),
+                            .text_size(px(9.))
+                            .text_color(rgb(palette.text_dimmed))
+                            .child(date.label()),
                     );
+                    for session in date_sessions.into_iter().take(48) {
+                        let session_id = session.id.clone();
+                        let delete_id = session.id.clone();
+                        let active = snapshot.current_ai_session_id == session.id;
+                        let occupied = snapshot
+                            .history_running_ids
+                            .iter()
+                            .any(|id| id == &session.id);
+                        rows = rows.child(
+                            div()
+                                .id(SharedString::from(format!("ai-session-{}", session.id)))
+                                .h(px(32.))
+                                .px_2()
+                                .rounded_md()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .bg(if active {
+                                    rgb(palette.hover)
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .hover(move |this| this.bg(rgb(palette.surface_elevated)))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "ai-session-open-{}",
+                                            session.id
+                                        )))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(palette.text))
+                                        .overflow_hidden()
+                                        .cursor_pointer()
+                                        .child(truncate_preview(&session.title, 28))
+                                        .on_click(cx.listener(move |panel, _, _, cx| {
+                                            let session_id = session_id.clone();
+                                            panel.with_app(cx, move |app, cx| {
+                                                app.load_ai_session_messages(session_id, cx);
+                                            });
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(rgb(palette.text_dimmed))
+                                        .child(format!(
+                                            "{}{}",
+                                            agent_kind_label(&session.agent_kind),
+                                            if occupied {
+                                                " · running"
+                                            } else if session.external_session_id.is_some() {
+                                                " · resume"
+                                            } else {
+                                                ""
+                                            }
+                                        )),
+                                )
+                                .child(svg_icon_button(
+                                    format!("ai-session-delete-{}", session.id),
+                                    "icons/fe/delete.svg",
+                                    14.,
+                                    palette,
+                                    cx.listener(move |panel, _, _, cx| {
+                                        let delete_id = delete_id.clone();
+                                        panel.with_app(cx, move |app, cx| {
+                                            app.delete_ai_session(delete_id, cx);
+                                        });
+                                    }),
+                                )),
+                        );
+                    }
                 }
             }
         }
@@ -2455,11 +2586,12 @@ impl ZzClawTermApp {
     }
 
     fn build_ai_panel_snapshot(&mut self, cx: &mut Context<Self>) -> AiPanelSnapshot {
+        self.sync_ai_active_scope(cx);
         let palette = self.theme_palette();
         let enabled = self.ai.settings_config().enabled;
-        let agent_mode = self.ai.settings_config().default_mode == AiMode::Agent;
+        let agent_mode = self.ai.chat_run_mode() == AiMode::Agent;
         let running = self.ai.chat_or_agent_is_running();
-        let agent_kind = self.ai.settings_config().default_agent_kind.clone();
+        let agent_kind = self.ai.chat_agent_kind();
         let external_agent = agent_mode && agent_kind != AiAgentKind::Zzclawterm;
         let selected_model_id = self.ai_selected_model_id();
         let enabled_models: Arc<[AiModelConfigItem]> = self.ai_enabled_models().into();
@@ -2569,7 +2701,27 @@ impl ZzClawTermApp {
             agent_mode,
             running,
             agent_kind,
+            reasoning_effort: self.ai.settings_config().default_reasoning_effort.clone(),
             external_agent,
+            external_model_label: match self.ai.chat_agent_kind() {
+                AiAgentKind::Codex => self
+                    .ai
+                    .settings_config()
+                    .codex
+                    .default_model
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Default model".to_string()),
+                AiAgentKind::ClaudeCode => self
+                    .ai
+                    .settings_config()
+                    .claude_code
+                    .default_model
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Default model".to_string()),
+                AiAgentKind::Zzclawterm => String::new(),
+            },
             selected_model_id,
             selected_model_exists,
             model_label,
@@ -2610,6 +2762,21 @@ impl ZzClawTermApp {
             history_open: self.ai.history_is_open(),
             history_query: self.ai.history_query().to_string(),
             history_sessions: self.ai.history_sessions().to_vec().into(),
+            history_running_ids: self
+                .ai
+                .history_sessions()
+                .iter()
+                .filter(|session| self.ai.ai_session_is_running(&session.id))
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+                .into(),
+            current_ai_session_id: self.ai.chat_session_id().to_string(),
+            owner_terminal_id: self.session.active_id().map(str::to_string),
+            owner_connection_id: self
+                .session
+                .active_id()
+                .and_then(|id| self.session.metadata(id))
+                .and_then(|metadata| metadata.source_connection_id.clone()),
             history_pending: self.ai.history_is_pending(),
             history_actions_disabled: self.ai.history_actions_are_disabled(),
             execution_menu_open: self.ai.panel_execution_menu_is_open(),
@@ -2622,6 +2789,18 @@ impl ZzClawTermApp {
                 .ai
                 .settings_config()
                 .agent_background_execution_enabled,
+        }
+    }
+
+    pub(in crate::features) fn sync_ai_active_scope(&mut self, cx: &mut Context<Self>) {
+        let scope = self
+            .session
+            .active_id()
+            .map(|session_id| format!("terminal:{session_id}"))
+            .unwrap_or_else(|| "unbound:".to_string());
+        if self.ai.switch_visible_scope(&scope) {
+            let draft = self.ai.chat_prompt_draft().to_string();
+            self.reset_text_input("ai.chat.prompt", &draft, cx);
         }
     }
 }
@@ -2652,9 +2831,10 @@ fn ai_agent_status_badge(snapshot: &AiPanelSnapshot) -> impl IntoElement {
             palette.text_muted
         }))
         .child(format!(
-            "{} · {}MCP-only",
+            "{} · {}{}",
             agent_kind_label(&snapshot.agent_kind),
-            if snapshot.running { "running · " } else { "" }
+            if snapshot.running { "running · " } else { "" },
+            truncate_preview(&snapshot.external_model_label, 24),
         ))
 }
 

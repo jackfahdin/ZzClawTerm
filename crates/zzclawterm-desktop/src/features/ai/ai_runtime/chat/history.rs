@@ -1,4 +1,6 @@
 use gpui::Context;
+use std::sync::atomic::Ordering;
+use zzclawterm_core::AiSessionScopeType;
 use zzclawterm_store::StoreDomain;
 
 use crate::features::{ZzClawTermApp, formatting::compact_id, runtime_jobs::await_blocking_job};
@@ -33,6 +35,10 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn start_new_ai_chat(&mut self, cx: &mut Context<Self>) {
+        self.sync_ai_active_scope(cx);
+        if self.ai.chat_or_agent_is_running() {
+            return;
+        }
         self.ai.start_new_chat();
         // The composer keeps its own buffer, so clearing the draft is not enough.
         self.reset_text_input("ai.chat.prompt", "", cx);
@@ -44,34 +50,120 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) {
+        self.sync_ai_active_scope(cx);
+        if self.ai.ai_session_is_running(&session_id) || self.ai.chat_or_agent_is_running() {
+            self.ai.set_panel_status("AI session is in use".to_string());
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
         let Some(job_id) = self.begin_ai_history_operation("loading AI session", cx) else {
             return;
         };
         let source_session_id = self.ai.chat_session_id().to_string();
+        let source_scope = self.ai.active_scope_key().to_string();
+        let (scope_epoch, expected_epoch) = self.ai.visible_scope_guard();
+        let loaded_kind = self
+            .ai
+            .history_session(&session_id)
+            .map(|session| session.agent_kind.clone());
+        let owner_scope = self.ai_current_owner_scope();
+        let should_rebind = owner_scope.r#type == AiSessionScopeType::Terminal
+            && self.ai.history_session(&session_id).is_some_and(|session| {
+                session.scope.r#type != owner_scope.r#type
+                    || session.scope.target_id != owner_scope.target_id
+            });
         let store = self.store_blocking_client();
         let job_session_id = session_id.clone();
+        let read_store = store.clone();
         let task = self
             .blocking_jobs
             .submit_task("ai-history-messages", move |_| {
-                store
+                read_store
                     .request_fn(StoreDomain::Ai, move |store| {
-                        store.list_ai_messages(&job_session_id)
+                        let messages = store.list_ai_messages(&job_session_id)?;
+                        Ok(messages)
                     })
                     .map_err(|error| error.to_string())
             });
         cx.spawn(async move |this, cx| {
-            let result = await_blocking_job(task).await.and_then(|result| result);
+            let mut result = await_blocking_job(task).await.and_then(|result| result);
+            let still_current = this
+                .update(cx, |this, _| {
+                    this.ai.active_scope_key() == source_scope
+                        && this.ai.chat_session_id() == source_session_id
+                        && !this.ai.chat_or_agent_is_running()
+                })
+                .unwrap_or(false);
+            if !still_current {
+                result = Err("AI session load cancelled after switching terminal".to_string());
+            }
+            let rebound = if result.is_ok() && should_rebind {
+                let target_session_id = session_id.clone();
+                let binding_store = store.clone();
+                let binding_task = this.update(cx, |this, _| {
+                    this.blocking_jobs
+                        .submit_task("ai-history-rebind", move |_| {
+                            binding_store
+                                .request_fn(StoreDomain::Ai, move |store| {
+                                    if scope_epoch.load(Ordering::Acquire) != expected_epoch {
+                                        return Err(zzclawterm_store::StorageError::InvalidData(
+                                            "AI session load cancelled after switching terminal"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    store.rebind_ai_session(&target_session_id, owner_scope)
+                                })
+                                .map_err(|error| error.to_string())
+                        })
+                });
+                match binding_task {
+                    Ok(task) => match await_blocking_job(task).await.and_then(|result| result) {
+                        Ok(session) => Some(session),
+                        Err(error) => {
+                            result = Err(error);
+                            None
+                        }
+                    },
+                    Err(_) => {
+                        result = Err("AI session load was interrupted".to_string());
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let _ = this.update(cx, |this, cx| {
+                let visible_scope = this.ai.active_scope_key().to_string();
+                let loaded = result.is_ok() && visible_scope == source_scope;
+                this.ai.switch_scope(&source_scope);
                 let loaded_status = format!("loaded AI session {}", compact_id(&session_id));
+                if result.is_ok() {
+                    this.ai.release_ai_session(&session_id);
+                }
+                let target_session_id = session_id.clone();
                 if this.ai.finish_history_message_load(
                     job_id,
                     &source_session_id,
                     session_id,
-                    result,
+                    if loaded {
+                        result
+                    } else {
+                        Err("AI session load cancelled after switching terminal".to_string())
+                    },
                     loaded_status,
                 ) {
+                    if let Some(rebound) = rebound {
+                        this.ai.replace_history_session(rebound);
+                    }
+                    if loaded
+                        && this.ai.chat_session_id() == target_session_id
+                        && let Some(kind) = loaded_kind
+                    {
+                        this.ai.apply_loaded_session_kind(kind);
+                    }
                     this.defer_ai_panel_snapshot_flush(cx);
                 }
+                this.ai.switch_scope(&visible_scope);
             });
         })
         .detach();
@@ -82,6 +174,11 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self.ai.ai_session_is_running(&session_id) {
+            self.ai.set_panel_status("AI session is in use".to_string());
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
         let Some(job_id) = self.begin_ai_history_operation("deleting AI session", cx) else {
             return;
         };
@@ -114,6 +211,12 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn clear_all_ai_history(&mut self, cx: &mut Context<Self>) {
+        if self.ai.any_chat_or_agent_running() {
+            self.ai
+                .set_panel_status("Stop AI requests before clearing history".to_string());
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
         let Some(job_id) = self.begin_ai_history_operation("clearing AI history", cx) else {
             return;
         };

@@ -51,6 +51,7 @@ impl ZzClawTermApp {
             SettingsTab::AiGeneral => self.ensure_ai_general_inputs(cx),
             SettingsTab::AiModels => self.ensure_ai_model_inputs(cx),
             SettingsTab::AiRules => self.ensure_ai_rule_inputs(cx),
+            SettingsTab::AiAgents => self.ensure_ai_agent_inputs(cx),
             SettingsTab::Transfer => self.ensure_transfer_inputs(cx),
             SettingsTab::Security => self.ensure_security_inputs(cx),
             SettingsTab::SyncBackup => self.ensure_cloud_sync_settings_inputs(cx),
@@ -73,11 +74,10 @@ impl ZzClawTermApp {
         self.request_settings_panel_refresh(cx);
     }
 
-    /// The AI General tab owns the request and external-agent registry inputs.
-    pub(in crate::features) fn ensure_ai_settings_inputs(&mut self, cx: &mut Context<Self>) {
+    /// The AI Agents tab owns the external-agent registry inputs.
+    pub(in crate::features) fn ensure_ai_agent_inputs(&mut self, cx: &mut Context<Self>) {
         let settings = self.ai.settings_config().clone();
         for (field, value) in [
-            (AiInputField::RequestUserAgent, settings.request_user_agent),
             (
                 AiInputField::CodexExecutable,
                 settings.codex.executable_path.unwrap_or_default(),
@@ -287,6 +287,41 @@ impl ZzClawTermApp {
             TextInputSetup::placeholder("[HH:mm:ss]"),
             cx,
         );
+        self.ensure_text_input(
+            "settings.recording.path",
+            &summary.recording_path,
+            TextInputSetup::placeholder(t!("settings.recordingPath")),
+            cx,
+        );
+        self.ensure_text_input(
+            "settings.recording.path-template",
+            &summary.recording_path_template,
+            TextInputSetup::placeholder(zzclawterm_core::DEFAULT_RECORDING_PATH_TEMPLATE),
+            cx,
+        );
+        let memory_mib = (summary.recording_memory_limit_bytes / (1024 * 1024)).max(1);
+        let rotation_size_mib = match summary.recording_rotation {
+            RecordingRotationPolicy::Size { max_bytes } => (max_bytes / (1024 * 1024)).max(1),
+            _ => 50,
+        };
+        self.ensure_number_input(
+            "settings.number.recording-rotation-size",
+            &rotation_size_mib.to_string(),
+            ZzClawNumberInputOptions::default()
+                .range(1.0, 102_400.0)
+                .step(1.0)
+                .suffix("MiB"),
+            cx,
+        );
+        self.ensure_number_input(
+            "settings.number.recording-memory-limit",
+            &memory_mib.to_string(),
+            ZzClawNumberInputOptions::default()
+                .range(1.0, 512.0)
+                .step(1.0)
+                .suffix("MiB"),
+            cx,
+        );
         for (id, value, min, max, step) in [
             (
                 "settings.number.terminal-scrollback-lines",
@@ -407,46 +442,9 @@ impl ZzClawTermApp {
                 summary.transfer_download_path.clone(),
                 t!("settings.downloadPath").to_string(),
             ),
-            (
-                "settings.recording.path",
-                summary.recording_path.clone(),
-                t!("settings.recordingPath").to_string(),
-            ),
-            (
-                "settings.recording.path-template",
-                summary.recording_path_template.clone(),
-                zzclawterm_core::DEFAULT_RECORDING_PATH_TEMPLATE.to_string(),
-            ),
         ] {
             self.ensure_text_input(id, &value, TextInputSetup::placeholder(placeholder), cx);
         }
-
-        // Recording lives on the Transfer tab, and both of its inputs are in MiB while
-        // the settings they mirror are in bytes.
-        let memory_mib =
-            (self.settings.summary().recording_memory_limit_bytes / (1024 * 1024)).max(1);
-        let rotation_size_mib = match self.settings.summary().recording_rotation {
-            RecordingRotationPolicy::Size { max_bytes } => (max_bytes / (1024 * 1024)).max(1),
-            _ => 50,
-        };
-        self.ensure_number_input(
-            "settings.number.recording-rotation-size",
-            &rotation_size_mib.to_string(),
-            ZzClawNumberInputOptions::default()
-                .range(1.0, 102_400.0)
-                .step(1.0)
-                .suffix("MiB"),
-            cx,
-        );
-        self.ensure_number_input(
-            "settings.number.recording-memory-limit",
-            &memory_mib.to_string(),
-            ZzClawNumberInputOptions::default()
-                .range(1.0, 512.0)
-                .step(1.0)
-                .suffix("MiB"),
-            cx,
-        );
     }
 
     fn ensure_security_inputs(&mut self, cx: &mut Context<Self>) {
@@ -470,7 +468,12 @@ impl ZzClawTermApp {
     }
 
     fn ensure_ai_general_inputs(&mut self, cx: &mut Context<Self>) {
-        self.ensure_ai_settings_inputs(cx);
+        self.ensure_text_input(
+            format!("ai.input.{}", AiInputField::RequestUserAgent.input_key()),
+            &self.ai.settings_config().request_user_agent.clone(),
+            TextInputSetup::default(),
+            cx,
+        );
         let config = self.ai.settings_config().clone();
         for (id, value, min, max, step) in [
             (
@@ -646,7 +649,7 @@ impl ZzClawTermApp {
 
 /// Every tab, so the tests below cannot silently miss one that gets added.
 #[cfg(test)]
-pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 13] = [
+pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 14] = [
     SettingsTab::General,
     SettingsTab::Appearance,
     SettingsTab::Interaction,
@@ -657,6 +660,7 @@ pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 
     SettingsTab::AiGeneral,
     SettingsTab::AiModels,
     SettingsTab::AiRules,
+    SettingsTab::AiAgents,
     SettingsTab::Transfer,
     SettingsTab::Security,
     SettingsTab::SyncBackup,

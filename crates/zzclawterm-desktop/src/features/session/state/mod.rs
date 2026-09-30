@@ -2632,7 +2632,6 @@ pub(in crate::features) struct PendingReconnectCompletion {
     pub old_id: String,
     pub new_id: String,
     pub connection_name: String,
-    pub session_name: String,
     pub kind: SessionKind,
     pub source_connection_id: Option<String>,
     pub workspace_split: Option<(WorkspaceSplitDirection, String)>,

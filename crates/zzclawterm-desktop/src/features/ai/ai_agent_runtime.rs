@@ -2,9 +2,9 @@ use std::time::{Duration, Instant};
 
 use gpui::Context;
 use zzclawterm_core::{
-    AgentCapturedOutput, AiAction, AiChatRequest, AiCommandCard, AiExecutionProfile, AiMode,
-    AppendAiAuditRequest, CommandObservation, build_agent_capture_command,
-    build_observation_message, truncate_preview, uuid,
+    AgentApprovalOutcome, AgentCapturedOutput, AiAction, AiChatRequest, AiCommandCard,
+    AiExecutionProfile, AiMode, AppendAiAuditRequest, CommandObservation,
+    build_agent_capture_command, build_observation_message, truncate_preview, uuid,
 };
 use zzclawterm_store::StoreDomain;
 use zzclawterm_transport::{SessionKind, SshProcessService, run_local_command};
@@ -17,7 +17,8 @@ use crate::features::{
 use crate::models::SessionLaunchConfig;
 
 use super::ai_jobs::{
-    ai_job_cancelled, observation_summary, remote_command_observation, run_ai_ask_job,
+    AiJobRunOptions, ai_job_cancelled, observation_summary, remote_command_observation,
+    run_ai_ask_job,
 };
 use super::state::AiAgentObservationPoll;
 use super::{
@@ -61,14 +62,15 @@ impl ZzClawTermApp {
         inserted_to_terminal: bool,
         cx: &mut Context<Self>,
     ) {
-        let store = self.store_blocking_client();
-        let write_lock = self.ai.history_audit_write_lock();
+        let target_session_id = card.target_terminal_session_id.as_deref().or_else(|| {
+            card.target
+                .as_ref()
+                .map(|target| target.terminal_session_id.as_str())
+        });
         let request = AppendAiAuditRequest {
-            connection_id: card.target_terminal_session_id.clone().or_else(|| {
-                card.target
-                    .as_ref()
-                    .map(|target| target.terminal_session_id.clone())
-            }),
+            connection_id: target_session_id
+                .and_then(|id| self.session.metadata(id))
+                .and_then(|metadata| metadata.source_connection_id.clone()),
             action: if execute {
                 "ai.command_card_run".to_string()
             } else {
@@ -82,6 +84,12 @@ impl ZzClawTermApp {
             blocked: false,
             ..Default::default()
         };
+        self.submit_ai_command_audit(request, cx);
+    }
+
+    fn submit_ai_command_audit(&mut self, request: AppendAiAuditRequest, cx: &mut Context<Self>) {
+        let store = self.store_blocking_client();
+        let write_lock = self.ai.history_audit_write_lock();
         let task = self.blocking_jobs.submit_task("ai-audit-save", move |_| {
             let _guard = write_lock
                 .lock()
@@ -124,11 +132,11 @@ impl ZzClawTermApp {
             return Err("AI Agent target terminal is unavailable".to_string());
         }
         let max_steps = self.ai.settings_max_agent_steps();
-        let (task_prompt, step_index) = match self.ai.begin_agent_step(max_steps) {
+        let (_, step_index) = match self.ai.begin_agent_step(max_steps) {
             Ok(step) => step,
             Err(error) => {
                 self.ai.set_panel_status(error);
-                return Ok(None);
+                return Err(self.ai.panel_status().to_string());
             }
         };
         let now = Instant::now();
@@ -161,7 +169,6 @@ impl ZzClawTermApp {
             terminal_session_id: terminal_session_id.clone(),
             available_targets,
             default_target_session_id: Some(terminal_session_id),
-            task_prompt,
             command: command.trim().to_string(),
             marker_id,
             background_job_id: None,
@@ -239,7 +246,7 @@ impl ZzClawTermApp {
             }
         };
         let max_steps = self.ai.settings_max_agent_steps();
-        let (task_prompt, step_index) = self.ai.begin_agent_step(max_steps)?;
+        let (_, step_index) = self.ai.begin_agent_step(max_steps)?;
         let now = Instant::now();
         let timeout = self
             .ai
@@ -260,7 +267,6 @@ impl ZzClawTermApp {
             terminal_session_id: terminal_session_id.clone(),
             available_targets,
             default_target_session_id: Some(terminal_session_id),
-            task_prompt,
             command: command.trim().to_string(),
             marker_id: None,
             background_job_id: Some(job_id),
@@ -343,6 +349,7 @@ impl ZzClawTermApp {
         if self.ai.agent_loop_clock_is_armed() || self.ai.agent_loop_snapshot().is_none() {
             return;
         }
+        let scope = self.ai.active_scope_key().to_string();
         self.ai.set_agent_loop_clock_armed(true);
         cx.spawn(async move |this, cx| {
             loop {
@@ -351,6 +358,8 @@ impl ZzClawTermApp {
                     .await;
                 let Ok(keep_running) = this.update(cx, |this, cx| {
                     let before = this.ai_header_presentation();
+                    let visible_scope = this.ai.active_scope_key().to_string();
+                    this.ai.switch_scope(&scope);
                     if this.drive_ai_agent_loop(cx) {
                         this.defer_ai_panel_snapshot_flush(cx);
                     }
@@ -358,6 +367,7 @@ impl ZzClawTermApp {
                     if !running {
                         this.ai.set_agent_loop_clock_armed(false);
                     }
+                    this.ai.switch_scope(&visible_scope);
                     this.notify_root_if_ai_header_changed(before, cx);
                     running
                 }) else {
@@ -452,7 +462,13 @@ impl ZzClawTermApp {
         captured: AgentCapturedOutput,
         cx: &mut Context<Self>,
     ) {
+        let Some(scope) = self.ai.scope_for_agent_marker(&captured.marker_id) else {
+            return;
+        };
+        let visible_scope = self.ai.active_scope_key().to_string();
+        self.ai.switch_scope(&scope);
         let Some(state) = self.ai.take_agent_loop_for_marker(&captured.marker_id) else {
+            self.ai.switch_scope(&visible_scope);
             return;
         };
         let observation = CommandObservation {
@@ -472,6 +488,7 @@ impl ZzClawTermApp {
         );
         self.start_ai_agent_continuation(state, observation, cx);
         self.defer_ai_panel_snapshot_flush(cx);
+        self.ai.switch_scope(&visible_scope);
     }
 
     pub(in crate::features) fn note_ai_agent_output_discontinuity(
@@ -480,7 +497,13 @@ impl ZzClawTermApp {
         dropped_bytes: usize,
         cx: &mut Context<Self>,
     ) -> bool {
+        let Some(scope) = self.ai.scope_for_agent_target(session_id) else {
+            return false;
+        };
+        let visible_scope = self.ai.active_scope_key().to_string();
+        self.ai.switch_scope(&scope);
         let Some(state) = self.ai.take_agent_loop_for_session(session_id) else {
+            self.ai.switch_scope(&visible_scope);
             return false;
         };
         if state.marker_id.is_some() {
@@ -510,6 +533,7 @@ impl ZzClawTermApp {
         );
         self.start_ai_agent_continuation(state, observation, cx);
         self.defer_ai_panel_snapshot_flush(cx);
+        self.ai.switch_scope(&visible_scope);
         true
     }
 
@@ -546,16 +570,38 @@ impl ZzClawTermApp {
         observation: CommandObservation,
         cx: &mut Context<Self>,
     ) {
-        let Some(launch) = self.ai.begin_agent_continuation(&state) else {
-            return;
-        };
         let observation_message = build_observation_message(
             &observation,
             &state.command,
             &self.settings.summary().language,
         );
+        self.start_ai_agent_continuation_with_message(state, observation_message, cx);
+    }
+
+    pub(in crate::features) fn start_ai_agent_continuation_with_message(
+        &mut self,
+        state: AiAgentLoopState,
+        observation_message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let conversation = self.ai.agent_conversation_snapshot();
+        let Some(launch) = self
+            .ai
+            .begin_agent_continuation(&state, &observation_message)
+        else {
+            return;
+        };
         let settings = self.ai.settings_config_cloned();
         let terminal_session_id = state.terminal_session_id.clone();
+        let owner_terminal_id = self
+            .ai
+            .active_scope_key()
+            .strip_prefix("terminal:")
+            .map(str::to_string);
+        let owner_connection_id = owner_terminal_id
+            .as_deref()
+            .and_then(|id| self.session.metadata(id))
+            .and_then(|metadata| metadata.source_connection_id.clone());
         let context = self.ai_terminal_context_for_session(Some(&terminal_session_id));
         let targets = state.available_targets.clone();
         let target_contexts = targets
@@ -569,31 +615,34 @@ impl ZzClawTermApp {
         let request = AiChatRequest {
             stream_id: None,
             session_id: Some(state.ai_session_id.clone()),
-            connection_id: Some(terminal_session_id.clone()),
+            connection_id: owner_connection_id.clone(),
             terminal_session_id: Some(terminal_session_id.clone()),
             owner_scope: zzclawterm_core::AiSessionScope {
                 r#type: zzclawterm_core::AiSessionScopeType::Terminal,
-                target_id: Some(terminal_session_id.clone()),
-                connection_ids: Vec::new(),
-                label: self.session.display_name(&terminal_session_id),
+                target_id: owner_terminal_id.clone(),
+                connection_ids: owner_connection_id.into_iter().collect(),
+                label: owner_terminal_id
+                    .as_deref()
+                    .and_then(|id| self.session.display_name(id)),
             },
             targets,
             target_contexts,
             mode: AiMode::Agent,
-            agent_kind: settings.default_agent_kind.clone(),
+            agent_kind: self.ai.chat_agent_kind(),
             permission_mode: settings.external_agent_permission_mode.clone(),
-            model_id: settings.default_model_id.clone(),
+            model_id: self.ai_selected_model_id(),
             model_name: None,
             default_target_session_id: state.default_target_session_id.clone(),
             existing_external_session_id: None,
             attachments: Vec::new(),
             action: AiAction::GenerateCommand,
-            user_input: format!(
-                "Continue the same Agent task.\n\nOriginal task:\n{}\n\n{}",
-                state.task_prompt, observation_message
-            ),
+            user_input: observation_message,
             context,
-            options: Default::default(),
+            options: zzclawterm_core::AiRequestOptions {
+                history_turns: state.max_steps.saturating_mul(2).saturating_add(2),
+                agent_json_protocol: self.ai.agent_uses_json_protocol(),
+                ..Default::default()
+            },
         };
         let store = self.store_blocking_client();
         let tx = launch.tx;
@@ -612,10 +661,13 @@ impl ZzClawTermApp {
                             store,
                             settings,
                             request,
-                            None,
-                            Some(tx.clone()),
-                            cancel,
-                            job_id,
+                            AiJobRunOptions {
+                                mcp_credential: None,
+                                stream_tx: Some(tx.clone()),
+                                cancel,
+                                job_id,
+                                agent_history: Some(conversation),
+                            },
                         )
                     };
                     let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
@@ -632,5 +684,97 @@ impl ZzClawTermApp {
             }));
         }
         self.defer_ai_panel_snapshot_flush(cx);
+    }
+
+    pub(in crate::features) fn reject_ai_agent_command_card(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(card) = self.ai.command_card(index) {
+            self.reject_ai_agent_command_card_value(card, cx);
+        }
+    }
+
+    pub(in crate::features) fn reject_ai_agent_command_card_by_id(
+        &mut self,
+        card_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(card) = self.ai.find_command_card(&card_id) {
+            self.reject_ai_agent_command_card_value(card, cx);
+        }
+    }
+
+    fn reject_ai_agent_command_card_value(&mut self, card: AiCommandCard, cx: &mut Context<Self>) {
+        if !super::ai_jobs::is_agent_command_card(&card)
+            || !self.ai.current_agent_command_card(&card.id)
+            || !self
+                .ai
+                .chat_command_cards()
+                .iter()
+                .any(|current| current.id == card.id)
+            || self.ai.chat_is_pending()
+            || self.ai.agent_loop_snapshot().is_some()
+        {
+            return;
+        }
+        let Some(terminal_session_id) = card.target_terminal_session_id.clone() else {
+            return;
+        };
+        let max_steps = self.ai.settings_max_agent_steps();
+        let Ok((_, step_index)) = self.ai.begin_agent_step(max_steps) else {
+            self.ai
+                .set_panel_status("AI Agent reached its step limit".to_string());
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        };
+        self.ai.upsert_agent_step(
+            step_index,
+            AiAgentStepStatus::Rejected,
+            "Rejected",
+            "User denied command execution",
+        );
+        self.ai.clear_chat_command_cards();
+        self.submit_ai_command_audit(
+            AppendAiAuditRequest {
+                connection_id: self
+                    .session
+                    .metadata(&terminal_session_id)
+                    .and_then(|metadata| metadata.source_connection_id.clone()),
+                action: "ai.agent_reject_execute".to_string(),
+                generated_command: Some(card.command.clone()),
+                risk_level: card.risk_level.clone(),
+                blocked: true,
+                session_id: Some(self.ai.chat_session_id().to_string()),
+                approval_decision: Some(AgentApprovalOutcome::Rejected.as_str().to_string()),
+                ..Default::default()
+            },
+            cx,
+        );
+        let now = Instant::now();
+        let target_ids = self.ai_effective_target_session_ids();
+        let state = AiAgentLoopState {
+            ai_session_id: self.ai.chat_session_id().to_string(),
+            terminal_session_id: terminal_session_id.clone(),
+            available_targets: self.ai_terminal_targets_for_sessions(&target_ids),
+            default_target_session_id: Some(terminal_session_id),
+            command: card.command.clone(),
+            marker_id: None,
+            background_job_id: None,
+            step_index,
+            max_steps,
+            output_start_len: 0,
+            started_at: now,
+            min_wait_until: now,
+            timeout_at: now,
+            last_seen_len: 0,
+            stable_since: now,
+        };
+        self.start_ai_agent_continuation_with_message(
+            state,
+            format!("The user rejected command `{}`. It was not executed. Choose a safe alternative or finish the task.", card.command),
+            cx,
+        );
     }
 }

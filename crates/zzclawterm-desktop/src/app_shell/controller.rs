@@ -593,7 +593,7 @@ impl DesktopController {
     fn install_process_snapshot(&mut self, snapshot: BootstrapSnapshot, cx: &mut Context<Self>) {
         if should_enable_startup_screen_lock(
             self.process_state.is_some(),
-            snapshot.settings.enable_screen_lock,
+            snapshot.settings.enable_startup_lock,
         ) {
             self.screen_locked = true;
         }

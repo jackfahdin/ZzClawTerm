@@ -14,6 +14,7 @@ pub(in crate::features) struct RecordingFeatureState {
     pipeline: RecordingWritePipeline,
     search_draft: String,
     busy_actions: HashMap<String, String>,
+    rekeyed_sessions: HashMap<String, String>,
     statuses: HashMap<String, RecordingStatus>,
     path_prompt: Option<RecordingPathPromptKind>,
 }
@@ -27,6 +28,7 @@ impl RecordingFeatureState {
             pipeline,
             search_draft: String::new(),
             busy_actions: HashMap::new(),
+            rekeyed_sessions: HashMap::new(),
             statuses: HashMap::new(),
             path_prompt: None,
         }
@@ -89,7 +91,16 @@ impl RecordingFeatureState {
     }
 
     pub(in crate::features) fn finish_action(&mut self, session_id: &str) {
-        self.busy_actions.remove(session_id);
+        let current_id = self.current_session_id(session_id);
+        self.busy_actions.remove(&current_id);
+    }
+
+    pub(in crate::features) fn current_session_id(&self, session_id: &str) -> String {
+        let mut current = session_id;
+        while let Some(next) = self.rekeyed_sessions.get(current) {
+            current = next;
+        }
+        current.to_string()
     }
 
     pub(in crate::features) fn search_draft(&self) -> &str {
@@ -152,6 +163,14 @@ impl RecordingFeatureState {
         self.pipeline.write_input(session_id, data);
     }
 
+    pub(in crate::features) fn resync_input_line(
+        &self,
+        session_id: impl Into<String>,
+        line: String,
+    ) {
+        self.pipeline.resync_input_line(session_id, line);
+    }
+
     pub(in crate::features) fn write_raw_input(
         &self,
         session_id: impl Into<String>,
@@ -175,6 +194,28 @@ impl RecordingFeatureState {
         self.statuses.remove(session_id);
         self.active_count = self.statuses.len();
         self.pipeline.cleanup_session(session_id.to_string());
+    }
+
+    pub(in crate::features) fn disconnect_session(&self, session_id: &str) {
+        self.pipeline.disconnect_session(session_id.to_string());
+    }
+
+    pub(in crate::features) fn rekey_session(&mut self, old_id: &str, new_id: &str) {
+        if old_id == new_id {
+            return;
+        }
+        if let Some((session_id, _)) = self.pending_auto_start.as_mut()
+            && session_id == old_id
+        {
+            *session_id = new_id.to_string();
+        }
+        if let Some(action) = self.busy_actions.remove(old_id) {
+            self.busy_actions.insert(new_id.to_string(), action);
+        }
+        self.rekeyed_sessions
+            .insert(old_id.to_string(), new_id.to_string());
+        self.pipeline
+            .rekey_session(old_id.to_string(), new_id.to_string());
     }
 }
 
@@ -205,5 +246,20 @@ mod tests {
         );
         recording.finish_path_prompt();
         assert!(recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
+    }
+
+    #[test]
+    fn reconnect_moves_pending_auto_start_and_busy_action_once() {
+        let mut recording = RecordingFeatureState::new(1024);
+        recording.schedule_auto_start("s1".to_string(), "shell".to_string());
+        assert!(recording.begin_action("s1", "record"));
+        recording.rekey_session("s1", "s2");
+        assert_eq!(recording.busy_action("s2"), Some("record"));
+        assert!(recording.busy_action("s1").is_none());
+        assert_eq!(
+            recording.take_pending_auto_start(),
+            Some(("s2".into(), "shell".into()))
+        );
+        assert!(recording.take_pending_auto_start().is_none());
     }
 }

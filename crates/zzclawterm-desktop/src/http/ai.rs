@@ -490,7 +490,9 @@ fn read_sse_chat_stream(
     let mut reasoning = String::new();
     let mut tool_call_buffers = BTreeMap::new();
     let mut buffer = String::new();
+    let mut pending_utf8 = Vec::new();
     let mut chunk = [0_u8; 4096];
+    let mut done = false;
     loop {
         let read = response
             .read(&mut chunk)
@@ -498,8 +500,8 @@ fn read_sse_chat_stream(
         if read == 0 {
             break;
         }
-        buffer.push_str(&String::from_utf8_lossy(&chunk[..read]));
-        drain_ai_stream_buffer(
+        buffer.push_str(&decode_stream_utf8(&mut pending_utf8, &chunk[..read]));
+        done = drain_ai_stream_buffer(
             &mut buffer,
             &mut raw_text,
             &mut reasoning,
@@ -507,10 +509,16 @@ fn read_sse_chat_stream(
             parse_chunk,
             &mut on_delta,
         )?;
+        if done {
+            break;
+        }
     }
-    if !buffer.trim().is_empty() {
+    if !done && !pending_utf8.is_empty() {
+        buffer.push_str(&String::from_utf8_lossy(&pending_utf8));
+    }
+    if !done && !buffer.trim().is_empty() {
         let tail = std::mem::take(&mut buffer);
-        apply_ai_stream_deltas(
+        done = apply_ai_stream_deltas(
             &tail,
             &mut raw_text,
             &mut reasoning,
@@ -519,10 +527,12 @@ fn read_sse_chat_stream(
             &mut on_delta,
         )?;
     }
-    on_delta(AiChatStreamDelta {
-        done: true,
-        ..Default::default()
-    });
+    if !done {
+        on_delta(AiChatStreamDelta {
+            done: true,
+            ..Default::default()
+        });
+    }
 
     Ok(AiChatCompletion {
         text: raw_text,
@@ -535,6 +545,33 @@ fn read_sse_chat_stream(
     })
 }
 
+fn decode_stream_utf8(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
+    pending.extend_from_slice(chunk);
+    let mut decoded = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                decoded.push_str(text);
+                pending.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                decoded
+                    .push_str(std::str::from_utf8(&pending[..valid]).expect("valid UTF-8 prefix"));
+                if let Some(invalid_len) = error.error_len() {
+                    decoded.push('\u{fffd}');
+                    pending.drain(..valid + invalid_len);
+                } else {
+                    pending.drain(..valid);
+                    break;
+                }
+            }
+        }
+    }
+    decoded
+}
+
 fn drain_ai_stream_buffer(
     buffer: &mut String,
     raw_text: &mut String,
@@ -542,20 +579,22 @@ fn drain_ai_stream_buffer(
     tool_call_buffers: &mut BTreeMap<usize, StreamToolCallBuffer>,
     parse_chunk: fn(&str) -> Result<Vec<AiChatStreamDelta>, AiModelError>,
     on_delta: &mut impl FnMut(AiChatStreamDelta),
-) -> Result<(), String> {
+) -> Result<bool, String> {
     while let Some((index, delimiter_len)) = find_sse_event_boundary(buffer) {
         let event = buffer[..index + delimiter_len].to_string();
         buffer.drain(..index + delimiter_len);
-        apply_ai_stream_deltas(
+        if apply_ai_stream_deltas(
             &event,
             raw_text,
             reasoning,
             tool_call_buffers,
             parse_chunk,
             on_delta,
-        )?;
+        )? {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn find_sse_event_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -574,7 +613,7 @@ fn apply_ai_stream_deltas(
     tool_call_buffers: &mut BTreeMap<usize, StreamToolCallBuffer>,
     parse_chunk: fn(&str) -> Result<Vec<AiChatStreamDelta>, AiModelError>,
     on_delta: &mut impl FnMut(AiChatStreamDelta),
-) -> Result<(), String> {
+) -> Result<bool, String> {
     for delta in parse_chunk(chunk).map_err(|error| error.to_string())? {
         if !delta.text_delta.is_empty() {
             raw_text.push_str(&delta.text_delta);
@@ -588,9 +627,13 @@ fn apply_ai_stream_deltas(
                 .or_default()
                 .apply_delta(tool_delta);
         }
+        let done = delta.done;
         on_delta(delta);
+        if done {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
 #[derive(Debug, Default)]
@@ -715,6 +758,7 @@ fn status_label(status: StatusCode) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
@@ -724,7 +768,46 @@ mod tests {
         AiProviderKind, AiReasoningEffort, AiSettings,
     };
 
-    use super::{complete_native_chat, stream_native_chat};
+    use super::{
+        complete_native_chat, decode_stream_utf8, drain_ai_stream_buffer, stream_native_chat,
+    };
+
+    #[test]
+    fn streaming_utf8_decoder_preserves_split_multibyte_characters() {
+        let mut pending = Vec::new();
+        let bytes = "A한繁B".as_bytes();
+        assert_eq!(decode_stream_utf8(&mut pending, &bytes[..2]), "A");
+        assert_eq!(decode_stream_utf8(&mut pending, &bytes[2..5]), "한");
+        assert_eq!(decode_stream_utf8(&mut pending, &bytes[5..]), "繁B");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn completed_stream_event_stops_before_later_payloads() {
+        let mut buffer = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n",
+        )
+        .to_string();
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut tools = BTreeMap::new();
+        let mut events = Vec::new();
+        assert!(
+            drain_ai_stream_buffer(
+                &mut buffer,
+                &mut text,
+                &mut reasoning,
+                &mut tools,
+                zzclawterm_core::parse_openai_responses_stream_chunk,
+                &mut |event| events.push(event),
+            )
+            .unwrap()
+        );
+        assert_eq!(text, "first");
+        assert_eq!(events.iter().filter(|event| event.done).count(), 1);
+    }
 
     fn responses_settings(base_url: String) -> AiSettings {
         let credential = AiProviderCredential {

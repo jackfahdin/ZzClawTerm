@@ -62,16 +62,17 @@ pub use agent_capture::{
 };
 pub use ai::{
     AI_AUDIT_MAX_LOGS, AI_HISTORY_MAX_MESSAGES, AI_HISTORY_MAX_SESSIONS,
-    AI_REQUEST_USER_AGENT_DEFAULT, AgentApprovalDecision, AgentCommandExecutionMode,
-    AgentCommandRiskAssessment, AgentLlmResponse, AiAction, AiAgentKind, AiApiFormat, AiAttachment,
-    AiAuditFile, AiAuditLog, AiBackendKind, AiChatCompletion, AiChatRequest, AiChatStreamDelta,
-    AiCommandCard, AiContext, AiCustomActionConfig, AiHistoryFile, AiMessage, AiMessageRole,
-    AiMode, AiModelConfigItem, AiModelDiscovery, AiModelError, AiModelOutput, AiModelSource,
-    AiPermissionMode, AiProviderCredential, AiProviderKind, AiProviderProfile, AiReasoningEffort,
-    AiRequestContractError, AiRequestOptions, AiSession, AiSessionBackendMetadata, AiSessionScope,
-    AiSessionScopeType, AiSettings, AiTargetContext, AiTerminalTarget, AiToolCall, AiToolCallDelta,
-    AppendAiAuditRequest, ClaudeCodeIntegrationSettings, CodexIntegrationSettings, CodexThreadMode,
-    CommandObservation, ExternalMcpSessionScope, ExternalMcpSettings, ResolvedAiModel, RiskLevel,
+    AI_REQUEST_USER_AGENT_DEFAULT, AgentApprovalDecision, AgentApprovalOutcome,
+    AgentCommandExecutionMode, AgentCommandRiskAssessment, AgentLlmResponse, AiAction, AiAgentKind,
+    AiApiFormat, AiAttachment, AiAuditFile, AiAuditLog, AiBackendKind, AiChatCompletion,
+    AiChatRequest, AiChatStreamDelta, AiCommandCard, AiContext, AiCustomActionConfig,
+    AiHistoryFile, AiMessage, AiMessageRole, AiMode, AiModelConfigItem, AiModelDiscovery,
+    AiModelError, AiModelOutput, AiModelSource, AiPermissionMode, AiProviderCredential,
+    AiProviderKind, AiProviderProfile, AiReasoningEffort, AiRequestContractError, AiRequestOptions,
+    AiSession, AiSessionBackendMetadata, AiSessionScope, AiSessionScopeType, AiSettings,
+    AiTargetContext, AiTerminalTarget, AiToolCall, AiToolCallDelta, AppendAiAuditRequest,
+    ClaudeCodeIntegrationSettings, CodexIntegrationSettings, CodexThreadMode, CommandObservation,
+    ExternalMcpSessionScope, ExternalMcpSettings, ResolvedAiModel, RiskLevel,
     agent_response_action, agent_system_prompt, ai_model_id_for_credential,
     ai_model_id_for_provider, ai_settings_has_secret, anthropic_messages_url,
     assess_agent_command_risk, assess_local_command_risk, bind_command_card_targets,
@@ -148,7 +149,9 @@ pub use command_suggestion_suppression::{
 };
 pub use credential_autofill::{
     CredentialPromptKind, compile_prompt_regex, credential_matches_prompt,
-    detect_credential_prompt_kind, extract_credential_prompt_text, find_matching_credentials,
+    credential_password_prompt_target_user, credential_password_prompt_targets_user,
+    credential_prompt_requests_password, detect_credential_prompt_kind,
+    extract_credential_prompt_text, find_matching_credentials,
     find_password_only_fallback_credentials, get_credential_prompt_pattern,
     is_default_password_prompt, strip_terminal_control_sequences, validate_prompt_regex,
 };

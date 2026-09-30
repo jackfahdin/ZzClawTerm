@@ -7,6 +7,7 @@ use super::{
     ConnectionStore, SETTINGS_AI_AUDIT, SETTINGS_AI_HISTORY, SETTINGS_TABLE, StorageError,
     merge_unknown_json,
 };
+use zzclawterm_core::ai::{normalize_ai_history_sessions, validate_ai_session_scope};
 use zzclawterm_core::{
     AiAgentKind, AiAuditFile, AiAuditLog, AiHistoryFile, AiMessage, AiMessageRole, AiSession,
     AiSessionBackendMetadata, AiSessionScope, AiSessionScopeType, AppendAiAuditRequest,
@@ -17,6 +18,10 @@ impl ConnectionStore {
     pub fn load_ai_history(&self) -> Result<AiHistoryFile, StorageError> {
         self.read_json_table::<AiHistoryFile>(SETTINGS_TABLE, SETTINGS_AI_HISTORY)
             .map(|history| history.unwrap_or_default())
+            .map(|mut history| {
+                normalize_ai_history_sessions(&mut history);
+                history
+            })
     }
     pub fn save_ai_history(&self, mut history: AiHistoryFile) -> Result<(), StorageError> {
         trim_ai_history(&mut history);
@@ -58,6 +63,8 @@ impl ConnectionStore {
             .iter_mut()
             .find(|item| item.id == session_id)
         {
+            validate_ai_session_scope(session, &agent_kind, &scope)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
             session.updated_at = now.clone();
             if session.scope.r#type == AiSessionScopeType::Unbound
                 && session.scope.target_id.is_none()
@@ -136,6 +143,23 @@ impl ConnectionStore {
             .into_iter()
             .filter(|message| message.session_id == session_id)
             .collect())
+    }
+    pub fn rebind_ai_session(
+        &self,
+        session_id: &str,
+        scope: AiSessionScope,
+    ) -> Result<AiSession, StorageError> {
+        let mut history = self.load_ai_history()?;
+        let session = history
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| StorageError::InvalidData("AI session not found".to_string()))?;
+        session.scope = scope;
+        session.updated_at = now_rfc3339();
+        let rebound = session.clone();
+        self.save_ai_history(history)?;
+        Ok(rebound)
     }
     pub fn clear_ai_history(&self) -> Result<(), StorageError> {
         self.save_ai_history(AiHistoryFile::default())
@@ -356,6 +380,98 @@ mod tests {
         assert_eq!(sessions[0].agent_kind, AiAgentKind::ClaudeCode);
         assert_eq!(sessions[0].scope, scope);
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn rebind_preserves_messages_metadata_and_unknown_fields() {
+        let dir = unique_temp_dir("ai-history-rebind");
+        let store = ConnectionStore::open(&dir).expect("store");
+        store
+            .append_ai_user_message_scoped(
+                "session-rebind",
+                Some("connection-1".to_string()),
+                "inspect".to_string(),
+                AiAgentKind::Codex,
+                AiSessionScope {
+                    r#type: AiSessionScopeType::Terminal,
+                    target_id: Some("terminal-1".to_string()),
+                    connection_ids: vec!["connection-1".to_string()],
+                    label: None,
+                },
+            )
+            .expect("create session");
+        let mut raw = store
+            .load_settings_doc_value(SETTINGS_AI_HISTORY, serde_json::Value::Null)
+            .expect("raw history");
+        raw["sessions"][0]["futureSessionField"] = serde_json::json!("preserve");
+        store
+            .save_settings_doc_value(SETTINGS_AI_HISTORY, &raw)
+            .expect("inject unknown field");
+
+        let new_scope = AiSessionScope {
+            r#type: AiSessionScopeType::Terminal,
+            target_id: Some("terminal-2".to_string()),
+            connection_ids: vec!["connection-2".to_string()],
+            label: Some("Second terminal".to_string()),
+        };
+        let session = store
+            .rebind_ai_session("session-rebind", new_scope.clone())
+            .expect("rebind");
+        assert_eq!(session.scope, new_scope);
+        assert_eq!(session.agent_kind, AiAgentKind::Codex);
+        assert_eq!(store.list_ai_messages("session-rebind").unwrap().len(), 1);
+        let raw = store
+            .load_settings_doc_value(SETTINGS_AI_HISTORY, serde_json::Value::Null)
+            .expect("raw history");
+        assert_eq!(raw["sessions"][0]["futureSessionField"], "preserve");
+        assert!(store.rebind_ai_session("missing", new_scope).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn scoped_ai_session_rejects_cross_terminal_or_agent_reuse() {
+        let dir = unique_temp_dir("ai-history-scope-reuse");
+        let store = ConnectionStore::open(&dir).expect("store");
+        let scope = AiSessionScope {
+            r#type: AiSessionScopeType::Terminal,
+            target_id: Some("terminal-1".to_string()),
+            ..Default::default()
+        };
+        store
+            .append_ai_user_message_scoped(
+                "session-scope",
+                None,
+                "first".to_string(),
+                AiAgentKind::Zzclawterm,
+                scope.clone(),
+            )
+            .expect("first message");
+        let mut other_scope = scope.clone();
+        other_scope.target_id = Some("terminal-2".to_string());
+        assert!(
+            store
+                .append_ai_user_message_scoped(
+                    "session-scope",
+                    None,
+                    "wrong terminal".to_string(),
+                    AiAgentKind::Zzclawterm,
+                    other_scope,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .append_ai_user_message_scoped(
+                    "session-scope",
+                    None,
+                    "wrong agent".to_string(),
+                    AiAgentKind::Codex,
+                    scope,
+                )
+                .is_err()
+        );
+        assert_eq!(store.list_ai_messages("session-scope").unwrap().len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 

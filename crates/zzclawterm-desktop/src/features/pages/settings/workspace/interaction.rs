@@ -97,15 +97,43 @@ impl SettingsPanel {
                     ))
                     .child(settings_form_row(
                         palette,
-                        t!("settings.rightClickPaste"),
-                        Some(SharedString::from(t!("settings.rightClickPasteDesc"))),
+                        t!("settings.terminalRightClickAction"),
+                        Some(SharedString::from(t!(
+                            "settings.terminalRightClickActionDesc"
+                        ))),
+                        self.settings_select_control(
+                            "settings.interaction.terminal-right-click-action",
+                            vec![
+                                ZzClawSelectOption::new(
+                                    "none",
+                                    t!("settings.terminalRightClickNone"),
+                                ),
+                                ZzClawSelectOption::new(
+                                    "menu",
+                                    t!("settings.terminalRightClickMenu"),
+                                ),
+                                ZzClawSelectOption::new(
+                                    "paste",
+                                    t!("settings.terminalRightClickPaste"),
+                                ),
+                            ],
+                            self.settings
+                                .summary()
+                                .interaction_terminal_right_click_action
+                                .compat_value(),
+                            false,
+                            cx,
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
+                        t!("settings.mouseEventsRequireAlt"),
+                        Some(SharedString::from(t!("settings.mouseEventsRequireAltDesc"))),
                         settings_switch(
                             palette,
-                            "interaction-right-paste",
-                            self.settings.summary().interaction_right_click_paste,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_interaction_right_click_paste(cx);
-                            }),
+                            "interaction-mouse-requires-alt",
+                            self.settings.summary().interaction_mouse_events_require_alt,
+                            cx.listener(|this, _, _, cx| this.toggle_mouse_events_require_alt(cx)),
                         ),
                     )),
             ))

@@ -257,7 +257,11 @@ impl ZzClawTermApp {
         {
             self.transfer.activate_editor_tab(&tab_id);
             let status = format!("remote text file already open: {}", entry.path);
-            self.open_remote_file_editor_window(cx);
+            if self.settings.summary().transfer_internal_editor_display
+                == zzclawterm_core::InternalEditorDisplay::Window
+            {
+                self.open_remote_file_editor_window(cx);
+            }
             if !self.transfer.editor_window_is_open()
                 && !self.transfer.editor_window_open_is_pending()
             {
@@ -294,7 +298,11 @@ impl ZzClawTermApp {
         self.transfer.open_editor_tab(tab);
         self.shell
             .set_status(format!("opening remote text file {}", entry.path));
-        self.open_remote_file_editor_window(cx);
+        if self.settings.summary().transfer_internal_editor_display
+            == zzclawterm_core::InternalEditorDisplay::Window
+        {
+            self.open_remote_file_editor_window(cx);
+        }
         if !self.transfer.editor_window_is_open() && !self.transfer.editor_window_open_is_pending()
         {
             window.focus(self.transfer.editor_focus(), cx);

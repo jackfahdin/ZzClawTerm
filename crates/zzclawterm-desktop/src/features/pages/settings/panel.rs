@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rust_i18n::t;
 
+use crate::features::ai::agent_management::AgentManagementView;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
@@ -15,7 +16,7 @@ use zzclawterm_core::{
 use zzclawterm_ui::{
     NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputShell, ZzClawNumberInputState, ZzClawSelect,
     ZzClawSelectOption, ZzClawSelectState, ZzClawSettingsLayout, ZzClawSettingsNavGroup,
-    ZzClawSettingsNavItem,
+    ZzClawSettingsNavItem, ZzClawSliderState, ZzClawSliderValue,
 };
 
 use crate::features::selects::SelectRegistry;
@@ -58,6 +59,7 @@ pub(in crate::features) enum SettingsSectionPresentation {
     AiGeneral,
     AiModels,
     AiRules,
+    AiAgents,
     Transfer,
     Security,
     SyncBackup,
@@ -106,9 +108,10 @@ impl PartialEq for SettingsSnapshot {
 impl SettingsSnapshot {
     fn active_section_eq(&self, other: &Self) -> bool {
         match self.active_tab {
-            SettingsTab::AiGeneral | SettingsTab::AiModels | SettingsTab::AiRules => {
-                self.ai == other.ai
-            }
+            SettingsTab::AiGeneral
+            | SettingsTab::AiModels
+            | SettingsTab::AiRules
+            | SettingsTab::AiAgents => self.ai == other.ai,
             SettingsTab::SyncBackup => {
                 self.settings == other.settings && self.cloud_sync == other.cloud_sync
             }
@@ -291,6 +294,7 @@ pub(in crate::features) struct AiSettingsPresentation {
     pub(in crate::features) credential_secret_drafts: Arc<HashMap<String, String>>,
     pub(in crate::features) action_focus: gpui::FocusHandle,
     pub(in crate::features) discovery_pending: bool,
+    pub(in crate::features) agent_management: AgentManagementView,
 }
 
 impl AiSettingsPresentation {
@@ -303,6 +307,7 @@ impl AiSettingsPresentation {
             credential_secret_drafts: Arc::new(HashMap::new()),
             action_focus: cx.focus_handle(),
             discovery_pending: false,
+            agent_management: AgentManagementView::default(),
         }
     }
 }
@@ -494,6 +499,13 @@ pub(in crate::features) struct SettingsPanel {
     pub(in crate::features) transfer: TransferSettingsPresentation,
     text_inputs: HashMap<SharedString, Entity<zzclawterm_ui::ZzClawInputState>>,
     number_inputs: HashMap<SharedString, Entity<ZzClawNumberInputState>>,
+    pub(in crate::features::pages::settings) image_opacity_slider: Entity<ZzClawSliderState>,
+    pub(in crate::features::pages::settings) content_opacity_slider: Entity<ZzClawSliderState>,
+    pub(in crate::features::pages::settings) image_opacity_focus: gpui::FocusHandle,
+    pub(in crate::features::pages::settings) content_opacity_focus: gpui::FocusHandle,
+    last_image_opacity: u8,
+    last_content_opacity: u8,
+    slider_subscriptions: Vec<Subscription>,
     selects: SelectRegistry,
     select_subscriptions: Vec<Subscription>,
     ui_font_select_options: FontSelectOptionCache,
@@ -514,6 +526,28 @@ impl SettingsPanel {
         surface: SettingsSurface,
         cx: &mut Context<Self>,
     ) -> Self {
+        let image_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(100.));
+        let content_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(82.));
+        let image_subscription = cx.observe(&image_opacity_slider, |this, slider, cx| {
+            let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                return;
+            };
+            let value = value.round().clamp(0., 100.) as u8;
+            if value != this.last_image_opacity {
+                this.last_image_opacity = value;
+                this.set_background_image_opacity(value, cx);
+            }
+        });
+        let content_subscription = cx.observe(&content_opacity_slider, |this, slider, cx| {
+            let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                return;
+            };
+            let value = value.round().clamp(0., 100.) as u8;
+            if value != this.last_content_opacity {
+                this.last_content_opacity = value;
+                this.set_background_content_opacity(value, cx);
+            }
+        });
         Self {
             app,
             surface,
@@ -525,6 +559,13 @@ impl SettingsPanel {
             transfer: TransferSettingsPresentation::default(),
             text_inputs: HashMap::new(),
             number_inputs: HashMap::new(),
+            image_opacity_slider,
+            content_opacity_slider,
+            image_opacity_focus: cx.focus_handle(),
+            content_opacity_focus: cx.focus_handle(),
+            last_image_opacity: 100,
+            last_content_opacity: 82,
+            slider_subscriptions: vec![image_subscription, content_subscription],
             selects: SelectRegistry::default(),
             select_subscriptions: Vec::new(),
             ui_font_select_options: FontSelectOptionCache::empty(),
@@ -558,6 +599,44 @@ impl SettingsPanel {
     ) {
         if self.snapshot.as_ref() == Some(&snapshot) {
             return;
+        }
+        let image_opacity = snapshot.settings.summary.background_image_opacity;
+        self.last_image_opacity = image_opacity;
+        if self.image_opacity_slider.read(cx).value()
+            != ZzClawSliderValue::Single(f32::from(image_opacity))
+        {
+            self.image_opacity_slider =
+                cx.new(|_| ZzClawSliderState::new().default_value(f32::from(image_opacity)));
+            self.slider_subscriptions[0] =
+                cx.observe(&self.image_opacity_slider, |this, slider, cx| {
+                    let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                        return;
+                    };
+                    let value = value.round().clamp(0., 100.) as u8;
+                    if value != this.last_image_opacity {
+                        this.last_image_opacity = value;
+                        this.set_background_image_opacity(value, cx);
+                    }
+                });
+        }
+        let content_opacity = snapshot.settings.summary.background_content_opacity;
+        self.last_content_opacity = content_opacity;
+        if self.content_opacity_slider.read(cx).value()
+            != ZzClawSliderValue::Single(f32::from(content_opacity))
+        {
+            self.content_opacity_slider =
+                cx.new(|_| ZzClawSliderState::new().default_value(f32::from(content_opacity)));
+            self.slider_subscriptions[1] =
+                cx.observe(&self.content_opacity_slider, |this, slider, cx| {
+                    let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                        return;
+                    };
+                    let value = value.round().clamp(0., 100.) as u8;
+                    if value != this.last_content_opacity {
+                        this.last_content_opacity = value;
+                        this.set_background_content_opacity(value, cx);
+                    }
+                });
         }
         self.surface = snapshot.surface;
         self.settings = snapshot.settings.clone();
@@ -1024,17 +1103,22 @@ impl Render for SettingsPanel {
                                         .text_color(rgb(palette.text_dimmed))
                                         .child("·"),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(palette.text_muted))
-                                        .child(active_group),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(palette.text_dimmed))
-                                        .child("/"),
+                                .when(
+                                    snapshot.active_tab.expandable_group_id().is_some(),
+                                    |this| {
+                                        this.child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(palette.text_muted))
+                                                .child(active_group),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(palette.text_dimmed))
+                                                .child("/"),
+                                        )
+                                    },
                                 )
                                 .child(
                                     div()
@@ -1107,6 +1191,9 @@ impl SettingsPanel {
                         }
                         app.ensure_settings_tab_inputs(tab, cx);
                         app.shell.set_settings_active_tab(tab);
+                        if tab == SettingsTab::AiAgents {
+                            app.refresh_ai_agents(cx);
+                        }
                     });
                 });
             }
@@ -1155,6 +1242,7 @@ impl SettingsPanel {
                     settings_nav_item(SettingsTab::AiGeneral),
                     settings_nav_item(SettingsTab::AiModels),
                     settings_nav_item(SettingsTab::AiRules),
+                    settings_nav_item(SettingsTab::AiAgents),
                 ]),
             ZzClawSettingsNavGroup::standalone([
                 settings_nav_item(SettingsTab::Transfer),
@@ -1182,6 +1270,7 @@ impl SettingsPanel {
             SettingsTab::AiGeneral => self.ai_settings_section(cx).into_any_element(),
             SettingsTab::AiModels => self.ai_models_settings_section(cx).into_any_element(),
             SettingsTab::AiRules => self.ai_rules_settings_section(cx).into_any_element(),
+            SettingsTab::AiAgents => self.ai_agents_settings_section(cx).into_any_element(),
             SettingsTab::Transfer => self.transfer_settings_section(cx).into_any_element(),
             SettingsTab::Security => self.security_settings_section(cx).into_any_element(),
             SettingsTab::SyncBackup => self.cloud_sync_settings_section(cx).into_any_element(),
@@ -1352,6 +1441,7 @@ fn settings_tab_nav_id(tab: SettingsTab) -> &'static str {
         SettingsTab::AiGeneral => "settings-tab-ai-general",
         SettingsTab::AiModels => "settings-tab-ai-models",
         SettingsTab::AiRules => "settings-tab-ai-rules",
+        SettingsTab::AiAgents => "settings-tab-ai-agents",
         SettingsTab::Transfer => "settings-tab-transfer",
         SettingsTab::Security => "settings-tab-security",
         SettingsTab::SyncBackup => "settings-tab-sync-backup",
@@ -1370,6 +1460,7 @@ fn settings_tab_from_nav_id(id: &str) -> Option<SettingsTab> {
         "settings-tab-ai-general" => Some(SettingsTab::AiGeneral),
         "settings-tab-ai-models" => Some(SettingsTab::AiModels),
         "settings-tab-ai-rules" => Some(SettingsTab::AiRules),
+        "settings-tab-ai-agents" => Some(SettingsTab::AiAgents),
         "settings-tab-transfer" => Some(SettingsTab::Transfer),
         "settings-tab-security" => Some(SettingsTab::Security),
         "settings-tab-sync-backup" => Some(SettingsTab::SyncBackup),
@@ -1583,6 +1674,22 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) {
         self.with_app(cx, |app, cx| app.toggle_ai_model_enabled(model_id, cx));
+    }
+
+    pub(in crate::features) fn start_codex_login(
+        &mut self,
+        device_code: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_app(cx, |app, cx| app.start_codex_login(device_code, cx));
+    }
+
+    pub(in crate::features) fn copy_external_mcp_config(
+        &mut self,
+        client: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_app(cx, |app, cx| app.copy_external_mcp_config(client, cx));
     }
 
     pub(in crate::features) fn toggle_ai_model_group(
@@ -1935,6 +2042,12 @@ forward_app_action!(
     confirm_keybinding_recording,
     copy_github_gist_user_code,
     discover_ai_models,
+    refresh_ai_agents,
+    refresh_codex_account,
+    refresh_claude_account,
+    cancel_codex_login,
+    logout_codex,
+    copy_codex_device_code,
     open_github_gist_verification_url,
     prompt_background_image,
     prompt_diagnostics_export,
@@ -1965,7 +2078,7 @@ forward_app_action!(
     toggle_docker_manager_panel,
     toggle_gpu_monitor_panel,
     toggle_interaction_copy_on_select,
-    toggle_interaction_right_click_paste,
+    toggle_mouse_events_require_alt,
     toggle_keyword_highlights,
     toggle_mac_ime_compatibility,
     toggle_minimize_to_tray,
@@ -1982,7 +2095,8 @@ forward_app_action!(
     toggle_recording_timestamps,
     toggle_remote_stats_panel,
     toggle_s3_virtual_host_style,
-    toggle_screen_lock_enabled,
+    toggle_startup_lock_enabled,
+    toggle_idle_lock_enabled,
     toggle_settings_master_password,
     toggle_startup_restore,
     toggle_startup_restore_window_layout,

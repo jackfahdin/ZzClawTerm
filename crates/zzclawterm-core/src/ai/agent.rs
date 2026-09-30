@@ -317,8 +317,16 @@ pub fn assess_agent_command_risk(
         .risk_reason
         .as_ref()
         .filter(|value| !value.trim().is_empty())
-        .map(|value| format!("AI: {}; local: {}", value.trim(), local_reason))
-        .or_else(|| Some(format!("local: {local_reason}")));
+        .map(|value| {
+            format!(
+                "model {}: {}; local {}: {}",
+                risk_label(&model_risk),
+                value.trim(),
+                risk_label(&local_risk),
+                local_reason,
+            )
+        })
+        .or_else(|| Some(format!("local {}: {local_reason}", risk_label(&local_risk))));
 
     AgentCommandRiskAssessment {
         model_risk,
@@ -367,6 +375,33 @@ pub fn decide_agent_command_execution(
 pub fn build_agent_prompt(request: &AiChatRequest, settings: &AiSettings) -> String {
     let ctx = &request.context;
     let user_input = user_input_with_target_contexts(request);
+    if let language @ (PromptLanguage::ZhHant | PromptLanguage::Ko) =
+        resolve_prompt_language(&request.options.language)
+    {
+        let (task, context, output, requirements) = match language {
+            PromptLanguage::ZhHant => (
+                "使用者任務",
+                "目前連線情境",
+                "最近終端輸出",
+                "面向使用者的說明和摘要使用繁體中文；命令、路徑和設定鍵名保持原樣。每輪只呼叫一個工具。命令必須是非互動式的，不能等待輸入、確認或分頁器；使用 git --no-pager、journalctl --no-pager 等形式。",
+            ),
+            _ => (
+                "사용자 작업",
+                "현재 연결 컨텍스트",
+                "최근 터미널 출력",
+                "사용자에게 보이는 설명과 요약에는 한국어를 사용하고 명령, 경로, 구성 키는 번역하지 마세요. 각 턴에서 도구 하나만 호출하세요. 명령은 비대화형이어야 하며 입력, 확인 또는 pager를 기다리면 안 됩니다. git --no-pager, journalctl --no-pager 같은 형식을 사용하세요.",
+            ),
+        };
+        return format!(
+            "{task}:\n{user_input}\n\n{context}: {} / {} / {}\n\n{output} ({}):\n{}\n\n{requirements}\nTarget language: {}",
+            ctx.connection_name.as_deref().unwrap_or("-"),
+            ctx.host.as_deref().unwrap_or("-"),
+            ctx.cwd.as_deref().unwrap_or("-"),
+            settings.context_line_limit,
+            ctx.recent_output,
+            request.options.language,
+        );
+    }
     if resolve_prompt_language(&request.options.language) == PromptLanguage::ZhCn {
         format!(
             r#"用户任务：
@@ -462,6 +497,20 @@ pub fn build_observation_message(
     } else {
         obs.output.clone()
     };
+    if let language @ (PromptLanguage::ZhHant | PromptLanguage::Ko) =
+        resolve_prompt_language(language)
+    {
+        return match language {
+            PromptLanguage::ZhHant => format!(
+                "命令 `{command}` 執行完成（{status}，耗時 {}ms）。\n\n輸出：\n{output}\n\n請根據觀察結果決定下一步。每輪只呼叫 execute_command 或 final_answer 其中一個工具。",
+                obs.duration_ms,
+            ),
+            _ => format!(
+                "명령 `{command}` 실행 완료({status}, {}ms).\n\n출력:\n{output}\n\n관찰 결과에 따라 다음 단계를 결정하세요. 각 턴에서 execute_command 또는 final_answer 도구 하나만 호출하세요.",
+                obs.duration_ms,
+            ),
+        };
+    }
     if resolve_prompt_language(language) == PromptLanguage::ZhCn {
         format!(
             "命令 `{command}` 执行完成（{status}，耗时 {duration}ms）。\n\n输出：\n{output}\n\n请根据观察结果决定下一步。每轮必须且只能调用一个工具：execute_command 或 final_answer。不要在普通正文里输出 JSON。",
@@ -493,12 +542,23 @@ mod tests {
     #[test]
     fn agent_prompts_require_non_interactive_commands_in_both_languages() {
         let settings = AiSettings::default();
-        for language in ["en", "zh-CN"] {
+        for language in ["en", "zh-CN", "zh-TW", "ko"] {
             let request = sample_ai_request(language);
             let prompt = build_agent_prompt(&request, &settings);
             assert!(prompt.contains("git --no-pager"));
             assert!(prompt.contains("journalctl --no-pager"));
         }
+    }
+
+    #[test]
+    fn traditional_chinese_and_korean_prompts_select_localized_text() {
+        let settings = AiSettings::default();
+        let traditional = sample_ai_request("zh-TW");
+        let korean = sample_ai_request("ko-KR");
+        assert!(crate::ai::system_prompt("zh-Hant-TW").contains("唯讀"));
+        assert!(crate::ai::agent_system_prompt("ko_KR").contains("도구"));
+        assert!(build_agent_prompt(&traditional, &settings).contains("使用者任務"));
+        assert!(build_agent_prompt(&korean, &settings).contains("사용자 작업"));
     }
 
     #[test]

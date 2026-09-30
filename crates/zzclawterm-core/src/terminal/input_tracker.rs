@@ -53,6 +53,11 @@ fn windows_prompt_prefix() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^[A-Za-z]:(?:[\\/][^>\r\n]*)?>\s*").expect("windows prompt"))
 }
 
+fn simple_prompt_prefix() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[#$]\s+").expect("simple prompt"))
+}
+
 /// Compile prompt matchers before the first interactive submission.
 ///
 /// These matchers are used from the UI input path. Keeping their lazy
@@ -64,6 +69,7 @@ pub fn warm_terminal_input_tracker() {
     let _ = posix_prompt_prefix();
     let _ = powershell_prompt_prefix();
     let _ = windows_prompt_prefix();
+    let _ = simple_prompt_prefix();
 }
 
 fn strip_leading_env_prefixes(input: &str) -> String {
@@ -83,6 +89,7 @@ fn strip_known_prompt_prefix(input: &str) -> String {
         posix_prompt_prefix(),
         powershell_prompt_prefix(),
         windows_prompt_prefix(),
+        simple_prompt_prefix(),
     ] {
         if let Some(m) = matcher.find(input) {
             return input[m.end()..].to_string();
@@ -567,6 +574,20 @@ mod tests {
             resync_from_terminal_line(&state, "user@host:~$ docker compose ps").expect("recover");
         assert_eq!(get_tracked_command(&recovered), "docker compose ps");
         assert!(!recovered.desynced);
+    }
+
+    #[test]
+    fn resyncs_tab_completion_with_common_shell_prompts() {
+        let mut state = TerminalInputState::new();
+        state = apply_terminal_input_data(&state, "vi ins\t");
+        for line in [
+            "[root@rocky9 ~]# vi install-node-exporter.sh",
+            "$ vi install-node-exporter.sh",
+            "PS C:\\Users> vi install-node-exporter.sh",
+        ] {
+            let recovered = resync_from_terminal_line(&state, line).expect("recover");
+            assert_eq!(recovered.value, "vi install-node-exporter.sh");
+        }
     }
 
     #[test]

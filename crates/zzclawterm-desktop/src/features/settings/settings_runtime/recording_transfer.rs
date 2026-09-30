@@ -141,6 +141,15 @@ impl ZzClawTermApp {
         self.save_transfer_settings("transfer editor preference saved", cx);
     }
 
+    pub(in crate::features) fn update_internal_editor_display(
+        &mut self,
+        display: zzclawterm_core::InternalEditorDisplay,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.set_internal_editor_display(display);
+        self.save_transfer_settings("editor display preference saved", cx);
+    }
+
     pub(in crate::features) fn adjust_transfer_internal_editor_font_size(
         &mut self,
         delta: i16,

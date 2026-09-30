@@ -16,6 +16,8 @@ pub(super) struct AiCommandCardPresentation {
     pub title: String,
     pub command: String,
     pub explanation: String,
+    pub risk_reason: String,
+    pub agent_command: bool,
     pub expected: String,
     pub rollback: String,
 }
@@ -33,6 +35,8 @@ impl AiCommandCardPresentation {
             },
             command: card.command,
             explanation: card.explanation,
+            risk_reason: card.risk_reason.unwrap_or_default(),
+            agent_command: card.id.starts_with("agent-"),
             expected: card.expected_effect,
             rollback: card.rollback.unwrap_or_default(),
         }

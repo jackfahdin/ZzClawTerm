@@ -114,6 +114,7 @@ pub(crate) enum SettingsTab {
     AiGeneral,
     AiModels,
     AiRules,
+    AiAgents,
     Transfer,
     Security,
     SyncBackup,
@@ -131,9 +132,10 @@ impl SettingsTab {
             Self::AiGeneral => "ai.general",
             Self::AiModels => "ai.models",
             Self::AiRules => "ai.rules",
-            Self::Transfer => "settings.transfer",
-            Self::Security => "settings.security",
-            Self::SyncBackup => "settings.syncBackup",
+            Self::AiAgents => "ai.localAgents",
+            Self::Transfer => "settings.groupTransfer",
+            Self::Security => "settings.groupSecurity",
+            Self::SyncBackup => "settings.groupSyncBackup",
         }
     }
 
@@ -145,7 +147,7 @@ impl SettingsTab {
             Self::TerminalGeneral | Self::Search | Self::Translation => {
                 "settings.groupTerminalSession"
             }
-            Self::AiGeneral | Self::AiModels | Self::AiRules => "ai.title",
+            Self::AiGeneral | Self::AiModels | Self::AiRules | Self::AiAgents => "ai.title",
             Self::Transfer => "settings.groupTransfer",
             Self::Security => "settings.groupSecurity",
             Self::SyncBackup => "settings.groupSyncBackup",
@@ -164,6 +166,7 @@ impl SettingsTab {
             Self::AiGeneral => "icons/ai/settings.svg",
             Self::AiModels => "icons/ai.svg",
             Self::AiRules => "icons/menu/book.svg",
+            Self::AiAgents => "icons/ai.svg",
             Self::Transfer => "icons/swap-horiz.svg",
             Self::Security => "icons/security.svg",
             Self::SyncBackup => "icons/sync.svg",
@@ -176,7 +179,7 @@ impl SettingsTab {
                 Some("workspace")
             }
             Self::TerminalGeneral | Self::Search | Self::Translation => Some("terminal_session"),
-            Self::AiGeneral | Self::AiModels | Self::AiRules => Some("ai_group"),
+            Self::AiGeneral | Self::AiModels | Self::AiRules | Self::AiAgents => Some("ai_group"),
             Self::Transfer | Self::Security | Self::SyncBackup => None,
         }
     }

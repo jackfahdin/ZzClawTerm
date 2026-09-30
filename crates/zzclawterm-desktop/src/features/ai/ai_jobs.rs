@@ -8,13 +8,13 @@ use futures::channel::mpsc::UnboundedSender;
 
 use crate::http::ai::{complete_native_chat, stream_native_chat};
 use zzclawterm_core::{
-    AgentApprovalDecision, AiAgentKind, AiBackendKind, AiChatRequest, AiChatStreamDelta,
-    AiCommandCard, AiMessage, AiMessageRole, AiMode, AiSessionBackendMetadata, AiSettings,
-    AppendAiAuditRequest, CommandObservation, agent_response_action, assess_agent_command_risk,
-    bind_command_card_targets, decide_agent_command_execution, now_rfc3339,
-    parse_agent_model_output, parse_agent_tool_call, parse_model_output, redact_context,
-    redact_sensitive_text, resolve_ai_terminal_target, sanitize_ai_diagnostic, truncate_preview,
-    uuid,
+    AgentApprovalDecision, AiAgentKind, AiBackendKind, AiChatCompletion, AiChatRequest,
+    AiChatStreamDelta, AiCommandCard, AiMessage, AiMessageRole, AiMode, AiSessionBackendMetadata,
+    AiSettings, AppendAiAuditRequest, CommandObservation, agent_response_action,
+    assess_agent_command_risk, bind_command_card_targets, decide_agent_command_execution,
+    now_rfc3339, parse_agent_model_output, parse_agent_tool_call, parse_model_output,
+    redact_context, redact_sensitive_text, resolve_ai_terminal_target, sanitize_ai_diagnostic,
+    truncate_preview, uuid,
 };
 use zzclawterm_store::{ConnectionStore, StoreBlockingClient, StoreDomain};
 use zzclawterm_transport::RemoteCommandOutput;
@@ -34,15 +34,27 @@ pub(in crate::features) fn is_agent_command_card(card: &AiCommandCard) -> bool {
             .is_some_and(|category| category == "AI Agent")
 }
 
+pub(in crate::features) struct AiJobRunOptions {
+    pub mcp_credential: Option<McpEphemeralCredential>,
+    pub stream_tx: Option<UnboundedSender<AiChatWorkerEvent>>,
+    pub cancel: Arc<AtomicBool>,
+    pub job_id: u64,
+    pub agent_history: Option<Vec<AiMessage>>,
+}
+
 pub(in crate::features) fn run_ai_ask_job(
     store: StoreBlockingClient,
     settings: AiSettings,
     mut request: AiChatRequest,
-    mcp_credential: Option<McpEphemeralCredential>,
-    stream_tx: Option<UnboundedSender<AiChatWorkerEvent>>,
-    cancel: Arc<AtomicBool>,
-    job_id: u64,
+    run: AiJobRunOptions,
 ) -> Result<AiChatJobOutput, String> {
+    let AiJobRunOptions {
+        mcp_credential,
+        stream_tx,
+        cancel,
+        job_id,
+        agent_history,
+    } = run;
     if ai_job_cancelled(&cancel) {
         return Err("AI request cancelled".to_string());
     }
@@ -380,61 +392,84 @@ pub(in crate::features) fn run_ai_ask_job(
         return Ok(output);
     }
 
-    let completion = if matches!(request.mode, AiMode::Ask | AiMode::Agent) {
-        let delta_session_id = session_id.clone();
-        let stream_cancel = cancel.clone();
-        let stream_mode = request.mode.clone();
-        stream_native_chat(&settings, &request, &history.messages, |delta| {
-            if ai_job_cancelled(&stream_cancel) {
-                return;
-            }
-            if delta.done {
-                return;
-            }
-            if let Some(tx) = stream_tx.as_ref() {
-                let AiChatStreamDelta {
-                    text_delta,
-                    reasoning_delta,
-                    tool_call_deltas,
-                    done: _,
-                } = delta;
-                if !text_delta.is_empty() || reasoning_delta.is_some() {
-                    let _ = tx.unbounded_send(AiChatWorkerEvent::Delta {
-                        job_id,
-                        session_id: delta_session_id.clone(),
-                        text_delta,
-                        reasoning_delta,
-                    });
-                }
-                if stream_mode == AiMode::Agent {
-                    for tool_delta in tool_call_deltas {
-                        let _ = tx.unbounded_send(AiChatWorkerEvent::AgentToolCallDelta {
-                            job_id,
-                            session_id: delta_session_id.clone(),
-                            tool_name: tool_delta.name_delta,
-                            arguments_delta_len: tool_delta.arguments_delta.len(),
-                        });
-                    }
-                }
-            }
-        })?
-    } else {
-        if ai_job_cancelled(&cancel) {
-            return Err("AI request cancelled".to_string());
+    let model_history = agent_history.as_deref().unwrap_or(&history.messages);
+    let completion = match stream_ai_completion(
+        &settings,
+        &request,
+        model_history,
+        stream_tx.as_ref(),
+        &cancel,
+        job_id,
+        &session_id,
+    ) {
+        Ok(completion) => completion,
+        Err(error)
+            if request.mode == AiMode::Agent
+                && !request.options.agent_json_protocol
+                && !ai_job_cancelled(&cancel) =>
+        {
+            request.options.agent_json_protocol = true;
+            notify_agent_json_fallback(stream_tx.as_ref(), job_id, &session_id);
+            stream_ai_completion(
+                &settings,
+                &request,
+                model_history,
+                stream_tx.as_ref(),
+                &cancel,
+                job_id,
+                &session_id,
+            )
+            .map_err(|fallback| {
+                format!(
+                    "Agent tool protocol failed: {}; JSON fallback failed: {}",
+                    sanitize_ai_diagnostic(&error, 160),
+                    sanitize_ai_diagnostic(&fallback, 160)
+                )
+            })?
         }
-        complete_native_chat(&settings, &request, &history.messages)?
+        Err(error) => return Err(error),
     };
     if ai_job_cancelled(&cancel) {
         return Err("AI request cancelled".to_string());
     }
     let mut output = if request.mode == AiMode::Agent {
-        ai_agent_job_output(
+        match ai_agent_job_output(
             &settings,
             &request,
             completion.text,
             completion.reasoning_content,
             completion.tool_calls,
-        )?
+        ) {
+            Ok(output) => output,
+            Err(error) if !request.options.agent_json_protocol && !ai_job_cancelled(&cancel) => {
+                request.options.agent_json_protocol = true;
+                notify_agent_json_fallback(stream_tx.as_ref(), job_id, &session_id);
+                let fallback = stream_ai_completion(
+                    &settings,
+                    &request,
+                    model_history,
+                    stream_tx.as_ref(),
+                    &cancel,
+                    job_id,
+                    &session_id,
+                )?;
+                ai_agent_job_output(
+                    &settings,
+                    &request,
+                    fallback.text,
+                    fallback.reasoning_content,
+                    fallback.tool_calls,
+                )
+                .map_err(|fallback| {
+                    format!(
+                        "Agent tool call failed: {}; JSON fallback failed: {}",
+                        sanitize_ai_diagnostic(&error, 160),
+                        sanitize_ai_diagnostic(&fallback, 160)
+                    )
+                })?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         let (text, reasoning, command_cards) =
             parse_model_output(&completion.text, completion.reasoning_content);
@@ -466,6 +501,64 @@ pub(in crate::features) fn run_ai_ask_job(
     }
 
     Ok(output)
+}
+
+fn notify_agent_json_fallback(
+    tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    job_id: u64,
+    session_id: &str,
+) {
+    if let Some(tx) = tx {
+        let _ = tx.unbounded_send(AiChatWorkerEvent::AgentProtocolFallback {
+            job_id,
+            session_id: session_id.to_string(),
+        });
+    }
+}
+
+fn stream_ai_completion(
+    settings: &AiSettings,
+    request: &AiChatRequest,
+    history: &[AiMessage],
+    stream_tx: Option<&UnboundedSender<AiChatWorkerEvent>>,
+    cancel: &Arc<AtomicBool>,
+    job_id: u64,
+    session_id: &str,
+) -> Result<AiChatCompletion, String> {
+    if request.mode != AiMode::Agent && request.mode != AiMode::Ask {
+        return complete_native_chat(settings, request, history);
+    }
+    stream_native_chat(settings, request, history, |delta| {
+        if ai_job_cancelled(cancel) || delta.done {
+            return;
+        }
+        if let Some(tx) = stream_tx {
+            let AiChatStreamDelta {
+                text_delta,
+                reasoning_delta,
+                tool_call_deltas,
+                done: _,
+            } = delta;
+            if !text_delta.is_empty() || reasoning_delta.is_some() {
+                let _ = tx.unbounded_send(AiChatWorkerEvent::Delta {
+                    job_id,
+                    session_id: session_id.to_string(),
+                    text_delta,
+                    reasoning_delta,
+                });
+            }
+            if request.mode == AiMode::Agent {
+                for tool_delta in tool_call_deltas {
+                    let _ = tx.unbounded_send(AiChatWorkerEvent::AgentToolCallDelta {
+                        job_id,
+                        session_id: session_id.to_string(),
+                        tool_name: tool_delta.name_delta,
+                        arguments_delta_len: tool_delta.arguments_delta.len(),
+                    });
+                }
+            }
+        }
+    })
 }
 
 pub(in crate::features) fn ai_job_cancelled(cancel: &Arc<AtomicBool>) -> bool {

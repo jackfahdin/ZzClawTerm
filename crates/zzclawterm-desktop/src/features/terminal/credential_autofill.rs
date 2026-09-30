@@ -10,15 +10,18 @@ use gpui::{
     svg,
 };
 use zzclawterm_core::{
-    CredentialPromptKind, SavedCredential, TerminalInputState, truncate_preview,
+    ConnectionAuth, CredentialPromptKind, SavedConnection, SecretString, TerminalInputState,
+    credential_password_prompt_target_user, credential_password_prompt_targets_user,
+    credential_prompt_requests_password, truncate_preview,
 };
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain, store_request};
 use zzclawterm_terminal::TerminalSnapshot;
 
 use crate::features::ZzClawTermApp;
 use crate::models::{
-    CredentialAutofillMatchEvent, CredentialAutofillMatchOutcome, CredentialAutofillMatchRequest,
-    CredentialAutofillMatchRequestKey, CredentialSuggestionState, PendingCredentialAutofill,
+    ConnectionPasswordTarget, CredentialAutofillAction, CredentialAutofillMatchEvent,
+    CredentialAutofillMatchRequest, CredentialAutofillMatchRequestKey, CredentialAutofillTarget,
+    CredentialSuggestionState, PendingCredentialAutofill, credential_autofill_action,
 };
 
 use super::command_suggestions::{
@@ -81,7 +84,7 @@ impl ZzClawTermApp {
     fn show_credential_panel(
         &mut self,
         kind: CredentialPromptKind,
-        matches: Vec<SavedCredential>,
+        matches: Vec<CredentialAutofillTarget>,
         prompt_text: String,
         cx: &mut Context<Self>,
     ) {
@@ -127,7 +130,7 @@ impl ZzClawTermApp {
             .credential_autofill_pending_request
             .is_none()
             && !self.terminal.assist.credential_autofill_detection_pending
-            && self.security.credentials().is_empty()
+            && !self.has_credential_autofill_candidates()
             && self.terminal.assist.credential_autofill_pending.is_none()
         {
             return false;
@@ -154,7 +157,7 @@ impl ZzClawTermApp {
             .is_some();
         if credential_autofill_snapshot_detection_can_run(
             self.session.active_id(),
-            !self.security.credentials().is_empty()
+            self.has_credential_autofill_candidates()
                 || self.terminal.assist.credential_autofill_pending.is_some(),
             runtime_backlog,
             match_request_pending,
@@ -264,9 +267,6 @@ impl ZzClawTermApp {
         {
             return false;
         }
-        if self.security.credentials().is_empty() {
-            return false;
-        }
 
         let now = Self::now_unix_ms();
         let prompt_text = credential_autofill_prompt_text_from_visible(
@@ -282,7 +282,22 @@ impl ZzClawTermApp {
         let Some(active_session_id) = self.session.active_id_owned() else {
             return false;
         };
-        let credentials = self.security.credentials().to_vec();
+        let mut credentials: Vec<CredentialAutofillTarget> = self
+            .security
+            .credentials()
+            .iter()
+            .cloned()
+            .map(CredentialAutofillTarget::Vault)
+            .collect();
+        if prompt_kind == CredentialPromptKind::Password
+            && let Some(connection_credential) =
+                self.credential_autofill_connection_password(&prompt_text)
+        {
+            credentials.insert(0, connection_credential);
+        }
+        if credentials.is_empty() {
+            return false;
+        }
 
         if let Some(pending) = self.terminal.assist.credential_autofill_pending.clone()
             && pending.expires_at_ms <= now
@@ -324,6 +339,75 @@ impl ZzClawTermApp {
                 pending: self.terminal.assist.credential_autofill_pending.clone(),
             });
         true
+    }
+
+    /// Whether the credential autofill has anything to offer: vault credentials
+    /// from the security catalog, or the active session's saved connection
+    /// password. Kept cheap because detection ticks call it on idle frames.
+    fn has_credential_autofill_candidates(&self) -> bool {
+        if !self.security.credentials().is_empty() {
+            return true;
+        }
+        self.active_connection_login_username().is_some()
+            && self
+                .active_connection_auth()
+                .is_some_and(connection_has_resolvable_password)
+    }
+
+    /// The account the active session actually logs in as. Saved-account auth
+    /// can override the catalog connection's username at connect time, so a
+    /// prompt like `[sudo] password for root:` is compared against this, not
+    /// against the stored connection config.
+    fn active_connection_login_username(&self) -> Option<&str> {
+        let metadata = self.session.metadata(self.session.active_id()?)?;
+        metadata.launch_config.login_username()
+    }
+
+    fn active_connection_auth(&self) -> Option<&ConnectionAuth> {
+        self.active_connection()?.auth.as_ref()
+    }
+
+    /// The catalog connection the active session was started from, if any.
+    fn active_connection(&self) -> Option<&SavedConnection> {
+        let metadata = self.session.metadata(self.session.active_id()?)?;
+        let connection_id = metadata.source_connection_id.as_deref()?;
+        self.connection_state.connection_by_id(connection_id)
+    }
+
+    /// Synthesize a candidate for the active session's saved connection
+    /// password. Only shell login types (SSH, Telnet) with a named login user
+    /// and a resolvable password source qualify; RDP/VNC/Serial/Local do not.
+    /// The connection password is only ever a suggestion: it is sent when the
+    /// user picks it from the panel, never because the prompt appeared.
+    fn credential_autofill_connection_password(
+        &self,
+        prompt_text: &str,
+    ) -> Option<CredentialAutofillTarget> {
+        // A login password answers a password prompt only. `Password` prompt
+        // kind also covers PIN/OTP/verification/MFA challenges, which a saved
+        // credential may be configured for but a connection password is not an
+        // answer to.
+        if !credential_prompt_requests_password(prompt_text) {
+            return None;
+        }
+        let username = self.active_connection_login_username()?.to_string();
+        let auth = self.active_connection_auth()?;
+        if !connection_has_resolvable_password(auth) {
+            return None;
+        }
+        if credential_password_prompt_target_user(prompt_text).is_some()
+            && !credential_password_prompt_targets_user(prompt_text, &username)
+        {
+            return None;
+        }
+        let connection = self.active_connection()?;
+        Some(CredentialAutofillTarget::ConnectionPassword(
+            ConnectionPasswordTarget {
+                connection_id: connection.id.clone(),
+                connection_name: connection.name.clone(),
+                username,
+            },
+        ))
     }
 
     /// Deliver credential-autofill match replies as they arrive.
@@ -417,8 +501,15 @@ impl ZzClawTermApp {
             return false;
         }
 
-        match event.outcome {
-            CredentialAutofillMatchOutcome::Suggest {
+        match credential_autofill_action(&event.outcome) {
+            CredentialAutofillAction::Send { target, kind } => {
+                self.terminal.assist.credential_autofill_pending = None;
+                self.terminal.assist.credential_autofill_buffer.clear();
+                self.terminal.assist.credential_autofill_recent.clear();
+                self.send_credential_value(&target, kind, &event.key.session_id, cx);
+                true
+            }
+            CredentialAutofillAction::Suggest {
                 kind,
                 matches,
                 clear_pending,
@@ -426,17 +517,15 @@ impl ZzClawTermApp {
                 if clear_pending {
                     self.terminal.assist.credential_autofill_pending = None;
                 }
+                // Nothing is sent here. The connection password is a saved
+                // secret and the prompt that surfaced it is remote-controlled
+                // output, so it is only ever offered: `show_credential_panel`
+                // puts it in the list and `select_credential_suggestion` is the
+                // single place that fills it, behind a user action.
                 self.show_credential_panel(kind, matches, event.key.prompt_text, cx);
                 true
             }
-            CredentialAutofillMatchOutcome::AutoFill { credential, kind } => {
-                self.terminal.assist.credential_autofill_pending = None;
-                self.terminal.assist.credential_autofill_buffer.clear();
-                self.terminal.assist.credential_autofill_recent.clear();
-                self.send_credential_value(&credential, kind, &event.key.session_id, cx);
-                true
-            }
-            CredentialAutofillMatchOutcome::NoMatch { clear_pending } => {
+            CredentialAutofillAction::None { clear_pending } => {
                 if clear_pending {
                     self.terminal.assist.credential_autofill_pending = None;
                 }
@@ -447,7 +536,7 @@ impl ZzClawTermApp {
 
     fn send_credential_value(
         &mut self,
-        credential: &SavedCredential,
+        target: &CredentialAutofillTarget,
         kind: CredentialPromptKind,
         session_id: &str,
         cx: &mut Context<Self>,
@@ -465,17 +554,82 @@ impl ZzClawTermApp {
         if self.session.active_id() != Some(session_id) {
             self.activate_session_id_with_surface_sync(session_id, cx);
         }
-        match kind {
-            CredentialPromptKind::Username => {
+        let credential_name = target.display_name();
+        match (kind, target) {
+            (CredentialPromptKind::Username, CredentialAutofillTarget::Vault(credential)) => {
                 let mut payload = credential.username.clone();
                 payload.push('\r');
                 self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
                 self.shell
-                    .set_status(format!("filled username from '{}'", credential.name));
+                    .set_status(format!("filled username from '{credential_name}'"));
             }
-            CredentialPromptKind::Password => {
+            // Username prompts never offer the connection password.
+            (CredentialPromptKind::Username, CredentialAutofillTarget::ConnectionPassword(_)) => {}
+            (
+                CredentialPromptKind::Password,
+                CredentialAutofillTarget::ConnectionPassword(target),
+            ) => {
+                let connection_id = target.connection_id.clone();
+                let closure_name = credential_name.clone();
+                let session_id = session_id.to_string();
+                let submitted = self.submit_store_request(
+                    0,
+                    store_request(StoreDomain::Security, move |store| {
+                        resolve_connection_password_from_store(store, &connection_id)
+                    }),
+                    move |this, event, cx| {
+                        if this.session.active_id() != Some(session_id.as_str()) {
+                            this.shell.set_status(
+                                "credential fill cancelled because the active session changed"
+                                    .to_string(),
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        if this.session.is_disconnected(&session_id) {
+                            this.shell.set_status(
+                                "session disconnected - reconnect before filling credentials"
+                                    .to_string(),
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        match event.outcome {
+                            Ok(ConnectionPasswordResolve::Resolved(mut password)) => {
+                                password.expose_secret_mut().push('\r');
+                                this.send_terminal_input_without_suggestion_track(
+                                    password.into_secret().into_bytes(),
+                                    cx,
+                                );
+                                this.shell
+                                    .set_status(format!("filled password from '{closure_name}'"));
+                            }
+                            Ok(ConnectionPasswordResolve::MissingConnection) => {
+                                this.shell.set_status(format!(
+                                    "connection for '{closure_name}' was not found"
+                                ));
+                            }
+                            Ok(ConnectionPasswordResolve::MissingPassword) => {
+                                this.shell.set_status(format!(
+                                    "connection '{closure_name}' has no saved password"
+                                ));
+                            }
+                            Err(error) => this.shell.set_status(format!(
+                                "failed to load connection password '{closure_name}': {error}"
+                            )),
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                );
+                if submitted {
+                    self.shell
+                        .set_status(format!("loading password from '{credential_name}'"));
+                }
+            }
+            (CredentialPromptKind::Password, CredentialAutofillTarget::Vault(credential)) => {
                 let credential_id = credential.id.clone();
-                let credential_name = credential.name.clone();
+                let closure_name = credential_name.clone();
                 let session_id = session_id.to_string();
                 let submitted = self.submit_store_request(
                     0,
@@ -505,7 +659,7 @@ impl ZzClawTermApp {
                                     entry.password.filter(|value| !value.is_empty())
                                 else {
                                     this.shell.set_status(format!(
-                                        "credential '{credential_name}' has no password"
+                                        "credential '{closure_name}' has no password"
                                     ));
                                     cx.notify();
                                     return;
@@ -515,15 +669,14 @@ impl ZzClawTermApp {
                                     password.into_secret().into_bytes(),
                                     cx,
                                 );
-                                this.shell.set_status(format!(
-                                    "filled password from '{credential_name}'"
-                                ));
+                                this.shell
+                                    .set_status(format!("filled password from '{closure_name}'"));
                             }
-                            Ok(None) => this.shell.set_status(format!(
-                                "credential '{credential_name}' was not found"
-                            )),
+                            Ok(None) => this
+                                .shell
+                                .set_status(format!("credential '{closure_name}' was not found")),
                             Err(error) => this.shell.set_status(format!(
-                                "failed to load credential '{credential_name}': {error}"
+                                "failed to load credential '{closure_name}': {error}"
                             )),
                         }
                         cx.notify();
@@ -532,7 +685,7 @@ impl ZzClawTermApp {
                 );
                 if submitted {
                     self.shell
-                        .set_status(format!("loading password from '{}'", credential.name));
+                        .set_status(format!("loading password from '{credential_name}'"));
                 }
             }
         }
@@ -546,15 +699,15 @@ impl ZzClawTermApp {
         let Some(state) = self.terminal.assist.credential_suggestions.clone() else {
             return;
         };
-        let Some(credential) = state.matches.get(state.selected_index).cloned() else {
+        let Some(target) = state.matches.get(state.selected_index).cloned() else {
             return;
         };
-        self.select_credential_suggestion(credential, cx);
+        self.select_credential_suggestion(target, cx);
     }
 
     pub(in crate::features) fn select_credential_suggestion(
         &mut self,
-        credential: SavedCredential,
+        target: CredentialAutofillTarget,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.terminal.assist.credential_suggestions.clone() else {
@@ -565,13 +718,22 @@ impl ZzClawTermApp {
         }
         let was_username = state.kind == CredentialPromptKind::Username;
         self.terminal.assist.credential_autofill_sending = true;
-        self.send_credential_value(&credential, state.kind, &state.session_id, cx);
+        self.send_credential_value(&target, state.kind, &state.session_id, cx);
         if was_username {
-            self.terminal.assist.credential_autofill_pending = Some(PendingCredentialAutofill {
-                session_id: state.session_id.clone(),
-                credential_id: credential.id,
-                expires_at_ms: Self::now_unix_ms().saturating_add(PENDING_PASSWORD_TTL_MS),
-            });
+            match &target {
+                CredentialAutofillTarget::Vault(credential) => {
+                    self.terminal.assist.credential_autofill_pending =
+                        Some(PendingCredentialAutofill {
+                            session_id: state.session_id.clone(),
+                            credential_id: credential.id.clone(),
+                            expires_at_ms: Self::now_unix_ms()
+                                .saturating_add(PENDING_PASSWORD_TTL_MS),
+                        });
+                }
+                CredentialAutofillTarget::ConnectionPassword(_) => {
+                    self.terminal.assist.credential_autofill_pending = None;
+                }
+            }
         } else {
             self.terminal.assist.credential_autofill_pending = None;
         }
@@ -692,7 +854,6 @@ impl ZzClawTermApp {
 
         for (index, credential) in state.matches.iter().enumerate() {
             let selected = index == state.selected_index;
-            let credential_id = credential.id.clone();
             list = list.child(
                 div()
                     .id(SharedString::from(format!("credential-suggestion-{index}")))
@@ -718,21 +879,16 @@ impl ZzClawTermApp {
                         if let Some(state) = this.terminal.assist.credential_suggestions.as_mut() {
                             state.selected_index = index;
                         }
-                        if let Some(credential) = this
+                        let Some(selected) = this
                             .terminal
                             .assist
                             .credential_suggestions
                             .as_ref()
-                            .and_then(|state| {
-                                state
-                                    .matches
-                                    .iter()
-                                    .find(|entry| entry.id == credential_id)
-                                    .cloned()
-                            })
-                        {
-                            this.select_credential_suggestion(credential, cx);
-                        }
+                            .and_then(|state| state.matches.get(index).cloned())
+                        else {
+                            return;
+                        };
+                        this.select_credential_suggestion(selected, cx);
                     }))
                     .child(svg().size(px(14.)).flex_none().path(kind_icon).text_color(
                         if selected {
@@ -751,13 +907,13 @@ impl ZzClawTermApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(palette.text))
-                                    .child(truncate_preview(&credential.name, 36)),
+                                    .child(truncate_preview(&credential.display_name(), 36)),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
                                     .text_color(rgb(palette.text_dimmed))
-                                    .child(truncate_preview(&credential.username, 40)),
+                                    .child(truncate_preview(credential.username(), 40)),
                             ),
                     ),
             );
@@ -829,6 +985,80 @@ impl ZzClawTermApp {
             )
             .into_any_element()
     }
+}
+
+/// Whether the connection has a password that can be resolved at fill time.
+/// Mirrors the source rule in `resolve_connection_password_from_store` and
+/// `ConnectionAuth::uses_account_password`, so a candidate
+/// is only offered when a store request can actually return a secret: an
+/// account reference counts only when the account supplies the password
+/// (`password_source == Account`, or the legacy shape with no inline
+/// password). A connection-owned password is a stored ciphertext the catalog
+/// keeps with `has_password = true` or a hydrated plaintext, so neither
+/// `has_password` nor the ciphertext value is a password to send. The
+/// vault-locked case simply fails later with `MissingPassword`.
+fn connection_has_resolvable_password(auth: &ConnectionAuth) -> bool {
+    if auth.mode != "password" {
+        return false;
+    }
+    if auth.uses_account_password() {
+        return auth.saved_account_id().is_some();
+    }
+    auth.has_password || connection_auth_inline_password(auth).is_some()
+}
+
+/// Plaintext connection password carried inside the connection document after
+/// hydration. A stored ciphertext or a locked password returns None.
+fn connection_auth_inline_password(auth: &ConnectionAuth) -> Option<SecretString> {
+    if auth.mode == "none" {
+        return None;
+    }
+    auth.password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|_| !auth.has_password)
+        .map(SecretString::from)
+}
+
+enum ConnectionPasswordResolve {
+    MissingConnection,
+    MissingPassword,
+    Resolved(SecretString),
+}
+
+/// Resolve the plaintext password backing the connection-password candidate.
+/// Connection-stored passwords are hydrated by `get_connection`; account-
+/// referenced passwords are decrypted on demand. Used inside a store request,
+/// so no GPUI types cross the background boundary.
+fn resolve_connection_password_from_store(
+    store: &ConnectionStore,
+    connection_id: &str,
+) -> Result<ConnectionPasswordResolve, StorageError> {
+    let Some(connection) = store.get_connection(connection_id)? else {
+        return Ok(ConnectionPasswordResolve::MissingConnection);
+    };
+    let Some(auth) = connection.auth.as_ref() else {
+        return Ok(ConnectionPasswordResolve::MissingPassword);
+    };
+    if auth.mode != "password" {
+        return Ok(ConnectionPasswordResolve::MissingPassword);
+    }
+    if auth.uses_account_password() {
+        let account = store.load_account_for_auth(auth)?;
+        return Ok(
+            match account
+                .and_then(|account| account.password)
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(password) => ConnectionPasswordResolve::Resolved(password),
+                None => ConnectionPasswordResolve::MissingPassword,
+            },
+        );
+    }
+    Ok(match connection_auth_inline_password(auth) {
+        Some(password) => ConnectionPasswordResolve::Resolved(password),
+        None => ConnectionPasswordResolve::MissingPassword,
+    })
 }
 
 fn credential_autofill_snapshot_detection_can_run(
@@ -992,16 +1222,28 @@ fn credential_autofill_detect_prompt_kind(prompt: &str) -> Option<CredentialProm
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_core::CredentialPromptKind;
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{
+        AiExecutionProfile, ConnectionAuth, ConnectionPasswordSource, ConnectionType,
+        CredentialPromptKind, SavedConnection,
+    };
+    use zzclawterm_transport::SshSessionConfig;
 
     use super::{
-        CREDENTIAL_AUTOFILL_INPUT_TAIL_LIMIT, CredentialAutofillRuntimeBacklog,
-        credential_autofill_detect_prompt_kind, credential_autofill_detection_should_run_this_tick,
+        CREDENTIAL_AUTOFILL_INPUT_TAIL_LIMIT, ConnectionPasswordResolve,
+        CredentialAutofillRuntimeBacklog, connection_auth_inline_password,
+        connection_has_resolvable_password, credential_autofill_detect_prompt_kind,
+        credential_autofill_detection_should_run_this_tick,
         credential_autofill_pending_detection_can_run,
         credential_autofill_prompt_line_from_viewport,
         credential_autofill_prompt_text_from_visible,
         credential_autofill_snapshot_detection_can_run, credential_autofill_visible_tail,
+        resolve_connection_password_from_store,
     };
+    use crate::features::ZzClawTermApp;
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionPasswordTarget, CredentialAutofillTarget, SessionLaunchConfig};
+    use crate::test_support::TestConfigDir;
 
     fn backlog(
         queued_output_bytes: usize,
@@ -1212,6 +1454,591 @@ mod tests {
         assert_eq!(
             credential_autofill_detect_prompt_kind("Password accepted"),
             None
+        );
+    }
+
+    #[test]
+    fn connection_auth_inline_password_accepts_only_hydrated_plaintext() {
+        use zzclawterm_core::{ConnectionAuth, SecretString};
+        let inline = ConnectionAuth {
+            mode: "password".into(),
+            password: Some(SecretString::from("secret")),
+            has_password: false,
+            ..Default::default()
+        };
+        assert!(
+            connection_auth_inline_password(&inline)
+                .expect("inline password")
+                .expose_secret()
+                == "secret"
+        );
+        let locked = ConnectionAuth {
+            mode: "password".into(),
+            password: Some(SecretString::from("ciphertext")),
+            has_password: true,
+            ..Default::default()
+        };
+        assert!(connection_auth_inline_password(&locked).is_none());
+        let none = ConnectionAuth {
+            mode: "none".into(),
+            ..Default::default()
+        };
+        assert!(connection_auth_inline_password(&none).is_none());
+    }
+
+    #[test]
+    fn connection_has_resolvable_password_reads_catalog_shape() {
+        use zzclawterm_core::{ConnectionAuth, SecretString};
+        // Catalog (unhydrated): ciphertext inline with has_password = true.
+        let catalog_inline = ConnectionAuth {
+            mode: "password".into(),
+            password: Some(SecretString::from("ciphertext")),
+            has_password: true,
+            ..Default::default()
+        };
+        assert!(connection_has_resolvable_password(&catalog_inline));
+        // Hydrated: plaintext inline.
+        let hydrated = ConnectionAuth {
+            mode: "password".into(),
+            password: Some(SecretString::from("secret")),
+            has_password: false,
+            ..Default::default()
+        };
+        assert!(connection_has_resolvable_password(&hydrated));
+        // Account reference.
+        let account_ref = ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            ..Default::default()
+        };
+        assert!(connection_has_resolvable_password(&account_ref));
+        // No password at all.
+        let empty = ConnectionAuth {
+            mode: "password".into(),
+            ..Default::default()
+        };
+        assert!(!connection_has_resolvable_password(&empty));
+        // Key-only auth.
+        let key_only = ConnectionAuth {
+            mode: "publickey".into(),
+            password: Some(SecretString::from("unused")),
+            ..Default::default()
+        };
+        assert!(!connection_has_resolvable_password(&key_only));
+    }
+
+    #[test]
+    fn connection_has_resolvable_password_follows_password_source() {
+        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
+        // The account is only the password when the source says so, so a
+        // connection that owns its password must not be offered a candidate
+        // that resolves to MissingPassword at fill time.
+        let account_reference_only = ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            ..Default::default()
+        };
+        assert!(!connection_has_resolvable_password(&account_reference_only));
+
+        // ... but its own stored ciphertext is still a resolvable password.
+        let connection_owned = ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            password: Some(SecretString::from("ciphertext")),
+            has_password: true,
+            ..Default::default()
+        };
+        assert!(connection_has_resolvable_password(&connection_owned));
+
+        // Account source without a saved account cannot be resolved.
+        let account_source_without_account = ConnectionAuth {
+            mode: "password".into(),
+            password_source: Some(ConnectionPasswordSource::Account),
+            ..Default::default()
+        };
+        assert!(!connection_has_resolvable_password(
+            &account_source_without_account
+        ));
+    }
+
+    /// Covers the store half of the fill path against a real database: the
+    /// candidate gate above only inspects the catalog shape, so this pins that a
+    /// connection which is offered actually resolves to the plaintext the
+    /// terminal would receive, and that the payload is exactly the secret plus a
+    /// carriage return.
+    #[test]
+    fn connection_password_resolves_from_store_to_the_terminal_payload() {
+        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
+        use zzclawterm_store::ConnectionStore;
+
+        let root = crate::test_support::TestConfigDir::new("zzclawterm-connection-password-fill");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        let connection = ssh_connection(
+            "root",
+            Some(ConnectionAuth {
+                mode: "password".into(),
+                password_source: Some(ConnectionPasswordSource::Connection),
+                // Hydrated shape: plaintext inline, catalog flag cleared.
+                password: Some(SecretString::from("s3cret")),
+                has_password: false,
+                ..Default::default()
+            }),
+        );
+        assert!(connection_has_resolvable_password(
+            connection.auth.as_ref().expect("auth")
+        ));
+        store.save_connection(&connection).expect("save connection");
+
+        let outcome = resolve_connection_password_from_store(&store, "conn-1")
+            .expect("resolve should not error");
+        let ConnectionPasswordResolve::Resolved(mut password) = outcome else {
+            panic!("hydrated inline password should resolve");
+        };
+        password.expose_secret_mut().push('\r');
+        assert!(password.into_secret().into_bytes() == b"s3cret\r");
+
+        let missing = resolve_connection_password_from_store(&store, "nope")
+            .expect("resolve should not error");
+        assert!(matches!(
+            missing,
+            ConnectionPasswordResolve::MissingConnection
+        ));
+    }
+
+    fn assert_resolved_password(store: &zzclawterm_store::ConnectionStore, expected: &str) {
+        let outcome = resolve_connection_password_from_store(store, "conn-1")
+            .expect("resolve should not error");
+        assert!(
+            matches!(outcome, ConnectionPasswordResolve::Resolved(password) if password.expose_secret() == expected)
+        );
+    }
+
+    fn save_test_account(store: &zzclawterm_store::ConnectionStore, password: Option<&str>) {
+        use zzclawterm_core::models::credentials::SavedPassword;
+
+        store
+            .save_password(SavedPassword {
+                id: "account-1".into(),
+                name: "Login account".into(),
+                username: "root".into(),
+                password: password.map(Into::into),
+                has_password: false,
+            })
+            .expect("save account");
+    }
+
+    #[test]
+    fn account_source_uses_account_password_despite_stale_connection_record() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-account-source-stale-connection");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        save_test_account(&store, Some("account-secret"));
+        let mut auth = account_password_auth();
+        auth.password = Some(SecretString::from("stale-connection-secret"));
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection with stale password");
+
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        let hydrated_auth = loaded.auth.as_ref().unwrap();
+        assert!(hydrated_auth.uses_account_password());
+        assert!(connection_has_resolvable_password(hydrated_auth));
+        assert_resolved_password(&store, "account-secret");
+    }
+
+    #[test]
+    fn connection_source_never_uses_saved_account_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-connection-source-with-account");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        save_test_account(&store, Some("account-secret"));
+        let auth = ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            password: Some(SecretString::from("connection-secret")),
+            ..Default::default()
+        };
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert_resolved_password(&store, "connection-secret");
+
+        let without_connection_password = ConnectionAuth {
+            password: None,
+            ..loaded.auth.unwrap()
+        };
+        store
+            .save_connection(&ssh_connection("root", Some(without_connection_password)))
+            .expect("remove connection password");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(!connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert!(matches!(
+            resolve_connection_password_from_store(&store, "conn-1").unwrap(),
+            ConnectionPasswordResolve::MissingPassword
+        ));
+    }
+
+    #[test]
+    fn non_password_auth_never_resolves_connection_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-non-password-auth");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        let auth = ConnectionAuth {
+            mode: "publickey".into(),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            password: Some(SecretString::from("unused-secret")),
+            ..Default::default()
+        };
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(!connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert!(matches!(
+            resolve_connection_password_from_store(&store, "conn-1").unwrap(),
+            ConnectionPasswordResolve::MissingPassword
+        ));
+    }
+
+    #[test]
+    fn legacy_password_source_follows_hydrated_auth_rule() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-legacy-password-source");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        save_test_account(&store, Some("account-secret"));
+        let mut auth = ConnectionAuth {
+            mode: "password".into(),
+            password_id: Some("account-1".into()),
+            ..Default::default()
+        };
+        store
+            .save_connection(&ssh_connection("root", Some(auth.clone())))
+            .expect("save legacy account reference");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(loaded.auth.as_ref().unwrap().uses_account_password());
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert_resolved_password(&store, "account-secret");
+
+        auth.password = Some(SecretString::from("connection-secret"));
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save legacy inline password");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(!loaded.auth.as_ref().unwrap().uses_account_password());
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert_resolved_password(&store, "connection-secret");
+    }
+
+    #[test]
+    fn account_source_does_not_fall_back_to_stale_connection_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-account-source-unavailable");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        let mut auth = account_password_auth();
+        auth.password = Some(SecretString::from("stale-connection-secret"));
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection with stale password");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+
+        assert!(matches!(
+            resolve_connection_password_from_store(&store, "conn-1").unwrap(),
+            ConnectionPasswordResolve::MissingPassword
+        ));
+        save_test_account(&store, None);
+        assert!(matches!(
+            resolve_connection_password_from_store(&store, "conn-1").unwrap(),
+            ConnectionPasswordResolve::MissingPassword
+        ));
+    }
+
+    #[test]
+    fn account_source_decryption_error_does_not_use_stale_connection_password() {
+        use redb::{Database, TableDefinition};
+        use zzclawterm_core::SecretString;
+        use zzclawterm_core::models::credentials::SavedPassword;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-account-source-corrupt");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        save_test_account(&store, Some("account-secret"));
+        let mut auth = account_password_auth();
+        auth.password = Some(SecretString::from("stale-connection-secret"));
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection with stale password");
+        let db_path = store.db_path().to_path_buf();
+        drop(store);
+
+        let db = Database::open(db_path).expect("open test database");
+        let txn = db.begin_write().expect("write test database");
+        let mut table = txn
+            .open_table(TableDefinition::<&str, &[u8]>::new("credentials"))
+            .expect("credentials table");
+        let corrupt = SavedPassword {
+            id: "account-1".into(),
+            name: "Login account".into(),
+            username: "root".into(),
+            password: Some(SecretString::from("invalid-ciphertext")),
+            has_password: true,
+        };
+        let raw = serde_json::to_vec(&corrupt).expect("serialize corrupt account");
+        table
+            .insert("credentials/password/account-1", raw.as_slice())
+            .expect("replace account ciphertext");
+        drop(table);
+        txn.commit().expect("commit corrupt account");
+        drop(db);
+
+        let store = ConnectionStore::open(root.path().join("config")).expect("reopen test store");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert!(resolve_connection_password_from_store(&store, "conn-1").is_err());
+    }
+
+    #[test]
+    fn account_source_locked_vault_does_not_use_stale_connection_password() {
+        use redb::{Database, TableDefinition};
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+
+        let root = TestConfigDir::new("zzclawterm-account-source-locked");
+        let store = ConnectionStore::open(root.path().join("config")).expect("test store");
+        save_test_account(&store, Some("account-secret"));
+        let mut auth = account_password_auth();
+        auth.password = Some(SecretString::from("stale-connection-secret"));
+        store
+            .save_connection(&ssh_connection("root", Some(auth)))
+            .expect("save connection with stale password");
+        let db_path = store.db_path().to_path_buf();
+        drop(store);
+
+        let db = Database::open(db_path).expect("open test database");
+        let txn = db.begin_write().expect("write test database");
+        let mut table = txn
+            .open_table(TableDefinition::<&str, &str>::new("meta"))
+            .expect("meta table");
+        table
+            .remove("security/master_key")
+            .expect("remove master key");
+        drop(table);
+        let mut legacy_table = txn
+            .open_table(TableDefinition::<&str, &str>::new("text_docs"))
+            .expect("legacy text table");
+        legacy_table
+            .remove("master.key")
+            .expect("remove legacy master key");
+        drop(legacy_table);
+        txn.commit().expect("commit locked vault");
+        drop(db);
+
+        let store = ConnectionStore::open(root.path().join("config")).expect("reopen test store");
+        let loaded = store.get_connection("conn-1").unwrap().unwrap();
+        assert!(connection_has_resolvable_password(
+            loaded.auth.as_ref().unwrap()
+        ));
+        assert!(resolve_connection_password_from_store(&store, "conn-1").is_err());
+    }
+
+    const SESSION_ID: &str = "credential-autofill-session";
+
+    fn ssh_connection(username: &str, auth: Option<ConnectionAuth>) -> SavedConnection {
+        SavedConnection {
+            extensions: Default::default(),
+            tags: Vec::new(),
+            id: "conn-1".to_string(),
+            name: "prod".to_string(),
+            config: ConnectionType::Ssh {
+                host: "host".into(),
+                port: 22,
+                username: username.to_string(),
+                backspace_mode: "del".into(),
+                ai_execution_profile: AiExecutionProfile::Auto,
+                x11_forwarding: false,
+                auth_agent_endpoint: None,
+                agent_forwarding_config: None,
+                legacy_agent_forwarding: None,
+                encoding: String::new(),
+                dynamic_tab_title: false,
+            },
+            group_id: None,
+            description: None,
+            sort_order: 0,
+            icon: None,
+            icon_auto_detect: None,
+            auth,
+            recording: None,
+            ssh_algorithms: None,
+            ssh_profile: Default::default(),
+            terminal_type: None,
+            sftp: Default::default(),
+            network: None,
+            post_login: None,
+            asset: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            last_used_at_ms: None,
+        }
+    }
+
+    fn account_password_auth() -> ConnectionAuth {
+        ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            password_source: Some(ConnectionPasswordSource::Account),
+            ..Default::default()
+        }
+    }
+
+    /// An active SSH session whose login user came from the saved account, not
+    /// from the catalog connection: the config says `dev` while the session
+    /// really logged in as `root`.
+    fn app_with_account_backed_session(
+        cx: &mut TestAppContext,
+        root: &TestConfigDir,
+        connection: SavedConnection,
+        login_username: &str,
+    ) -> gpui::Entity<ZzClawTermApp> {
+        let app = app_with_visible_local_session(cx, root.path(), SESSION_ID);
+        cx.update_entity(&app, |app, _| {
+            let mut metadata = app
+                .session
+                .metadata(SESSION_ID)
+                .cloned()
+                .expect("fixture session metadata");
+            metadata.source_connection_id = Some(connection.id.clone());
+            metadata.launch_config = SessionLaunchConfig::Ssh(Box::new(SshSessionConfig {
+                username: login_username.to_string(),
+                ..SshSessionConfig::default()
+            }));
+            *app.session
+                .metadata_mut(SESSION_ID)
+                .expect("fixture session metadata") = metadata;
+            app.connection_state
+                .replace_loaded(vec![connection], Vec::new());
+        });
+        app
+    }
+
+    fn connection_password_candidate(
+        app: &gpui::Entity<ZzClawTermApp>,
+        cx: &mut TestAppContext,
+        prompt: &str,
+    ) -> Option<ConnectionPasswordTarget> {
+        let mut candidate = None;
+        cx.update_entity(app, |app, _| {
+            candidate = match app.credential_autofill_connection_password(prompt) {
+                Some(CredentialAutofillTarget::ConnectionPassword(target)) => Some(target),
+                Some(other) => panic!("unexpected candidate: {other:?}"),
+                None => None,
+            };
+        });
+        candidate
+    }
+
+    #[test]
+    fn connection_password_candidate_matches_the_effective_session_user() {
+        let root = TestConfigDir::new("zzclawterm-credential-autofill-user");
+        let mut cx = TestAppContext::single();
+        // The catalog says `dev`; the saved account resolved the session to `root`.
+        let app = app_with_account_backed_session(
+            &mut cx,
+            &root,
+            ssh_connection("dev", Some(account_password_auth())),
+            "root",
+        );
+
+        let candidate = connection_password_candidate(&app, &mut cx, "[sudo] password for root:")
+            .expect("the session's own account is offered");
+        assert_eq!(candidate.connection_id, "conn-1");
+        assert_eq!(candidate.connection_name, "prod");
+        assert_eq!(candidate.username, "root");
+        assert!(
+            connection_password_candidate(&app, &mut cx, "[sudo] password for dev:").is_none(),
+            "the catalog username is not who the session logs in as"
+        );
+    }
+
+    #[test]
+    fn connection_password_candidate_is_refused_for_otp_style_prompts() {
+        let root = TestConfigDir::new("zzclawterm-credential-autofill-otp");
+        let mut cx = TestAppContext::single();
+        let app = app_with_account_backed_session(
+            &mut cx,
+            &root,
+            ssh_connection("dev", Some(account_password_auth())),
+            "dev",
+        );
+
+        for prompt in [
+            "Verification code:",
+            "Enter PIN for dev:",
+            "OTP:",
+            "MFA code:",
+            "验证码：",
+        ] {
+            assert!(
+                connection_password_candidate(&app, &mut cx, prompt).is_none(),
+                "{prompt} must not offer a connection password"
+            );
+        }
+        assert!(
+            connection_password_candidate(&app, &mut cx, "Password:").is_some(),
+            "a real password prompt still offers the connection password"
+        );
+    }
+
+    #[test]
+    fn connection_password_candidate_requires_a_resolvable_password_source() {
+        let root = TestConfigDir::new("zzclawterm-credential-autofill-source");
+        let mut cx = TestAppContext::single();
+        // The connection owns its password, so the account reference is not one.
+        let connection_owned_without_password = ConnectionAuth {
+            mode: "password".into(),
+            account_id: Some("account-1".into()),
+            password_source: Some(ConnectionPasswordSource::Connection),
+            ..Default::default()
+        };
+        let app = app_with_account_backed_session(
+            &mut cx,
+            &root,
+            ssh_connection("dev", Some(connection_owned_without_password)),
+            "dev",
+        );
+
+        assert!(
+            connection_password_candidate(&app, &mut cx, "Password:").is_none(),
+            "an account reference is not a password when the connection owns it"
         );
     }
 }

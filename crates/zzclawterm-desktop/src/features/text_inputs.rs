@@ -218,8 +218,18 @@ impl ZzClawTermApp {
             cx.subscribe(
                 &entity,
                 move |app: &mut ZzClawTermApp, _, event, cx| match event {
-                    ZzClawInputEvent::Changed(text) | ZzClawInputEvent::Submitted(text) => {
+                    ZzClawInputEvent::Changed(text) => {
                         app.on_text_input_changed(subscription_id.clone(), text.clone(), cx);
+                    }
+                    ZzClawInputEvent::Submitted(text) => {
+                        app.on_text_input_changed(subscription_id.clone(), text.clone(), cx);
+                        if subscription_id.as_ref() == "ai.chat.prompt" {
+                            if app.ai.chat_mention_is_open() {
+                                app.select_ai_mention_candidate(cx);
+                            } else {
+                                app.start_ai_ask(cx);
+                            }
+                        }
                     }
                     ZzClawInputEvent::Blurred(_) => {}
                 },

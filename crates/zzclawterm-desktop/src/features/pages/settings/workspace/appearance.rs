@@ -4,10 +4,10 @@ use std::sync::Arc;
 use rust_i18n::t;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, SharedString, Window, div,
-    prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    SharedString, Window, div, prelude::*, px, rgb, rgba, svg,
 };
-use zzclawterm_ui::{NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelectOption};
+use zzclawterm_ui::{NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelectOption, ZzClawSlider};
 
 use crate::features::{
     FontAvailability, FontCatalogLoadState, FontResolutionSource, FontResolutionStatus,
@@ -557,12 +557,54 @@ impl SettingsPanel {
         } else {
             t!("settings.backgroundImageOpacityDesc").to_string()
         };
-        let kind = if content { "content" } else { "image" };
+        let slider = if content {
+            &self.content_opacity_slider
+        } else {
+            &self.image_opacity_slider
+        };
+        let focus = if content {
+            self.content_opacity_focus.clone()
+        } else {
+            self.image_opacity_focus.clone()
+        };
+        let mouse_focus = focus.clone();
 
         div()
             .flex()
             .flex_col()
             .gap_3()
+            .track_focus(&focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    window.focus(&mouse_focus, cx);
+                }),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !enabled {
+                    return;
+                }
+                let current = if content {
+                    this.settings.summary().background_content_opacity
+                } else {
+                    this.settings.summary().background_image_opacity
+                };
+                let next = match event.keystroke.key.as_str() {
+                    "left" | "down" => current.saturating_sub(1),
+                    "right" | "up" => current.saturating_add(1).min(100),
+                    "home" => 0,
+                    "end" => 100,
+                    _ => return,
+                };
+                if next != current {
+                    if content {
+                        this.set_background_content_opacity(next, cx);
+                    } else {
+                        this.set_background_image_opacity(next, cx);
+                    }
+                }
+                cx.stop_propagation();
+            }))
             .child(
                 div()
                     .flex()
@@ -603,45 +645,7 @@ impl SettingsPanel {
                             .child(format!("{value}%")),
                     ),
             )
-            .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "appearance-{kind}-opacity-track"
-                    )))
-                    .h(px(10.))
-                    .w_full()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgb(palette.input))
-                    .overflow_hidden()
-                    .flex()
-                    .opacity(if enabled { 1.0 } else { 0.5 })
-                    .children((0_u8..=100).map(|percent| {
-                        div()
-                            .id(SharedString::from(format!(
-                                "appearance-{kind}-opacity-{percent}"
-                            )))
-                            .h_full()
-                            .flex_1()
-                            .bg(if percent < value {
-                                rgb(palette.primary)
-                            } else {
-                                rgb(palette.input)
-                            })
-                            .when(enabled, |this| {
-                                this.cursor_pointer().on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if content {
-                                            this.set_background_content_opacity(percent, cx);
-                                        } else {
-                                            this.set_background_image_opacity(percent, cx);
-                                        }
-                                    },
-                                ))
-                            })
-                    })),
-            )
+            .child(ZzClawSlider::new(slider).disabled(!enabled).w_full())
     }
 
     fn appearance_theme_select(

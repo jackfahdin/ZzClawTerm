@@ -110,6 +110,7 @@ impl ZzClawTermApp {
                 ));
             } else {
                 self.session.clear_active_session();
+                self.sync_ai_active_scope(cx);
                 self.terminal.view.output = String::from(INITIAL_TERMINAL_BANNER);
                 self.terminal.view.output_decoder.reset_decoder();
                 self.terminal.view.screen = initial_terminal_screen();
@@ -188,6 +189,7 @@ impl ZzClawTermApp {
                 self.activate_session_id(&next_session_id, cx);
             } else {
                 self.session.clear_active_session();
+                self.sync_ai_active_scope(cx);
             }
         }
         self.shell
@@ -245,6 +247,7 @@ impl ZzClawTermApp {
                 self.activate_session_id(&next_session_id, cx);
             } else {
                 self.session.clear_active_session();
+                self.sync_ai_active_scope(cx);
                 self.terminal.view.output = String::from(INITIAL_TERMINAL_BANNER);
                 self.terminal.view.output_decoder.reset_decoder();
                 self.terminal.view.screen = initial_terminal_screen();

@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::FocusHandle;
 use zzclawterm_core::{
-    AgentCommandExecutionMode, AiAgentKind, AiCustomActionConfig, AiMode, AiModelConfigItem,
+    AgentCommandExecutionMode, AiAgentKind, AiCustomActionConfig, AiModelConfigItem,
     AiModelDiscovery, AiModelSource, AiPermissionMode, AiProviderCredential, AiProviderKind,
-    AiSettings, CodexThreadMode, ExternalMcpSessionScope, RiskLevel, ai_model_id_for_credential,
-    ai_model_id_for_provider, merge_model_discoveries, now_rfc3339,
+    AiReasoningEffort, AiSettings, CodexThreadMode, ExternalMcpSessionScope, RiskLevel,
+    ai_model_id_for_credential, ai_model_id_for_provider, merge_model_discoveries, now_rfc3339,
 };
 
 use crate::models::{AiActionEditorField, AiActionListKind};
@@ -433,9 +433,9 @@ impl AiFeatureState {
         .to_string();
     }
 
-    pub(in crate::features) fn set_settings_mode(&mut self, mode: AiMode) {
-        self.settings.config.default_mode = mode;
-        self.panel.status = "AI mode updated".to_string();
+    pub(in crate::features) fn set_settings_reasoning_effort(&mut self, effort: AiReasoningEffort) {
+        self.settings.config.default_reasoning_effort = effort;
+        self.panel.status = "AI reasoning effort updated".to_string();
     }
 
     pub(in crate::features) fn set_settings_command_mode(

@@ -6,10 +6,154 @@ use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_core::{
     AccountAuthError, AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType,
     AssetMetadata, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth,
-    ConnectionType, ExistingFileBehavior, MainWindowBounds, MainWindowState, OtpEntry,
-    PortableSnapshotKind, RecordingMode, RecordingRotationPolicy, SavedCredential,
-    SearchEngineConfig, SshKey, export_quick_commands_json,
+    ConnectionType, ExistingFileBehavior, InternalEditorDisplay, MainWindowBounds, MainWindowState,
+    OtpEntry, PortableSnapshotKind, RecordingMode, RecordingRotationPolicy, SavedCredential,
+    SearchEngineConfig, SshKey, TerminalRightClickAction, export_quick_commands_json,
 };
+
+#[test]
+fn settings_migrate_right_click_and_lock_keys_without_losing_unknown_fields() {
+    let dir = unique_temp_dir("settings-interaction-lock-migration");
+    let store = ConnectionStore::open(&dir).expect("store");
+    store
+        .save_settings_value(&serde_json::json!({
+            "interaction": { "right_click_paste": true, "future_option": { "keep": true } },
+            "security": { "enable_screen_lock": true, "future_option": 42 },
+            "transfer": { "future_option": "retain" }
+        }))
+        .expect("seed legacy settings");
+
+    let legacy = store.load_app_settings_summary().expect("load legacy");
+    assert_eq!(
+        legacy.interaction_terminal_right_click_action,
+        TerminalRightClickAction::Paste
+    );
+    assert!(legacy.enable_startup_lock);
+    assert!(legacy.enable_idle_lock);
+    assert_eq!(
+        legacy.transfer_internal_editor_display,
+        InternalEditorDisplay::Window
+    );
+
+    let mut raw = store.load_settings_value().expect("raw");
+    raw["interaction"]["terminal_right_click_action"] = serde_json::json!("none");
+    raw["security"]["enable_startup_lock"] = serde_json::json!(false);
+    raw["security"]["enable_idle_lock"] = serde_json::json!(true);
+    store
+        .save_settings_value(&raw)
+        .expect("seed mixed settings");
+    let mixed = store.load_app_settings_summary().expect("load mixed");
+    assert_eq!(
+        mixed.interaction_terminal_right_click_action,
+        TerminalRightClickAction::None
+    );
+    assert!(!mixed.enable_startup_lock);
+    assert!(mixed.enable_idle_lock);
+
+    let mut updated = mixed;
+    updated.interaction_terminal_right_click_action = TerminalRightClickAction::Menu;
+    updated.interaction_mouse_events_require_alt = true;
+    updated.enable_startup_lock = true;
+    updated.enable_idle_lock = false;
+    updated.transfer_internal_editor_display = InternalEditorDisplay::Workspace;
+    store
+        .save_interaction_settings(&updated)
+        .expect("save interaction");
+    store
+        .save_screen_lock_settings(&updated)
+        .expect("save locks");
+    let saved = store
+        .save_transfer_settings(&updated)
+        .expect("save transfer");
+    assert_eq!(
+        saved.interaction_terminal_right_click_action,
+        TerminalRightClickAction::Menu
+    );
+    assert!(saved.interaction_mouse_events_require_alt);
+    assert!(saved.enable_startup_lock);
+    assert!(!saved.enable_idle_lock);
+    assert_eq!(
+        saved.transfer_internal_editor_display,
+        InternalEditorDisplay::Workspace
+    );
+
+    let raw = store.load_settings_value().expect("raw saved");
+    assert_eq!(raw["interaction"]["right_click_paste"], false);
+    assert_eq!(raw["security"]["enable_screen_lock"], true);
+    assert_eq!(raw["interaction"]["future_option"]["keep"], true);
+    assert_eq!(raw["security"]["future_option"], 42);
+    assert_eq!(raw["transfer"]["future_option"], "retain");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn new_settings_survive_portable_snapshot_and_native_backup() {
+    let source_dir = unique_temp_dir("settings-new-source");
+    let portable_dir = unique_temp_dir("settings-new-portable");
+    let native_dir = unique_temp_dir("settings-new-native");
+    let backup_dir = unique_temp_dir("settings-new-backup");
+    let backup_path = backup_dir.join("settings.redb");
+    let source = ConnectionStore::open(&source_dir).expect("source");
+    source
+        .save_settings_value(&serde_json::json!({
+            "interaction": {
+                "terminal_right_click_action": "none",
+                "right_click_paste": true,
+                "mouse_events_require_alt": true,
+                "future_option": "keep"
+            },
+            "security": {
+                "enable_startup_lock": false,
+                "enable_idle_lock": true,
+                "enable_screen_lock": false,
+                "idle_lock_minutes": 15
+            },
+            "transfer": { "internal_editor_display": "workspace" }
+        }))
+        .expect("seed");
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "device", "test")
+        .expect("build portable snapshot");
+    snapshot.recalculate_hash().expect("hash snapshot");
+    let target = ConnectionStore::open(&portable_dir).expect("portable target");
+    target
+        .apply_raw_portable_snapshot(&snapshot)
+        .expect("import portable");
+    assert_new_settings_loaded(&target);
+    drop(target);
+    drop(source);
+
+    ConnectionStore::export_config_database(&source_dir, None, &backup_path)
+        .expect("export native backup");
+    ConnectionStore::import_config_database(&native_dir, None, &backup_path)
+        .expect("import native backup");
+    let native = ConnectionStore::open(&native_dir).expect("native target");
+    assert_new_settings_loaded(&native);
+    drop(native);
+    for dir in [source_dir, portable_dir, native_dir, backup_dir] {
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+fn assert_new_settings_loaded(store: &ConnectionStore) {
+    let settings = store.load_app_settings_summary().expect("load settings");
+    assert_eq!(
+        settings.interaction_terminal_right_click_action,
+        TerminalRightClickAction::None
+    );
+    assert!(!settings.interaction_right_click_paste);
+    assert!(settings.interaction_mouse_events_require_alt);
+    assert!(!settings.enable_startup_lock);
+    assert!(settings.enable_idle_lock);
+    assert_eq!(
+        settings.transfer_internal_editor_display,
+        InternalEditorDisplay::Workspace
+    );
+    assert_eq!(
+        store.load_settings_value().expect("raw")["interaction"]["future_option"],
+        "keep"
+    );
+}
 
 use super::{
     AiSettings, COMMAND_HISTORY_PREFIX, COMMAND_HISTORY_TABLE, CONNECTION_PASSWORD_PREFIX,
@@ -3005,6 +3149,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
 
     let mut interaction_update = saved_ui_layout.clone();
     interaction_update.interaction_right_click_paste = false;
+    interaction_update.interaction_terminal_right_click_action = TerminalRightClickAction::Menu;
     interaction_update.interaction_command_suggestion_min_chars = 4;
     interaction_update.interaction_command_suggestion_max_chars = 120;
     interaction_update.interaction_duplicate_session_command_delay_ms = 2_500;
@@ -3102,6 +3247,8 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
 
     let mut lock_update = saved_recording.clone();
     lock_update.enable_screen_lock = false;
+    lock_update.enable_startup_lock = false;
+    lock_update.enable_idle_lock = false;
     lock_update.idle_lock_minutes = 30;
     let saved_lock = store
         .save_screen_lock_settings(&lock_update)

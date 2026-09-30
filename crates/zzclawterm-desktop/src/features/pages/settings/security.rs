@@ -43,8 +43,10 @@ impl SettingsPanel {
         });
         let master_input_desc = t!("settings.masterPasswordDesc");
         let session_security_label = t!("settings.sessionSecurity");
-        let screen_lock_label = t!("settings.enableScreenLock");
-        let screen_lock_desc = t!("settings.enableScreenLockDesc");
+        let startup_lock_label = t!("settings.enableStartupLock");
+        let startup_lock_desc = t!("settings.enableStartupLockDesc");
+        let idle_lock_switch_label = t!("settings.enableIdleLock");
+        let idle_lock_switch_desc = t!("settings.enableIdleLockDesc");
         let idle_lock_label = t!("settings.idleLockMinutes");
         let idle_lock_desc = t!("settings.idleLockMinutesDesc");
         let _minutes_label = t!("common.minutes");
@@ -118,18 +120,29 @@ impl SettingsPanel {
                     .gap_3()
                     .child(settings_form_row(
                         palette,
-                        screen_lock_label,
-                        Some(SharedString::from(screen_lock_desc)),
+                        startup_lock_label,
+                        Some(SharedString::from(startup_lock_desc)),
                         settings_switch(
                             palette,
-                            "settings-screen-lock-enabled",
-                            self.settings.summary().enable_screen_lock,
+                            "settings-startup-lock-enabled",
+                            self.settings.summary().enable_startup_lock,
                             cx.listener(|this, _, _, cx| {
-                                this.toggle_screen_lock_enabled(cx);
+                                this.toggle_startup_lock_enabled(cx);
                             }),
                         ),
                     ))
-                    .when(self.settings.summary().enable_screen_lock, |this| {
+                    .child(settings_form_row(
+                        palette,
+                        idle_lock_switch_label,
+                        Some(SharedString::from(idle_lock_switch_desc)),
+                        settings_switch(
+                            palette,
+                            "settings-idle-lock-enabled",
+                            self.settings.summary().enable_idle_lock,
+                            cx.listener(|this, _, _, cx| this.toggle_idle_lock_enabled(cx)),
+                        ),
+                    ))
+                    .when(self.settings.summary().enable_idle_lock, |this| {
                         this.child(settings_form_row(
                             palette,
                             idle_lock_label,

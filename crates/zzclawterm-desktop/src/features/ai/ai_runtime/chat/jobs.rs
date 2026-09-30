@@ -1,8 +1,8 @@
 use futures::StreamExt as _;
 use gpui::{Context, KeyDownEvent};
 use zzclawterm_core::{
-    AiAction, AiAgentKind, AiChatRequest, AiContext, AiMode, AiSessionScope, AiSessionScopeType,
-    AiTargetContext, AiTerminalTarget,
+    AiAction, AiAgentKind, AiBackendKind, AiChatRequest, AiContext, AiMode, AiSessionScope,
+    AiSessionScopeType, AiTargetContext, AiTerminalTarget,
 };
 use zzclawterm_transport::SessionInfo;
 
@@ -12,7 +12,7 @@ use crate::features::{
 };
 use crate::models::SessionLaunchConfig;
 
-use super::super::super::ai_jobs::{observation_summary, run_ai_ask_job};
+use super::super::super::ai_jobs::{AiJobRunOptions, observation_summary, run_ai_ask_job};
 use super::super::super::state::AiAgentBackgroundEffect;
 
 impl ZzClawTermApp {
@@ -28,7 +28,8 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn start_ai_ask(&mut self, cx: &mut Context<Self>) {
-        if self.ai.chat_is_pending() {
+        self.sync_ai_active_scope(cx);
+        if self.ai.chat_or_agent_is_running() {
             self.ai
                 .reject_chat_start("AI request already running", false);
             self.defer_ai_panel_snapshot_flush(cx);
@@ -51,9 +52,9 @@ impl ZzClawTermApp {
             return;
         }
         let settings = self.ai.settings_config_cloned();
-        let mode = settings.default_mode.clone();
+        let mode = self.ai.chat_run_mode();
         let agent_kind = if mode == AiMode::Agent {
-            settings.default_agent_kind.clone()
+            self.ai.chat_agent_kind()
         } else {
             AiAgentKind::Zzclawterm
         };
@@ -94,15 +95,12 @@ impl ZzClawTermApp {
                 target: Some(target),
             })
             .collect::<Vec<_>>();
-        let owner_scope = target_session_id
-            .as_ref()
-            .map(|id| AiSessionScope {
-                r#type: AiSessionScopeType::Terminal,
-                target_id: Some(id.clone()),
-                connection_ids: Vec::new(),
-                label: self.session.display_name(id),
-            })
-            .unwrap_or_default();
+        let owner_scope = self.ai_current_owner_scope();
+        let connection_id = self
+            .session
+            .active_id()
+            .and_then(|id| self.session.metadata(id))
+            .and_then(|metadata| metadata.source_connection_id.clone());
 
         let source_label = prepared_request
             .as_ref()
@@ -111,7 +109,7 @@ impl ZzClawTermApp {
         let request = AiChatRequest {
             stream_id: None,
             session_id: Some(session_id.clone()),
-            connection_id: target_session_id.clone(),
+            connection_id,
             terminal_session_id: target_session_id.clone(),
             owner_scope,
             targets,
@@ -190,10 +188,13 @@ impl ZzClawTermApp {
                         store,
                         settings,
                         request,
-                        mcp_credential,
-                        Some(tx.clone()),
-                        cancel,
-                        job_id,
+                        AiJobRunOptions {
+                            mcp_credential,
+                            stream_tx: Some(tx.clone()),
+                            cancel,
+                            job_id,
+                            agent_history: None,
+                        },
                     )
                 };
                 let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
@@ -224,6 +225,7 @@ impl ZzClawTermApp {
             .iter()
             .find(|model| {
                 model.enabled
+                    && model.backend == AiBackendKind::Genai
                     && self.ai.settings_config().default_model_id.as_deref()
                         == Some(model.id.as_str())
             })
@@ -232,7 +234,7 @@ impl ZzClawTermApp {
                     .settings_config()
                     .models
                     .iter()
-                    .find(|model| model.enabled)
+                    .find(|model| model.enabled && model.backend == AiBackendKind::Genai)
             })
             .map(|model| model.id.clone())
     }
@@ -242,7 +244,7 @@ impl ZzClawTermApp {
             .settings_config()
             .models
             .iter()
-            .filter(|model| model.enabled)
+            .filter(|model| model.enabled && model.backend == AiBackendKind::Genai)
             .cloned()
             .collect()
     }
@@ -358,6 +360,12 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn ai_effective_target_session_ids(&self) -> Vec<String> {
         let mut session_ids = Vec::new();
+        if let Some(active_session_id) = self.session.active_id()
+            && self.session.session_info(active_session_id).is_some()
+            && !self.session.is_disconnected(active_session_id)
+        {
+            session_ids.push(active_session_id.to_string());
+        }
         for session_id in self.ai.chat_target_session_ids() {
             if !session_ids.iter().any(|id| id == session_id)
                 && self.session.session_info(session_id).is_some()
@@ -366,14 +374,25 @@ impl ZzClawTermApp {
                 session_ids.push(session_id.clone());
             }
         }
-        if session_ids.is_empty()
-            && let Some(active_session_id) = self.session.active_id()
-            && self.session.session_info(active_session_id).is_some()
-            && !self.session.is_disconnected(active_session_id)
-        {
-            session_ids.push(active_session_id.to_string());
-        }
         session_ids
+    }
+
+    pub(in crate::features) fn ai_current_owner_scope(&self) -> AiSessionScope {
+        let Some(session_id) = self.session.active_id() else {
+            return AiSessionScope::default();
+        };
+        let connection_ids = self
+            .session
+            .metadata(session_id)
+            .and_then(|metadata| metadata.source_connection_id.clone())
+            .into_iter()
+            .collect();
+        AiSessionScope {
+            r#type: AiSessionScopeType::Terminal,
+            target_id: Some(session_id.to_string()),
+            connection_ids,
+            label: self.session.display_name(session_id),
+        }
     }
 
     pub(in crate::features) fn ai_terminal_context_for_sessions(
@@ -465,7 +484,10 @@ impl ZzClawTermApp {
                 let context = self.ai_terminal_context_for_session(Some(session_id));
                 Some(AiTerminalTarget {
                     terminal_session_id: session_id.clone(),
-                    connection_id: None,
+                    connection_id: self
+                        .session
+                        .metadata(session_id)
+                        .and_then(|metadata| metadata.source_connection_id.clone()),
                     label: self
                         .session
                         .display_name(session_id)
@@ -611,18 +633,12 @@ impl ZzClawTermApp {
                     self.defer_ai_panel_snapshot_flush(cx);
                     return true;
                 }
-                "enter" => {
-                    self.select_ai_mention_candidate(cx);
-                    return true;
-                }
                 _ => {}
             }
         }
 
-        // Shift+Enter is a newline, which the box takes itself; a bare Enter
-        // sends.
+        // The input's Submitted event handles Enter after IME composition commits.
         match keystroke.key.as_str() {
-            "enter" if !keystroke.modifiers.shift => self.start_ai_ask(cx),
             "escape" => {
                 self.ai.blur_chat_prompt();
                 self.defer_ai_panel_snapshot_flush(cx);
@@ -669,7 +685,15 @@ impl ZzClawTermApp {
                 if this
                     .update(cx, |this, cx| {
                         let before = this.ai_header_presentation();
-                        if this.ai.chat_event_is_wanted() && this.apply_ai_chat_event(event, cx) {
+                        let Some(scope) = this.ai.scope_for_ai_session(event.session_id()) else {
+                            return;
+                        };
+                        let visible_scope = this.ai.active_scope_key().to_string();
+                        this.ai.switch_scope(&scope);
+                        let dirty =
+                            this.ai.chat_event_is_wanted() && this.apply_ai_chat_event(event, cx);
+                        this.ai.switch_scope(&visible_scope);
+                        if dirty {
                             this.flush_ai_panel_snapshot(cx);
                             this.notify_root_if_ai_header_changed(before, cx);
                         }
@@ -722,6 +746,9 @@ impl ZzClawTermApp {
                     );
                 }
             }
+            AiChatWorkerEvent::AgentProtocolFallback { job_id, .. } => {
+                dirty = self.ai.apply_agent_protocol_fallback(job_id);
+            }
             AiChatWorkerEvent::AgentBackgroundFinished {
                 job_id,
                 state,
@@ -737,10 +764,9 @@ impl ZzClawTermApp {
                         dirty = true;
                         self.start_ai_agent_continuation(*state, observation, cx);
                     }
-                    AiAgentBackgroundEffect::Failed => {
+                    AiAgentBackgroundEffect::ContinueAfterFailure(state, message) => {
                         dirty = true;
-                        self.settings
-                            .update_store_status(self.ai.panel_status().to_string(), false);
+                        self.start_ai_agent_continuation_with_message(*state, message, cx);
                     }
                 }
             }
@@ -758,7 +784,14 @@ impl ZzClawTermApp {
                         },
                         effect.succeeded,
                     );
-                    if effect.clear_prompt_input {
+                    if effect.clear_prompt_input
+                        && self.ai.active_scope_key()
+                            == self
+                                .session
+                                .active_id()
+                                .map(|session_id| format!("terminal:{session_id}"))
+                                .unwrap_or_else(|| "unbound:".to_string())
+                    {
                         self.reset_text_input("ai.chat.prompt", "", cx);
                     }
                     if effect.refresh_usage_counts {

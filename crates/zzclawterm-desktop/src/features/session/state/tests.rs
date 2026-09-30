@@ -1421,7 +1421,6 @@ fn reconnect_stays_pending_until_frame_migration_finishes() {
         old_id: "old".to_string(),
         new_id: "new".to_string(),
         connection_name: "ssh".to_string(),
-        session_name: "ssh".to_string(),
         kind: SessionKind::Ssh,
         source_connection_id: None,
         workspace_split: None,

@@ -13026,6 +13026,7 @@ dependencies = [
  "quick-xml 0.40.1",
  "rand 0.10.3",
  "raw-window-handle",
+ "redb",
  "regex",
  "rqrr",
  "rust-i18n",

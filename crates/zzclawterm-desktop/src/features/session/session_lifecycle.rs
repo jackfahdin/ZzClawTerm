@@ -266,7 +266,7 @@ impl ZzClawTermApp {
         } else {
             let _ = self.session.manager().close(&session_id);
         }
-        self.cleanup_recording_for_session(&session_id);
+        self.disconnect_recording_for_session(&session_id);
         self.mark_session_disconnected(&session_id, cx);
         self.session.finish_busy_action(&session_id);
         self.shell
@@ -366,7 +366,7 @@ impl ZzClawTermApp {
         } else {
             let _ = self.session.manager().close(&old_id);
         }
-        self.cleanup_recording_for_session(&old_id);
+        self.disconnect_recording_for_session(&old_id);
         self.clear_terminal_mouse_report_for_session(&old_id);
         self.transfer.clear_file_clipboard_for_session(&old_id);
         let Some(metadata) = self.session.metadata(&old_id).cloned() else {

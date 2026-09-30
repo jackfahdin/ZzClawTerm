@@ -29,6 +29,58 @@ impl TransferBrowserViewMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalRightClickAction {
+    None,
+    #[default]
+    Menu,
+    Paste,
+}
+
+impl TerminalRightClickAction {
+    pub fn from_compat_value(value: &str) -> Self {
+        match value {
+            "none" => Self::None,
+            "paste" => Self::Paste,
+            _ => Self::Menu,
+        }
+    }
+
+    pub const fn compat_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Menu => "menu",
+            Self::Paste => "paste",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalEditorDisplay {
+    Workspace,
+    #[default]
+    Window,
+}
+
+impl InternalEditorDisplay {
+    pub fn from_compat_value(value: &str) -> Self {
+        if value == "workspace" {
+            Self::Workspace
+        } else {
+            Self::Window
+        }
+    }
+
+    pub const fn compat_value(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Window => "window",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionLinksMatcherSettings {
     #[serde(default = "default_true_action_link")]
@@ -311,6 +363,10 @@ pub struct AppSettingsSummary {
     #[serde(default)]
     pub interaction_allow_osc52_clipboard_write: bool,
     pub interaction_right_click_paste: bool,
+    #[serde(default)]
+    pub interaction_terminal_right_click_action: TerminalRightClickAction,
+    #[serde(default)]
+    pub interaction_mouse_events_require_alt: bool,
     #[serde(default = "default_true")]
     pub interaction_terminal_zoom_enabled: bool,
     pub interaction_command_suggestions_enabled: bool,
@@ -329,6 +385,8 @@ pub struct AppSettingsSummary {
     pub transfer_ask_save_location: bool,
     pub transfer_duplicate_strategy: String,
     pub transfer_editor_type: String,
+    #[serde(default)]
+    pub transfer_internal_editor_display: InternalEditorDisplay,
     #[serde(default = "default_internal_editor_font_size")]
     pub transfer_internal_editor_font_size: u16,
     pub transfer_default_editor: String,
@@ -367,6 +425,10 @@ pub struct AppSettingsSummary {
     pub minimize_to_tray: bool,
     pub confirm_on_close: bool,
     pub enable_screen_lock: bool,
+    #[serde(default)]
+    pub enable_startup_lock: bool,
+    #[serde(default)]
+    pub enable_idle_lock: bool,
     pub idle_lock_minutes: u32,
     pub has_master_password: bool,
     pub keybindings: HashMap<String, String>,
@@ -512,6 +574,8 @@ impl Default for AppSettingsSummary {
             interaction_copy_on_select: false,
             interaction_allow_osc52_clipboard_write: false,
             interaction_right_click_paste: false,
+            interaction_terminal_right_click_action: TerminalRightClickAction::Menu,
+            interaction_mouse_events_require_alt: false,
             interaction_terminal_zoom_enabled: true,
             interaction_command_suggestions_enabled: true,
             interaction_command_suggestion_min_chars: 2,
@@ -529,6 +593,7 @@ impl Default for AppSettingsSummary {
             transfer_ask_save_location: false,
             transfer_duplicate_strategy: "ask".to_string(),
             transfer_editor_type: "external".to_string(),
+            transfer_internal_editor_display: InternalEditorDisplay::Window,
             transfer_internal_editor_font_size: default_internal_editor_font_size(),
             transfer_default_editor: String::new(),
             transfer_download_threads: 3,
@@ -556,6 +621,8 @@ impl Default for AppSettingsSummary {
             minimize_to_tray: false,
             confirm_on_close: true,
             enable_screen_lock: false,
+            enable_startup_lock: false,
+            enable_idle_lock: false,
             idle_lock_minutes: 0,
             has_master_password: false,
             keybindings: HashMap::new(),

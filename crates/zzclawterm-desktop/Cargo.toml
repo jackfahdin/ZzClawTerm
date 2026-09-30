@@ -54,6 +54,7 @@ zeroize.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 zzclawterm-core = { workspace = true, features = ["test-support"] }
+redb.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [

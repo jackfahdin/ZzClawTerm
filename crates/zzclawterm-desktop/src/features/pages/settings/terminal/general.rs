@@ -471,6 +471,7 @@ impl SettingsPanel {
                     ),
             ))
             .child(self.keyword_highlights_settings_section(cx))
+            .child(self.recording_settings_section(cx))
     }
 }
 

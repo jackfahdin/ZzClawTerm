@@ -14,10 +14,10 @@ use super::{
 };
 use zzclawterm_core::{
     AppSettingsSummary, CredentialCrypto, DEFAULT_RECORDING_PATH_TEMPLATE,
-    DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, RecordingMode,
-    RecordingRotationPolicy, SearchEngineConfig, TransferBrowserViewMode, WorkspaceId,
-    WorkspaceRestoreManifest, WorkspaceRestoreState, WorkspaceSessionState, WorkspaceUiState,
-    default_panel_open_mode, default_search_engines, normalize_panel_open_mode,
+    DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, InternalEditorDisplay, RecordingMode,
+    RecordingRotationPolicy, SearchEngineConfig, TerminalRightClickAction, TransferBrowserViewMode,
+    WorkspaceId, WorkspaceRestoreManifest, WorkspaceRestoreState, WorkspaceSessionState,
+    WorkspaceUiState, default_panel_open_mode, default_search_engines, normalize_panel_open_mode,
 };
 
 impl ConnectionStore {
@@ -344,9 +344,32 @@ impl ConnectionStore {
                 &["interaction", "allow_osc52_clipboard_write"],
                 false,
             ),
-            interaction_right_click_paste: json_bool(
+            interaction_right_click_paste: json_path(
                 &value,
-                &["interaction", "right_click_paste"],
+                &["interaction", "terminal_right_click_action"],
+            )
+            .and_then(serde_json::Value::as_str)
+            .map(|action| {
+                TerminalRightClickAction::from_compat_value(action)
+                    == TerminalRightClickAction::Paste
+            })
+            .unwrap_or_else(|| json_bool(&value, &["interaction", "right_click_paste"], false)),
+            interaction_terminal_right_click_action: json_path(
+                &value,
+                &["interaction", "terminal_right_click_action"],
+            )
+            .and_then(serde_json::Value::as_str)
+            .map(TerminalRightClickAction::from_compat_value)
+            .unwrap_or_else(|| {
+                if json_bool(&value, &["interaction", "right_click_paste"], false) {
+                    TerminalRightClickAction::Paste
+                } else {
+                    TerminalRightClickAction::Menu
+                }
+            }),
+            interaction_mouse_events_require_alt: json_bool(
+                &value,
+                &["interaction", "mouse_events_require_alt"],
                 false,
             ),
             interaction_terminal_zoom_enabled: json_bool(
@@ -429,6 +452,9 @@ impl ConnectionStore {
                 &["transfer", "editor_type"],
                 "external",
             )),
+            transfer_internal_editor_display: InternalEditorDisplay::from_compat_value(
+                &json_string(&value, &["transfer", "internal_editor_display"], "window"),
+            ),
             transfer_internal_editor_font_size: json_u16(
                 &value,
                 &["transfer", "internal_editor_font_size"],
@@ -516,7 +542,25 @@ impl ConnectionStore {
             ),
             minimize_to_tray: json_bool(&value, &["general", "minimize_to_tray"], false),
             confirm_on_close: json_bool(&value, &["general", "confirm_on_close"], true),
-            enable_screen_lock: json_bool(&value, &["security", "enable_screen_lock"], false),
+            enable_screen_lock: json_bool(
+                &value,
+                &["security", "enable_startup_lock"],
+                json_bool(&value, &["security", "enable_screen_lock"], false),
+            ) || json_bool(
+                &value,
+                &["security", "enable_idle_lock"],
+                json_bool(&value, &["security", "enable_screen_lock"], false),
+            ),
+            enable_startup_lock: json_bool(
+                &value,
+                &["security", "enable_startup_lock"],
+                json_bool(&value, &["security", "enable_screen_lock"], false),
+            ),
+            enable_idle_lock: json_bool(
+                &value,
+                &["security", "enable_idle_lock"],
+                json_bool(&value, &["security", "enable_screen_lock"], false),
+            ),
             idle_lock_minutes: u32::from(json_u16(&value, &["security", "idle_lock_minutes"], 0)),
             has_master_password: value
                 .get("security")
@@ -679,6 +723,14 @@ impl ConnectionStore {
             &mut value,
             &["transfer", "editor_type"],
             normalize_transfer_editor_type(&settings.transfer_editor_type),
+        );
+        set_nested_json_string(
+            &mut value,
+            &["transfer", "internal_editor_display"],
+            settings
+                .transfer_internal_editor_display
+                .compat_value()
+                .to_string(),
         );
         set_nested_json_value(
             &mut value,
@@ -1290,7 +1342,22 @@ impl ConnectionStore {
         set_nested_json_value(
             &mut value,
             &["interaction", "right_click_paste"],
-            serde_json::Value::Bool(settings.interaction_right_click_paste),
+            serde_json::Value::Bool(
+                settings.interaction_terminal_right_click_action == TerminalRightClickAction::Paste,
+            ),
+        );
+        set_nested_json_string(
+            &mut value,
+            &["interaction", "terminal_right_click_action"],
+            settings
+                .interaction_terminal_right_click_action
+                .compat_value()
+                .to_string(),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["interaction", "mouse_events_require_alt"],
+            serde_json::Value::Bool(settings.interaction_mouse_events_require_alt),
         );
         set_nested_json_value(
             &mut value,
@@ -1684,7 +1751,17 @@ impl ConnectionStore {
         set_nested_json_value(
             &mut value,
             &["security", "enable_screen_lock"],
-            serde_json::Value::Bool(settings.enable_screen_lock),
+            serde_json::Value::Bool(settings.enable_startup_lock || settings.enable_idle_lock),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["security", "enable_startup_lock"],
+            serde_json::Value::Bool(settings.enable_startup_lock),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["security", "enable_idle_lock"],
+            serde_json::Value::Bool(settings.enable_idle_lock),
         );
         set_nested_json_value(
             &mut value,

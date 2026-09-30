@@ -93,6 +93,7 @@ pub(super) fn settings_form_row(
         .child(
             div()
                 .min_w_0()
+                .min_w(px(200.))
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -115,8 +116,9 @@ pub(super) fn settings_form_row(
         )
         .child(
             div()
-                .flex_none()
+                .flex_1()
                 .min_w_0()
+                .min_w(px(220.))
                 .max_w_full()
                 .flex()
                 .items_center()

@@ -73,13 +73,9 @@ fn run_codex_app_server_with_environment(
     if !settings.codex.enabled {
         return Err("Codex integration is disabled".to_string());
     }
-    let executable = settings
-        .codex
-        .executable_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("codex");
+    let executable = super::helper_resolver::resolve_codex_executable(
+        settings.codex.executable_path.as_deref(),
+    )?;
     let mut command = Command::new(executable);
     command
         .args(["app-server", "--listen", "stdio://"])

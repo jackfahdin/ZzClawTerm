@@ -511,8 +511,14 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn read_active_terminal_input_line(&self) -> Option<String> {
-        let offset = self.active_terminal_display_offset();
-        let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), offset);
+        self.read_terminal_input_line_for_session(self.session.active_id()?)
+    }
+
+    pub(in crate::features) fn read_terminal_input_line_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<String> {
+        let snapshot = self.terminal_snapshot_for_session(Some(session_id), 0);
         if snapshot.cursor.row == usize::MAX {
             return None;
         }

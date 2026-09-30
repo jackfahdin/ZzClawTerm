@@ -155,6 +155,45 @@ pub struct AiSessionScope {
     pub label: Option<String>,
 }
 
+pub fn validate_ai_session_scope(
+    session: &AiSession,
+    agent_kind: &AiAgentKind,
+    owner_scope: &AiSessionScope,
+) -> Result<(), &'static str> {
+    if &session.agent_kind != agent_kind {
+        return Err("AI session belongs to another agent type");
+    }
+    if session.scope.r#type != AiSessionScopeType::Unbound
+        && (session.scope.r#type != owner_scope.r#type
+            || session.scope.target_id != owner_scope.target_id)
+    {
+        return Err("AI session belongs to another terminal scope");
+    }
+    Ok(())
+}
+
+pub fn normalize_ai_history_sessions(history: &mut AiHistoryFile) {
+    for session in &mut history.sessions {
+        if session.agent_kind == AiAgentKind::Zzclawterm
+            && let Some(metadata) = session.backend_metadata.as_ref()
+            && metadata.backend == AiBackendKind::Codex
+        {
+            session.agent_kind = AiAgentKind::Codex;
+            if session.external_session_id.is_none() {
+                session.external_session_id = metadata.external_thread_id.clone();
+            }
+        }
+        if session.scope.r#type == AiSessionScopeType::Unbound
+            && session.scope.target_id.is_none()
+            && let Some(connection_id) = session.connection_id.as_ref()
+            && !connection_id.trim().is_empty()
+            && !session.scope.connection_ids.contains(connection_id)
+        {
+            session.scope.connection_ids.push(connection_id.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiTerminalTarget {
@@ -208,6 +247,35 @@ pub enum AgentCommandExecutionMode {
     ConfirmEach,
     Smart,
     Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiAgentStepStatus {
+    Planning,
+    Tool,
+    NeedsApproval,
+    Running,
+    Completed,
+    Failed,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentApprovalOutcome {
+    Automatic,
+    Approved,
+    Rejected,
+}
+
+impl AgentApprovalOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -659,6 +727,8 @@ pub struct AiRequestOptions {
     pub safety_mode: String,
     #[serde(default = "default_history_turns")]
     pub history_turns: u16,
+    #[serde(skip)]
+    pub agent_json_protocol: bool,
 }
 
 impl Default for AiRequestOptions {
@@ -668,6 +738,7 @@ impl Default for AiRequestOptions {
             language: default_language(),
             safety_mode: default_safety_mode(),
             history_turns: default_history_turns(),
+            agent_json_protocol: false,
         }
     }
 }
@@ -904,6 +975,10 @@ Return exactly one JSON object and do not use Markdown code fences. Format:
   ]
 }"#;
 
+const SYSTEM_PROMPT_ZH_HANT: &str = r#"你是一個專業、謹慎、安全優先的 Linux / DevOps / 雲端原生終端助手。協助使用者解釋終端輸出、產生 Shell 命令及分析錯誤。預設使用唯讀診斷命令；對刪除、格式化、重新啟動、停止服務或修改權限標示風險。不要編造資訊，也不要索取密碼、私鑰或 token。只回傳一個 JSON 物件，包含 text 與 commandCards；每個命令卡包含 command、explanation、riskLevel、riskReason、expectedEffect 與 rollback。不要使用 Markdown 程式碼區塊。"#;
+
+const SYSTEM_PROMPT_KO: &str = r#"당신은 안전을 최우선으로 하는 Linux / DevOps / 클라우드 네이티브 터미널 어시스턴트입니다. 터미널 출력을 설명하고 Shell 명령을 생성하며 오류를 분석하세요. 기본적으로 읽기 전용 진단 명령을 우선하고 삭제, 포맷, 재시작, 서비스 중지 또는 권한 변경의 위험을 표시하세요. 사실을 지어내거나 비밀번호, 개인 키, token을 요청하지 마세요. text와 commandCards를 포함한 JSON 객체 하나만 반환하세요. 각 명령 카드에는 command, explanation, riskLevel, riskReason, expectedEffect, rollback을 포함하고 Markdown 코드 블록을 사용하지 마세요."#;
+
 const AGENT_SYSTEM_PROMPT_ZH: &str = r#"你是一个终端自动化 Agent，通过"思考—执行—观察"循环完成用户的任务。
 
 每一轮你只能做一件事：调用 execute_command 工具执行一条命令，或调用 final_answer 工具给出最终回答。
@@ -937,6 +1012,10 @@ Rules:
 9. Commands must fit the user's current system and shell environment.
 10. riskLevel guidance: read-only commands -> low, normal write actions -> medium, delete/restart/permission changes -> high, irreversible destructive actions -> critical.
 11. execute_command calls must include both riskLevel and riskReason. Keep riskReason brief and explain why the risk applies."#;
+
+const AGENT_SYSTEM_PROMPT_ZH_HANT: &str = r#"你是一個終端自動化 Agent，透過思考、執行和觀察完成任務。每輪必須且只能呼叫一個工具：execute_command 或 final_answer。優先使用唯讀命令，不要執行不可逆的高風險命令，不要編造資訊或索取密碼、私鑰、token。命令必須符合目前系統與 Shell，且不得等待輸入、確認或分頁器。execute_command 必須提供簡短 thought、riskLevel 和 riskReason；完成任務時呼叫 final_answer。"#;
+
+const AGENT_SYSTEM_PROMPT_KO: &str = r#"당신은 생각, 실행, 관찰을 통해 작업을 완료하는 터미널 자동화 Agent입니다. 각 턴에서 execute_command 또는 final_answer 도구를 정확히 하나만 호출하세요. 읽기 전용 명령을 우선하고 되돌릴 수 없는 고위험 명령을 실행하지 마세요. 정보를 지어내거나 비밀번호, 개인 키, token을 요청하지 마세요. 명령은 현재 시스템과 Shell에 맞아야 하며 입력, 확인 또는 pager를 기다리면 안 됩니다. execute_command에는 간단한 thought, riskLevel, riskReason을 포함하고 작업을 마치면 final_answer를 호출하세요."#;
 
 pub fn ai_model_id_for_provider(kind: &AiProviderKind, name: &str) -> String {
     format!("{}:{name}", provider_kind_key(kind))
@@ -1283,6 +1362,8 @@ where
 pub fn system_prompt(language: &str) -> &'static str {
     match resolve_prompt_language(language) {
         PromptLanguage::ZhCn => SYSTEM_PROMPT_ZH,
+        PromptLanguage::ZhHant => SYSTEM_PROMPT_ZH_HANT,
+        PromptLanguage::Ko => SYSTEM_PROMPT_KO,
         PromptLanguage::En => SYSTEM_PROMPT_EN,
     }
 }
@@ -1290,18 +1371,36 @@ pub fn system_prompt(language: &str) -> &'static str {
 pub fn agent_system_prompt(language: &str) -> &'static str {
     match resolve_prompt_language(language) {
         PromptLanguage::ZhCn => AGENT_SYSTEM_PROMPT_ZH,
+        PromptLanguage::ZhHant => AGENT_SYSTEM_PROMPT_ZH_HANT,
+        PromptLanguage::Ko => AGENT_SYSTEM_PROMPT_KO,
         PromptLanguage::En => AGENT_SYSTEM_PROMPT_EN,
     }
 }
 
 fn request_system_prompt(request: &AiChatRequest) -> &'static str {
+    if request.mode == AiMode::Agent && request.options.agent_json_protocol {
+        return AGENT_JSON_PROTOCOL_PROMPT;
+    }
     match request.mode {
         AiMode::Ask => system_prompt(&request.options.language),
         AiMode::Agent => agent_system_prompt(&request.options.language),
     }
 }
 
+const AGENT_JSON_PROTOCOL_PROMPT: &str = r#"You are a terminal automation agent. Return exactly one JSON object per turn, with no Markdown. For a command use {"thought":"brief reason","action":"execute_command","command":"one non-interactive shell command","riskLevel":"low|medium|high|critical","riskReason":"brief reason","targetTerminalSessionId":"terminal ID"}. To finish use {"thought":"brief reason","action":"final_answer","answer":"user-facing answer"}. Never request passwords or execute irreversible destructive commands. Keep commands and paths unchanged."#;
+
 fn request_user_prompt(request: &AiChatRequest, settings: &AiSettings) -> String {
+    if request.mode == AiMode::Agent && request.options.agent_json_protocol {
+        return format!(
+            "Task or latest observation:\n{}\n\nConnection: {}\nHost: {}\nDirectory: {}\nRecent terminal output:\n{}\n\nRespond with exactly one JSON action: execute_command or final_answer. Use {} for user-facing text. Commands must be non-interactive; never wait for a pager, confirmation, or input.",
+            user_input_with_target_contexts(request),
+            request.context.connection_name.as_deref().unwrap_or("-"),
+            request.context.host.as_deref().unwrap_or("-"),
+            request.context.cwd.as_deref().unwrap_or("-"),
+            request.context.recent_output,
+            request.options.language,
+        );
+    }
     match request.mode {
         AiMode::Ask => build_prompt(request, settings),
         AiMode::Agent => build_agent_prompt(request, settings),
@@ -1311,6 +1410,34 @@ fn request_user_prompt(request: &AiChatRequest, settings: &AiSettings) -> String
 pub fn build_prompt(request: &AiChatRequest, settings: &AiSettings) -> String {
     let ctx = &request.context;
     let user_input = user_input_with_target_contexts(request);
+    if let language @ (PromptLanguage::ZhHant | PromptLanguage::Ko) =
+        resolve_prompt_language(&request.options.language)
+    {
+        let (task, context, output, requirements) = match language {
+            PromptLanguage::ZhHant => (
+                "使用者任務",
+                "目前連線情境",
+                "最近終端輸出",
+                "請使用繁體中文說明和推理；命令、路徑和設定鍵名保持原樣。優先使用唯讀命令，資訊不足時提供驗證命令。只回傳 JSON 物件，不要使用 Markdown。",
+            ),
+            _ => (
+                "사용자 작업",
+                "현재 연결 컨텍스트",
+                "최근 터미널 출력",
+                "설명과 추론에는 한국어를 사용하고 명령, 경로, 구성 키는 번역하지 마세요. 읽기 전용 명령을 우선하고 정보가 부족하면 확인 명령을 제공하세요. Markdown 없이 JSON 객체만 반환하세요.",
+            ),
+        };
+        return format!(
+            "{task}: {:?}\n{user_input}\n\n{context}: {} / {} / {}\n\n{output}:\n{}\n\n{requirements}\nTarget language: {}\nMaximum commands: {}",
+            request.action,
+            ctx.connection_name.as_deref().unwrap_or("-"),
+            ctx.host.as_deref().unwrap_or("-"),
+            ctx.cwd.as_deref().unwrap_or("-"),
+            ctx.recent_output,
+            request.options.language,
+            request.options.max_output_commands,
+        );
+    }
     if resolve_prompt_language(&request.options.language) == PromptLanguage::ZhCn {
         let action = match request.action {
             AiAction::GenerateCommand => "根据自然语言需求生成 1 到 2 条 Shell 命令",
@@ -1553,6 +1680,8 @@ fn redaction_patterns() -> &'static [(Regex, &'static str)] {
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum PromptLanguage {
     ZhCn,
+    ZhHant,
+    Ko,
     En,
 }
 
@@ -1560,7 +1689,11 @@ fn normalize_prompt_locale(language: &str) -> String {
     let normalized = language.trim().replace('_', "-").to_ascii_lowercase();
     match normalized.as_str() {
         "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" => "zh-cn".to_string(),
+        "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant" => "zh-hant".to_string(),
+        "ko" | "ko-kr" => "ko".to_string(),
         "en" | "en-us" | "en-gb" => "en".to_string(),
+        _ if normalized.starts_with("zh-hant-") => "zh-hant".to_string(),
+        _ if normalized.starts_with("zh-hans-") => "zh-cn".to_string(),
         _ => normalized,
     }
 }
@@ -1568,7 +1701,12 @@ fn normalize_prompt_locale(language: &str) -> String {
 fn prompt_language_map() -> &'static HashMap<&'static str, PromptLanguage> {
     static PROMPT_LANGUAGE_MAP: OnceLock<HashMap<&'static str, PromptLanguage>> = OnceLock::new();
     PROMPT_LANGUAGE_MAP.get_or_init(|| {
-        HashMap::from([("zh-cn", PromptLanguage::ZhCn), ("en", PromptLanguage::En)])
+        HashMap::from([
+            ("zh-cn", PromptLanguage::ZhCn),
+            ("zh-hant", PromptLanguage::ZhHant),
+            ("ko", PromptLanguage::Ko),
+            ("en", PromptLanguage::En),
+        ])
     })
 }
 

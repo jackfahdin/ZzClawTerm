@@ -164,6 +164,24 @@ impl ZzClawTermApp {
             return;
         }
         let should_continue_agent = execute && is_agent_command_card(&card);
+        if should_continue_agent && !self.ai.current_agent_command_card(&card.id) {
+            self.ai
+                .set_panel_status("AI Agent command is no longer awaiting approval");
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
+        if should_continue_agent && self.ai.chat_is_pending() {
+            self.ai
+                .set_panel_status("AI Agent is continuing from the previous command");
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
+        if should_continue_agent && self.ai.agent_target_busy(&target_session_id) {
+            self.ai
+                .set_panel_status("Another AI Agent command is running in this terminal");
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
         if should_continue_agent && self.ai.settings_config().agent_background_execution_enabled {
             match self.begin_ai_agent_background_execution(&card.command, &target_session_id, cx) {
                 Ok(()) => {

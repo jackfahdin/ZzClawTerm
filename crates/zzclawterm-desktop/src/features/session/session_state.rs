@@ -168,6 +168,7 @@ impl ZzClawTermApp {
         }
 
         self.session.select_active_session(session_id);
+        self.sync_ai_active_scope(cx);
         if switching_sessions {
             self.transfer.reset_transfer_queue_interaction();
             // Reset stays `cx`-free: it is pure remote state. The GPUI-facing resync is
@@ -233,6 +234,7 @@ impl ZzClawTermApp {
         let previous_session_id = self.activate_session_id(session_id, cx);
         self.load_transfer_browser_for_active_session_if_needed(cx);
         self.sync_terminal_activation_surfaces(previous_session_id, session_id, cx);
+        self.defer_ai_panel_snapshot_flush(cx);
     }
 
     fn sync_terminal_activation_surfaces(

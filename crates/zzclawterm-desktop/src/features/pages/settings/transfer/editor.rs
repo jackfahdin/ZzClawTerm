@@ -48,6 +48,29 @@ impl SettingsPanel {
                     cx,
                 ),
             ))
+            .when(editor_type == "internal", |this| {
+                this.child(settings_form_row(
+                    palette,
+                    t!("settings.internalEditorDisplay"),
+                    None,
+                    self.settings_select_control(
+                        "settings.transfer.internal-editor-display",
+                        vec![
+                            ZzClawSelectOption::new(
+                                "workspace",
+                                t!("settings.internalEditorWorkspace"),
+                            ),
+                            ZzClawSelectOption::new("window", t!("settings.internalEditorWindow")),
+                        ],
+                        self.settings
+                            .summary()
+                            .transfer_internal_editor_display
+                            .compat_value(),
+                        false,
+                        cx,
+                    ),
+                ))
+            })
             .when(editor_type == "external", |this| {
                 this.child(settings_form_row(
                     palette,

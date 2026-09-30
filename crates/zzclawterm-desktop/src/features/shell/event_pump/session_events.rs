@@ -409,7 +409,7 @@ impl ZzClawTermApp {
         self.clear_xymodem_session(&session_id);
         self.clear_zmodem_session(&session_id);
         self.session.clear_event_bridge_session(&session_id);
-        self.cleanup_recording_for_session(&session_id);
+        self.disconnect_recording_for_session(&session_id);
         let _ = self.session.manager().close(&session_id);
         if known_session {
             // Keep the tab so the user can reconnect (Tauri disconnected pane).
@@ -535,7 +535,7 @@ impl ZzClawTermApp {
             drain_timings.decode += stage_duration;
             chunk_timings.decode += stage_duration;
             let stage_started_at = Instant::now();
-            let result = self.ai.process_agent_output(&text);
+            let result = self.ai.process_agent_output(&session_id, &text);
             let stage_duration = stage_started_at.elapsed();
             drain_timings.ai_capture += stage_duration;
             chunk_timings.ai_capture += stage_duration;

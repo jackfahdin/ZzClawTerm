@@ -8,7 +8,7 @@
 mod settings;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -16,10 +16,13 @@ use std::time::{Duration, Instant};
 
 use gpui::FocusHandle;
 use zzclawterm_core::{
-    AgentCaptureProcessResult, AgentCommandExecutionMode, AgentOutputCaptureProcessor,
+    AgentCaptureProcessResult, AgentCommandExecutionMode, AgentOutputCaptureProcessor, AiAgentKind,
     AiCommandCard, AiMessage, AiMessageRole, AiMode, AiSession, AiSettings, truncate_preview, uuid,
 };
 
+use super::agent_management::{
+    AgentCommand, AgentEvent, AgentManagementState, AgentManagementView,
+};
 use crate::features::{
     runtime_jobs::AiAgentLoopState, runtime_jobs::AiAgentStepStatus, runtime_jobs::AiAgentStepView,
     runtime_jobs::AiChatJobOutput, runtime_jobs::AiChatWorkerEvent,
@@ -33,9 +36,14 @@ use crate::models::{
 pub(in crate::features) struct AiFeatureState {
     settings: AiSettingsState,
     chat: AiChatState,
+    active_scope_key: String,
+    visible_scope_epoch: Arc<AtomicU64>,
+    inactive_scopes: HashMap<String, AiConversationState>,
+    archived_sessions: HashMap<String, (String, AiConversationState)>,
     history: AiHistoryState,
     discovery: AiDiscoveryState,
     agent: AiAgentState,
+    agent_management: AgentManagementState,
     panel: AiPanelState,
 }
 
@@ -104,6 +112,8 @@ struct AiChatState {
     job_id: u64,
     cancel: Option<Arc<AtomicBool>>,
     session_id: String,
+    run_mode: AiMode,
+    agent_kind: AiAgentKind,
     prompt_draft: String,
     target_session_ids: Vec<String>,
     mention_open: bool,
@@ -118,6 +128,46 @@ struct AiChatState {
     command_cards: Vec<AiCommandCard>,
     focus: FocusHandle,
     focus_pending: bool,
+}
+
+struct AiConversationState {
+    chat: AiChatState,
+    agent: AiAgentState,
+    status: String,
+}
+
+impl AiChatState {
+    fn fresh(
+        tx: UnboundedSender<AiChatWorkerEvent>,
+        focus: FocusHandle,
+        run_mode: AiMode,
+        agent_kind: AiAgentKind,
+    ) -> Self {
+        Self {
+            tx,
+            rx: None,
+            pending: false,
+            job_id: 0,
+            cancel: None,
+            session_id: format!("ai-session-{}", uuid()),
+            run_mode,
+            agent_kind,
+            prompt_draft: String::new(),
+            target_session_ids: Vec::new(),
+            mention_open: false,
+            mention_query: String::new(),
+            mention_index: 0,
+            prepared_request: None,
+            response_preview: "Ask mode ready".to_string(),
+            messages: Vec::new(),
+            streaming_assistant_id: None,
+            message_menu: None,
+            quoted_text: None,
+            command_cards: Vec::new(),
+            focus,
+            focus_pending: false,
+        }
+    }
 }
 
 /// Stored sessions, the history browser and the counters shown beside it.
@@ -149,6 +199,8 @@ struct AiDiscoveryState {
 /// Agent loop: the running task, its steps and their disclosure state.
 struct AiAgentState {
     task_prompt: Option<String>,
+    conversation: Vec<AiMessage>,
+    json_protocol: bool,
     step_index: u16,
     loop_state: Option<AiAgentLoopState>,
     /// True while the agent-loop observation clock task is alive.
@@ -157,6 +209,23 @@ struct AiAgentState {
     steps: Vec<AiAgentStepView>,
     thought_expanded: HashSet<u16>,
     output_expanded: HashSet<u16>,
+}
+
+impl AiAgentState {
+    fn fresh() -> Self {
+        Self {
+            task_prompt: None,
+            conversation: Vec::new(),
+            json_protocol: false,
+            step_index: 0,
+            loop_state: None,
+            loop_clock_armed: false,
+            capture: AgentOutputCaptureProcessor::new(),
+            steps: Vec::new(),
+            thought_expanded: HashSet::new(),
+            output_expanded: HashSet::new(),
+        }
+    }
 }
 
 pub(in crate::features) struct AiChatLaunch {
@@ -178,7 +247,7 @@ pub(in crate::features) enum AiAgentBackgroundEffect {
     Ignored,
     MatchedStale,
     Continue(Box<AiAgentLoopState>, zzclawterm_core::CommandObservation),
-    Failed,
+    ContinueAfterFailure(Box<AiAgentLoopState>, String),
 }
 
 pub(in crate::features) enum AiAgentObservationPoll {
@@ -221,6 +290,8 @@ impl AiFeatureState {
         } = init;
         let (chat_tx, chat_rx) = unbounded();
         let (discovery_tx, discovery_rx) = unbounded();
+        let default_mode = settings.default_mode.clone();
+        let default_agent_kind = settings.default_agent_kind.clone();
         Self {
             settings: AiSettingsState {
                 config: settings,
@@ -249,6 +320,8 @@ impl AiFeatureState {
                 job_id: 0,
                 cancel: None,
                 session_id: chat_session_id,
+                run_mode: default_mode,
+                agent_kind: default_agent_kind,
                 prompt_draft: String::new(),
                 target_session_ids: Vec::new(),
                 mention_open: false,
@@ -264,6 +337,10 @@ impl AiFeatureState {
                 focus: focus.chat,
                 focus_pending: false,
             },
+            active_scope_key: "unbound:".to_string(),
+            visible_scope_epoch: Arc::new(AtomicU64::new(0)),
+            inactive_scopes: HashMap::new(),
+            archived_sessions: HashMap::new(),
             history: AiHistoryState {
                 open: false,
                 query: String::new(),
@@ -284,16 +361,8 @@ impl AiFeatureState {
                 query: String::new(),
                 index: 0,
             },
-            agent: AiAgentState {
-                task_prompt: None,
-                step_index: 0,
-                loop_state: None,
-                loop_clock_armed: false,
-                capture: AgentOutputCaptureProcessor::new(),
-                steps: Vec::new(),
-                thought_expanded: HashSet::new(),
-                output_expanded: HashSet::new(),
-            },
+            agent: AiAgentState::fresh(),
+            agent_management: AgentManagementState::new(),
             panel: AiPanelState {
                 execution_menu_open: false,
                 status: "AI settings ready".to_string(),
@@ -305,8 +374,215 @@ impl AiFeatureState {
         }
     }
 
+    pub(in crate::features) fn active_scope_key(&self) -> &str {
+        &self.active_scope_key
+    }
+
+    pub(in crate::features) fn visible_scope_guard(&self) -> (Arc<AtomicU64>, u64) {
+        (
+            Arc::clone(&self.visible_scope_epoch),
+            self.visible_scope_epoch.load(Ordering::Acquire),
+        )
+    }
+
+    pub(in crate::features) fn switch_visible_scope(&mut self, scope_key: &str) -> bool {
+        if !self.switch_scope(scope_key) {
+            return false;
+        }
+        self.visible_scope_epoch.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+
+    pub(in crate::features) fn switch_scope(&mut self, scope_key: &str) -> bool {
+        if self.active_scope_key == scope_key {
+            return false;
+        }
+        let next = self
+            .inactive_scopes
+            .remove(scope_key)
+            .unwrap_or_else(|| AiConversationState {
+                chat: AiChatState::fresh(
+                    self.chat.tx.clone(),
+                    self.chat.focus.clone(),
+                    self.settings.config.default_mode.clone(),
+                    self.settings.config.default_agent_kind.clone(),
+                ),
+                agent: AiAgentState::fresh(),
+                status: "AI assistant ready".to_string(),
+            });
+        let mut previous = AiConversationState {
+            chat: std::mem::replace(&mut self.chat, next.chat),
+            agent: std::mem::replace(&mut self.agent, next.agent),
+            status: std::mem::replace(&mut self.panel.status, next.status),
+        };
+        if self.chat.rx.is_none() {
+            self.chat.rx = previous.chat.rx.take();
+        }
+        self.inactive_scopes.insert(
+            std::mem::replace(&mut self.active_scope_key, scope_key.to_string()),
+            previous,
+        );
+        true
+    }
+
+    pub(in crate::features) fn scope_for_ai_session(&self, session_id: &str) -> Option<String> {
+        if self.chat.session_id == session_id {
+            return Some(self.active_scope_key.clone());
+        }
+        self.inactive_scopes
+            .iter()
+            .find(|(_, state)| state.chat.session_id == session_id)
+            .map(|(scope, _)| scope.clone())
+            .or_else(|| {
+                self.archived_sessions
+                    .get(session_id)
+                    .map(|(scope, _)| scope.clone())
+            })
+    }
+
+    pub(in crate::features) fn ai_session_is_running(&self, session_id: &str) -> bool {
+        if self.chat.session_id == session_id {
+            return self.chat_or_agent_is_running();
+        }
+        self.inactive_scopes.values().any(|scope| {
+            scope.chat.session_id == session_id
+                && (scope.chat.pending
+                    || scope.agent.loop_state.is_some()
+                    || scope.agent.task_prompt.is_some())
+        })
+    }
+
+    pub(in crate::features) fn release_ai_session(&mut self, session_id: &str) {
+        if self.chat.session_id == session_id {
+            return;
+        }
+        if let Some((_, scope)) = self.inactive_scopes.iter_mut().find(|(_, scope)| {
+            scope.chat.session_id == session_id
+                && !scope.chat.pending
+                && scope.agent.loop_state.is_none()
+        }) {
+            scope.chat = AiChatState::fresh(
+                scope.chat.tx.clone(),
+                scope.chat.focus.clone(),
+                self.settings.config.default_mode.clone(),
+                self.settings.config.default_agent_kind.clone(),
+            );
+            scope.agent = AiAgentState::fresh();
+            scope.status = "AI assistant ready".to_string();
+        }
+    }
+
+    fn archive_current_session(&mut self) {
+        if self.chat.messages.is_empty() || self.chat_or_agent_is_running() {
+            return;
+        }
+        let mut fresh = AiChatState::fresh(
+            self.chat.tx.clone(),
+            self.chat.focus.clone(),
+            self.chat.run_mode.clone(),
+            self.chat.agent_kind.clone(),
+        );
+        fresh.rx = self.chat.rx.take();
+        let chat = std::mem::replace(&mut self.chat, fresh);
+        let agent = std::mem::replace(&mut self.agent, AiAgentState::fresh());
+        let status = std::mem::replace(&mut self.panel.status, "AI assistant ready".to_string());
+        self.archived_sessions.insert(
+            chat.session_id.clone(),
+            (
+                self.active_scope_key.clone(),
+                AiConversationState {
+                    chat,
+                    agent,
+                    status,
+                },
+            ),
+        );
+    }
+
+    fn restore_archived_session(&mut self, session_id: &str) {
+        let Some((scope, mut archived)) = self.archived_sessions.remove(session_id) else {
+            return;
+        };
+        if scope != self.active_scope_key {
+            return;
+        }
+        self.archive_current_session();
+        archived.chat.rx = self.chat.rx.take();
+        self.chat = archived.chat;
+        self.agent = archived.agent;
+        self.panel.status = archived.status;
+    }
+
+    pub(in crate::features) fn scope_for_agent_marker(&self, marker_id: &str) -> Option<String> {
+        if self
+            .agent
+            .loop_state
+            .as_ref()
+            .is_some_and(|state| state.marker_id.as_deref() == Some(marker_id))
+        {
+            return Some(self.active_scope_key.clone());
+        }
+        self.inactive_scopes.iter().find_map(|(scope, state)| {
+            state.agent.loop_state.as_ref().and_then(|loop_state| {
+                (loop_state.marker_id.as_deref() == Some(marker_id)).then(|| scope.clone())
+            })
+        })
+    }
+
+    pub(in crate::features) fn scope_for_agent_target(&self, session_id: &str) -> Option<String> {
+        if self
+            .agent
+            .loop_state
+            .as_ref()
+            .is_some_and(|state| state.terminal_session_id == session_id)
+        {
+            return Some(self.active_scope_key.clone());
+        }
+        self.inactive_scopes.iter().find_map(|(scope, state)| {
+            state.agent.loop_state.as_ref().and_then(|loop_state| {
+                (loop_state.terminal_session_id == session_id).then(|| scope.clone())
+            })
+        })
+    }
+
+    pub(in crate::features) fn any_chat_or_agent_running(&self) -> bool {
+        self.chat_or_agent_is_running()
+            || self.inactive_scopes.values().any(|state| {
+                state.chat.pending
+                    || state.agent.loop_state.is_some()
+                    || state.agent.task_prompt.is_some()
+            })
+    }
+
+    pub(in crate::features) fn agent_target_busy(&self, terminal_session_id: &str) -> bool {
+        self.agent
+            .loop_state
+            .as_ref()
+            .is_some_and(|state| state.terminal_session_id == terminal_session_id)
+            || self.inactive_scopes.values().any(|scope| {
+                scope
+                    .agent
+                    .loop_state
+                    .as_ref()
+                    .is_some_and(|state| state.terminal_session_id == terminal_session_id)
+            })
+    }
+
     pub(in crate::features) fn chat_or_agent_is_running(&self) -> bool {
-        self.chat.pending || self.agent.loop_state.is_some()
+        self.chat.pending || self.agent.loop_state.is_some() || self.agent.task_prompt.is_some()
+    }
+
+    pub(in crate::features) fn agent_task_is_active(&self) -> bool {
+        self.agent.task_prompt.is_some()
+    }
+
+    pub(in crate::features) fn current_agent_command_card(&self, card_id: &str) -> bool {
+        self.agent_task_is_active()
+            && self
+                .chat
+                .command_cards
+                .iter()
+                .any(|card| card.id == card_id)
     }
 
     pub(in crate::features) fn chat_is_pending(&self) -> bool {
@@ -327,6 +603,19 @@ impl AiFeatureState {
 
     pub(in crate::features) fn chat_session_id(&self) -> &str {
         &self.chat.session_id
+    }
+
+    pub(in crate::features) fn chat_run_mode(&self) -> AiMode {
+        self.chat.run_mode.clone()
+    }
+
+    pub(in crate::features) fn chat_agent_kind(&self) -> AiAgentKind {
+        self.chat.agent_kind.clone()
+    }
+
+    pub(in crate::features) fn set_chat_run_mode(&mut self, mode: AiMode, kind: AiAgentKind) {
+        self.chat.run_mode = mode;
+        self.chat.agent_kind = kind;
     }
 
     pub(in crate::features) fn chat_prompt_draft(&self) -> &str {
@@ -493,6 +782,16 @@ impl AiFeatureState {
         let launch = self.begin_chat_job();
         if mode == AiMode::Agent {
             self.agent.task_prompt = Some(request_prompt.clone());
+            self.agent.conversation = vec![AiMessage {
+                id: format!("agent-user-{}", uuid()),
+                session_id: self.chat.session_id.clone(),
+                role: AiMessageRole::User,
+                content: request_prompt.clone(),
+                created_at: zzclawterm_core::now_rfc3339(),
+                reasoning_content: None,
+                command_cards: Vec::new(),
+            }];
+            self.agent.json_protocol = false;
             self.agent.step_index = 0;
             self.agent.steps.clear();
             self.agent.thought_expanded.clear();
@@ -505,6 +804,8 @@ impl AiFeatureState {
             );
         } else {
             self.agent.task_prompt = None;
+            self.agent.conversation.clear();
+            self.agent.json_protocol = false;
             self.agent.step_index = 0;
             self.agent.loop_state = None;
             self.agent.steps.clear();
@@ -574,6 +875,8 @@ impl AiFeatureState {
         }
         self.agent.capture = AgentOutputCaptureProcessor::new();
         self.agent.task_prompt = None;
+        self.agent.conversation.clear();
+        self.agent.json_protocol = false;
         self.chat.command_cards.clear();
         self.chat.response_preview = "AI request cancelled".to_string();
         if let Some(assistant_id) = self.chat.streaming_assistant_id.take()
@@ -611,7 +914,7 @@ impl AiFeatureState {
     /// per-event `job_id` checks would reject it anyway, but dropping it here
     /// keeps that intent explicit.
     pub(in crate::features) fn chat_event_is_wanted(&self) -> bool {
-        self.chat.pending
+        self.chat.pending || self.agent.loop_state.is_some()
     }
 
     pub(in crate::features) fn apply_chat_delta(
@@ -681,6 +984,27 @@ impl AiFeatureState {
         true
     }
 
+    pub(in crate::features) fn apply_agent_protocol_fallback(&mut self, job_id: u64) -> bool {
+        if job_id != self.chat.job_id || !self.chat.pending {
+            return false;
+        }
+        if let Some(assistant_id) = self.chat.streaming_assistant_id.as_deref()
+            && let Some(message) = self
+                .chat
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.id == assistant_id)
+        {
+            let message = Arc::make_mut(message);
+            message.content.clear();
+            message.reasoning_content = None;
+        }
+        self.panel.status = "AI Agent retrying with JSON protocol".to_string();
+        self.agent.json_protocol = true;
+        true
+    }
+
     pub(in crate::features) fn finish_agent_background(
         &mut self,
         job_id: u64,
@@ -723,7 +1047,13 @@ impl AiFeatureState {
                     "Failed",
                     truncate_preview(&error, 140),
                 );
-                AiAgentBackgroundEffect::Failed
+                AiAgentBackgroundEffect::ContinueAfterFailure(
+                    Box::new(state),
+                    format!(
+                        "Command execution failed: {}. Decide the next step or finish the task.",
+                        zzclawterm_core::sanitize_ai_diagnostic(&error, 500)
+                    ),
+                )
             }
         }
     }
@@ -734,13 +1064,24 @@ impl AiFeatureState {
         session_id: String,
         result: Result<AiChatJobOutput, String>,
     ) -> Option<AiChatFinishEffect> {
-        if job_id != self.chat.job_id {
+        if job_id != self.chat.job_id || session_id != self.chat.session_id {
             return None;
         }
         self.chat.pending = false;
         self.chat.cancel = None;
         match result {
             Ok(output) => {
+                if output.mode == AiMode::Agent {
+                    self.agent.conversation.push(AiMessage {
+                        id: format!("agent-assistant-{}", uuid()),
+                        session_id: self.chat.session_id.clone(),
+                        role: AiMessageRole::Assistant,
+                        content: output.text.clone(),
+                        created_at: zzclawterm_core::now_rfc3339(),
+                        reasoning_content: output.reasoning.clone(),
+                        command_cards: output.command_cards.clone(),
+                    });
+                }
                 let command_count = output.command_cards.len();
                 self.chat.response_preview = if output.text.trim().is_empty() {
                     "AI returned an empty response".to_string()
@@ -834,6 +1175,9 @@ impl AiFeatureState {
                         "Failed",
                         truncate_preview(&error, 140),
                     );
+                    self.agent.task_prompt = None;
+                    self.agent.conversation.clear();
+                    self.agent.loop_state = None;
                 }
                 Some(AiChatFinishEffect {
                     session_id,
@@ -883,6 +1227,10 @@ impl AiFeatureState {
 
     pub(in crate::features) fn chat_command_cards(&self) -> &[AiCommandCard] {
         &self.chat.command_cards
+    }
+
+    pub(in crate::features) fn clear_chat_command_cards(&mut self) {
+        self.chat.command_cards.clear();
     }
 
     pub(in crate::features) fn command_card(&self, index: usize) -> Option<AiCommandCard> {
@@ -984,6 +1332,35 @@ impl AiFeatureState {
         &self.history.sessions
     }
 
+    pub(in crate::features) fn history_session(&self, session_id: &str) -> Option<&AiSession> {
+        self.history
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+    }
+
+    pub(in crate::features) fn apply_loaded_session_kind(&mut self, kind: AiAgentKind) {
+        self.chat.run_mode = if kind == AiAgentKind::Zzclawterm {
+            self.chat.run_mode.clone()
+        } else {
+            AiMode::Agent
+        };
+        self.chat.agent_kind = kind;
+    }
+
+    pub(in crate::features) fn replace_history_session(&mut self, session: AiSession) {
+        if let Some(existing) = self
+            .history
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.id == session.id)
+        {
+            *existing = session;
+        } else {
+            self.history.sessions.push(session);
+        }
+    }
+
     pub(in crate::features) fn history_is_pending(&self) -> bool {
         self.history.pending
     }
@@ -1025,7 +1402,7 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn history_actions_are_disabled(&self) -> bool {
-        self.history.sessions.is_empty() || self.history.pending || self.chat_or_agent_is_running()
+        self.history.sessions.is_empty() || self.history.pending || self.any_chat_or_agent_running()
     }
 
     pub(in crate::features) fn history_audit_write_lock(&self) -> Arc<Mutex<()>> {
@@ -1086,6 +1463,7 @@ impl AiFeatureState {
         }
         match result {
             Ok(messages) => {
+                self.restore_archived_session(&target_session_id);
                 self.chat.session_id = target_session_id;
                 self.chat.messages = messages.into_iter().map(Arc::new).collect();
                 self.chat.streaming_assistant_id = None;
@@ -1126,6 +1504,8 @@ impl AiFeatureState {
         self.history.pending = false;
         match result {
             Ok(()) => {
+                self.archived_sessions.remove(session_id);
+                self.release_ai_session(session_id);
                 if self.chat.session_id == session_id {
                     self.chat.messages.clear();
                     self.chat.command_cards.clear();
@@ -1134,6 +1514,7 @@ impl AiFeatureState {
                     self.chat.quoted_text = None;
                     self.chat.session_id = format!("ai-session-{}", uuid());
                     self.chat.response_preview = "Ask mode ready".to_string();
+                    self.agent = AiAgentState::fresh();
                 }
                 self.history
                     .sessions
@@ -1162,6 +1543,13 @@ impl AiFeatureState {
             Ok(()) => {
                 self.history.sessions.clear();
                 self.history.query.clear();
+                self.archived_sessions.clear();
+                for state in self.inactive_scopes.values_mut() {
+                    state.chat.messages.clear();
+                    state.chat.command_cards.clear();
+                    state.chat.session_id = format!("ai-session-{}", uuid());
+                    state.agent = AiAgentState::fresh();
+                }
                 if self.chat.session_id == source_session_id {
                     self.chat.messages.clear();
                     self.chat.command_cards.clear();
@@ -1170,12 +1558,11 @@ impl AiFeatureState {
                     self.chat.quoted_text = None;
                     self.clear_detected_error();
                     self.chat.session_id = format!("ai-session-{}", uuid());
-                    self.chat.response_preview =
-                        if self.settings.config.default_mode == AiMode::Agent {
-                            "Agent mode ready".to_string()
-                        } else {
-                            "Ask mode ready".to_string()
-                        };
+                    self.chat.response_preview = if self.chat.run_mode == AiMode::Agent {
+                        "Agent mode ready".to_string()
+                    } else {
+                        "Ask mode ready".to_string()
+                    };
                 }
                 self.panel.status = "AI history cleared".to_string();
                 Some(true)
@@ -1423,6 +1810,9 @@ impl AiFeatureState {
         let step_index = self.agent.step_index;
         if step_index.saturating_add(1) >= max_steps {
             self.agent.loop_state = None;
+            self.agent.task_prompt = None;
+            self.agent.conversation.clear();
+            self.chat.command_cards.clear();
             return Err(format!(
                 "AI Agent reached max step limit ({max_steps}); review terminal output"
             ));
@@ -1441,6 +1831,9 @@ impl AiFeatureState {
 
     pub(in crate::features) fn stop_agent_for_closed_target(&mut self) -> Option<u16> {
         let state = self.agent.loop_state.take()?;
+        self.agent.task_prompt = None;
+        self.agent.conversation.clear();
+        self.chat.command_cards.clear();
         self.panel.status = "AI Agent loop stopped because the target session closed".to_string();
         self.upsert_agent_step(
             state.step_index,
@@ -1531,12 +1924,22 @@ impl AiFeatureState {
     pub(in crate::features) fn begin_agent_continuation(
         &mut self,
         state: &AiAgentLoopState,
+        observation_message: &str,
     ) -> Option<AiChatLaunch> {
         if self.chat.pending {
             self.agent.loop_state = Some(state.clone());
             return None;
         }
         let mut launch = self.begin_chat_job();
+        self.agent.conversation.push(AiMessage {
+            id: format!("agent-observation-{}", uuid()),
+            session_id: state.ai_session_id.clone(),
+            role: AiMessageRole::User,
+            content: observation_message.to_string(),
+            created_at: zzclawterm_core::now_rfc3339(),
+            reasoning_content: None,
+            command_cards: Vec::new(),
+        });
         launch.session_id = state.ai_session_id.clone();
         self.chat.pending = true;
         self.chat.response_preview = format!(
@@ -1553,6 +1956,14 @@ impl AiFeatureState {
             "Continuing from the latest command observation",
         );
         Some(launch)
+    }
+
+    pub(in crate::features) fn agent_conversation_snapshot(&self) -> Vec<AiMessage> {
+        self.agent.conversation.clone()
+    }
+
+    pub(in crate::features) fn agent_uses_json_protocol(&self) -> bool {
+        self.agent.json_protocol
     }
 
     pub(in crate::features) fn agent_thought_is_expanded(&self, step_index: u16) -> bool {
@@ -1611,9 +2022,20 @@ impl AiFeatureState {
 
     pub(in crate::features) fn process_agent_output(
         &mut self,
+        terminal_session_id: &str,
         text: &str,
     ) -> AgentCaptureProcessResult {
-        self.agent.capture.process(text)
+        let Some(scope) = self.scope_for_agent_target(terminal_session_id) else {
+            return AgentCaptureProcessResult {
+                visible_text: text.to_string(),
+                completed: Vec::new(),
+            };
+        };
+        let previous_scope = self.active_scope_key.clone();
+        self.switch_scope(&scope);
+        let result = self.agent.capture.process(text);
+        self.switch_scope(&previous_scope);
+        result
     }
 
     pub(in crate::features) fn reset_agent_runtime(&mut self) {
@@ -1622,12 +2044,20 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn agent_capture_is_active_for(&self, session_id: &str) -> bool {
-        self.agent.capture.has_active()
+        (self.agent.capture.has_active()
             && self
                 .agent
                 .loop_state
                 .as_ref()
-                .is_some_and(|state| state.terminal_session_id == session_id)
+                .is_some_and(|state| state.terminal_session_id == session_id))
+            || self.inactive_scopes.values().any(|scope| {
+                scope.agent.capture.has_active()
+                    && scope
+                        .agent
+                        .loop_state
+                        .as_ref()
+                        .is_some_and(|state| state.terminal_session_id == session_id)
+            })
     }
 
     pub(in crate::features) fn panel_status(&self) -> &str {
@@ -1775,6 +2205,28 @@ impl AiPanelState {
 
 /// Transitions that span more than one AI concern.
 impl AiFeatureState {
+    pub(in crate::features) fn agent_management_view(&self) -> &AgentManagementView {
+        self.agent_management.view()
+    }
+
+    pub(in crate::features) fn set_agent_management_error(&mut self, error: String) {
+        self.agent_management.set_error(error);
+    }
+
+    pub(in crate::features) fn submit_agent_command(&mut self, command: AgentCommand) -> bool {
+        self.agent_management.submit(command)
+    }
+
+    pub(in crate::features) fn take_agent_events(
+        &mut self,
+    ) -> Option<UnboundedReceiver<AgentEvent>> {
+        self.agent_management.take_events()
+    }
+
+    pub(in crate::features) fn apply_agent_event(&mut self, event: AgentEvent) -> Option<String> {
+        self.agent_management.apply(event)
+    }
+
     pub(in crate::features) fn clear_quote(&mut self) {
         self.chat.quoted_text = None;
         self.panel.status = "AI quote cleared".to_string();
@@ -1785,12 +2237,13 @@ impl AiFeatureState {
     /// Provider settings are deliberately untouched; the response preview is
     /// seeded from the configured default mode exactly as before.
     pub(in crate::features) fn start_new_chat(&mut self) {
+        self.archive_current_session();
         self.chat.prompt_draft.clear();
         self.chat.target_session_ids.clear();
         self.chat.message_menu = None;
         self.chat.quoted_text = None;
         self.chat.close_mention();
-        self.chat.response_preview = if self.settings.config.default_mode == AiMode::Agent {
+        self.chat.response_preview = if self.chat.run_mode == AiMode::Agent {
             "Agent mode ready".to_string()
         } else {
             "Ask mode ready".to_string()
@@ -1802,6 +2255,8 @@ impl AiFeatureState {
         self.chat.session_id = format!("ai-session-{}", uuid());
 
         self.agent.task_prompt = None;
+        self.agent.conversation.clear();
+        self.agent.json_protocol = false;
         self.agent.step_index = 0;
         self.agent.loop_state = None;
         self.agent.capture = AgentOutputCaptureProcessor::new();

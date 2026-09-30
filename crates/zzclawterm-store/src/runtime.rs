@@ -1098,6 +1098,49 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_ai_history_appends_preserve_every_session_and_message() {
+        let config_dir = temp_dir("ai-concurrent-history");
+        let runtime = StoreRuntime::spawn(StoreConfig {
+            config_dir: config_dir.path().to_path_buf(),
+            portable_key_path: None,
+        })
+        .expect("spawn runtime");
+        let client = runtime.blocking_client();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        std::thread::scope(|scope| {
+            let tasks = (0..8)
+                .map(|index| {
+                    let client = client.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        let session_id = format!("parallel-{index}");
+                        barrier.wait();
+                        client
+                            .request_fn(StoreDomain::Ai, move |store| {
+                                store.append_ai_user_message(
+                                    &session_id,
+                                    None,
+                                    format!("prompt {index}"),
+                                )
+                            })
+                            .expect("append AI message");
+                    })
+                })
+                .collect::<Vec<_>>();
+            for task in tasks {
+                task.join().expect("AI writer thread");
+            }
+        });
+
+        let history = client
+            .request_fn(StoreDomain::Ai, |store| store.load_ai_history())
+            .expect("load AI history");
+        assert_eq!(history.sessions.len(), 8);
+        assert_eq!(history.messages.len(), 8);
+    }
+
+    #[test]
     fn flush_barrier_retains_failures_until_the_domain_succeeds() {
         let config_dir = temp_dir("barrier-failure");
         let runtime = StoreRuntime::spawn(StoreConfig {

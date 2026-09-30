@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{TestAppContext, px};
 use zzclawterm_core::{
-    AiAction, AiContext, AiMessage, AiMessageRole, AiMode, AiModelConfigItem, AiModelSource,
-    AiProviderCredential, AiProviderKind, AiSession, AiSettings,
+    AiAction, AiAgentKind, AiContext, AiMessage, AiMessageRole, AiMode, AiModelConfigItem,
+    AiModelSource, AiProviderCredential, AiProviderKind, AiSession, AiSettings,
 };
 
 use crate::features::{
@@ -452,7 +452,7 @@ fn history_completion_updates_history_and_chat_atomically() {
     assert!(state.chat_messages().is_empty());
     assert_ne!(state.chat_session_id(), "session-a");
 
-    state.settings.config.default_mode = AiMode::Agent;
+    state.set_chat_run_mode(AiMode::Agent, Default::default());
     state.history.sessions.push(AiSession {
         agent_kind: Default::default(),
         scope: Default::default(),
@@ -624,6 +624,180 @@ fn chat_cancel_invalidates_the_job_and_clears_agent_lifecycle() {
 }
 
 #[test]
+fn awaiting_agent_approval_remains_an_active_cancellable_run() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".to_string(), AiMode::Agent, None);
+    let card = zzclawterm_core::AiCommandCard {
+        id: "agent-command".to_string(),
+        title: "Inspect".to_string(),
+        command: "pwd".to_string(),
+        explanation: String::new(),
+        risk_level: None,
+        risk_reason: None,
+        expected_effect: String::new(),
+        rollback: None,
+        category: Some("AI Agent".to_string()),
+        references: Vec::new(),
+        target_terminal_session_id: Some("terminal-a".to_string()),
+        target: None,
+    };
+    assert!(
+        state
+            .finish_chat_job(
+                launch.job_id,
+                launch.session_id.clone(),
+                Ok(AiChatJobOutput {
+                    mode: AiMode::Agent,
+                    text: "Run pwd".to_string(),
+                    reasoning: None,
+                    command_cards: vec![card],
+                    auto_execute_first: false,
+                    approval_note: None,
+                }),
+            )
+            .is_some()
+    );
+    assert!(!state.chat_is_pending());
+    assert!(state.chat_or_agent_is_running());
+    assert!(state.ai_session_is_running(&launch.session_id));
+    assert!(state.current_agent_command_card("agent-command"));
+    state.cancel_chat_and_agent();
+    assert!(!state.chat_or_agent_is_running());
+    assert!(!state.current_agent_command_card("agent-command"));
+}
+
+#[test]
+fn a_matching_job_id_cannot_finish_another_ai_session() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".to_string(), AiMode::Ask, None);
+    assert!(
+        state
+            .finish_chat_job(
+                launch.job_id,
+                "another-session".to_string(),
+                Err("late".to_string())
+            )
+            .is_none()
+    );
+    assert!(state.chat_is_pending());
+    state.cancel_chat_and_agent();
+}
+
+#[test]
+fn agent_step_limit_ends_the_run_and_removes_pending_approval() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.begin_chat_request("inspect".to_string(), AiMode::Agent, None);
+    state.chat.pending = false;
+    assert!(state.begin_agent_step(1).is_err());
+    assert!(!state.agent_task_is_active());
+    assert!(!state.chat_or_agent_is_running());
+}
+
+#[test]
+fn parallel_terminal_chats_isolate_cancel_and_late_results() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_scope("terminal:a");
+    let first = state.begin_chat_request("first".to_string(), AiMode::Ask, None);
+    state.switch_scope("terminal:b");
+    let second = state.begin_chat_request("second".to_string(), AiMode::Ask, None);
+    assert_ne!(first.session_id, second.session_id);
+    assert!(state.apply_chat_delta(second.job_id, "B", None));
+    state.switch_scope("terminal:a");
+    assert!(state.apply_chat_delta(first.job_id, "A", None));
+    assert_eq!(state.chat_messages()[1].content, "A");
+    state.cancel_chat_and_agent();
+    assert!(
+        state
+            .finish_chat_job(first.job_id, first.session_id, Err("late".to_string()))
+            .is_none()
+    );
+    state.switch_scope("terminal:b");
+    assert!(state.chat_is_pending());
+    assert_eq!(state.chat_messages()[1].content, "B");
+    assert!(
+        state
+            .finish_chat_job(
+                second.job_id,
+                second.session_id,
+                Ok(AiChatJobOutput {
+                    mode: AiMode::Ask,
+                    text: "finished B".to_string(),
+                    reasoning: None,
+                    command_cards: Vec::new(),
+                    auto_execute_first: false,
+                    approval_note: None,
+                })
+            )
+            .is_some()
+    );
+    assert_eq!(state.chat_messages()[1].content, "finished B");
+}
+
+#[test]
+fn terminal_scopes_keep_run_mode_and_agent_protocol_independent() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_scope("terminal:a");
+    state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm);
+    let first = state.begin_chat_request("inspect".to_string(), AiMode::Agent, None);
+    assert!(state.apply_agent_protocol_fallback(first.job_id));
+    state.switch_scope("terminal:b");
+    assert_eq!(state.chat_run_mode(), AiMode::Ask);
+    assert!(!state.agent_uses_json_protocol());
+    state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Codex);
+    state.switch_scope("terminal:a");
+    assert_eq!(state.chat_agent_kind(), AiAgentKind::Zzclawterm);
+    assert!(state.agent_uses_json_protocol());
+    state.cancel_chat_and_agent();
+    assert!(!state.agent_uses_json_protocol());
+    state.switch_scope("terminal:b");
+    assert_eq!(state.chat_agent_kind(), AiAgentKind::Codex);
+}
+
+#[test]
+fn new_chat_preserves_idle_agent_steps_for_history_reload() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_scope("terminal:a");
+    let session_id = state.chat_session_id().to_string();
+    state.begin_chat_request("inspect".to_string(), AiMode::Agent, None);
+    let job_id = state.chat.job_id;
+    state
+        .finish_chat_job(
+            job_id,
+            session_id.clone(),
+            Ok(AiChatJobOutput {
+                mode: AiMode::Agent,
+                text: "done".to_string(),
+                reasoning: None,
+                command_cards: Vec::new(),
+                auto_execute_first: false,
+                approval_note: None,
+            }),
+        )
+        .unwrap();
+    state.start_new_chat();
+    assert_eq!(
+        state.scope_for_ai_session(&session_id).as_deref(),
+        Some("terminal:a")
+    );
+    let new_session_id = state.chat_session_id().to_string();
+    let history_job_id = state.begin_history_operation("loading").unwrap();
+    assert!(state.finish_history_message_load(
+        history_job_id,
+        &new_session_id,
+        session_id,
+        Ok(Vec::new()),
+        "loaded".to_string(),
+    ));
+    assert_eq!(state.agent_steps()[0].title, "Final Answer");
+}
+
+#[test]
 fn mention_selection_and_navigation_are_atomic_owner_transitions() {
     let cx = TestAppContext::single();
     let mut state = state(&cx);
@@ -659,7 +833,6 @@ fn background_completion_distinguishes_foreign_and_matched_stale_jobs() {
         default_target_session_id: None,
         ai_session_id: "session-a".to_string(),
         terminal_session_id: "terminal-a".to_string(),
-        task_prompt: "inspect".to_string(),
         command: "pwd".to_string(),
         marker_id: None,
         background_job_id: Some(launch.job_id),
@@ -702,7 +875,6 @@ fn agent_step_limit_and_observation_poll_stay_on_the_owner() {
         default_target_session_id: None,
         ai_session_id: "session-a".to_string(),
         terminal_session_id: "terminal-a".to_string(),
-        task_prompt: "inspect".to_string(),
         command: "pwd".to_string(),
         marker_id: None,
         background_job_id: None,

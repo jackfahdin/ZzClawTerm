@@ -176,11 +176,17 @@ impl ZzClawTermApp {
         self.save_interaction_settings(cx);
     }
 
-    pub(in crate::features) fn toggle_interaction_right_click_paste(
+    pub(in crate::features) fn set_terminal_right_click_action(
         &mut self,
+        action: zzclawterm_core::TerminalRightClickAction,
         cx: &mut Context<Self>,
     ) {
-        self.settings.toggle_interaction_right_click_paste();
+        self.settings.set_terminal_right_click_action(action);
+        self.save_interaction_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_mouse_events_require_alt(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_mouse_events_require_alt();
         self.save_interaction_settings(cx);
     }
 
@@ -261,8 +267,13 @@ impl ZzClawTermApp {
         self.queue_settings_save(SettingsSaveKind::Interaction, cx);
     }
 
-    pub(in crate::features) fn toggle_screen_lock_enabled(&mut self, cx: &mut Context<Self>) {
-        self.settings.toggle_screen_lock_enabled();
+    pub(in crate::features) fn toggle_startup_lock_enabled(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_startup_lock_enabled();
+        self.save_screen_lock_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_idle_lock_enabled(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_idle_lock_enabled();
         self.ensure_idle_lock_clock(cx);
         self.security.reset_screen_lock_idle_timer();
         self.save_screen_lock_settings(cx);

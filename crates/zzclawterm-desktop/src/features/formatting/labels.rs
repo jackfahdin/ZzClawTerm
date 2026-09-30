@@ -21,6 +21,7 @@ pub(in crate::features) fn ai_agent_step_status_style(
         AiAgentStepStatus::Running => ("running", 0x6ee7b7, 0x12342a),
         AiAgentStepStatus::Completed => ("done", 0x86efac, 0x12301f),
         AiAgentStepStatus::Failed => ("failed", 0xfca5a5, 0x3a1717),
+        AiAgentStepStatus::Rejected => ("rejected", 0xfca5a5, 0x3a1717),
         AiAgentStepStatus::Cancelled => ("cancelled", 0xcbd5e1, 0x273244),
     }
 }

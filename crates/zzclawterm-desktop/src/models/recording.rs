@@ -83,6 +83,10 @@ impl RecordingWritePipeline {
         self.writer().write_input(session_id, data);
     }
 
+    pub(crate) fn resync_input_line(&self, session_id: impl Into<String>, line: String) {
+        self.writer().resync_input_line(session_id, line);
+    }
+
     pub(crate) fn write_raw_input(&self, session_id: impl Into<String>, data: impl Into<Vec<u8>>) {
         self.writer().write_raw_input(session_id, data);
     }
@@ -90,6 +94,25 @@ impl RecordingWritePipeline {
     pub(crate) fn cleanup_session(&self, session_id: impl Into<String>) {
         let _ = self.command_tx.send(RecordingWriteCommand::CleanupSession {
             session_id: session_id.into(),
+        });
+    }
+
+    pub(crate) fn disconnect_session(&self, session_id: impl Into<String>) {
+        let _ = self
+            .command_tx
+            .send(RecordingWriteCommand::DisconnectSession {
+                session_id: session_id.into(),
+            });
+    }
+
+    pub(crate) fn rekey_session(
+        &self,
+        old_session_id: impl Into<String>,
+        new_session_id: impl Into<String>,
+    ) {
+        let _ = self.command_tx.send(RecordingWriteCommand::RekeySession {
+            old_session_id: old_session_id.into(),
+            new_session_id: new_session_id.into(),
         });
     }
 
@@ -168,6 +191,18 @@ impl RecordingWriteHandle {
             RecordingWriteCommand::WriteInput {
                 session_id: session_id.clone(),
                 data,
+            },
+        );
+    }
+
+    pub(crate) fn resync_input_line(&self, session_id: impl Into<String>, line: String) {
+        let session_id = session_id.into();
+        self.enqueue_payload(
+            &session_id,
+            line.len(),
+            RecordingWriteCommand::ResyncInputLine {
+                session_id: session_id.clone(),
+                line,
             },
         );
     }
@@ -395,12 +430,23 @@ enum RecordingWriteCommand {
         session_id: String,
         data: Vec<u8>,
     },
+    ResyncInputLine {
+        session_id: String,
+        line: String,
+    },
     WriteRawInput {
         session_id: String,
         data: Vec<u8>,
     },
     CleanupSession {
         session_id: String,
+    },
+    DisconnectSession {
+        session_id: String,
+    },
+    RekeySession {
+        old_session_id: String,
+        new_session_id: String,
     },
     HistorySearch {
         key: RecordingHistorySearchKey,
@@ -447,27 +493,34 @@ fn run_recording_writer(
     dropped: Arc<Mutex<DroppedPayloads>>,
 ) {
     let recording_manager = RecordingManager::new();
+    let mut rekeyed_sessions: HashMap<String, Option<String>> = HashMap::new();
     recording_manager.set_memory_limit(memory_limit_bytes);
     while let Ok(command) = command_rx.recv() {
         match command {
             RecordingWriteCommand::Shutdown => break,
             RecordingWriteCommand::Start {
                 session_id,
-                context,
+                mut context,
                 profile,
                 explicit_path,
                 memory_limit_bytes,
                 reply_tx,
             } => {
                 recording_manager.set_memory_limit(memory_limit_bytes);
-                let result = recording_manager
-                    .start_with_profile(&session_id, *context, profile, explicit_path)
-                    .map_err(|error| error.to_string());
+                let current_id = current_recording_id(&session_id, &rekeyed_sessions);
+                let result = if let Some(current_id) = current_id {
+                    context.session_id = current_id.to_string();
+                    recording_manager
+                        .start_with_profile(current_id, *context, profile, explicit_path)
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err("session closed before recording started".to_string())
+                };
                 send_recording_status_or_removed(
                     &recording_manager,
                     &event_tx,
                     &queued_bytes,
-                    &session_id,
+                    current_id.unwrap_or(&session_id),
                     true,
                 );
                 let _ = reply_tx.send(result);
@@ -476,14 +529,16 @@ fn run_recording_writer(
                 session_id,
                 reply_tx,
             } => {
+                let current_id =
+                    current_recording_id(&session_id, &rekeyed_sessions).unwrap_or(&session_id);
                 let result = recording_manager
-                    .stop(&session_id)
+                    .stop(current_id)
                     .map_err(|error| error.to_string());
                 send_recording_status_or_removed(
                     &recording_manager,
                     &event_tx,
                     &queued_bytes,
-                    &session_id,
+                    current_id,
                     true,
                 );
                 let _ = reply_tx.send(result);
@@ -519,8 +574,10 @@ fn run_recording_writer(
                 reply_tx,
             } => {
                 recording_manager.set_memory_limit(memory_limit_bytes);
+                let current_id =
+                    current_recording_id(&session_id, &rekeyed_sessions).unwrap_or(&session_id);
                 let result = recording_manager
-                    .save_transcript(&session_id, &path, include_io_labels, include_timestamps)
+                    .save_transcript(current_id, &path, include_io_labels, include_timestamps)
                     .map_err(|error| error.to_string());
                 let _ = reply_tx.send(result);
             }
@@ -548,6 +605,10 @@ fn run_recording_writer(
                     false,
                 );
             }
+            RecordingWriteCommand::ResyncInputLine { session_id, line } => {
+                recording_manager.resync_input_line(&session_id, &line);
+                release_queued_bytes(&queued_bytes, line.len());
+            }
             RecordingWriteCommand::WriteRawInput { session_id, data } => {
                 let payload_bytes = data.len();
                 recording_manager.write_raw_input(&session_id, &data);
@@ -562,8 +623,44 @@ fn run_recording_writer(
             }
             RecordingWriteCommand::CleanupSession { session_id } => {
                 recording_manager.cleanup_session(&session_id);
+                rekeyed_sessions.insert(session_id.clone(), None);
                 remove_dropped_payloads(&dropped, &session_id);
                 let _ = event_tx.unbounded_send(RecordingWriteEvent::StatusRemoved { session_id });
+            }
+            RecordingWriteCommand::DisconnectSession { session_id } => {
+                recording_manager.disconnect_session(&session_id);
+                send_recording_status(
+                    &recording_manager,
+                    &event_tx,
+                    &queued_bytes,
+                    &session_id,
+                    false,
+                );
+            }
+            RecordingWriteCommand::RekeySession {
+                old_session_id,
+                new_session_id,
+            } => {
+                recording_manager.rekey_session(&old_session_id, &new_session_id);
+                rekeyed_sessions.insert(old_session_id.clone(), Some(new_session_id.clone()));
+                let old_dropped = take_dropped_payloads(&dropped, &old_session_id);
+                if old_dropped > 0 {
+                    recording_manager.report_dropped(
+                        &new_session_id,
+                        usize::try_from(old_dropped).unwrap_or(usize::MAX),
+                    );
+                }
+                remove_dropped_payloads(&dropped, &old_session_id);
+                let _ = event_tx.unbounded_send(RecordingWriteEvent::StatusRemoved {
+                    session_id: old_session_id,
+                });
+                send_recording_status_or_removed(
+                    &recording_manager,
+                    &event_tx,
+                    &queued_bytes,
+                    &new_session_id,
+                    true,
+                );
             }
             RecordingWriteCommand::HistorySearch { key } => {
                 let result = recording_manager
@@ -587,6 +684,17 @@ fn run_recording_writer(
             }
         }
     }
+}
+
+fn current_recording_id<'a>(
+    session_id: &'a str,
+    rekeyed_sessions: &'a HashMap<String, Option<String>>,
+) -> Option<&'a str> {
+    let mut current = session_id;
+    while let Some(next) = rekeyed_sessions.get(current) {
+        current = next.as_deref()?;
+    }
+    Some(current)
 }
 
 fn take_dropped_payloads(dropped: &Mutex<DroppedPayloads>, session_id: &str) -> u64 {
@@ -727,6 +835,39 @@ mod tests {
             );
         }
         assert!(removed);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_pipeline_resyncs_tab_input_before_enter() {
+        let pipeline = RecordingWritePipeline::spawn(1024 * 1024);
+        let writer = pipeline.writer();
+        let session_id = "session-tab-resync";
+        let path = PathBuf::from(unique_recording_path("tab-resync"));
+        writer
+            .start(
+                session_id.to_string(),
+                recording_context(session_id),
+                recording_profile(&path),
+                Some(path.clone()),
+                1024 * 1024,
+            )
+            .expect("recording should start");
+        pipeline.write_input(session_id, b"vi ins\t".to_vec());
+        pipeline.write_output(session_id, "\r\x1b[2Kvi install-node-exporter.sh");
+        pipeline.resync_input_line(
+            session_id,
+            "[root@rocky9 ~]# vi install-node-exporter.sh".to_string(),
+        );
+        pipeline.write_input(session_id, b"\r".to_vec());
+        writer
+            .stop(session_id.to_string())
+            .expect("recording should stop");
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[INPUT] vi install-node-exporter.sh\n"
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -878,6 +1019,59 @@ mod tests {
             );
         }
         assert!(removed);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_pipeline_rekeys_status_and_late_start_to_current_session() {
+        let mut pipeline = RecordingWritePipeline::spawn(1024 * 1024);
+        let mut event_rx = pipeline.take_event_receiver().unwrap();
+        let writer = pipeline.writer();
+        let path = PathBuf::from(unique_recording_path("pipeline-rekey"));
+        pipeline.write_output("s1", "before\n");
+        pipeline.disconnect_session("s1");
+        pipeline.write_output("s2", "early\n");
+        pipeline.rekey_session("s1", "s2");
+        writer
+            .start(
+                "s1".to_string(),
+                recording_context("s1"),
+                recording_profile(&path),
+                Some(path.clone()),
+                1024 * 1024,
+            )
+            .unwrap();
+        pipeline.write_output("s2", "after\n");
+        writer.stop("s2".to_string()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("after"));
+        let mut removed_old = false;
+        let mut status_new = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                RecordingWriteEvent::StatusRemoved { session_id } if session_id == "s1" => {
+                    removed_old = true;
+                }
+                RecordingWriteEvent::Status(status) if status.session_id == "s2" => {
+                    status_new = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(removed_old && status_new);
+        pipeline.cleanup_session("s2");
+        writer.flush();
+        assert!(
+            writer
+                .start(
+                    "s1".to_string(),
+                    recording_context("s1"),
+                    recording_profile(&path),
+                    Some(path.clone()),
+                    1024 * 1024,
+                )
+                .is_err()
+        );
         let _ = fs::remove_file(path);
     }
 

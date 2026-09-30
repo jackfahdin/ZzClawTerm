@@ -162,7 +162,7 @@ pub fn build_openai_compatible_chat_request_body_with_stream(
     {
         body["reasoning_effort"] = serde_json::json!(effort);
     }
-    if request.mode == AiMode::Agent {
+    if request.mode == AiMode::Agent && !request.options.agent_json_protocol {
         body["tools"] = agent_openai_tools();
         body["tool_choice"] = serde_json::json!("required");
     }
@@ -193,7 +193,7 @@ pub fn build_anthropic_chat_request_body_with_stream(
         "messages": messages,
         "stream": stream,
     });
-    if request.mode == AiMode::Agent {
+    if request.mode == AiMode::Agent && !request.options.agent_json_protocol {
         body["tools"] = agent_anthropic_tools();
         body["tool_choice"] = serde_json::json!({ "type": "any" });
     }
@@ -228,7 +228,7 @@ pub fn build_gemini_chat_request_body(
             "temperature": 0,
         },
     });
-    if request.mode == AiMode::Agent {
+    if request.mode == AiMode::Agent && !request.options.agent_json_protocol {
         body["tools"] = agent_gemini_tools();
         body["toolConfig"] = serde_json::json!({
             "functionCallingConfig": {
@@ -1026,6 +1026,34 @@ mod tests {
             serde_json::json!(["thought", "command", "riskLevel", "riskReason"])
         );
         assert_eq!(tools[1]["function"]["name"], "final_answer");
+    }
+
+    #[test]
+    fn agent_json_fallback_omits_native_tools_without_changing_request_json() {
+        let settings = AiSettings::default();
+        let mut request = sample_ai_request("en");
+        request.mode = AiMode::Agent;
+        request.options.agent_json_protocol = true;
+        let resolved = ResolvedAiModel {
+            backend: Default::default(),
+            api_format: Default::default(),
+            model_name: "gpt-4o-mini".to_string(),
+            provider_kind: AiProviderKind::Openai,
+            credential: None,
+        };
+        let body = build_openai_compatible_chat_request_body(&resolved, &request, &settings, &[]);
+        assert!(body.get("tools").is_none());
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("JSON object")
+        );
+        assert!(
+            serde_json::to_value(&request).unwrap()["options"]
+                .get("agent_json_protocol")
+                .is_none()
+        );
     }
 
     #[test]

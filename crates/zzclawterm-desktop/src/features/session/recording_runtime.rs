@@ -120,6 +120,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.recording.finish_path_prompt();
+        let session_id = self.recording.current_session_id(&session_id);
         match result {
             RecordingPathPromptResult::Selected(path) => match kind {
                 RecordingPathPromptKind::Start => {
@@ -201,14 +202,10 @@ impl ZzClawTermApp {
         cx.spawn(async move |this, cx| {
             let result = await_blocking_job(task).await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
+                let current_id = this.recording.current_session_id(&result_session_id);
                 this.recording.finish_action(&result_session_id);
                 match result {
-                    Ok(path)
-                        if this
-                            .session
-                            .metadata(&result_session_id)
-                            .is_some_and(|metadata| !metadata.disconnected) =>
-                    {
+                    Ok(path) if this.session.metadata(&current_id).is_some() => {
                         this.shell.set_status(format!("recording started: {path}"));
                         this.append_terminal_log(format!("\n# recording started: {path}\n"));
                     }
@@ -357,6 +354,10 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn cleanup_recording_for_session(&mut self, session_id: &str) {
         self.recording.cleanup_session(session_id);
+    }
+
+    pub(in crate::features) fn disconnect_recording_for_session(&self, session_id: &str) {
+        self.recording.disconnect_session(session_id);
     }
 
     pub(in crate::features) fn apply_recording_search(

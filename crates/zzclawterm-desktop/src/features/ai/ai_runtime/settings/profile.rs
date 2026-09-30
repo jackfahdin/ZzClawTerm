@@ -1,7 +1,7 @@
 use gpui::Context;
 use zzclawterm_core::{
-    AgentCommandExecutionMode, AiAgentKind, AiMode, AiPermissionMode, CodexThreadMode,
-    ExternalMcpSessionScope, RiskLevel,
+    AgentCommandExecutionMode, AiAgentKind, AiMode, AiPermissionMode, AiReasoningEffort,
+    CodexThreadMode, ExternalMcpSessionScope, RiskLevel,
 };
 
 use crate::features::ZzClawTermApp;
@@ -13,8 +13,22 @@ impl ZzClawTermApp {
         self.persist_ai_settings_now(cx);
     }
 
-    pub(in crate::features) fn set_ai_mode(&mut self, mode: AiMode, cx: &mut Context<Self>) {
-        self.ai.set_settings_mode(mode);
+    pub(in crate::features) fn set_ai_run_mode(
+        &mut self,
+        mode: AiMode,
+        kind: AiAgentKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.ai.set_chat_run_mode(mode, kind);
+        self.defer_ai_panel_snapshot_flush(cx);
+    }
+
+    pub(in crate::features) fn set_ai_reasoning_effort(
+        &mut self,
+        effort: AiReasoningEffort,
+        cx: &mut Context<Self>,
+    ) {
+        self.ai.set_settings_reasoning_effort(effort);
         self.persist_ai_settings_now(cx);
     }
 

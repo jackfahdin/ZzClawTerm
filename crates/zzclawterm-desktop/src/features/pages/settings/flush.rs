@@ -97,6 +97,7 @@ impl ZzClawTermApp {
                 ),
                 action_focus: self.ai.settings_action_focus().clone(),
                 discovery_pending: self.ai.discovery_is_pending(),
+                agent_management: self.ai.agent_management_view().clone(),
             },
             cloud_sync: CloudSyncPresentation {
                 settings: Arc::new(self.cloud_sync.settings().clone()),
@@ -146,6 +147,7 @@ impl ZzClawTermApp {
                 SettingsTab::AiGeneral => SettingsSectionPresentation::AiGeneral,
                 SettingsTab::AiModels => SettingsSectionPresentation::AiModels,
                 SettingsTab::AiRules => SettingsSectionPresentation::AiRules,
+                SettingsTab::AiAgents => SettingsSectionPresentation::AiAgents,
                 SettingsTab::Transfer => SettingsSectionPresentation::Transfer,
                 SettingsTab::Security => SettingsSectionPresentation::Security,
                 SettingsTab::SyncBackup => SettingsSectionPresentation::SyncBackup,

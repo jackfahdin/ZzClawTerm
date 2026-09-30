@@ -14,15 +14,15 @@ use crate::test_support::TestConfigDir;
 
 use super::{
     TERMINAL_INPUT_LATENCY_WINDOW, TERMINAL_USER_SCROLL_ACTIVE_WINDOW,
-    lost_mouse_report_release_button, terminal_cursor_position_changed,
-    terminal_cursor_visible_for_display_offset, terminal_input_latency_active,
-    terminal_key_bytes_for_mode_and_settings, terminal_keyword_highlight_updates_allowed,
-    terminal_live_action_link_enrichment_allowed, terminal_mouse_report_button,
-    terminal_paint_snapshot_for_view, terminal_paint_window_snapshot_for_view,
-    terminal_retained_snapshot_matches_view, terminal_scroll_retained_window_extra_rows,
-    terminal_scroll_snapshot_request_offset, terminal_scroll_text_first_decorations,
-    terminal_selection_for_session, terminal_session_write_failure_log,
-    terminal_should_defer_key_text_to_input_handler_for_state,
+    lost_mouse_report_release_button, mouse_report_allowed_by_alt,
+    terminal_cursor_position_changed, terminal_cursor_visible_for_display_offset,
+    terminal_input_latency_active, terminal_key_bytes_for_mode_and_settings,
+    terminal_keyword_highlight_updates_allowed, terminal_live_action_link_enrichment_allowed,
+    terminal_mouse_report_button, terminal_paint_snapshot_for_view,
+    terminal_paint_window_snapshot_for_view, terminal_retained_snapshot_matches_view,
+    terminal_scroll_retained_window_extra_rows, terminal_scroll_snapshot_request_offset,
+    terminal_scroll_text_first_decorations, terminal_selection_for_session,
+    terminal_session_write_failure_log, terminal_should_defer_key_text_to_input_handler_for_state,
     terminal_should_track_command_suggestion_input, terminal_snapshot_covers_display_offset,
     terminal_snapshot_with_newer_edge_row, terminal_snapshot_with_retained_scroll_window,
     terminal_status_changed, terminal_user_scroll_active, terminal_visual_display_offset,
@@ -34,6 +34,22 @@ fn terminal_mouse_report_buttons_map_to_their_gpui_capture_button() {
     assert_eq!(terminal_mouse_report_button(1), Some(MouseButton::Middle));
     assert_eq!(terminal_mouse_report_button(2), Some(MouseButton::Right));
     assert_eq!(terminal_mouse_report_button(3), None);
+}
+
+#[test]
+fn alt_mouse_gate_allows_captured_release_after_alt_is_released() {
+    assert!(!mouse_report_allowed_by_alt(
+        true, false, true, false, false
+    ));
+    assert!(!mouse_report_allowed_by_alt(true, false, false, true, true));
+    assert!(mouse_report_allowed_by_alt(true, false, false, false, true));
+    assert!(!mouse_report_allowed_by_alt(
+        true, false, false, false, false
+    ));
+    assert!(mouse_report_allowed_by_alt(true, true, true, false, false));
+    assert!(mouse_report_allowed_by_alt(
+        false, false, true, false, false
+    ));
 }
 
 #[test]
