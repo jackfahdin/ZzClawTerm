@@ -190,6 +190,23 @@ jobs:
           set -euo pipefail
           gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="${TAG}" -f target_commitish="${GITHUB_SHA}" --jq '.body // ""' > release-notes.md
+          curated="$(awk -v tag="${TAG#v}" '
+            index($0, "## [" tag "]") == 1 { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md | sed -e '/./,$!d')"
+          if [[ -n "${curated}" ]]; then
+            {
+              echo "## 更新日志"
+              echo
+              printf '%s\n' "${curated}"
+              echo
+              echo "---"
+              echo
+              cat release-notes.md
+            } > release-notes-full.md
+            mv release-notes-full.md release-notes.md
+          fi
           echo "published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
       - name: Prepare updater signing key
         shell: bash

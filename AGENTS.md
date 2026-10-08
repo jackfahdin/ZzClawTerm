@@ -314,3 +314,16 @@ Pull requests should include:
 * commands and platforms tested;
 * explicit notes for persistence, credentials, data compatibility, or forked
   dependency changes, including the fork branch and revision a bump moves to.
+
+## Changelog
+
+`CHANGELOG.md` at the repository root is the single source of truth for release
+notes. Every version-bump commit must add a `## [X.Y.Z] - YYYY-MM-DD` section
+for the version being released, written in Chinese, grouped into
+「新增 / 变更 / 修复」subsections that describe user-visible behavior rather
+than restating commit subjects. The Release workflow injects the section
+matching the tag into the GitHub release body ahead of the auto-generated
+commit list; when no section matches, the release falls back to auto-generated
+notes only. Append the same entries (English and zh-CN) to
+`docs-site/src/data/changelogData.ts` at release time. Versions published
+before this convention (0.0.1 – 0.1.1) are not backfilled.
