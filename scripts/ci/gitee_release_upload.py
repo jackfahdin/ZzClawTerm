@@ -6,6 +6,10 @@ Gitee 的附件上传是普通 multipart POST，没有 GitCode 的签名 URL；�
 """
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from urllib.parse import urlsplit
+import json
+import re
 import threading
 import time
 
@@ -181,3 +185,131 @@ def _post_attachment(session, url, token, asset, progress, cancel, result) -> No
         result.append((False, "cancelled by the stall watchdog"))
     except Exception as error:
         result.append((False, f"{type(error).__name__} while uploading"))
+
+
+
+def backup_release_asset(session, asset: dict, destination: Path, *, sleep=time.sleep) -> None:
+    """Keep the old manifest available for rollback and version comparison."""
+    url = asset.get("browser_download_url")
+    host = urlsplit(url).hostname if isinstance(url, str) else None
+    if not host or (host != "gitee.com" and not host.endswith(".gitee.com")):
+        raise RuntimeError(f"Gitee attachment {asset.get('name')} has no trusted download URL")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 4):
+        try:
+            with session.get(url, stream=True, timeout=(20, 120)) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type:
+                    raise RuntimeError("Gitee returned an HTML page instead of an attachment")
+                expected_length = response.headers.get("Content-Length")
+                received = 0
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        handle.write(chunk)
+                        received += len(chunk)
+                if expected_length is not None and received != int(expected_length):
+                    raise RuntimeError("Gitee attachment backup was truncated")
+            return
+        except Exception as error:
+            destination.unlink(missing_ok=True)
+            if attempt == 3:
+                raise RuntimeError(
+                    f"Gitee attachment {asset.get('name')} backup failed after 3 attempts: "
+                    f"{type(error).__name__}"
+                ) from error
+            sleep(5 * attempt)
+
+
+def publish_stable_manifest(
+    session_factory, request, api_base: str, token: str, releases_path: str,
+    manifest: Path, target: str, *, sleep=time.sleep,
+) -> None:
+    """Advance the fixed Gitee update endpoint after the version release is complete."""
+    new_version = _stable_version(json.loads(manifest.read_text(encoding="utf-8")))
+    existing = request("GET", f"{releases_path}/tags/update-stable", allow_404=True)
+    if existing is None:
+        release = request("POST", releases_path, data={
+            "tag_name": "update-stable",
+            "name": "Stable update channel",
+            "body": "Stable update manifest for installed applications.",
+            "target_commitish": target,
+            "prerelease": "true",
+        })
+        release_id = release_id_of(release)
+        attach_path = f"{releases_path}/{release_id}/attach_files"
+        success, reason = _upload_and_confirm(
+            session_factory, request, api_base, token, attach_path, manifest, sleep,
+        )
+        if not success:
+            raise RuntimeError(f"Gitee stable update manifest failed: {reason}")
+        return
+
+    release_id = release_id_of(existing)
+    attach_path = f"{releases_path}/{release_id}/attach_files"
+    previous = next(
+        (item for item in (request("GET", attach_path) or [])
+         if item.get("name") == manifest.name),
+        None,
+    )
+    if previous is None:
+        success, reason = _upload_and_confirm(
+            session_factory, request, api_base, token, attach_path, manifest, sleep,
+        )
+        if not success:
+            raise RuntimeError(f"Gitee stable update manifest failed: {reason}")
+        return
+
+    with TemporaryDirectory() as directory:
+        backup = Path(directory) / manifest.name
+        backup_release_asset(session_factory(), previous, backup)
+        old_version = _stable_version(json.loads(backup.read_text(encoding="utf-8")))
+        if new_version < old_version:
+            raise RuntimeError("Gitee stable update manifest would move to an older version")
+        delete_attachments(
+            request, attach_path, attachment_ids_named([previous], manifest.name),
+        )
+        success, reason = _upload_and_confirm(
+            session_factory, request, api_base, token, attach_path, manifest, sleep,
+        )
+        if success:
+            return
+        restored, restore_reason = _upload_and_confirm(
+            session_factory, request, api_base, token, attach_path, backup, sleep,
+        )
+        if not restored:
+            reason += f"; restoring the old manifest failed: {restore_reason}"
+        raise RuntimeError(f"Gitee stable update manifest failed: {reason}")
+
+
+def _upload_and_confirm(
+    session_factory, request, api_base: str, token: str, attach_path: str,
+    manifest: Path, sleep,
+) -> tuple[bool, str]:
+    success, reason = upload_attachment_with_watchdog(
+        session_factory, f"{api_base.rstrip('/')}{attach_path}", token, manifest,
+        sleep=sleep,
+    )
+    if not success:
+        return False, reason
+    # 上传返回 200/201 不等于附件已登记，轮询列表确认（与 GitCode 版一致）。
+    for poll in range(20):
+        current = request("GET", attach_path) or []
+        if any(item.get("name") == manifest.name for item in current):
+            return True, ""
+        if poll < 19:
+            sleep(3)
+    return False, "Gitee did not register the uploaded attachment"
+
+
+def _stable_version(manifest: dict) -> tuple[int, int, int]:
+    # 与 gitcode 版保持同一套版本格式约定；两个 helper 模块刻意互不依赖。
+    version = manifest.get("version")
+    match = re.fullmatch(
+        r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?",
+        version if isinstance(version, str) else "",
+    )
+    if match is None:
+        raise RuntimeError("Gitee stable update manifest has an invalid version")
+    return tuple(int(part) for part in match.groups())

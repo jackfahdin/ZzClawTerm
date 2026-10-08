@@ -11,12 +11,15 @@ pub const STABLE_MANIFEST_URL: &str =
     "https://github.com/jackfahdin/ZzClawTerm/releases/latest/download/latest.json";
 pub const PREVIEW_MANIFEST_URL: &str =
     "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/latest.json";
+pub const GITEE_STABLE_MANIFEST_URL: &str =
+    "https://gitee.com/jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json";
 pub const GITCODE_STABLE_MANIFEST_URL: &str =
     "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateSource {
     Auto,
+    Gitee,
     GitCode,
     GitHub,
 }
@@ -27,7 +30,12 @@ impl UpdateSource {
             return &[UpdateRepository::GitHub];
         }
         match self {
-            Self::Auto => &[UpdateRepository::GitCode, UpdateRepository::GitHub],
+            Self::Auto => &[
+                UpdateRepository::Gitee,
+                UpdateRepository::GitCode,
+                UpdateRepository::GitHub,
+            ],
+            Self::Gitee => &[UpdateRepository::Gitee],
             Self::GitCode => &[UpdateRepository::GitCode],
             Self::GitHub => &[UpdateRepository::GitHub],
         }
@@ -36,6 +44,7 @@ impl UpdateSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateRepository {
+    Gitee,
     GitCode,
     GitHub,
 }
@@ -60,15 +69,25 @@ impl UpdateRepository {
 
     pub fn release_url(self, version: &Version) -> String {
         match self {
-            Self::GitCode => format!("{}/releases/v{version}", self.base_url()),
+            Self::Gitee | Self::GitCode => format!("{}/releases/v{version}", self.base_url()),
             Self::GitHub => format!("{}/releases/tag/v{version}", self.base_url()),
         }
     }
 
     fn base_url(self) -> &'static str {
         match self {
+            Self::Gitee => "https://gitee.com/jackfahdin/ZzClawTerm",
             Self::GitCode => "https://gitcode.com/Jackfahdin/ZzClawTerm",
             Self::GitHub => "https://github.com/jackfahdin/ZzClawTerm",
+        }
+    }
+
+    /// 自动顺序中的下一个镜像；GitHub 是最终源，不再重写下载地址。
+    fn next_in_auto_order(self) -> Option<UpdateRepository> {
+        match self {
+            Self::Gitee => Some(Self::GitCode),
+            Self::GitCode => Some(Self::GitHub),
+            Self::GitHub => None,
         }
     }
 }
@@ -93,6 +112,7 @@ impl UpdateChannel {
 
     pub fn manifest_url_for(self, repository: UpdateRepository) -> &'static str {
         match (self, repository) {
+            (Self::Stable, UpdateRepository::Gitee) => GITEE_STABLE_MANIFEST_URL,
             (Self::Stable, UpdateRepository::GitCode) => GITCODE_STABLE_MANIFEST_URL,
             _ => self.manifest_url(),
         }
@@ -207,11 +227,10 @@ impl UpdateManifest {
         auto_fallback: bool,
     ) -> Result<SelectedUpdateArtifact, UpdaterError> {
         let mut selected = self.select_artifact(expected_version, target, package)?;
-        if repository == UpdateRepository::GitCode {
+        if let Some(next) = repository.next_in_auto_order() {
             selected.url = repository.artifact_url(expected_version, &selected.filename);
-            selected.fallback_url = auto_fallback.then(|| {
-                UpdateRepository::GitHub.artifact_url(expected_version, &selected.filename)
-            });
+            selected.fallback_url =
+                auto_fallback.then(|| next.artifact_url(expected_version, &selected.filename));
         }
         Ok(selected)
     }
@@ -441,19 +460,100 @@ mod tests {
     }
 
     #[test]
-    fn stable_auto_prefers_gitcode_and_preview_uses_github() {
+    fn stable_auto_prefers_gitee_then_gitcode_and_preview_uses_github() {
         assert_eq!(
             UpdateSource::Auto.repositories(UpdateChannel::Stable),
-            &[UpdateRepository::GitCode, UpdateRepository::GitHub]
+            &[
+                UpdateRepository::Gitee,
+                UpdateRepository::GitCode,
+                UpdateRepository::GitHub
+            ]
+        );
+        assert_eq!(
+            UpdateSource::Gitee.repositories(UpdateChannel::Stable),
+            &[UpdateRepository::Gitee]
+        );
+        assert_eq!(
+            UpdateSource::GitCode.repositories(UpdateChannel::Stable),
+            &[UpdateRepository::GitCode]
         );
         assert_eq!(
             UpdateSource::GitCode.repositories(UpdateChannel::Preview),
             &[UpdateRepository::GitHub]
         );
         assert_eq!(
+            UpdateChannel::Stable.manifest_url_for(UpdateRepository::Gitee),
+            "https://gitee.com/jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json"
+        );
+        assert_eq!(
             UpdateChannel::Stable.manifest_url_for(UpdateRepository::GitCode),
             "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/update-stable/latest.json"
         );
+    }
+
+    #[test]
+    fn gitee_download_rewrites_url_and_falls_back_to_gitcode() {
+        let version = Version::parse("2.1.0").unwrap();
+        assert_eq!(
+            UpdateRepository::Gitee.release_url(&version),
+            "https://gitee.com/jackfahdin/ZzClawTerm/releases/v2.1.0"
+        );
+        let filename = "ZzClawTerm_2.1.0_linux_x64.AppImage";
+        let github_url = format!(
+            "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+        );
+        let target = UpdateTarget::from_rust_target("linux", "x86_64").unwrap();
+        let valid =
+            UpdateManifest::parse(&manifest("2.1.0", "linux-x86_64", &github_url, "signed"))
+                .unwrap();
+        let selected = valid
+            .select_artifact_from(
+                &version,
+                target,
+                UpdatePackageKind::Installed,
+                UpdateRepository::Gitee,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.url,
+            format!("https://gitee.com/jackfahdin/ZzClawTerm/releases/download/v2.1.0/{filename}")
+        );
+        assert_eq!(
+            selected.fallback_url.as_deref(),
+            Some(
+                format!(
+                    "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/v2.1.0/{filename}"
+                )
+                .as_str()
+            )
+        );
+        // 显式单源没有回退地址。
+        assert_eq!(
+            valid
+                .select_artifact_from(
+                    &version,
+                    target,
+                    UpdatePackageKind::Installed,
+                    UpdateRepository::Gitee,
+                    false,
+                )
+                .unwrap()
+                .fallback_url,
+            None
+        );
+        // GitHub 是顺序末端，不重写地址。
+        let github_selected = valid
+            .select_artifact_from(
+                &version,
+                target,
+                UpdatePackageKind::Installed,
+                UpdateRepository::GitHub,
+                true,
+            )
+            .unwrap();
+        assert_eq!(github_selected.url, github_url);
+        assert_eq!(github_selected.fallback_url, None);
     }
 
     #[test]

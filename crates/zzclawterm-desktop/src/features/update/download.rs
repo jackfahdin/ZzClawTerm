@@ -4,8 +4,8 @@ use gpui::{Context, Window};
 use std::io::{Read as _, Write as _};
 use std::path::Path;
 use zzclawterm_core::updater::{
-    UpdateManifest, UpdatePackageKind, UpdateRepository, UpdateSource, UpdateTarget,
-    parse_current_version,
+    SelectedUpdateArtifact, UpdateChannel, UpdateManifest, UpdatePackageKind, UpdateRepository,
+    UpdateSource, UpdateTarget, parse_current_version,
 };
 use zzclawterm_transport::connection_attempt::ConnectionAttempt;
 
@@ -74,6 +74,47 @@ fn decode_update_signature(value: &str) -> Result<minisign_verify::Signature, St
     .map_err(|_| "invalid update signature".to_string())
 }
 
+fn download_candidates(
+    source: UpdateSource,
+    repository: UpdateRepository,
+    channel: UpdateChannel,
+) -> &'static [UpdateRepository] {
+    let order = source.repositories(channel);
+    let start = order
+        .iter()
+        .position(|&candidate| candidate == repository)
+        .unwrap_or(0);
+    &order[start..]
+}
+
+fn download_attempts(
+    selected: &SelectedUpdateArtifact,
+    candidates: &[UpdateRepository],
+    selected_index: usize,
+    version: &semver::Version,
+    filename: &str,
+) -> Vec<(String, UpdateRepository)> {
+    // 下载链：选中仓库的地址，其后每个候选仓库的同路径地址依次兜底；
+    // 核心侧 fallback_url（预览通道的 GitHub 固定地址）若不在链上则补到末尾。
+    let mut attempts: Vec<(String, UpdateRepository)> = vec![];
+    for (index, &candidate) in candidates.iter().enumerate().skip(selected_index) {
+        let url = if index == selected_index {
+            selected.url.clone()
+        } else {
+            candidate.artifact_url(version, filename)
+        };
+        if !attempts.iter().any(|(existing, _)| existing == &url) {
+            attempts.push((url, candidate));
+        }
+    }
+    if let Some(fallback) = selected.fallback_url.clone() {
+        if !attempts.iter().any(|(url, _)| url == &fallback) {
+            attempts.push((fallback, UpdateRepository::GitHub));
+        }
+    }
+    attempts
+}
+
 fn download_signed_update(
     version: &str,
     repository: UpdateRepository,
@@ -99,13 +140,12 @@ fn download_signed_update(
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|error| error.to_string())?;
-    let mut candidates = vec![repository];
-    if source == UpdateSource::Auto && repository == UpdateRepository::GitCode {
-        candidates.push(UpdateRepository::GitHub);
-    }
+    // 候选仓库取来源全顺序中从已确认仓库开始的尾段：自动模式依次尝试
+    // Gitee → GitCode → GitHub，显式单源只有一段，预览通道只有 GitHub。
+    let candidates = download_candidates(source, repository, UpdateChannel::for_version(&version));
     let mut last_error = String::new();
     let mut selected = None;
-    for candidate in candidates {
+    for (index, &candidate) in candidates.iter().enumerate() {
         let result = (|| {
             let mut manifest_body = String::new();
             client
@@ -133,13 +173,13 @@ fn download_signed_update(
         })();
         match result {
             Ok(artifact) => {
-                selected = Some((artifact, candidate));
+                selected = Some((artifact, index));
                 break;
             }
             Err(error) => last_error = error,
         }
     }
-    let (selected, selected_repository) = selected.ok_or(last_error)?;
+    let (selected, selected_index) = selected.ok_or(last_error)?;
     let signature = decode_update_signature(&selected.signature)?;
     let public_key = STANDARD
         .decode(PUBLIC_KEY)
@@ -150,16 +190,13 @@ fn download_signed_update(
     .map_err(|_| "invalid public key")?;
     cancel.check()?;
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let name = selected.filename;
+    let name = selected.filename.clone();
     let partial = directory.join(format!("{name}.partial"));
     let artifact = directory.join(&name);
+    let attempts = download_attempts(&selected, candidates, selected_index, &version, &name);
     let mut last_error = "no update download URL is available".to_string();
-    for (url, candidate) in std::iter::once((selected.url.as_str(), selected_repository)).chain(
-        selected
-            .fallback_url
-            .as_deref()
-            .map(|url| (url, UpdateRepository::GitHub)),
-    ) {
+    for (url, candidate) in &attempts {
+        let candidate = *candidate;
         cancel.check()?;
         progress(DownloadProgress::Source(candidate));
         let result = (|| -> Result<(), String> {
@@ -394,8 +431,151 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{PUBLIC_KEY, decode_update_signature, supports_native_install};
+    use super::{
+        PUBLIC_KEY, decode_update_signature, download_attempts, download_candidates,
+        supports_native_install,
+    };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[test]
+    fn auto_download_candidates_follow_the_full_mirror_order() {
+        use semver::Version;
+        use zzclawterm_core::updater::{
+            SelectedUpdateArtifact, UpdateChannel, UpdateRepository, UpdateSource,
+        };
+
+        let channel = UpdateChannel::Stable;
+        // 检查阶段确认 Gitee 后，候选是完整三段；确认 GitCode 后只剩尾段。
+        assert_eq!(
+            download_candidates(UpdateSource::Auto, UpdateRepository::Gitee, channel),
+            &[
+                UpdateRepository::Gitee,
+                UpdateRepository::GitCode,
+                UpdateRepository::GitHub
+            ]
+        );
+        assert_eq!(
+            download_candidates(UpdateSource::Auto, UpdateRepository::GitCode, channel),
+            &[UpdateRepository::GitCode, UpdateRepository::GitHub]
+        );
+        assert_eq!(
+            download_candidates(UpdateSource::Auto, UpdateRepository::GitHub, channel),
+            &[UpdateRepository::GitHub]
+        );
+        assert_eq!(
+            download_candidates(UpdateSource::Gitee, UpdateRepository::Gitee, channel),
+            &[UpdateRepository::Gitee]
+        );
+
+        let version = Version::parse("0.2.0").unwrap();
+        let filename = "ZzClawTerm_0.2.0_windows_x64-setup.exe";
+        let selected = |url: String, fallback_url: Option<String>| SelectedUpdateArtifact {
+            url,
+            fallback_url,
+            signature: "signature".into(),
+            filename: filename.to_string(),
+        };
+        let candidates = download_candidates(UpdateSource::Auto, UpdateRepository::Gitee, channel);
+        let attempts = download_attempts(
+            &selected(
+                format!(
+                    "https://gitee.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                ),
+                None,
+            ),
+            candidates,
+            0,
+            &version,
+            filename,
+        );
+        assert_eq!(
+            attempts,
+            vec![
+                (
+                    format!(
+                        "https://gitee.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                    ),
+                    UpdateRepository::Gitee,
+                ),
+                (
+                    format!(
+                        "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                    ),
+                    UpdateRepository::GitCode,
+                ),
+                (
+                    format!(
+                        "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                    ),
+                    UpdateRepository::GitHub,
+                ),
+            ]
+        );
+        // 从 GitCode 段选中时 Gitee 不再出现，GitHub 仍在链尾。
+        let candidates =
+            download_candidates(UpdateSource::Auto, UpdateRepository::GitCode, channel);
+        let attempts = download_attempts(
+            &selected(
+                format!(
+                    "https://gitcode.com/Jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                ),
+                Some(format!(
+                    "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                )),
+            ),
+            candidates,
+            0,
+            &version,
+            filename,
+        );
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|(_, repository)| *repository)
+                .collect::<Vec<_>>(),
+            vec![UpdateRepository::GitCode, UpdateRepository::GitHub]
+        );
+        // 显式单源只有选中地址本身。
+        let candidates = download_candidates(UpdateSource::Gitee, UpdateRepository::Gitee, channel);
+        let attempts = download_attempts(
+            &selected(
+                format!(
+                    "https://gitee.com/jackfahdin/ZzClawTerm/releases/download/v{version}/{filename}"
+                ),
+                None,
+            ),
+            candidates,
+            0,
+            &version,
+            filename,
+        );
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].1, UpdateRepository::Gitee);
+        // 预览通道选中 GitHub 后，核心侧的固定版本地址补在链尾。
+        let preview = Version::parse("0.2.0-preview.1").unwrap();
+        let candidates = download_candidates(
+            UpdateSource::Auto,
+            UpdateRepository::GitHub,
+            UpdateChannel::Preview,
+        );
+        let attempts = download_attempts(
+            &selected(
+                format!(
+                    "https://github.com/jackfahdin/ZzClawTerm/releases/download/continuous-build/{filename}"
+                ),
+                Some(format!(
+                    "https://github.com/jackfahdin/ZzClawTerm/releases/download/v{preview}/{filename}"
+                )),
+            ),
+            candidates,
+            0,
+            &preview,
+            filename,
+        );
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts[0].0.contains("continuous-build"));
+        assert!(attempts[1].0.contains(&format!("v{preview}")));
+    }
 
     #[cfg(windows)]
     #[test]

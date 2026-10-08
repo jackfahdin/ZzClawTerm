@@ -150,8 +150,9 @@ impl ZzClawTermApp {
                 let locked = downloading || ready || applying;
                 let selected_index = match source {
                     UpdateSource::Auto => 0,
-                    UpdateSource::GitCode => 1,
-                    UpdateSource::GitHub => 2,
+                    UpdateSource::Gitee => 1,
+                    UpdateSource::GitCode => 2,
+                    UpdateSource::GitHub => 3,
                 };
                 this.child(
                     div()
@@ -168,14 +169,16 @@ impl ZzClawTermApp {
                             ZzClawTabs::new("update-source")
                                 .items([
                                     ZzClawTabItem::new(t!("updater.sourceAuto")).disabled(locked),
+                                    ZzClawTabItem::new("Gitee").disabled(locked),
                                     ZzClawTabItem::new("GitCode").disabled(locked),
                                     ZzClawTabItem::new("GitHub").disabled(locked),
                                 ])
                                 .selected_index(selected_index)
                                 .on_select(cx.listener(|app, index: &usize, _, cx| {
                                     let source = match index {
-                                        1 => UpdateSource::GitCode,
-                                        2 => UpdateSource::GitHub,
+                                        1 => UpdateSource::Gitee,
+                                        2 => UpdateSource::GitCode,
+                                        3 => UpdateSource::GitHub,
                                         _ => UpdateSource::Auto,
                                     };
                                     app.set_update_source(source, cx);
@@ -185,6 +188,7 @@ impl ZzClawTermApp {
                             source == UpdateSource::Auto && repository.is_some(),
                             |this| {
                                 let label = match repository {
+                                    Some(UpdateRepository::Gitee) => "Gitee",
                                     Some(UpdateRepository::GitCode) => "GitCode",
                                     _ => "GitHub",
                                 };
