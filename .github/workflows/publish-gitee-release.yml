@@ -149,10 +149,12 @@ jobs:
         run: |
           set -euo pipefail
           public_remote="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          echo "checking whether ${TAG} already exists on Gitee"
           old_sha="$(git ls-remote "${public_remote}" "refs/tags/${TAG}" | awk '{print $1}')"
           work="${RUNNER_TEMP}/gitee-tag"
           git init -q "${work}"
-          git -C "${work}" fetch -q "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          echo "fetching ${TAG} objects from GitHub"
+          git -C "${work}" fetch --progress "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
           new_sha="$(git -C "${work}" rev-parse "refs/tags/${TAG}")"
           target_sha="$(git -C "${work}" rev-parse "refs/tags/${TAG}^{}")"
           [[ "${target_sha}" == "${EXPECTED_SHA}" ]] || {
@@ -162,7 +164,8 @@ jobs:
           if [[ "${old_sha}" != "${new_sha}" ]]; then
             lease=()
             [[ -z "${old_sha}" ]] || lease=("--force-with-lease=refs/tags/${TAG}:${old_sha}")
-            git -C "${work}" push -q "${lease[@]}" \
+            echo "pushing ${TAG} to Gitee (first push carries full history and can take a while)"
+            git -C "${work}" push --progress "${lease[@]}" \
               "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
               "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
