@@ -2,6 +2,7 @@ mod activation;
 mod ai;
 mod app_state;
 mod assets;
+mod capability_runtime;
 mod commands;
 mod connections;
 mod font_catalog;
@@ -14,6 +15,7 @@ mod notes;
 mod pages;
 mod panels;
 mod perf;
+pub(crate) mod plugins;
 mod recording;
 mod remote;
 mod remote_desktop;
@@ -22,7 +24,7 @@ mod runtime_jobs;
 mod selects;
 mod session;
 mod settings;
-mod shell;
+pub(crate) mod shell;
 mod sync;
 
 pub(crate) fn cloud_sync_operation_lock() -> &'static std::sync::Mutex<()> {
@@ -35,7 +37,7 @@ pub(crate) use sync::{AutoSyncResult, AutoSyncTrigger, run_auto_sync};
 mod tab_transfer;
 mod terminal;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod text_inputs;
 mod transfers;
 mod translation;
@@ -65,4 +67,3 @@ pub(in crate::features) use font_catalog::{
     FontCatalogLoadState, FontCatalogPresentation, FontCatalogSnapshot, FontCatalogState,
     FontResolutionSource, FontResolutionStatus, font_names_fingerprint, normalize_font_family,
 };
-pub(crate) use shell::tray::{SystemTray, TraySnapshot, show_window as show_tray_window};

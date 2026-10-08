@@ -2,8 +2,9 @@
 
 use regex::Regex;
 use std::sync::OnceLock;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct TerminalInputState {
     pub value: String,
     /// Byte cursor into `value`.
@@ -13,6 +14,20 @@ pub struct TerminalInputState {
     pub line_rewrite_required: bool,
     pub multiline: bool,
     pub paste_mode: bool,
+}
+
+impl std::fmt::Debug for TerminalInputState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalInputState")
+            .field("value", &"[REDACTED]")
+            .field("cursor", &self.cursor)
+            .field("desynced", &self.desynced)
+            .field("desync_reason", &self.desync_reason)
+            .field("line_rewrite_required", &self.line_rewrite_required)
+            .field("multiline", &self.multiline)
+            .field("paste_mode", &self.paste_mode)
+            .finish()
+    }
 }
 
 impl TerminalInputState {
@@ -243,6 +258,7 @@ pub fn apply_terminal_input_data_in_place(state: &mut TerminalInputState, data: 
 
     match data {
         "\r" | "\u{0003}" => {
+            state.value.zeroize();
             *state = TerminalInputState::reset(false);
             return;
         }

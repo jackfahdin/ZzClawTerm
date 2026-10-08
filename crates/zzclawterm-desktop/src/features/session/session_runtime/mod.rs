@@ -1,5 +1,7 @@
 use zzclawterm_core::AiExecutionProfile;
-use zzclawterm_transport::{SessionKind, SshMultiplexHandle, SshSessionConfig};
+use zzclawterm_transport::{SessionKind, SshSessionConfig};
+
+use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
 
 use super::state::{SavedConnectionStartOptions, SessionStartTabPlacement};
 use crate::models::{SessionLaunchConfig, StartupCommandRequest, WorkspaceSplitDirection};
@@ -10,7 +12,7 @@ pub(in crate::features) struct MultiplexSshStartRequest {
     pub source_connection_id: Option<String>,
     pub ai_execution_profile: AiExecutionProfile,
     pub options: SavedConnectionStartOptions,
-    pub existing_multiplex: Option<SshMultiplexHandle>,
+    pub existing_multiplex: Option<SshConnectionLease>,
     pub existing_multiplex_key: Option<String>,
 }
 

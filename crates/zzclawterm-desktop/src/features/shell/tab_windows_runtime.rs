@@ -1,42 +1,26 @@
 use gpui::Context;
 use zzclawterm_store::{StoreDomain, store_request};
 
-use crate::features::terminal::{TerminalWindowDockResult, TerminalWindowReconcileResult};
+use crate::features::terminal::TerminalWindowDockResult;
 use crate::features::{ZzClawTermApp, formatting::short_id};
 use crate::models::{MainMode, NavItem, SmartSplitMode, TabDockZone};
 
 impl ZzClawTermApp {
     /// Ensure every live session appears in the multi-leaf layout once it is enabled.
     pub(in crate::features) fn reconcile_terminal_windows(&mut self) {
-        // Flat strip mode (default): avoid allocating a full session list on
-        // every residual call when the multi-leaf owner is inactive.
-        if !self.terminal.terminal_window_tree_is_some() {
-            return;
-        }
         let live_ids = self
-            .session
-            .session_order()
-            .iter()
-            .filter(|session_id| {
-                self.session.has_session(session_id) && !self.is_secondary_pane_session(session_id)
-            })
-            .cloned()
+            .ordered_tab_sessions()
+            .into_iter()
+            .map(|session| session.id)
             .collect::<Vec<_>>();
-        let preferred = self.shell.workspace.focused_terminal_leaf_id.clone();
+        let preferred = self.current_terminal_group();
         let active = self.session.active_id_owned();
-        match self.terminal.reconcile_terminal_windows(
+        self.terminal.reconcile_terminal_windows(
             &live_ids,
             preferred.as_deref(),
             active.as_deref(),
-        ) {
-            TerminalWindowReconcileResult::Inactive => {}
-            TerminalWindowReconcileResult::Cleared => {
-                self.shell.workspace.focused_terminal_leaf_id = None;
-            }
-            TerminalWindowReconcileResult::Reconciled { focused_leaf_id } => {
-                self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
-            }
-        }
+        );
+        self.normalize_legacy_terminal_groups();
     }
 
     pub(in crate::features) fn ensure_terminal_windows_root(&mut self) {
@@ -46,25 +30,7 @@ impl ZzClawTermApp {
             .map(|session| session.id)
             .collect::<Vec<_>>();
         let active = self.session.active_id_owned();
-        if let Some(focused_leaf_id) = self.terminal.ensure_terminal_windows_root(tab_ids, active) {
-            self.shell.workspace.focused_terminal_leaf_id = Some(focused_leaf_id);
-        }
-    }
-
-    pub(in crate::features) fn activate_terminal_window_tab(
-        &mut self,
-        leaf_id: String,
-        session_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_terminal_windows_root();
-        self.terminal
-            .activate_terminal_window_tab(&leaf_id, &session_id);
-        self.shell.workspace.focused_terminal_leaf_id = Some(leaf_id);
-        self.activate_session_id_with_surface_sync(&session_id, cx);
-        self.shell.navigation.selected_nav = NavItem::Workspace;
-        self.shell.navigation.main_mode = MainMode::Workspace;
-        cx.notify();
+        self.terminal.ensure_terminal_windows_root(tab_ids, active);
     }
 
     pub(in crate::features) fn terminal_windows_is_multi_leaf(&self) -> bool {
@@ -74,35 +40,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn sync_terminal_windows_active_tab(&mut self, session_id: &str) {
         // Multi-leaf tab ids are tab roots; map secondary pane focus to its strip tab.
         let tab_id = self.tab_root_for_session(session_id);
-        if let Some(leaf_id) = self.terminal.sync_terminal_windows_active_tab(&tab_id) {
-            self.shell.workspace.focused_terminal_leaf_id = Some(leaf_id);
-        }
-    }
-
-    pub(in crate::features) fn place_tab_before_in_terminal_windows(
-        &mut self,
-        tab_id: String,
-        before_tab_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal.terminal_window_tree_is_some() {
-            self.terminal.clear_terminal_window_drop();
-            return;
-        }
-        if let Some(focused_leaf_id) = self
-            .terminal
-            .place_tab_before_in_terminal_windows(&tab_id, &before_tab_id)
-        {
-            self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
-            self.activate_session_id_with_surface_sync(&tab_id, cx);
-            self.shell.set_status(format!(
-                "moved tab {} before {}",
-                short_id(&tab_id),
-                short_id(&before_tab_id)
-            ));
-            self.persist_terminal_window_layout();
-        }
-        cx.notify();
+        self.terminal.sync_terminal_windows_active_tab(&tab_id);
     }
 
     pub(in crate::features) fn set_terminal_window_drop(
@@ -130,6 +68,14 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.ensure_terminal_windows_root();
+        if let TabDockZone::Edge(edge) = zone
+            && !self.terminal_group_can_split(&target_leaf_id, edge.direction())
+        {
+            self.shell
+                .set_status("not enough space to split this group".to_string());
+            cx.notify();
+            return;
+        }
         let focused_leaf_id =
             match self
                 .terminal
@@ -152,7 +98,7 @@ impl ZzClawTermApp {
                 }
                 TerminalWindowDockResult::Docked { focused_leaf_id } => focused_leaf_id,
             };
-        self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
+        let _ = focused_leaf_id;
         self.activate_session_id_with_surface_sync(&tab_id, cx);
         self.shell.navigation.selected_nav = NavItem::Workspace;
         self.shell.navigation.main_mode = MainMode::Workspace;
@@ -172,20 +118,27 @@ impl ZzClawTermApp {
         mode: SmartSplitMode,
         cx: &mut Context<Self>,
     ) {
+        if !self.normalize_legacy_terminal_groups() && !self.shell.workspace.pane_roots.is_empty() {
+            return;
+        }
         let tab_ids = self
             .ordered_tab_sessions()
             .into_iter()
             .map(|session| session.id)
             .collect::<Vec<_>>();
-        if tab_ids.is_empty() {
+        if tab_ids.len() < 2 {
             self.shell.set_status("no tabs to tile".to_string());
             cx.notify();
             return;
         }
         let active = self.session.active_id_owned();
+        let size = self
+            .terminal
+            .terminal_workspace_size()
+            .unwrap_or(self.shell.viewport_size());
         let Some(focused_leaf_id) =
             self.terminal
-                .apply_smart_split(&tab_ids, mode, active.as_deref())
+                .tile_terminal_groups(&tab_ids, mode, size, active.as_deref())
         else {
             self.shell
                 .set_status("unable to build tile layout".to_string());
@@ -195,7 +148,8 @@ impl ZzClawTermApp {
         // Clear global pane splits so multi-leaf rendering takes precedence cleanly.
         self.shell.workspace.split = None;
         self.shell.workspace.split_resize = None;
-        self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
+        self.sync_terminal_frame_snapshot_priority();
+        let _ = focused_leaf_id;
         self.shell.navigation.selected_nav = NavItem::Workspace;
         self.shell.navigation.main_mode = MainMode::Workspace;
         self.shell
@@ -221,7 +175,9 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.terminal_windows_restore_is_complete() {
+        if self.terminal.terminal_windows_restore_is_complete()
+            || self.terminal.terminal_windows_restore_is_in_flight()
+        {
             return;
         }
         if !self.settings.summary().startup_restore
@@ -231,7 +187,11 @@ impl ZzClawTermApp {
             return;
         }
         // Do not open the config DB during connect/register; wait for idle.
-        if self.session.start_has_pending() || self.runtime_output_pressure_active() {
+        if self.session.start_has_pending()
+            || self.runtime_output_pressure_active()
+            || !self.shell.workspace_layout_restore_is_settled()
+            || !self.session.restore_is_complete()
+        {
             return;
         }
         let ordered = self
@@ -249,13 +209,13 @@ impl ZzClawTermApp {
             }
             return;
         }
-        self.terminal.complete_terminal_windows_restore();
         let active = self.session.active_id_owned();
         let loaded = self
             .stores
             .startup_restore
             .update(cx, |store, _| store.take_loaded_terminal_window_layout());
         if let Some(layout) = loaded {
+            self.terminal.complete_terminal_windows_restore();
             if let Some(layout) = layout
                 && let Some(focused_leaf_id) = self.terminal.restore_terminal_window_layout(
                     &layout,
@@ -263,19 +223,32 @@ impl ZzClawTermApp {
                     active.as_deref(),
                 )
             {
-                self.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
+                if self.shell.workspace.pane_roots.is_empty()
+                    && let Some(group) = focused_leaf_id
+                    && let Some((_, Some(tab))) = self.terminal.terminal_group_tabs(&group)
+                {
+                    self.select_session(tab, cx);
+                }
                 self.shell
                     .set_status("restored multi-leaf window layout".to_string());
             }
+            self.normalize_legacy_terminal_groups();
             cx.notify();
             return;
         }
+        self.terminal.begin_terminal_windows_restore();
+        let restore_revision = self.workspace_revision;
         self.submit_store_request(
             0,
             store_request(StoreDomain::Sessions, |store| {
                 store.load_terminal_window_layout()
             }),
             move |this, event, cx| {
+                this.terminal.complete_terminal_windows_restore();
+                if this.workspace_revision != restore_revision {
+                    this.normalize_legacy_terminal_groups();
+                    return;
+                }
                 match event.outcome {
                     Ok(Some(layout)) => {
                         if let Some(focused_leaf_id) = this.terminal.restore_terminal_window_layout(
@@ -283,16 +256,25 @@ impl ZzClawTermApp {
                             &ordered,
                             active.as_deref(),
                         ) {
-                            this.shell.workspace.focused_terminal_leaf_id = focused_leaf_id;
+                            if this.shell.workspace.pane_roots.is_empty()
+                                && let Some(group) = focused_leaf_id
+                                && let Some((_, Some(tab))) =
+                                    this.terminal.terminal_group_tabs(&group)
+                            {
+                                this.select_session(tab, cx);
+                            }
                             this.shell
                                 .set_status("restored multi-leaf window layout".to_string());
                         }
                     }
                     Ok(None) => {}
-                    Err(error) => this
-                        .shell
-                        .set_status(format!("failed to restore terminal layout: {error}")),
+                    Err(error) => {
+                        this.terminal.preserve_unread_terminal_layout();
+                        this.shell
+                            .set_status(format!("failed to restore terminal layout: {error}"));
+                    }
                 }
+                this.normalize_legacy_terminal_groups();
                 cx.notify();
             },
             cx,

@@ -6,7 +6,7 @@ use gpui::{
 use gpui_kit::component::Disableable;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{
-    InputEvent, InputState, MaskPattern, NumberInput, NumberInputEvent, StepAction,
+    InputEvent, InputState, MaskPattern, NumberInput, NumberInputEvent, NumberStep, StepAction,
 };
 
 use crate::input_focus::{preserve_nya_input_focus_on_pointer_down, register_nya_input_focus};
@@ -94,6 +94,7 @@ pub struct ZzClawNumberInputState {
     state: Option<Entity<InputState>>,
     seed: SharedString,
     pending_value: Option<SharedString>,
+    silent_value: Option<SharedString>,
     placeholder: SharedString,
     options: ZzClawNumberInputOptions,
     focus: FocusHandle,
@@ -111,6 +112,7 @@ impl ZzClawNumberInputState {
             state: None,
             seed: seed.into(),
             pending_value: None,
+            silent_value: None,
             placeholder: SharedString::default(),
             options,
             focus: cx.focus_handle(),
@@ -136,6 +138,14 @@ impl ZzClawNumberInputState {
 
     pub fn set_content(&mut self, text: &str, cx: &mut Context<Self>) {
         self.pending_value = Some(SharedString::from(text.to_string()));
+        cx.notify();
+    }
+
+    /// Replace a draft buffer without reporting the rollback as a user edit.
+    pub fn set_content_silent(&mut self, text: &str, cx: &mut Context<Self>) {
+        let value = SharedString::from(text.to_string());
+        self.silent_value = Some(value.clone());
+        self.pending_value = Some(value);
         cx.notify();
     }
 
@@ -182,19 +192,25 @@ impl ZzClawNumberInputState {
             .take()
             .unwrap_or_else(|| self.seed.clone());
         let placeholder = self.placeholder.clone();
-        let mask_pattern = (!self.options.allow_infinity).then_some(MaskPattern::Number {
-            separator: None,
-            fraction: self.options.decimal_places,
-        });
-        let state = cx.new(|cx| {
-            let state = InputState::new(window, cx)
-                .default_value(value)
-                .placeholder(placeholder);
-            if let Some(mask_pattern) = mask_pattern {
-                state.mask_pattern(mask_pattern)
-            } else {
-                state
+        // The component installs a numeric mask unless one is set explicitly,
+        // and that mask would reject the `∞` an infinity-capable field steps to.
+        let mask_pattern = if self.options.allow_infinity {
+            MaskPattern::None
+        } else {
+            MaskPattern::Number {
+                separator: None,
+                fraction: self.options.decimal_places,
             }
+        };
+        let state = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .default_value(value)
+                .placeholder(placeholder)
+                .mask_pattern(mask_pattern);
+            // The component steps by 1 with no bounds unless told otherwise;
+            // stepping here keeps the range, decimals and the `∞` wrap.
+            state.set_step(None::<NumberStep>, window, cx);
+            state
         });
         register_nya_input_focus(&state.read(cx).focus_handle(cx), cx);
         self.subscriptions = vec![
@@ -220,9 +236,15 @@ impl ZzClawNumberInputState {
                 window,
                 |this, input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => {
-                        cx.emit(ZzClawNumberInputEvent::Changed(
-                            input.read(cx).value().to_string(),
-                        ));
+                        let value = input.read(cx).value().to_string();
+                        if this
+                            .silent_value
+                            .take()
+                            .is_some_and(|expected| expected.as_ref() == value)
+                        {
+                            return;
+                        }
+                        cx.emit(ZzClawNumberInputEvent::Changed(value));
                     }
                     InputEvent::PressEnter { .. } => {
                         let committed = this.committed_value(input.read(cx).value().as_ref());
@@ -321,6 +343,7 @@ impl RenderOnce for ZzClawNumberInput {
             })
             .child(
                 NumberInput::new(&state)
+                    .w_full()
                     .with_size(form_control_size())
                     .h(form_control_height())
                     .appearance(self.appearance)
@@ -399,13 +422,87 @@ fn format_number(value: f64, options: &ZzClawNumberInputOptions) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{
+        AppContext as _, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, div,
+        px,
+    };
 
     use super::{
-        ZzClawNumberInputOptions, ZzClawNumberInputState, ZzClawNumberStep, committed_number_text,
-        stepped_number_text,
+        ZzClawNumberInput, ZzClawNumberInputOptions, ZzClawNumberInputState, ZzClawNumberStep,
+        committed_number_text, stepped_number_text,
     };
     use crate::sizing::{NYA_FORM_CONTROL_HEIGHT_PX, form_control_size};
+
+    struct NumberLayoutFixture {
+        count: gpui::Entity<ZzClawNumberInputState>,
+        interval: gpui::Entity<ZzClawNumberInputState>,
+    }
+
+    impl Render for NumberLayoutFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().flex().children([
+                div()
+                    .w(px(128.))
+                    .h(px(32.))
+                    .flex_none()
+                    .child(ZzClawNumberInput::new(&self.count).appearance(false)),
+                div()
+                    .w(px(160.))
+                    .h(px(32.))
+                    .flex_none()
+                    .child(ZzClawNumberInput::new(&self.interval).appearance(false)),
+            ])
+        }
+    }
+
+    #[gpui::test]
+    fn borderless_number_inputs_leave_room_for_values_and_both_step_buttons(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| NumberLayoutFixture {
+            count: cx.new(|cx| {
+                ZzClawNumberInputState::new(
+                    cx,
+                    "9999",
+                    ZzClawNumberInputOptions::default()
+                        .range(1., 9999.)
+                        .allow_infinity(true),
+                )
+            }),
+            interval: cx.new(|cx| {
+                ZzClawNumberInputState::new(
+                    cx,
+                    "60.00",
+                    ZzClawNumberInputOptions::default()
+                        .range(0., 60.)
+                        .decimal_places(2)
+                        .suffix("s"),
+                )
+            }),
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        fixture.read_with(cx, |fixture, cx| {
+            for (field, left, width, expected) in [
+                (&fixture.count, 0., 128., "9999"),
+                (&fixture.interval, 128., 160., "60.00"),
+            ] {
+                let input = field.read(cx).component_state().unwrap();
+                let bounds = input.read(cx).input_bounds();
+                assert!(bounds.size.width >= px(32.));
+                assert!(bounds.size.height > px(0.));
+                assert!(bounds.origin.x >= px(left + 32.));
+                assert!(bounds.right() <= px(left + width - 32.));
+                assert_eq!(field.read(cx).value(cx), expected);
+            }
+        });
+    }
 
     #[test]
     fn stepped_number_increments_decrements_and_clamps() {

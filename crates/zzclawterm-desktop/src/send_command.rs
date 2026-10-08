@@ -71,41 +71,6 @@ pub(crate) fn parse_send_command_hex(value: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub(crate) fn format_send_command_hex_display(draft: &str) -> String {
-    let normalized = draft.replace("\r\n", "\n").replace("\r", "\n");
-    normalized
-        .split('\n')
-        .map(|line| {
-            let cleaned: String = line
-                .chars()
-                .filter(|ch| ch.is_ascii_hexdigit())
-                .map(|ch| ch.to_ascii_uppercase())
-                .collect();
-            let mut formatted = String::new();
-            let mut byte_index = 0usize;
-            let mut i = 0usize;
-            while i < cleaned.len() {
-                let end = (i + 2).min(cleaned.len());
-                let byte = &cleaned[i..end];
-                formatted.push_str(byte);
-                if byte.len() == 2 {
-                    byte_index += 1;
-                    if i + 2 < cleaned.len() {
-                        if byte_index.is_multiple_of(4) {
-                            formatted.push_str("  ");
-                        } else {
-                            formatted.push(' ');
-                        }
-                    }
-                }
-                i = end;
-            }
-            formatted
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub(crate) fn build_send_command_units_for(
     draft: &str,
     data_type: SendCommandDataType,
@@ -126,6 +91,9 @@ pub(crate) fn build_send_command_units_for(
             }
         }
         SendCommandDataType::Text => {
+            if draft.is_empty() {
+                return Ok(Vec::new());
+            }
             let shell_target = matches!(
                 session_kind,
                 Some(SessionKind::LocalPty | SessionKind::Ssh | SessionKind::Telnet) | None
@@ -163,7 +131,7 @@ mod tests {
 
     use super::{
         SendCommandDataType, SendCommandLineEnding, SendCommandMode, build_send_command_units_for,
-        format_send_command_hex_display, parse_send_command_hex,
+        parse_send_command_hex,
     };
 
     #[test]
@@ -226,14 +194,18 @@ mod tests {
     }
 
     #[test]
-    fn formats_hex_pairs_with_quad_spacing() {
-        assert_eq!(
-            format_send_command_hex_display("48656c6c6f20"),
-            "48 65 6C 6C  6F 20"
-        );
-        assert_eq!(
-            format_send_command_hex_display("48 65\n6c6c"),
-            "48 65\n6C 6C"
-        );
+    fn empty_text_has_no_send_units_and_unicode_counts_utf8_bytes() {
+        let build = |draft| {
+            build_send_command_units_for(
+                draft,
+                SendCommandDataType::Text,
+                SendCommandMode::Character,
+                SendCommandLineEnding::None,
+                Some(SessionKind::Serial),
+            )
+            .unwrap()
+        };
+        assert!(build("").is_empty());
+        assert_eq!(build("中a"), vec!["中".as_bytes().to_vec(), vec![b'a']]);
     }
 }

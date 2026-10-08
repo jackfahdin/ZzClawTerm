@@ -236,6 +236,7 @@ impl ZzClawTermApp {
         }
 
         let key = SshKey {
+            sort_order: 0,
             id: editor.id.clone().unwrap_or_default(),
             name,
             key: (!editor.key_data.trim().is_empty()).then_some(editor.key_data),

@@ -1,3 +1,5 @@
+pub(super) mod resize;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +25,8 @@ pub(in crate::features) struct RemoteDesktopFeatureState {
     pub(super) focus: FocusHandle,
     pub(in crate::features) restore_pending: Option<String>,
     pub(super) inputs: HashMap<String, gpui::Entity<super::input::RemoteDesktopInput>>,
+    pub(super) surfaces: HashMap<String, gpui::Entity<super::surface::RemoteDesktopSurface>>,
+    pub(super) drain_cursor: usize,
     pub(super) last_clipboard_poll: Option<Instant>,
     pub(super) metrics_enabled: bool,
     pub(super) metrics_last_report: Instant,
@@ -54,11 +58,17 @@ pub(super) struct RemoteDesktopSessionState {
     pub(super) state: RemoteDesktopViewState,
     pub(super) framebuffer: Option<Framebuffer>,
     pub(super) texture: Option<DynamicTexture>,
+    pub(super) texture_dirty: bool,
     pub(super) cursor_shape: Option<CursorShape>,
     pub(super) cursor_position: CursorPosition,
     pub(super) cursor_visible: bool,
     pub(super) cursor_texture: Option<DynamicTexture>,
     pub(super) certificate_request: Option<RdpCertificatePrompt>,
+    pub(super) vnc_key_request: Option<(
+        zzclawterm_remote_desktop::VncServerKeyRequest,
+        Option<String>,
+    )>,
+    pub(super) vnc_trust_previous: Option<String>,
     pub(super) error: Option<RemoteDesktopError>,
     pub(super) capability: Option<RdpCapability>,
     pub(super) server_capabilities: Option<RdpServerCapabilities>,
@@ -86,11 +96,14 @@ impl Default for RemoteDesktopSessionState {
             state: RemoteDesktopViewState::Connecting,
             framebuffer: None,
             texture: None,
+            texture_dirty: false,
             cursor_shape: None,
             cursor_position: CursorPosition::default(),
             cursor_visible: true,
             cursor_texture: None,
             certificate_request: None,
+            vnc_key_request: None,
+            vnc_trust_previous: None,
             error: None,
             capability: None,
             server_capabilities: None,
@@ -142,6 +155,8 @@ impl RemoteDesktopFeatureState {
             focus,
             restore_pending: None,
             inputs: HashMap::new(),
+            surfaces: HashMap::new(),
+            drain_cursor: 0,
             last_clipboard_poll: None,
             metrics_enabled: std::env::var("ZZCLAWTERM_RDP_METRICS").as_deref() == Ok("1"),
             metrics_last_report: Instant::now(),
@@ -241,6 +256,7 @@ impl RemoteDesktopFeatureState {
 
     pub(in crate::features) fn remove_session(&mut self, session_id: &str) {
         self.inputs.remove(session_id);
+        self.surfaces.remove(session_id);
         self.routes.remove(session_id);
         if let Some(mut session) = self.sessions.remove(session_id) {
             if let Some(texture) = session.texture.take() {
@@ -250,6 +266,8 @@ impl RemoteDesktopFeatureState {
                 self.pending_texture_removals.push(texture);
             }
         }
+        // Resource disposal must run even when the last helper is already gone.
+        self.wake.signal(ANY_INTEREST);
     }
 
     pub(super) fn insert_connecting(&mut self, session_id: String) {
@@ -270,6 +288,19 @@ mod tests {
     use zzclawterm_remote_desktop::{RdpErrorKind, RemoteDesktopViewState};
 
     use super::RemoteDesktopFeatureState;
+
+    #[test]
+    fn removing_the_last_session_wakes_disposal_without_protocol_events() {
+        let cx = gpui::TestAppContext::single();
+        let focus = cx.update(|cx| cx.focus_handle());
+        let mut state = RemoteDesktopFeatureState::new(focus);
+        let mut wake = state.take_wake_receiver().unwrap();
+        state.insert_disconnected("last".to_string());
+        state.arm_event_wake();
+        state.remove_session("last");
+        assert!(wake.try_recv().is_ok());
+        assert!(state.sessions.is_empty());
+    }
 
     #[test]
     fn failed_session_transition_clears_transient_protocol_state() {

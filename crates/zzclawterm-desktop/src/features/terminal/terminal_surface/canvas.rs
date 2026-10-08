@@ -101,24 +101,14 @@ impl ZzClawTermApp {
                 cx.stop_propagation();
                 return;
             }
-            if self.terminal.selection.selection.is_some()
-                && smart_input_selection.is_some()
-                && self.handle_smart_input_selection_key(event, cx)
-            {
-                cx.stop_propagation();
-                return;
-            }
             if self.terminal_should_defer_key_text_to_input_handler(event) {
                 return;
             }
             cx.stop_propagation();
-            // When a non-smart buffer selection is painted, still send
-            // keystrokes but skip suggestion tracking so the selection
-            // edit path stays isolated (Tauri preserves selection).
-            let has_buffer_selection =
-                self.terminal.selection.selection.is_some() && smart_input_selection.is_none();
-            if has_buffer_selection {
-                self.send_terminal_key_event(event, false, cx);
+            if smart_input_selection.is_some()
+                && let Some(text) = event.keystroke.key_char.as_deref()
+            {
+                self.commit_terminal_text(text, cx);
             } else {
                 self.send_terminal_key_event(event, true, cx);
             }
@@ -554,6 +544,9 @@ impl ZzClawTermApp {
                         .pr(px(8.))
                         .text_color(rgb(palette.text_dimmed))
                         .font(terminal_gpui_font.clone())
+                        .font_weight(FontWeight(
+                            self.settings.summary().terminal_font_weight as f32,
+                        ))
                         .text_size(px(self.settings.summary().terminal_font_size as f32))
                         .when(show_timestamps, |this| {
                             this.child(div().w(px(ts_w)).flex_none().child(labels.timestamp))
@@ -678,7 +671,6 @@ impl ZzClawTermApp {
             .unwrap_or(palette.link);
         let sync_status_label = if sync_is_paused { "Paused" } else { "Syncing" };
         let output_session_id = session_id.clone();
-        let terminal_font_size = self.settings.summary().terminal_font_size as f32;
         let performance_overlay = self
             .terminal
             .view
@@ -728,17 +720,6 @@ impl ZzClawTermApp {
             .unwrap_or("Local");
         let (drop_title, drop_hint) =
             zzclawterm_core::terminal_drop_overlay_copy(drop_session_kind);
-        let selection_belongs_to_surface = self
-            .terminal
-            .selection
-            .session_id
-            .as_deref()
-            .map(|selection_session_id| selection_session_id == session_id)
-            .unwrap_or(is_active);
-        let context_selection = selection_belongs_to_surface
-            .then(|| self.selected_terminal_text())
-            .flatten()
-            .unwrap_or_default();
         let context_menu_enabled = !session_id.is_empty()
             && self
                 .settings
@@ -747,18 +728,16 @@ impl ZzClawTermApp {
                 == zzclawterm_core::TerminalRightClickAction::Menu
             && (!terminal_mouse_reporting
                 || self.settings.summary().interaction_mouse_events_require_alt);
-        let context_menu_items =
-            self.terminal_context_menu_items(session_id.to_string(), context_selection, cx);
+        let context_menu_app = cx.entity().downgrade();
+        let context_menu_session_id = session_id.clone();
 
+        // Menus and terminal chrome inherit the UI typography. Terminal text
+        // surfaces set their own font so it cannot leak into popup labels.
         let canvas = div()
             .flex_1()
             .h_full()
             .min_h_0()
-            .font(terminal_gpui_font)
-            .text_size(px(terminal_font_size))
-            .font_weight(FontWeight(
-                self.settings.summary().terminal_font_weight as f32,
-            ))
+            .bg(self.shell_terminal_surface_color(palette.terminal_bg))
             .text_color(rgb(palette.terminal_fg))
             .child(
                 div()
@@ -766,7 +745,6 @@ impl ZzClawTermApp {
                     .flex()
                     .flex_col()
                     .relative()
-                    .bg(self.shell_transparent_color(palette.terminal_bg))
                     .key_context(TERMINAL_KEY_CONTEXT)
                     .track_focus(&self.terminal.input.focus)
                     .on_action(cx.listener(|this, _: &TerminalTab, window, cx| {
@@ -810,56 +788,6 @@ impl ZzClawTermApp {
                             this.mark_user_activity();
                         }
                     }))
-                    .when(is_disconnected, |this| {
-                        this.child(
-                            div()
-                                .h(px(26.))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .px_3()
-                                .border_b_1()
-                                .border_color(rgb(palette.border))
-                                .bg(self.shell_surface_color(palette.input))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight(700.))
-                                        .text_color(rgb(palette.danger))
-                                        .child(rust_i18n::t!("terminal.disconnectedStatus")),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(palette.warning))
-                                        .child(rust_i18n::t!("terminal.reconnectHint")),
-                                ),
-                        )
-                    })
-                    .when(
-                        !session_id.is_empty()
-                            && !self.shell.status().trim().is_empty()
-                            && !is_active,
-                        |this| {
-                            this.child(
-                                div()
-                                    .h(px(22.))
-                                    .flex()
-                                    .items_center()
-                                    .px_3()
-                                    .border_b_1()
-                                    .border_color(rgb(palette.border))
-                                    .bg(self.shell_surface_color(palette.input))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(palette.text_muted))
-                                            .child(self.shell.status().to_string()),
-                                    ),
-                            )
-                        },
-                    )
                     // Empty-workspace bootstrap actions stay available when no session is selected.
                     .when(session_id.is_empty(), |this| {
                         this.child(
@@ -898,7 +826,7 @@ impl ZzClawTermApp {
                         )
                     })
                     .child(
-                        ZzClawContextMenu::new(
+                        ZzClawContextMenu::new_dynamic(
                             div()
                                 .id(SharedString::from(format!(
                                     "terminal-output-{output_session_id}"
@@ -1149,7 +1077,11 @@ impl ZzClawTermApp {
                                                 .border_color(rgb(palette.link))
                                                 .bg(rgba((palette.terminal_cursor << 8) | 0x33))
                                                 .text_color(rgb(palette.terminal_fg))
-                                                .font_family(terminal_font_family.clone())
+                                                .font(terminal_gpui_font.clone())
+                                                .font_weight(FontWeight(
+                                                    self.settings.summary().terminal_font_weight
+                                                        as f32,
+                                                ))
                                                 .text_size(px(self
                                                     .settings
                                                     .summary()
@@ -1345,7 +1277,16 @@ impl ZzClawTermApp {
                                             ),
                                     )
                                 }),
-                            context_menu_items,
+                            move |_, cx| {
+                                context_menu_app
+                                    .update(cx, |this, cx| {
+                                        this.terminal_context_menu_items_for_session(
+                                            context_menu_session_id.clone(),
+                                            cx,
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            },
                         )
                         .min_width(px(200.))
                         .enabled(context_menu_enabled),

@@ -19,6 +19,7 @@ pub(in crate::features) struct SessionTabDragPayload {
     pub source_revision: u64,
     pub session_id: String,
     pub order_index: usize,
+    pub source_group_id: Option<String>,
     pub display_name: String,
     pub kind_label: &'static str,
     pub kind_icon: &'static str,
@@ -402,7 +403,8 @@ impl ZzClawTermApp {
             }
         }
 
-        self.select_session(session_id, cx);
+        self.select_session(session_id.clone(), cx);
+        self.focus_terminal_session(&session_id, window, cx);
     }
 
     pub(in crate::features) fn handle_session_tab_mouse_down(
@@ -448,6 +450,32 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if dragged_session_id == target_session_id {
+            self.clear_session_tab_drag(cx);
+            return;
+        }
+        if let Some(mut root) = self.terminal.terminal_window_tree() {
+            let before = if insert_after {
+                root.leaf_tab_ids_for_tab(&target_session_id)
+                    .and_then(|tabs| {
+                        tabs.iter()
+                            .position(|id| id == &target_session_id)
+                            .and_then(|index| tabs.get(index + 1).cloned())
+                    })
+            } else {
+                Some(target_session_id.clone())
+            };
+            let changed = if let Some(before) = before {
+                root.place_tab_before(&dragged_session_id, &before)
+            } else if let Some(group) = root.leaf_for_tab(&target_session_id).map(str::to_string) {
+                root.move_tab_to_leaf(&dragged_session_id, &group)
+            } else {
+                false
+            };
+            if changed {
+                self.terminal.restore_terminal_window_tree(Some(root));
+                self.select_session(dragged_session_id, cx);
+                self.persist_open_tabs();
+            }
             self.clear_session_tab_drag(cx);
             return;
         }

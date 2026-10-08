@@ -14,7 +14,7 @@ use crate::models::{ConnectionEditorField, ConnectionEditorSelect};
 
 use super::super::super::list::{
     ConnectionEditorRenderContext, connection_editor_select, connection_editor_select_on_open,
-    editor_field_box, required,
+    editor_stepper_field, required,
 };
 use super::{ConnectionEditorSectionContext, recording::connection_editor_recording_section};
 
@@ -152,12 +152,17 @@ fn serial_baud_picker(
                                 .text_color(rgb(palette.text_muted))
                                 .child(t!("dialog.customBaudRate")),
                         )
-                        .child(editor_field_box(
-                            palette,
-                            ConnectionEditorField::BaudRate,
-                            fields,
-                            cx,
-                        ))
+                        .child(
+                            div()
+                                .debug_selector(|| "connection-editor-custom-baud".to_string())
+                                .child(editor_stepper_field(
+                                    palette,
+                                    "",
+                                    ConnectionEditorField::BaudRate,
+                                    fields,
+                                    cx,
+                                )),
+                        )
                         .when(!valid, |this| {
                             this.child(
                                 div()
@@ -171,19 +176,27 @@ fn serial_baud_picker(
                             )
                         })
                         .child(
-                            zzclawterm_ui::ZzClawButton::new(
-                                "connection-editor-apply-custom-baud",
-                                t!("dialog.applyCustomBaudRate"),
-                            )
-                            .disabled(!valid)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let value = this
-                                    .connection_state
-                                    .active_editor_draft()
-                                    .map(|editor| editor.baud_rate)
-                                    .unwrap_or_default();
-                                this.set_connection_editor_baud_rate(value, cx);
-                            })),
+                            div()
+                                .debug_selector(|| {
+                                    "connection-editor-apply-custom-baud".to_string()
+                                })
+                                .child(
+                                    zzclawterm_ui::ZzClawButton::new(
+                                        "connection-editor-apply-custom-baud",
+                                        t!("dialog.applyCustomBaudRate"),
+                                    )
+                                    .disabled(!valid)
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            let value = this
+                                                .connection_state
+                                                .active_editor_draft()
+                                                .map(|editor| editor.baud_rate)
+                                                .unwrap_or_default();
+                                            this.set_connection_editor_baud_rate(value, cx);
+                                        },
+                                    )),
+                                ),
                         ),
                 ),
         );
@@ -293,6 +306,16 @@ pub(super) fn connection_editor_serial_section(
                     ConnectionEditorSelect::StopBits,
                 )),
         )
+        .child(connection_editor_select(
+            ConnectionEditorRenderContext {
+                palette,
+                fields,
+                cx,
+            },
+            "connection-editor-flow-control",
+            t!("dialog.serialFlowControl"),
+            ConnectionEditorSelect::FlowControl,
+        ))
         .child(
             div()
                 .id("connection-editor-serial-advanced-toggle")

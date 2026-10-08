@@ -1,43 +1,15 @@
 use rust_i18n::t;
 
-use gpui::{
-    AppContext as _, Context, FontWeight, IntoElement, Point, Render, Window, div, prelude::*, px,
-    rgb,
-};
+use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
 use zzclawterm_core::truncate_preview;
 
 use crate::features::ZzClawTermApp;
 use crate::theme::ThemePalette;
 use crate::widgets::empty_panel;
 
+use super::drag::{security_drag_handle, security_sortable_row};
 use super::{security_auth_body_base, security_tab_toolbar};
-
-#[derive(Clone)]
-struct SecurityCredentialDragPayload {
-    id: String,
-    label: String,
-}
-
-struct SecurityCredentialDragPreview {
-    label: String,
-    position: Point<gpui::Pixels>,
-}
-
-impl Render for SecurityCredentialDragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .absolute()
-            .left(self.position.x)
-            .top(self.position.y)
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(0x202938))
-            .text_xs()
-            .text_color(rgb(0xf1f5f9))
-            .child(self.label.clone())
-    }
-}
+use crate::models::SecurityAuthTab;
 
 impl ZzClawTermApp {
     pub(super) fn security_credentials_body(
@@ -83,17 +55,7 @@ impl ZzClawTermApp {
                     .unwrap_or_default();
                 let username_copy_id = entry.id.clone();
                 let password_copy_id = entry.id.clone();
-                let drag_id = entry.id.clone();
-                let drop_id = entry.id.clone();
-                let is_drop_before = self
-                    .security
-                    .credential_drop_target()
-                    .is_some_and(|target| target.id == entry.id && !target.after);
-                let is_drop_after = self
-                    .security
-                    .credential_drop_target()
-                    .is_some_and(|target| target.id == entry.id && target.after);
-                rows = rows.child(
+                rows = rows.child(security_sortable_row(
                     div()
                         .min_h(px(48.))
                         .when(index + 1 < entry_count, |this| {
@@ -105,12 +67,6 @@ impl ZzClawTermApp {
                         .when(compact, |this| this.flex_col().items_stretch())
                         .when(!compact, |this| this.items_center())
                         .gap_2()
-                        .when(is_drop_before, |this| {
-                            this.border_t_2().border_color(rgb(palette.link))
-                        })
-                        .when(is_drop_after, |this| {
-                            this.border_b_2().border_color(rgb(palette.link))
-                        })
                         .hover(|this| this.bg(rgb(palette.hover)))
                         .child(
                             div()
@@ -120,27 +76,7 @@ impl ZzClawTermApp {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .id(format!("security-cred-drag-{id}"))
-                                        .flex_none()
-                                        .cursor_move()
-                                        .child(crate::features::view_widgets::mono_icon(
-                                            "icons/drag.svg",
-                                            rgb(palette.text_dimmed).into(),
-                                            14.,
-                                        ))
-                                        .on_drag(
-                                            SecurityCredentialDragPayload {
-                                                id: drag_id,
-                                                label: entry.name.clone(),
-                                            },
-                                            |payload, position, _, cx| {
-                                                cx.new(|_| SecurityCredentialDragPreview {
-                                                    label: payload.label.clone(),
-                                                    position,
-                                                })
-                                            },
-                                        ),
+                                    security_drag_handle(SecurityAuthTab::Credentials, entry.id.clone(), entry.name.clone(), palette),
                                 )
                                 .child(
                                     div()
@@ -321,40 +257,9 @@ impl ZzClawTermApp {
                                     )),
                                 ),
                         )
-                        .on_drag_move(cx.listener({
-                            let target_id = drop_id.clone();
-                            move |this,
-                                  event: &gpui::DragMoveEvent<SecurityCredentialDragPayload>,
-                                  _,
-                                  cx| {
-                                let _ = event.drag(cx);
-                                let after = event.event.position.y
-                                    >= event.bounds.origin.y + event.bounds.size.height / 2.;
-                                this.security.set_credential_drop_target(Some(
-                                    crate::models::SecurityCredentialDropTarget {
-                                        id: target_id.clone(),
-                                        after,
-                                    },
-                                ));
-                                cx.notify();
-                            }
-                        }))
-                        .on_drop(cx.listener(
-                            move |this, payload: &SecurityCredentialDragPayload, _, cx| {
-                                let after = this
-                                    .security
-                                    .credential_drop_target()
-                                    .filter(|target| target.id == drop_id)
-                                    .is_some_and(|target| target.after);
-                                this.reorder_security_credentials(
-                                    payload.id.clone(),
-                                    drop_id.clone(),
-                                    after,
-                                    cx,
-                                );
-                            },
-                        )),
-                );
+                        ,
+                    SecurityAuthTab::Credentials, entry.id.clone(), palette, self, cx,
+                ));
             }
             body = body.child(rows);
         }

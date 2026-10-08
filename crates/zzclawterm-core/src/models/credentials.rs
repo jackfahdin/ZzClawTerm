@@ -118,6 +118,8 @@ impl ConnectionAuth {
 pub struct SshKey {
     #[serde(default = "uuid_v4")]
     pub id: String,
+    #[serde(default)]
+    pub sort_order: i32,
     pub name: String,
     #[serde(default)]
     pub key: Option<SecretString>,
@@ -148,6 +150,8 @@ pub struct DecryptedSshKey {
 pub struct SavedPassword {
     #[serde(default = "uuid_v4")]
     pub id: String,
+    #[serde(default)]
+    pub sort_order: i32,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub username: String,

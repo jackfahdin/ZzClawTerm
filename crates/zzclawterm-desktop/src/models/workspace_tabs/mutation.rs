@@ -1,4 +1,4 @@
-use super::{TerminalWindowNode, WorkspacePaneNode, WorkspaceSplitDirection};
+use super::{TerminalWindowNode, WorkspaceSplitDirection};
 
 impl TerminalWindowNode {
     pub(crate) fn remove_tab(&mut self, tab_id: &str) -> Option<Self> {
@@ -15,9 +15,12 @@ impl TerminalWindowNode {
                         active_tab_id: active_tab_id.clone(),
                     });
                 }
+                let removed_index = tab_ids.iter().position(|id| id == tab_id).unwrap_or(0);
                 tab_ids.retain(|id| id != tab_id);
                 if active_tab_id.as_deref() == Some(tab_id) {
-                    *active_tab_id = tab_ids.first().cloned();
+                    *active_tab_id = tab_ids
+                        .get(removed_index.min(tab_ids.len().saturating_sub(1)))
+                        .cloned();
                 }
                 if tab_ids.is_empty() {
                     None
@@ -54,14 +57,11 @@ impl TerminalWindowNode {
     }
 
     pub(crate) fn move_tab_to_leaf(&mut self, tab_id: &str, target_leaf_id: &str) -> bool {
-        if !self.contains_tab(tab_id) {
+        if !self.contains_tab(tab_id) || self.leaf_tabs(target_leaf_id).is_none() {
             return false;
         }
-        // Already on target leaf.
-        if let Self::Leaf { id, tab_ids, .. } = self
-            && id == target_leaf_id
-        {
-            return tab_ids.iter().any(|id| id == tab_id);
+        if let Some(moved) = self.move_existing_tab_to_leaf_end(tab_id, target_leaf_id) {
+            return moved;
         }
         let Some(removed) = self.remove_tab(tab_id) else {
             return false;
@@ -73,6 +73,26 @@ impl TerminalWindowNode {
             // Target gone; put back on first leaf.
             self.insert_tab_into_first_leaf(tab_id);
             false
+        }
+    }
+
+    fn move_existing_tab_to_leaf_end(&mut self, tab: &str, leaf: &str) -> Option<bool> {
+        match self {
+            Self::Leaf {
+                id,
+                tab_ids,
+                active_tab_id,
+            } if id == leaf => {
+                let index = tab_ids.iter().position(|id| id == tab)?;
+                let tab = tab_ids.remove(index);
+                *active_tab_id = Some(tab.clone());
+                tab_ids.push(tab);
+                Some(true)
+            }
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .move_existing_tab_to_leaf_end(tab, leaf)
+                .or_else(|| second.move_existing_tab_to_leaf_end(tab, leaf)),
         }
     }
 
@@ -110,7 +130,7 @@ impl TerminalWindowNode {
                 ..
             } => {
                 if id == split_id {
-                    *ratio_percent = WorkspacePaneNode::clamped_ratio_percent(value);
+                    *ratio_percent = value.clamp(1, 99);
                     true
                 } else {
                     first.set_ratio_for_split(split_id, value)

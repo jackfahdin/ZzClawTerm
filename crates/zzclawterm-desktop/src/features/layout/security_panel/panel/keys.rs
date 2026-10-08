@@ -7,7 +7,9 @@ use crate::features::ZzClawTermApp;
 use crate::theme::ThemePalette;
 use crate::widgets::empty_panel;
 
+use super::drag::{security_drag_handle, security_sortable_row};
 use super::{security_auth_body_base, security_tab_toolbar};
+use crate::models::SecurityAuthTab;
 
 impl ZzClawTermApp {
     pub(super) fn security_keys_body(
@@ -43,7 +45,7 @@ impl ZzClawTermApp {
                 let public_id = key.id.clone();
                 let edit_id = key.id.clone();
                 let delete_id = key.id.clone();
-                rows = rows.child(
+                rows = rows.child(security_sortable_row(
                     div()
                         .min_h(px(42.))
                         .when(index + 1 < entry_count, |this| {
@@ -57,13 +59,27 @@ impl ZzClawTermApp {
                         .gap_2()
                         .hover(|this| this.bg(rgb(palette.hover)))
                         .child(
-                            div().min_w_0().flex_1().flex().flex_col().child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(palette.text))
-                                    .overflow_hidden()
-                                    .child(truncate_preview(&key.name, 28)),
-                            ),
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(security_drag_handle(
+                                    SecurityAuthTab::Keys,
+                                    key.id.clone(),
+                                    key.name.clone(),
+                                    palette,
+                                ))
+                                .child(
+                                    div().min_w_0().flex_1().flex().flex_col().child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(palette.text))
+                                            .overflow_hidden()
+                                            .child(truncate_preview(&key.name, 28)),
+                                    ),
+                                ),
                         )
                         .child(
                             div()
@@ -137,7 +153,12 @@ impl ZzClawTermApp {
                                     )),
                                 ),
                         ),
-                );
+                    SecurityAuthTab::Keys,
+                    key.id.clone(),
+                    palette,
+                    self,
+                    cx,
+                ));
             }
             body = body.child(rows);
         }

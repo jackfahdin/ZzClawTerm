@@ -7,12 +7,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::FocusHandle;
+use gpui::{App, AppContext as _, Entity};
+use zzclawterm_core::command_draft::{DraftOrigin, DraftProvenance};
+use zzclawterm_core::hex_document::{HexCopyFormat, format_hex};
 use zzclawterm_transport::SessionKind;
+use zzclawterm_ui::hex_editor::ZzClawHexEditorState;
 
 use crate::send_command::{
     SendCommandControlFocus, SendCommandDataType, SendCommandLineEnding, SendCommandMode,
-    SendCommandTarget, build_send_command_units_for, format_send_command_hex_display,
+    SendCommandTarget, build_send_command_units_for,
 };
 
 pub(in crate::features) struct SendCommandFeatureState {
@@ -21,23 +24,19 @@ pub(in crate::features) struct SendCommandFeatureState {
     progress: SendCommandProgressState,
 }
 
-/// Focus handles the send-command bar needs at construction time.
-pub(in crate::features) struct SendCommandFeatureFocus {
-    pub editor: FocusHandle,
-}
-
 /// The payload being composed and where the caret is.
 struct SendCommandComposerState {
-    draft: String,
-    focus: FocusHandle,
-    hex_scroll_x: f32,
-    hex_scroll_y: f32,
+    text_draft: String,
+    provenance: DraftProvenance,
+    hex: Entity<ZzClawHexEditorState>,
+    viewport_width: f32,
 }
 
 /// How the payload is interpreted and delivered.
 struct SendCommandOptionsState {
     data_type: SendCommandDataType,
-    mode: SendCommandMode,
+    text_mode: SendCommandMode,
+    hex_mode: SendCommandMode,
     line_ending: SendCommandLineEnding,
     target: SendCommandTarget,
     count: Option<u32>,
@@ -56,11 +55,12 @@ struct SendCommandProgressState {
     rounds: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub(in crate::features) struct SendCommandPresentationState {
     pub draft: String,
-    pub hex_scroll_x: f32,
-    pub hex_scroll_y: f32,
+    pub provenance: DraftProvenance,
+    pub hex: Entity<ZzClawHexEditorState>,
+    pub viewport_width: f32,
     pub data_type: SendCommandDataType,
     pub mode: SendCommandMode,
     pub line_ending: SendCommandLineEnding,
@@ -90,17 +90,18 @@ pub(in crate::features) struct SendCommandProgressResult {
 }
 
 impl SendCommandFeatureState {
-    pub(in crate::features) fn new(focus: SendCommandFeatureFocus) -> Self {
+    pub(in crate::features) fn new(cx: &mut App) -> Self {
         Self {
             composer: SendCommandComposerState {
-                draft: String::new(),
-                focus: focus.editor,
-                hex_scroll_x: 0.,
-                hex_scroll_y: 0.,
+                text_draft: String::new(),
+                provenance: DraftProvenance::default(),
+                hex: cx.new(ZzClawHexEditorState::new),
+                viewport_width: 0.,
             },
             options: SendCommandOptionsState {
                 data_type: SendCommandDataType::Text,
-                mode: SendCommandMode::Line,
+                text_mode: SendCommandMode::Line,
+                hex_mode: SendCommandMode::Byte,
                 line_ending: SendCommandLineEnding::Crlf,
                 target: SendCommandTarget::Current,
                 count: Some(1),
@@ -119,13 +120,18 @@ impl SendCommandFeatureState {
         }
     }
 
-    pub(in crate::features) fn presentation(&self) -> SendCommandPresentationState {
+    pub(in crate::features) fn presentation(&self, cx: &App) -> SendCommandPresentationState {
         SendCommandPresentationState {
-            draft: self.composer.draft.clone(),
-            hex_scroll_x: self.composer.hex_scroll_x,
-            hex_scroll_y: self.composer.hex_scroll_y,
+            draft: self.draft_for_send(false, cx),
+            provenance: if self.options.data_type == SendCommandDataType::Text {
+                self.composer.provenance.clone()
+            } else {
+                DraftProvenance::default()
+            },
+            hex: self.composer.hex.clone(),
+            viewport_width: self.composer.viewport_width,
             data_type: self.options.data_type,
-            mode: self.options.mode,
+            mode: self.options.mode(),
             line_ending: self.options.line_ending,
             target: self.options.target.clone(),
             count_input: self.options.count_input.clone(),
@@ -138,8 +144,43 @@ impl SendCommandFeatureState {
         }
     }
 
-    pub(in crate::features) fn editor_focus(&self) -> &FocusHandle {
-        &self.composer.focus
+    pub(in crate::features) fn set_viewport_width(&mut self, width: f32) -> bool {
+        if (self.composer.viewport_width - width).abs() <= 1. {
+            return false;
+        }
+        self.composer.viewport_width = width;
+        true
+    }
+
+    pub(in crate::features) fn convert_to_hex(&mut self, cx: &mut App) -> bool {
+        if self.is_sending() {
+            return false;
+        }
+        self.composer.hex.update(cx, |hex, cx| {
+            hex.set_bytes(self.composer.text_draft.as_bytes().to_vec(), cx)
+        });
+        self.set_data_type(SendCommandDataType::Hex);
+        true
+    }
+
+    pub(in crate::features) fn decode_utf8(&mut self, cx: &App) -> Result<(), ()> {
+        if self.is_sending()
+            || self
+                .composer
+                .hex
+                .read(cx)
+                .document()
+                .pending_nibble()
+                .is_some()
+        {
+            return Err(());
+        }
+        let text =
+            std::str::from_utf8(self.composer.hex.read(cx).document().bytes()).map_err(|_| ())?;
+        self.composer.text_draft = text.to_string();
+        self.composer.provenance = DraftProvenance::default();
+        self.set_data_type(SendCommandDataType::Text);
+        Ok(())
     }
 
     pub(in crate::features) fn is_sending(&self) -> bool {
@@ -181,25 +222,69 @@ impl SendCommandFeatureState {
         }
     }
 
-    pub(in crate::features) fn clear_draft(&mut self) {
-        self.composer.draft.clear();
-    }
-
-    pub(in crate::features) fn apply_draft(&mut self, text: String) -> Option<String> {
-        if self.options.data_type == SendCommandDataType::Hex {
-            let cleaned: String = text.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
-            let formatted = format_send_command_hex_display(&cleaned);
-            self.composer.draft = formatted.clone();
-            self.composer.clamp_hex_scroll();
-            (formatted != text).then_some(formatted)
-        } else {
-            self.composer.draft = text;
-            None
+    pub(in crate::features) fn clear_draft(&mut self, cx: &mut App) {
+        match self.options.data_type {
+            SendCommandDataType::Text => {
+                self.composer.text_draft.clear();
+                self.composer.provenance = DraftProvenance::default();
+            }
+            SendCommandDataType::Hex => self.composer.hex.update(cx, |hex, cx| hex.clear(cx)),
         }
     }
 
-    pub(in crate::features) fn draft_for_send(&self, append_enter: bool) -> String {
-        let mut draft = self.composer.draft.clone();
+    /// Never discard edits made while an earlier payload was being sent.
+    pub(in crate::features) fn clear_sent_draft(
+        &mut self,
+        enabled: bool,
+        completed_successfully: bool,
+        sent_draft: &str,
+        cx: &mut App,
+    ) -> bool {
+        if !enabled
+            || !completed_successfully
+            || self.draft_for_send(false, cx) != sent_draft
+            || (self.options.data_type == SendCommandDataType::Hex
+                && self
+                    .composer
+                    .hex
+                    .read(cx)
+                    .document()
+                    .pending_nibble()
+                    .is_some())
+        {
+            return false;
+        }
+        self.clear_draft(cx);
+        true
+    }
+
+    pub(in crate::features) fn apply_draft(&mut self, text: String) {
+        if self.composer.text_draft != text {
+            self.composer.provenance.edit(text.is_empty());
+        }
+        self.composer.text_draft = text;
+    }
+
+    pub(in crate::features) fn fill_plugin_draft(
+        &mut self,
+        text: String,
+        origin: DraftOrigin,
+        replace: bool,
+    ) {
+        self.composer
+            .provenance
+            .fill(origin, replace, self.composer.text_draft.is_empty());
+        self.composer.text_draft = text;
+    }
+
+    pub(in crate::features) fn draft_for_send(&self, append_enter: bool, cx: &App) -> String {
+        let mut draft = match self.options.data_type {
+            SendCommandDataType::Text => self.composer.text_draft.clone(),
+            SendCommandDataType::Hex => format_hex(
+                self.composer.hex.read(cx).document().bytes(),
+                HexCopyFormat::Hex,
+            ),
+        };
         if append_enter && self.options.data_type == SendCommandDataType::Text {
             draft.push('\n');
         }
@@ -210,11 +295,28 @@ impl SendCommandFeatureState {
         &self,
         draft: &str,
         session_kind: Option<SessionKind>,
+        cx: &App,
     ) -> Result<Vec<Vec<u8>>, String> {
+        if self.options.data_type == SendCommandDataType::Hex
+            && self.composer.hex.read(cx).error().is_some()
+        {
+            return Err("invalid paste: expected hexadecimal bytes".to_string());
+        }
+        if self.options.data_type == SendCommandDataType::Hex
+            && self
+                .composer
+                .hex
+                .read(cx)
+                .document()
+                .pending_nibble()
+                .is_some()
+        {
+            return Err("incomplete hexadecimal byte".to_string());
+        }
         build_send_command_units_for(
             draft,
             self.options.data_type,
-            self.options.mode,
+            self.options.mode(),
             self.options.line_ending,
             session_kind,
         )
@@ -296,27 +398,6 @@ impl SendCommandFeatureState {
             return None;
         }
         self.options.data_type = data_type;
-        match data_type {
-            SendCommandDataType::Hex
-                if matches!(
-                    self.options.mode,
-                    SendCommandMode::Line | SendCommandMode::Character
-                ) =>
-            {
-                self.options.mode = SendCommandMode::Byte;
-            }
-            SendCommandDataType::Text
-                if matches!(
-                    self.options.mode,
-                    SendCommandMode::Packet | SendCommandMode::Byte
-                ) =>
-            {
-                self.options.mode = SendCommandMode::Line;
-            }
-            _ => {}
-        }
-        self.composer.hex_scroll_x = 0.;
-        self.composer.hex_scroll_y = 0.;
         Some(self.reset_default_interval())
     }
 
@@ -324,7 +405,15 @@ impl SendCommandFeatureState {
         if self.progress.sending {
             return None;
         }
-        self.options.mode = mode;
+        match (self.options.data_type, mode) {
+            (SendCommandDataType::Text, SendCommandMode::Line | SendCommandMode::Character) => {
+                self.options.text_mode = mode
+            }
+            (SendCommandDataType::Hex, SendCommandMode::Byte | SendCommandMode::Packet) => {
+                self.options.hex_mode = mode
+            }
+            _ => return None,
+        }
         Some(self.reset_default_interval())
     }
 
@@ -339,24 +428,6 @@ impl SendCommandFeatureState {
         true
     }
 
-    pub(in crate::features) fn scroll_hex_by(
-        &mut self,
-        delta_x: f32,
-        delta_y: f32,
-        max_scroll_x: f32,
-        max_scroll_y: f32,
-    ) -> bool {
-        let next_y = (self.composer.hex_scroll_y - delta_y).clamp(0., max_scroll_y);
-        let next_x = (self.composer.hex_scroll_x - delta_x).clamp(0., max_scroll_x);
-        let changed = (next_y - self.composer.hex_scroll_y).abs() > 0.01
-            || (next_x - self.composer.hex_scroll_x).abs() > 0.01;
-        if changed {
-            self.composer.hex_scroll_y = next_y;
-            self.composer.hex_scroll_x = next_x;
-        }
-        changed
-    }
-
     fn sync_count_input(&mut self) -> String {
         self.options.count_input = self.options.count_label();
         self.options.count_input.clone()
@@ -368,37 +439,15 @@ impl SendCommandFeatureState {
     }
 }
 
-/// Composer edits that only touch the payload and its hex viewport.
-impl SendCommandComposerState {
-    /// Keeps the hex guide overlay's scroll offsets inside the rendered text.
-    ///
-    /// The viewport constants approximate the Tauri textarea this replaced;
-    /// they are unchanged.
-    fn clamp_hex_scroll(&mut self) {
-        const HEX_LINE_PX: f32 = 15.;
-        const HEX_CHAR_PX: f32 = 7.2;
-        const VIEWPORT_LINES: f32 = 5.;
-        const VIEWPORT_CHARS: f32 = 48.;
-
-        let display = format_send_command_hex_display(&self.draft);
-        let lines: Vec<&str> = display.lines().collect();
-        let line_count = lines.len().max(1) as f32;
-        let max_line_chars = lines
-            .iter()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0) as f32;
-
-        let max_scroll_y = ((line_count - VIEWPORT_LINES).max(0.)) * HEX_LINE_PX;
-        let max_scroll_x = ((max_line_chars - VIEWPORT_CHARS).max(0.)) * HEX_CHAR_PX;
-
-        self.hex_scroll_y = self.hex_scroll_y.clamp(0., max_scroll_y);
-        self.hex_scroll_x = self.hex_scroll_x.clamp(0., max_scroll_x);
-    }
-}
-
 /// Option edits that only touch how the payload is interpreted and delivered.
 impl SendCommandOptionsState {
+    fn mode(&self) -> SendCommandMode {
+        match self.data_type {
+            SendCommandDataType::Text => self.text_mode,
+            SendCommandDataType::Hex => self.hex_mode,
+        }
+    }
+
     /// Parses the repeat-count field.
     ///
     /// `live` means the user is still typing, so an unparsable value is left
@@ -438,7 +487,7 @@ impl SendCommandOptionsState {
     }
 
     fn apply_default_interval(&mut self) {
-        self.interval_seconds = match (self.data_type, self.mode) {
+        self.interval_seconds = match (self.data_type, self.mode()) {
             (SendCommandDataType::Hex, SendCommandMode::Byte) => 0.02,
             (SendCommandDataType::Hex, _) => 0.0,
             (SendCommandDataType::Text, SendCommandMode::Line) => 1.0,
@@ -455,14 +504,10 @@ mod tests {
 
     use crate::send_command::{SendCommandControlFocus, SendCommandDataType, SendCommandMode};
 
-    use super::{SendCommandFeatureFocus, SendCommandFeatureState};
+    use super::SendCommandFeatureState;
 
     fn send_command_state(cx: &TestAppContext) -> SendCommandFeatureState {
-        cx.update(|cx| {
-            SendCommandFeatureState::new(SendCommandFeatureFocus {
-                editor: cx.focus_handle(),
-            })
-        })
+        cx.update(SendCommandFeatureState::new)
     }
 
     #[test]
@@ -474,7 +519,7 @@ mod tests {
             state.set_data_type(SendCommandDataType::Hex),
             Some("0.02".to_string())
         );
-        let presentation = state.presentation();
+        let presentation = cx.update(|cx| state.presentation(cx));
         assert_eq!(presentation.data_type, SendCommandDataType::Hex);
         assert_eq!(presentation.mode, SendCommandMode::Byte);
 
@@ -486,7 +531,10 @@ mod tests {
             state.set_data_type(SendCommandDataType::Text),
             Some("1.00".to_string())
         );
-        assert_eq!(state.presentation().mode, SendCommandMode::Line);
+        assert_eq!(
+            cx.update(|cx| state.presentation(cx).mode),
+            SendCommandMode::Line
+        );
     }
 
     #[test]
@@ -510,6 +558,63 @@ mod tests {
             state.synced_control_input(SendCommandControlFocus::Interval),
             "60.00"
         );
+    }
+
+    #[test]
+    fn drafts_and_modes_survive_switching_and_clear_only_sent_payload() {
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            let mut state = SendCommandFeatureState::new(cx);
+            state.apply_draft("AT+CSQ".to_string());
+            state.set_mode(SendCommandMode::Character);
+            state.set_data_type(SendCommandDataType::Hex);
+            state
+                .composer
+                .hex
+                .update(cx, |hex, cx| hex.paste("01 FF", cx));
+            state.set_mode(SendCommandMode::Packet);
+            state.set_data_type(SendCommandDataType::Text);
+            assert_eq!(state.presentation(cx).draft, "AT+CSQ");
+            assert_eq!(state.presentation(cx).mode, SendCommandMode::Character);
+            state.set_data_type(SendCommandDataType::Hex);
+            assert_eq!(state.presentation(cx).draft, "01 FF");
+            assert_eq!(state.presentation(cx).mode, SendCommandMode::Packet);
+            assert!(!state.clear_sent_draft(false, true, "01 FF", cx));
+            assert!(!state.clear_sent_draft(true, false, "01 FF", cx));
+            state.composer.hex.update(cx, |hex, cx| hex.paste("AB", cx));
+            assert!(!state.clear_sent_draft(true, true, "01 FF", cx));
+            assert!(state.clear_sent_draft(true, true, "01 FF AB", cx));
+            state.set_data_type(SendCommandDataType::Text);
+            assert_eq!(state.presentation(cx).draft, "AT+CSQ");
+        });
+    }
+
+    #[test]
+    fn explicit_utf8_conversion_validates_before_replacing_text() {
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            let mut state = SendCommandFeatureState::new(cx);
+            state.apply_draft("中a".to_string());
+            assert!(state.convert_to_hex(cx));
+            assert_eq!(
+                state.composer.hex.read(cx).document().bytes(),
+                "中a".as_bytes()
+            );
+            state
+                .composer
+                .hex
+                .update(cx, |hex, cx| hex.set_bytes(vec![255], cx));
+            assert!(state.decode_utf8(cx).is_err());
+            state.set_data_type(SendCommandDataType::Text);
+            assert_eq!(state.presentation(cx).draft, "中a");
+            state.set_data_type(SendCommandDataType::Hex);
+            state
+                .composer
+                .hex
+                .update(cx, |hex, cx| hex.set_bytes(b"Hello".to_vec(), cx));
+            assert!(state.decode_utf8(cx).is_ok());
+            assert_eq!(state.presentation(cx).draft, "Hello");
+        });
     }
 
     #[test]

@@ -8,7 +8,6 @@ use crate::features::{
     text_inputs::TextInputSetup,
 };
 use crate::models::{QuickCommandEditorField, QuickCommandSortMode};
-use crate::send_command::parse_send_command_hex;
 
 pub(in crate::features::panels) struct QuickCommandCategoryOption {
     pub id: String,
@@ -376,46 +375,6 @@ pub(in crate::features::panels) fn quick_command_editor_field_key(
         QuickCommandEditorField::Category => "category",
         QuickCommandEditorField::Description => "description",
     }
-}
-
-pub(in crate::features::panels) fn send_command_hex_preview(draft: &str) -> String {
-    match parse_send_command_hex(draft) {
-        Ok(bytes) if bytes.is_empty() => String::new(),
-        Ok(bytes) => bytes
-            .iter()
-            .take(96)
-            .map(|byte| {
-                if (0x20..=0x7e).contains(byte) {
-                    char::from(*byte)
-                } else {
-                    '.'
-                }
-            })
-            .collect(),
-        Err(error) => error,
-    }
-}
-
-pub(in crate::features::panels) fn send_command_hex_byte_count(draft: &str) -> Option<usize> {
-    parse_send_command_hex(draft).ok().map(|bytes| bytes.len())
-}
-
-/// Per-line character offsets for 4-byte group boundaries (Tauri `buildHexGuideRows`).
-pub(in crate::features::panels) fn send_command_hex_guide_rows(draft: &str) -> Vec<Vec<u32>> {
-    let display = crate::send_command::format_send_command_hex_display(draft);
-    display
-        .split('\n')
-        .map(|line| {
-            let cleaned: String = line.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
-            let bytes = cleaned.len() / 2;
-            let groups = bytes / 4;
-            // Tauri: left = (groupNumber * 13 - 1) ch
-            (1..=groups)
-                .map(|group| (group as u32) * 13 - 1)
-                .take(24)
-                .collect()
-        })
-        .collect()
 }
 
 pub(in crate::features::panels) fn terminal_action_prompt_text(

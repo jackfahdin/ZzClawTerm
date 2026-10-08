@@ -624,6 +624,13 @@ pub(super) fn build_shell_command(shell_path: &Path, script: &str) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         let mut command = Command::new(shell_path);
+        // Mirror PTY creation's environment so the probe does not overwrite
+        // newly installed PATH entries with an inherited process snapshot.
+        // NOTE: upstream uses the forked portable-pty `iter_full_env`, which
+        // additionally re-reads the fresh registry environment on Windows;
+        // crates.io portable-pty only exposes the inherited base environment.
+        let environment = portable_pty::CommandBuilder::new(shell_path);
+        command.env_clear().envs(environment.iter_full_env_as_str());
         if is_powershell_shell(shell_path) {
             command.args(["-NoLogo", "-Command", script]);
         } else {

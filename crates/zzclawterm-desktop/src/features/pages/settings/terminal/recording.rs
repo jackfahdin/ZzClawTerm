@@ -143,6 +143,19 @@ impl SettingsPanel {
                 ))
                 .child(settings_form_row(
                     palette,
+                    t!("settings.recordingIncludeInput"),
+                    Some(SharedString::from(t!("settings.recordingIncludeInputDesc"))),
+                    settings_switch(
+                        palette,
+                        "settings-recording-input",
+                        self.settings.summary().recording_include_input,
+                        cx.listener(|this, _, _, cx| {
+                            this.toggle_recording_input(cx);
+                        }),
+                    ),
+                ))
+                .child(settings_form_row(
+                    palette,
                     t!("settings.recordingIncludeIoLabels"),
                     Some(SharedString::from(t!(
                         "settings.recordingIncludeIoLabelsDesc"

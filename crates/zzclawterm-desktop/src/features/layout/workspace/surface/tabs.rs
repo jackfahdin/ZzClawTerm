@@ -5,7 +5,10 @@ use gpui::{
     ScrollWheelEvent, SharedString, div, point, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::truncate_preview;
-use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement};
+use zzclawterm_ui::{
+    ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement,
+    ZzClawScrollable as _,
+};
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::session_kind_label;
@@ -342,19 +345,436 @@ impl ZzClawTermApp {
             .child(self.workspace_view(cx))
     }
 
+    #[inline(never)]
+    fn session_strip_tab(
+        &mut self,
+        session: zzclawterm_transport::SessionInfo,
+        tab_index: usize,
+        tab_number: usize,
+        group_active: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let palette = self.theme_palette();
+        let display_name = self.session.display_name_by_info(&session);
+        let session_id = session.id.clone();
+        let close_session_id = session.id.clone();
+        let tab_group_name = SharedString::from(format!("session-tab-group-{session_id}"));
+        let kind_icon = session_kind_icon_path(session.kind);
+        let custom_icon = self
+            .session
+            .metadata(&session.id)
+            .and_then(|metadata| metadata.source_connection_id.as_ref())
+            .and_then(|id| {
+                self.connection_state
+                    .connections()
+                    .iter()
+                    .find(|connection| &connection.id == id)
+            })
+            .and_then(|connection| connection.icon.as_ref())
+            .and_then(|id| self.connection_state.custom_icons.images.get(id))
+            .cloned();
+        let saved_icon = self
+            .session
+            .metadata(&session.id)
+            .and_then(|metadata| metadata.source_connection_id.as_deref())
+            .and_then(|connection_id| {
+                self.connection_state
+                    .connections()
+                    .iter()
+                    .find(|connection| connection.id == connection_id)
+            })
+            .and_then(|connection| connection.icon.as_deref())
+            .filter(|icon| !icon.trim().is_empty())
+            .map(|icon| {
+                let kind = match session.kind {
+                    zzclawterm_transport::SessionKind::LocalPty => "Local",
+                    zzclawterm_transport::SessionKind::Ssh => "SSH",
+                    zzclawterm_transport::SessionKind::Telnet => "Telnet",
+                    zzclawterm_transport::SessionKind::Serial => "Serial",
+                    zzclawterm_transport::SessionKind::RawTcp => "SSH",
+                    zzclawterm_transport::SessionKind::Rdp => "RDP",
+                    zzclawterm_transport::SessionKind::Vnc => "VNC",
+                };
+                resolve_connection_icon(Some(icon), kind)
+            });
+        let is_locked = self.tab_tree_is_locked(&session.id);
+        let drop_target_session_id = session.id.clone();
+        let drag_over_target_session_id = session.id.clone();
+        let is_drag_source = self.session.tab_drag_source_is(&session.id);
+        let custom_color = self.session.tab_color(&session.id);
+        // Active when any leaf under this tab root is focused.
+        let is_active = group_active == Some(session.id.as_str());
+        let leaf_ids = self
+            .shell
+            .workspace_pane_root(&session.id)
+            .map(|root| root.session_ids())
+            .unwrap_or_else(|| vec![session.id.clone()]);
+        let is_disconnected = leaf_ids.iter().any(|id| self.session.is_disconnected(id));
+        let tab_title = truncate_preview(&display_name, 28);
+        let has_unread = leaf_ids
+            .iter()
+            .any(|id| self.terminal.session_has_unread(id));
+        let sync_group = leaf_ids
+            .iter()
+            .find_map(|id| self.sync_input.active_group_for_session(id));
+        let sync_paused = leaf_ids
+            .iter()
+            .any(|id| self.sync_input.session_is_paused_in_active_group(id));
+        let show_sync_indicator = self.sync_input.broadcast_to_all() || sync_group.is_some();
+        let sync_indicator_color = sync_group.map(|group| group.color).unwrap_or(palette.link);
+        let accent_color = if is_active {
+            custom_color.unwrap_or(palette.primary)
+        } else if let Some(custom_color) = custom_color {
+            custom_color
+        } else if is_disconnected {
+            palette.danger
+        } else if has_unread {
+            palette.warning
+        } else {
+            palette.text_dimmed
+        };
+        let accent = rgb(accent_color);
+        let bg = if let Some(custom_color) = custom_color {
+            rgba((custom_color << 8) | if is_active { 0x24 } else { 0x14 })
+        } else if is_active {
+            self.shell_surface_color(palette.bg)
+        } else {
+            rgba(0x00000000)
+        };
+        let hover_bg = if let Some(custom_color) = custom_color {
+            rgba((custom_color << 8) | if is_active { 0x32 } else { 0x22 })
+        } else {
+            self.shell_surface_color(palette.hover)
+        };
+        // Match the Zed tab affordance through ZzClawTerm's theme projection:
+        // the whole target uses the theme hover surface and the insertion
+        // edge uses the focus/drag border color.
+        let drag_target_bg = self.shell_surface_color(palette.hover);
+        let drop_workspace_id = self.workspace_id;
+        let target_group = self.terminal.terminal_group_for_tab(&session.id);
+        let hover_target_group = target_group.clone();
+        let drag_payload = SessionTabDragPayload {
+            source_workspace_id: self.workspace_id,
+            root_tab_id: session.id.clone(),
+            source_revision: self.workspace_revision(),
+            session_id: session.id.clone(),
+            order_index: tab_index,
+            source_group_id: target_group.clone(),
+            display_name: display_name.clone(),
+            kind_label: session_kind_label(session.kind),
+            kind_icon,
+            preview_background: palette.surface,
+            preview_border: palette.border,
+            preview_text: palette.text,
+            preview_text_muted: palette.text_muted,
+            preview_accent: accent_color,
+        };
+        let drag_source_app = cx.entity().downgrade();
+        let hover_card = self.session_tab_hover_card(&session.id, palette);
+        let hover_card_id = format!("session-tab-hover-card-{session_id}");
+        let tab = div()
+            .id(SharedString::from(format!("session-tab-{session_id}")))
+            .group(tab_group_name.clone())
+            // HoverCard adds trigger-host elements between this tab and
+            // the 36px strip. Keep the tab's old explicit strip height so
+            // those hosts cannot collapse `h_full()` to content height.
+            .h(px(36.))
+            .min_w(px(SESSION_TAB_MIN_WIDTH))
+            .max_w(px(SESSION_TAB_MAX_WIDTH))
+            .flex_none()
+            .pl_3()
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .relative()
+            .border_r_1()
+            .border_color(rgb(palette.border))
+            .when(!is_active, |this| this.border_b_1())
+            .bg(bg)
+            .when(is_disconnected, |this| this.opacity(0.78))
+            .when(is_drag_source, |this| this.opacity(0.55))
+            .cursor_pointer()
+            .hover(move |this| this.bg(hover_bg))
+            .cursor_move()
+            .on_drag(drag_payload, move |payload, position, window, cx| {
+                let _ = drag_source_app.update(cx, |app, cx| {
+                    app.begin_session_tab_drag(payload, position, window, cx);
+                });
+                cx.new(|_| SessionTabDragPreview::new(payload.clone(), position))
+            })
+            .drag_over::<SessionTabDragPayload>(move |this, payload, _, _| {
+                if payload.source_workspace_id != drop_workspace_id {
+                    return this
+                        .bg(drag_target_bg)
+                        .border_l_2()
+                        .border_color(rgb(palette.focus_ring));
+                }
+                let Some(insert_after) = (if payload.source_group_id != hover_target_group {
+                    Some(false)
+                } else {
+                    tab_drop_insert_after(payload.order_index, tab_index)
+                }) else {
+                    return this;
+                };
+                if payload.session_id == drag_over_target_session_id {
+                    return this;
+                }
+                let target = this
+                    .bg(drag_target_bg)
+                    .border_0()
+                    .border_color(rgb(palette.focus_ring));
+                if insert_after {
+                    target.border_r_2()
+                } else {
+                    target.border_l_2()
+                }
+            })
+            .on_drag_move(cx.listener(
+                move |this, event: &gpui::DragMoveEvent<SessionTabDragPayload>, _, cx| {
+                    let payload = event.drag(cx);
+                    this.update_session_tab_drag(payload.session_id.clone(), cx);
+                },
+            ))
+            .on_drop(
+                cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
+                    this.accept_session_tab_drop(payload, cx);
+                    if payload.source_workspace_id != this.workspace_id {
+                        this.request_tab_tree_move(
+                            payload,
+                            zzclawterm_core::MoveTabPlacement::BeforeTab(
+                                drop_target_session_id.clone(),
+                            ),
+                            cx,
+                        );
+                        return;
+                    }
+                    let Some(insert_after) = (if payload.source_group_id != target_group {
+                        Some(false)
+                    } else {
+                        tab_drop_insert_after(payload.order_index, tab_index)
+                    }) else {
+                        this.clear_session_tab_drag(cx);
+                        return;
+                    };
+                    this.reorder_session_relative(
+                        payload.session_id.clone(),
+                        drop_target_session_id.clone(),
+                        insert_after,
+                        cx,
+                    );
+                }),
+            )
+            .when(custom_color.is_some(), move |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(3.))
+                        .bg(accent),
+                )
+            })
+            // Tauri tab: top accent when active, icon + name + close.
+            .when(is_active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(2.))
+                        .bg(accent),
+                )
+            })
+            .child(
+                div()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(if let Some(image) = custom_icon {
+                        gpui::img(image).size(px(14.)).into_any_element()
+                    } else if let Some(icon) = saved_icon {
+                        themed_icon(palette, icon, is_active, 14.)
+                    } else {
+                        svg()
+                            .size(px(14.))
+                            .path(kind_icon)
+                            .text_color(accent)
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .min_w(px(12.))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight(700.))
+                    .text_color(rgb(palette.text_dimmed))
+                    .child(format!("{tab_number}")),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .max_w(px(160.))
+                    .text_size(px(12.))
+                    .font_weight(if is_active {
+                        FontWeight(700.)
+                    } else {
+                        FontWeight(500.)
+                    })
+                    .text_color(if is_disconnected {
+                        rgb(palette.text_dimmed)
+                    } else if is_active {
+                        rgb(palette.text)
+                    } else {
+                        rgb(palette.text_muted)
+                    })
+                    .overflow_hidden()
+                    // Without this the title wraps inside the tab and the
+                    // strip shows whichever line happens to land on the
+                    // one row of height it has — "ste", out of "System32".
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(tab_title.clone()),
+            )
+            .when(show_sync_indicator, |this| {
+                this.child(
+                    div()
+                        .size(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(if sync_paused { 0.4 } else { 1. })
+                        .child(
+                            svg()
+                                .size(px(10.))
+                                .path("icons/sync.svg")
+                                .text_color(rgb(sync_indicator_color)),
+                        ),
+                )
+            })
+            .when(has_unread && !is_active, |this| {
+                this.child(div().size(px(7.)).rounded_full().bg(rgb(palette.success)))
+            })
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "session-tab-close-{close_session_id}"
+                    )))
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .text_size(px(10.))
+                    .text_color(rgb(palette.text_muted))
+                    .when(!is_active && !is_locked, |this| {
+                        this.opacity(0.)
+                            .group_hover(tab_group_name.clone(), |style| style.opacity(1.))
+                    })
+                    .hover(|this| {
+                        this.bg(rgb(palette.border)).text_color(if is_locked {
+                            rgb(palette.warning)
+                        } else {
+                            rgb(palette.danger)
+                        })
+                    })
+                    .child(
+                        svg()
+                            .size(px(13.))
+                            .path(if is_locked {
+                                "icons/lock.svg"
+                            } else {
+                                "icons/window/close.svg"
+                            })
+                            .text_color(rgb(palette.text_muted)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if is_locked {
+                            this.notify_locked_tab_close_blocked(cx);
+                        } else {
+                            this.close_session(close_session_id.clone(), cx);
+                        }
+                    })),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.handle_session_tab_click(session_id.clone(), event, window, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener({
+                    let session_id = session.id.clone();
+                    move |this, event, window, cx| {
+                        this.handle_session_tab_mouse_down(session_id.clone(), event, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let session_id = session.id.clone();
+                    move |this, event, window, cx| {
+                        this.handle_session_tab_mouse_down(session_id.clone(), event, window, cx);
+                    }
+                }),
+            );
+        ZzClawHoverCard::new(hover_card_id, tab, hover_card)
+            .anchor(Anchor::TopLeft)
+            .into_any_element()
+    }
+
     pub(in crate::features) fn session_tab_strip(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        self.session_tab_strip_for_group(None, cx)
+    }
+
+    #[inline(never)]
+    pub(in crate::features) fn session_tab_strip_for_group(
+        &mut self,
+        group_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let palette = self.theme_palette();
         let shell_hover_bg = self.shell_surface_color(palette.hover);
-        let sessions = self.ordered_tab_sessions();
+        let (sessions, group_active) = if let Some(group) = &group_id {
+            let (tabs, active) = self.terminal.terminal_group_tabs(group).unwrap_or_default();
+            (
+                tabs.iter()
+                    .filter_map(|id| self.session.session_info(id))
+                    .collect::<Vec<_>>(),
+                active,
+            )
+        } else {
+            (self.ordered_tab_sessions(), self.session.active_id_owned())
+        };
         let session_count = sessions.len();
+        let tab_scroll = group_id
+            .as_ref()
+            .map(|id| self.terminal.terminal_group_scroll(id))
+            .unwrap_or_else(|| self.shell.session_tab_strip_scroll().clone());
+        let matches_group =
+            |placement: Option<crate::features::session::SessionStartTabPlacement>| {
+                let target = placement
+                    .and_then(|p| {
+                        self.terminal
+                            .terminal_start_display_group(p.request_sequence)
+                    })
+                    .or_else(|| self.terminal.first_terminal_group());
+                group_id
+                    .as_deref()
+                    .is_none_or(|group| target.as_deref() == Some(group))
+            };
         let mut transient_tabs: Vec<TransientSessionTab> = self
             .session
             .start_pending_entries()
             .filter_map(|(request_id, pending)| {
-                if pending.reconnect_session_id.is_some() {
+                if pending.reconnect_session_id.is_some() || !matches_group(pending.tab_placement) {
                     return None;
                 }
                 let name = pending
@@ -393,6 +813,7 @@ impl ZzClawTermApp {
         transient_tabs.extend(
             self.session
                 .start_failed_entries()
+                .filter(|(_, failed)| matches_group(failed.pending.tab_placement))
                 .map(|(request_id, failed)| {
                     let pending = &failed.pending;
                     let name = pending
@@ -435,7 +856,9 @@ impl ZzClawTermApp {
                 .then_with(|| left.2.cmp(&right.2))
                 .then_with(|| left.3.cmp(&right.3))
         });
-        if self.shell.session_tab_scroll_into_view_pending() {
+        if self.shell.session_tab_scroll_into_view_pending()
+            && (group_id.is_none() || self.current_terminal_group() == group_id)
+        {
             if let Some(active_id) = self.session.active_id()
                 && let Some(index) = sessions
                     .iter()
@@ -451,16 +874,16 @@ impl ZzClawTermApp {
                     .filter(|transient| transient_tab_precedes_session(transient, active_key))
                     .count();
                 let child_index = index + pending_count;
-                self.shell
-                    .session_tab_strip_scroll()
-                    .scroll_to_item(child_index);
+                tab_scroll.scroll_to_item(child_index);
             }
             self.shell.consume_session_tab_scroll_into_view();
         }
-        let tab_scroll = self.shell.session_tab_strip_scroll().clone();
         let tab_scroll_for_wheel = tab_scroll.clone();
         let mut tabs = div()
-            .id("session-tab-strip-scroll")
+            .id(SharedString::from(format!(
+                "session-tab-strip-scroll-{}",
+                group_id.as_deref().unwrap_or("main")
+            )))
             .h_full()
             .w_full()
             .flex()
@@ -509,377 +932,13 @@ impl ZzClawTermApp {
                 });
                 transient_cursor += 1;
             }
-            let display_name = self.session.display_name_by_info(&session);
-            let session_id = session.id.clone();
-            let close_session_id = session.id.clone();
-            let tab_group_name = SharedString::from(format!("session-tab-group-{session_id}"));
-            let tab_number = tab_index + transient_cursor + 1;
-            let kind_icon = session_kind_icon_path(session.kind);
-            let custom_icon = self
-                .session
-                .metadata(&session.id)
-                .and_then(|metadata| metadata.source_connection_id.as_ref())
-                .and_then(|id| {
-                    self.connection_state
-                        .connections()
-                        .iter()
-                        .find(|connection| &connection.id == id)
-                })
-                .and_then(|connection| connection.icon.as_ref())
-                .and_then(|id| self.connection_state.custom_icons.images.get(id))
-                .cloned();
-            let saved_icon = self
-                .session
-                .metadata(&session.id)
-                .and_then(|metadata| metadata.source_connection_id.as_deref())
-                .and_then(|connection_id| {
-                    self.connection_state
-                        .connections()
-                        .iter()
-                        .find(|connection| connection.id == connection_id)
-                })
-                .and_then(|connection| connection.icon.as_deref())
-                .filter(|icon| !icon.trim().is_empty())
-                .map(|icon| {
-                    let kind = match session.kind {
-                        zzclawterm_transport::SessionKind::LocalPty => "Local",
-                        zzclawterm_transport::SessionKind::Ssh => "SSH",
-                        zzclawterm_transport::SessionKind::Telnet => "Telnet",
-                        zzclawterm_transport::SessionKind::Serial => "Serial",
-                        zzclawterm_transport::SessionKind::RawTcp => "SSH",
-                        zzclawterm_transport::SessionKind::Rdp => "RDP",
-                        zzclawterm_transport::SessionKind::Vnc => "VNC",
-                    };
-                    resolve_connection_icon(Some(icon), kind)
-                });
-            let is_locked = self.tab_tree_is_locked(&session.id);
-            let drop_target_session_id = session.id.clone();
-            let drag_over_target_session_id = session.id.clone();
-            let is_drag_source = self.session.tab_drag_source_is(&session.id);
-            let custom_color = self.session.tab_color(&session.id);
-            // Active when any leaf under this tab root is focused.
-            let is_active = self
-                .session
-                .active_id()
-                .is_some_and(|id| self.tab_root_for_session(id) == session.id);
-            let leaf_ids = self
-                .shell
-                .workspace_pane_root(&session.id)
-                .map(|root| root.session_ids())
-                .unwrap_or_else(|| vec![session.id.clone()]);
-            let is_disconnected = leaf_ids.iter().any(|id| self.session.is_disconnected(id));
-            let tab_title = truncate_preview(&display_name, 28);
-            let has_unread = leaf_ids
-                .iter()
-                .any(|id| self.terminal.session_has_unread(id));
-            let sync_group = leaf_ids
-                .iter()
-                .find_map(|id| self.sync_input.active_group_for_session(id));
-            let sync_paused = leaf_ids
-                .iter()
-                .any(|id| self.sync_input.session_is_paused_in_active_group(id));
-            let show_sync_indicator = self.sync_input.broadcast_to_all() || sync_group.is_some();
-            let sync_indicator_color = sync_group.map(|group| group.color).unwrap_or(palette.link);
-            let accent_color = if is_active {
-                custom_color.unwrap_or(palette.primary)
-            } else if let Some(custom_color) = custom_color {
-                custom_color
-            } else if is_disconnected {
-                palette.danger
-            } else if has_unread {
-                palette.warning
-            } else {
-                palette.text_dimmed
-            };
-            let accent = rgb(accent_color);
-            let bg = if let Some(custom_color) = custom_color {
-                rgba((custom_color << 8) | if is_active { 0x24 } else { 0x14 })
-            } else if is_active {
-                self.shell_surface_color(palette.bg)
-            } else {
-                rgba(0x00000000)
-            };
-            let hover_bg = if let Some(custom_color) = custom_color {
-                rgba((custom_color << 8) | if is_active { 0x32 } else { 0x22 })
-            } else {
-                self.shell_surface_color(palette.hover)
-            };
-            // Match the Zed tab affordance through ZzClawTerm's theme projection:
-            // the whole target uses the theme hover surface and the insertion
-            // edge uses the focus/drag border color.
-            let drag_target_bg = self.shell_surface_color(palette.hover);
-            let drop_workspace_id = self.workspace_id;
-            let drag_payload = SessionTabDragPayload {
-                source_workspace_id: self.workspace_id,
-                root_tab_id: session.id.clone(),
-                source_revision: self.workspace_revision(),
-                session_id: session.id.clone(),
-                order_index: tab_index,
-                display_name: display_name.clone(),
-                kind_label: session_kind_label(session.kind),
-                kind_icon,
-                preview_background: palette.surface,
-                preview_border: palette.border,
-                preview_text: palette.text,
-                preview_text_muted: palette.text_muted,
-                preview_accent: accent_color,
-            };
-            let hover_card = self.session_tab_hover_card(&session.id, palette);
-            let hover_card_id = format!("session-tab-hover-card-{session_id}");
-            let tab = div()
-                .id(SharedString::from(format!("session-tab-{session_id}")))
-                .group(tab_group_name.clone())
-                // HoverCard adds trigger-host elements between this tab and
-                // the 36px strip. Keep the tab's old explicit strip height so
-                // those hosts cannot collapse `h_full()` to content height.
-                .h(px(36.))
-                .min_w(px(SESSION_TAB_MIN_WIDTH))
-                .max_w(px(SESSION_TAB_MAX_WIDTH))
-                .flex_none()
-                .pl_3()
-                .pr_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .relative()
-                .border_r_1()
-                .border_color(rgb(palette.border))
-                .when(!is_active, |this| this.border_b_1())
-                .bg(bg)
-                .when(is_disconnected, |this| this.opacity(0.78))
-                .when(is_drag_source, |this| this.opacity(0.55))
-                .cursor_pointer()
-                .hover(move |this| this.bg(hover_bg))
-                .cursor_move()
-                .on_drag(drag_payload, |payload, position, _, cx| {
-                    cx.new(|_| SessionTabDragPreview::new(payload.clone(), position))
-                })
-                .drag_over::<SessionTabDragPayload>(move |this, payload, _, _| {
-                    if payload.source_workspace_id != drop_workspace_id {
-                        return this
-                            .bg(drag_target_bg)
-                            .border_l_2()
-                            .border_color(rgb(palette.focus_ring));
-                    }
-                    let Some(insert_after) = tab_drop_insert_after(payload.order_index, tab_index)
-                    else {
-                        return this;
-                    };
-                    if payload.session_id == drag_over_target_session_id {
-                        return this;
-                    }
-                    let target = this
-                        .bg(drag_target_bg)
-                        .border_0()
-                        .border_color(rgb(palette.focus_ring));
-                    if insert_after {
-                        target.border_r_2()
-                    } else {
-                        target.border_l_2()
-                    }
-                })
-                .on_drag_move(cx.listener(
-                    move |this, event: &gpui::DragMoveEvent<SessionTabDragPayload>, _, cx| {
-                        let payload = event.drag(cx);
-                        this.update_session_tab_drag(payload.session_id.clone(), cx);
-                    },
-                ))
-                .on_drop(
-                    cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
-                        if payload.source_workspace_id != this.workspace_id {
-                            this.request_tab_tree_move(
-                                payload,
-                                zzclawterm_core::MoveTabPlacement::BeforeTab(
-                                    drop_target_session_id.clone(),
-                                ),
-                                cx,
-                            );
-                            return;
-                        }
-                        let Some(insert_after) =
-                            tab_drop_insert_after(payload.order_index, tab_index)
-                        else {
-                            this.clear_session_tab_drag(cx);
-                            return;
-                        };
-                        this.reorder_session_relative(
-                            payload.session_id.clone(),
-                            drop_target_session_id.clone(),
-                            insert_after,
-                            cx,
-                        );
-                    }),
-                )
-                .when(custom_color.is_some(), move |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left_0()
-                            .w(px(3.))
-                            .bg(accent),
-                    )
-                })
-                // Tauri tab: top accent when active, icon + name + close.
-                .when(is_active, |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(2.))
-                            .bg(accent),
-                    )
-                })
-                .child(
-                    div()
-                        .size(px(14.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(if let Some(image) = custom_icon {
-                            gpui::img(image).size(px(14.)).into_any_element()
-                        } else if let Some(icon) = saved_icon {
-                            themed_icon(palette, icon, is_active, 14.)
-                        } else {
-                            svg()
-                                .size(px(14.))
-                                .path(kind_icon)
-                                .text_color(accent)
-                                .into_any_element()
-                        }),
-                )
-                .child(
-                    div()
-                        .min_w(px(12.))
-                        .text_size(px(12.))
-                        .font_weight(FontWeight(700.))
-                        .text_color(rgb(palette.text_dimmed))
-                        .child(format!("{tab_number}")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .max_w(px(160.))
-                        .text_size(px(12.))
-                        .font_weight(if is_active {
-                            FontWeight(700.)
-                        } else {
-                            FontWeight(500.)
-                        })
-                        .text_color(if is_disconnected {
-                            rgb(palette.text_dimmed)
-                        } else if is_active {
-                            rgb(palette.text)
-                        } else {
-                            rgb(palette.text_muted)
-                        })
-                        .overflow_hidden()
-                        // Without this the title wraps inside the tab and the
-                        // strip shows whichever line happens to land on the
-                        // one row of height it has — "ste", out of "System32".
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(tab_title.clone()),
-                )
-                .when(show_sync_indicator, |this| {
-                    this.child(
-                        div()
-                            .size(px(12.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .opacity(if sync_paused { 0.4 } else { 1. })
-                            .child(
-                                svg()
-                                    .size(px(10.))
-                                    .path("icons/sync.svg")
-                                    .text_color(rgb(sync_indicator_color)),
-                            ),
-                    )
-                })
-                .when(has_unread && !is_active, |this| {
-                    this.child(div().size(px(7.)).rounded_full().bg(rgb(palette.success)))
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "session-tab-close-{close_session_id}"
-                        )))
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_sm()
-                        .text_size(px(10.))
-                        .text_color(rgb(palette.text_muted))
-                        .when(!is_active && !is_locked, |this| {
-                            this.opacity(0.)
-                                .group_hover(tab_group_name.clone(), |style| style.opacity(1.))
-                        })
-                        .hover(|this| {
-                            this.bg(rgb(palette.border)).text_color(if is_locked {
-                                rgb(palette.warning)
-                            } else {
-                                rgb(palette.danger)
-                            })
-                        })
-                        .child(
-                            svg()
-                                .size(px(13.))
-                                .path(if is_locked {
-                                    "icons/lock.svg"
-                                } else {
-                                    "icons/window/close.svg"
-                                })
-                                .text_color(rgb(palette.text_muted)),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if is_locked {
-                                this.notify_locked_tab_close_blocked(cx);
-                            } else {
-                                this.close_session(close_session_id.clone(), cx);
-                            }
-                        })),
-                )
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.handle_session_tab_click(session_id.clone(), event, window, cx);
-                }))
-                .on_mouse_down(
-                    MouseButton::Middle,
-                    cx.listener({
-                        let session_id = session.id.clone();
-                        move |this, event, window, cx| {
-                            this.handle_session_tab_mouse_down(
-                                session_id.clone(),
-                                event,
-                                window,
-                                cx,
-                            );
-                        }
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener({
-                        let session_id = session.id.clone();
-                        move |this, event, window, cx| {
-                            this.handle_session_tab_mouse_down(
-                                session_id.clone(),
-                                event,
-                                window,
-                                cx,
-                            );
-                        }
-                    }),
-                );
-            tabs = tabs.child(
-                ZzClawHoverCard::new(hover_card_id, tab, hover_card).anchor(Anchor::TopLeft),
-            );
+            tabs = tabs.child(self.session_strip_tab(
+                session,
+                tab_index,
+                tab_index + transient_cursor + 1,
+                group_active.as_deref(),
+                cx,
+            ));
         }
         while transient_cursor < transient_tabs.len() {
             let (_, _, _, request_id, name, error) = transient_tabs[transient_cursor].clone();
@@ -896,11 +955,16 @@ impl ZzClawTermApp {
             transient_cursor += 1;
         }
 
+        let end_drop_group = group_id.clone();
+        let hover_end_group = group_id.clone();
         if session_count > 0 {
             let drop_workspace_id = self.workspace_id;
             tabs = tabs.child(
                 div()
-                    .id("session-tab-drop-end")
+                    .id(SharedString::from(format!(
+                        "session-tab-drop-end-{}",
+                        group_id.as_deref().unwrap_or("main")
+                    )))
                     .h_full()
                     .min_w(px(SESSION_TAB_END_DROP_TARGET_MIN_WIDTH))
                     .flex_1()
@@ -909,6 +973,7 @@ impl ZzClawTermApp {
                     .hover(move |this| this.bg(shell_hover_bg))
                     .drag_over::<SessionTabDragPayload>(move |this, payload, _, _| {
                         if payload.source_workspace_id == drop_workspace_id
+                            && payload.source_group_id == hover_end_group
                             && payload.order_index + 1 >= session_count
                         {
                             this
@@ -923,22 +988,45 @@ impl ZzClawTermApp {
                             this.update_session_tab_drag(event.drag(cx).session_id.clone(), cx);
                         },
                     ))
-                    .on_drop(cx.listener(|this, payload: &SessionTabDragPayload, _, cx| {
-                        if payload.source_workspace_id == this.workspace_id {
-                            this.reorder_session_to_end(payload.session_id.clone(), cx);
-                        } else {
-                            this.request_tab_tree_move(
-                                payload,
-                                zzclawterm_core::MoveTabPlacement::Append,
-                                cx,
-                            );
-                        }
-                    })),
+                    .on_drop(
+                        cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
+                            this.accept_session_tab_drop(payload, cx);
+                            if payload.source_workspace_id == this.workspace_id {
+                                if let Some(group) = &end_drop_group {
+                                    this.dock_tab_on_terminal_window_leaf(
+                                        payload.session_id.clone(),
+                                        group.clone(),
+                                        crate::models::TabDockZone::Center,
+                                        cx,
+                                    );
+                                } else {
+                                    this.reorder_session_to_end(payload.session_id.clone(), cx);
+                                }
+                            } else {
+                                this.request_tab_tree_move(
+                                    payload,
+                                    end_drop_group
+                                        .clone()
+                                        .map(|leaf_id| {
+                                            zzclawterm_core::MoveTabPlacement::TerminalLeaf {
+                                                leaf_id,
+                                                edge: None,
+                                            }
+                                        })
+                                        .unwrap_or(zzclawterm_core::MoveTabPlacement::Append),
+                                    cx,
+                                );
+                            }
+                        }),
+                    ),
             );
         } else {
             tabs = tabs.child(
                 div()
-                    .id("session-tab-drop-empty")
+                    .id(SharedString::from(format!(
+                        "session-tab-drop-empty-{}",
+                        group_id.as_deref().unwrap_or("main")
+                    )))
                     .h_full()
                     .flex_1()
                     .border_b_1()
@@ -949,6 +1037,7 @@ impl ZzClawTermApp {
                             .border_color(rgb(palette.focus_ring))
                     })
                     .on_drop(cx.listener(|this, payload: &SessionTabDragPayload, _, cx| {
+                        this.accept_session_tab_drop(payload, cx);
                         if payload.source_workspace_id != this.workspace_id {
                             this.request_tab_tree_move(
                                 payload,
@@ -961,14 +1050,22 @@ impl ZzClawTermApp {
         }
 
         // Tauri TabBar trailing chrome: optional open-tabs overflow menu + new session menu.
-        let open_tabs_menu = self.shell.open_tabs_menu_is_open();
-        let new_session_anchor = NewSessionMenuAnchor::MainTabStrip;
+        let open_tabs_menu = self.shell.open_tabs_menu_is_open()
+            && (group_id.is_none() || self.current_terminal_group() == group_id);
+        let new_session_anchor = group_id
+            .clone()
+            .map(NewSessionMenuAnchor::TerminalLeaf)
+            .unwrap_or(NewSessionMenuAnchor::MainTabStrip);
         let new_session_menu = self.shell.new_session_menu_is_open_at(&new_session_anchor);
         let new_session_has_submenu = self.shell.new_session_all_sessions_is_open();
         let open_tabs_label = t!("terminal.openTabs").to_string();
         let new_session_label = t!("terminal.newSession").to_string();
         let tab_strip_has_overflow = self.shell.session_tab_strip_has_overflow();
-        let show_open_tabs_menu = tab_strip_has_overflow || open_tabs_menu;
+        let show_open_tabs_menu = if group_id.is_some() {
+            session_count > 1 || open_tabs_menu
+        } else {
+            tab_strip_has_overflow || open_tabs_menu
+        };
 
         let mut session_actions = div()
             .h_full()
@@ -981,7 +1078,10 @@ impl ZzClawTermApp {
 
         if show_open_tabs_menu {
             let open_tabs_trigger = div()
-                .id("workspace-open-tabs-menu")
+                .id(SharedString::from(format!(
+                    "workspace-open-tabs-menu-{}",
+                    group_id.as_deref().unwrap_or("main")
+                )))
                 .size(px(SESSION_TAB_ACTION_SIZE))
                 .flex()
                 .items_center()
@@ -1006,21 +1106,40 @@ impl ZzClawTermApp {
                 .tooltip(move |window, cx| {
                     zzclawterm_ui::ZzClawTooltip::new(open_tabs_label.clone()).build(window, cx)
                 });
+            let overflow_group = group_id.clone();
             let open_tabs_popover = ZzClawPopover::new(
-                "workspace-open-tabs-popover",
+                SharedString::from(format!(
+                    "workspace-open-tabs-popover-{}",
+                    group_id.as_deref().unwrap_or("main")
+                )),
                 open_tabs_trigger,
-                self.render_open_tabs_menu(cx),
+                if open_tabs_menu {
+                    self.render_open_tabs_menu_for_group(group_id.as_deref(), cx)
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                },
             )
             .anchor(Anchor::TopRight)
             .appearance(false)
             .open(open_tabs_menu)
-            .on_open_change(cx.listener(|this, open, _, cx| {
+            .on_open_change(cx.listener(move |this, open, window, cx| {
                 if *open {
+                    if let Some(group) = &overflow_group
+                        && let Some((_, Some(tab))) = this.terminal.terminal_group_tabs(group)
+                    {
+                        this.select_session(tab, cx);
+                    }
                     if !this.shell.open_tabs_menu_is_open() {
                         this.toggle_open_tabs_menu(cx);
                     }
-                } else {
+                } else if overflow_group.is_none()
+                    || this.current_terminal_group() == overflow_group
+                {
                     this.close_open_tabs_menu(cx);
+                    if let Some(active) = this.session.active_id_owned() {
+                        this.focus_terminal_session(&active, window, cx);
+                    }
                 }
             }));
             session_actions = session_actions.child(
@@ -1037,7 +1156,10 @@ impl ZzClawTermApp {
         }
 
         let new_session_trigger = div()
-            .id("workspace-new-session-menu")
+            .id(SharedString::from(format!(
+                "workspace-new-session-menu-{}",
+                group_id.as_deref().unwrap_or("main")
+            )))
             .size(px(SESSION_TAB_ACTION_SIZE))
             .flex()
             .items_center()
@@ -1063,9 +1185,17 @@ impl ZzClawTermApp {
                 zzclawterm_ui::ZzClawTooltip::new(new_session_label.clone()).build(window, cx)
             });
         let new_session_popover = ZzClawPopover::new(
-            "workspace-new-session-popover",
+            SharedString::from(format!(
+                "workspace-new-session-popover-{}",
+                group_id.as_deref().unwrap_or("main")
+            )),
             new_session_trigger,
-            self.render_new_session_menu("main", cx),
+            if new_session_menu {
+                self.render_new_session_menu(group_id.as_deref().unwrap_or("main"), cx)
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            },
         )
         .placement(ZzClawPopoverPlacement::Bottom)
         .align(ZzClawPopoverAlign::End)
@@ -1073,12 +1203,15 @@ impl ZzClawTermApp {
         .appearance(false)
         .overlay_closable(!new_session_has_submenu)
         .open(new_session_menu)
-        .on_open_change(cx.listener(|this, open, _, cx| {
-            let anchor = NewSessionMenuAnchor::MainTabStrip;
+        .on_open_change(cx.listener(move |this, open, window, cx| {
+            let anchor = new_session_anchor.clone();
             if *open {
                 this.open_new_session_menu(anchor, cx);
             } else if this.shell.new_session_menu_is_open_at(&anchor) {
                 this.close_new_session_menu(cx);
+                if let Some(active) = this.session.active_id_owned() {
+                    this.focus_terminal_session(&active, window, cx);
+                }
             }
         }));
         session_actions = session_actions.child(
@@ -1093,6 +1226,7 @@ impl ZzClawTermApp {
                 .child(new_session_popover),
         );
 
+        let measure_flat_strip = group_id.is_none();
         let tracked_app = cx.weak_entity();
         let tab_scroll_for_layout = tab_scroll.clone();
         let tab_strip_viewport = div()
@@ -1101,6 +1235,9 @@ impl ZzClawTermApp {
             .flex_1()
             .overflow_hidden()
             .on_children_prepainted(move |_, _, cx| {
+                if !measure_flat_strip {
+                    return;
+                }
                 let viewport_width = tab_scroll_for_layout.bounds().size.width;
                 if viewport_width <= px(0.) {
                     return;
@@ -1131,7 +1268,8 @@ impl ZzClawTermApp {
                     });
                 });
             })
-            .child(tabs);
+            .child(tabs)
+            .horizontal_scrollbar(&tab_scroll);
 
         div()
             .h(px(36.)) // Tauri TabBar: h-9
@@ -1140,6 +1278,7 @@ impl ZzClawTermApp {
             .bg(self.shell_surface_color(palette.surface))
             .child(tab_strip_viewport)
             .child(session_actions)
+            .into_any_element()
     }
 }
 

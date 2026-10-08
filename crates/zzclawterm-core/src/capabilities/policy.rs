@@ -1,4 +1,4 @@
-use crate::ai::{AiPermissionMode, RiskLevel};
+use crate::ai::{AgentCommandExecutionMode, AiPermissionMode, RiskLevel};
 
 use super::CapabilityAccess;
 
@@ -7,6 +7,202 @@ pub enum PolicyDecision {
     Allow,
     RequireApproval,
     Deny,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentApprovalDecision {
+    Deny,
+    AllowOnce,
+    AllowSession,
+}
+
+/// A session grant is never enough to authorize a destructive or critical call.
+pub fn requires_single_approval(
+    access: CapabilityAccess,
+    assessment: Option<&RiskAssessment>,
+) -> bool {
+    access == CapabilityAccess::DestructiveWrite
+        || assessment.is_some_and(|risk| risk.level == RiskLevel::Critical)
+}
+
+pub fn decide_native_policy(
+    mode: &AgentCommandExecutionMode,
+    smart_max_risk: &RiskLevel,
+    access: CapabilityAccess,
+    assessment: Option<&RiskAssessment>,
+) -> PolicyDecision {
+    let permission = match mode {
+        AgentCommandExecutionMode::ConfirmEach => AiPermissionMode::Confirm,
+        AgentCommandExecutionMode::Smart => AiPermissionMode::Auto,
+        AgentCommandExecutionMode::Auto => AiPermissionMode::FullAccess,
+    };
+    let decision = decide_policy(&permission, access, assessment);
+    if decision == PolicyDecision::Allow
+        && *mode == AgentCommandExecutionMode::Smart
+        && assessment.is_some_and(|risk| risk.level > *smart_max_risk)
+    {
+        PolicyDecision::RequireApproval
+    } else {
+        decision
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::{
+        AgentCommandExecutionMode, AiPermissionMode, CapabilityAccess, PolicyDecision, RiskLevel,
+        assess_command_risk, decide_native_policy, decide_policy, requires_single_approval,
+    };
+
+    #[test]
+    fn native_auto_allows_every_access_and_risk_without_approval() {
+        for access in [
+            CapabilityAccess::Read,
+            CapabilityAccess::SensitiveRead,
+            CapabilityAccess::Write,
+            CapabilityAccess::DestructiveWrite,
+        ] {
+            assert_eq!(
+                decide_native_policy(
+                    &AgentCommandExecutionMode::Auto,
+                    &RiskLevel::Low,
+                    access,
+                    None
+                ),
+                PolicyDecision::Allow
+            );
+            for command in [
+                "pwd",
+                "mkdir /tmp/test",
+                "unknown-tool",
+                "sudo rm -rf /tmp/test",
+                "rm -rf /",
+                "reboot",
+            ] {
+                let risk = assess_command_risk(command);
+                assert_eq!(
+                    decide_native_policy(
+                        &AgentCommandExecutionMode::Auto,
+                        &RiskLevel::Low,
+                        access,
+                        Some(&risk)
+                    ),
+                    PolicyDecision::Allow,
+                    "{access:?}: {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_smart_only_allows_explicitly_safe_commands_below_high() {
+        for command in [
+            "unknown-tool",
+            "sudo rm -rf /tmp/test",
+            "rm -rf /",
+            "reboot",
+        ] {
+            let risk = assess_command_risk(command);
+            assert_eq!(
+                decide_native_policy(
+                    &AgentCommandExecutionMode::Smart,
+                    &RiskLevel::Critical,
+                    CapabilityAccess::Write,
+                    Some(&risk)
+                ),
+                PolicyDecision::RequireApproval,
+                "{command}"
+            );
+        }
+        let ordinary = assess_command_risk("mkdir /tmp/test");
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::Smart,
+                &RiskLevel::Medium,
+                CapabilityAccess::Write,
+                Some(&ordinary)
+            ),
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::Smart,
+                &RiskLevel::Low,
+                CapabilityAccess::Write,
+                Some(&ordinary)
+            ),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::ConfirmEach,
+                &RiskLevel::Low,
+                CapabilityAccess::Write,
+                Some(&assess_command_risk("pwd"))
+            ),
+            PolicyDecision::RequireApproval
+        );
+    }
+
+    #[test]
+    fn critical_and_destructive_requests_require_single_approval_except_explicit_full_access() {
+        let critical = assess_command_risk("reboot");
+        assert!(requires_single_approval(
+            CapabilityAccess::Write,
+            Some(&critical)
+        ));
+        assert!(requires_single_approval(
+            CapabilityAccess::DestructiveWrite,
+            None
+        ));
+        assert_eq!(
+            decide_policy(
+                &AiPermissionMode::Auto,
+                CapabilityAccess::Write,
+                Some(&critical)
+            ),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            decide_policy(
+                &AiPermissionMode::FullAccess,
+                CapabilityAccess::Write,
+                Some(&critical)
+            ),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn native_confirm_approves_sensitive_reads_but_not_metadata() {
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::ConfirmEach,
+                &RiskLevel::Low,
+                CapabilityAccess::Read,
+                None
+            ),
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::ConfirmEach,
+                &RiskLevel::Low,
+                CapabilityAccess::SensitiveRead,
+                None
+            ),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            decide_native_policy(
+                &AgentCommandExecutionMode::Auto,
+                &RiskLevel::Low,
+                CapabilityAccess::SensitiveRead,
+                None
+            ),
+            PolicyDecision::Allow
+        );
+    }
 }
 
 #[derive(Debug, Clone)]

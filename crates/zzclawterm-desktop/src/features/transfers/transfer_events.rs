@@ -193,6 +193,22 @@ impl ZzClawTermApp {
                     }
                 }
 
+                let mut latest = HashMap::new();
+                let mut coalesced: Vec<TransferJobResult> = Vec::with_capacity(batch.len());
+                for event in batch {
+                    if matches!(event.event, TransferJobEvent::Progress(_)) {
+                        if let Some(&index) = latest.get(&event.id) {
+                            coalesced[index] = event;
+                        } else {
+                            latest.insert(event.id.clone(), coalesced.len());
+                            coalesced.push(event);
+                        }
+                    } else {
+                        latest.remove(&event.id);
+                        coalesced.push(event);
+                    }
+                }
+                let batch = coalesced;
                 if this
                     .update_in(cx, |this, window, cx| {
                         // One transaction, one notify, however many events it took.
@@ -228,6 +244,49 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let TransferJobEvent::DragExportOpened {
+            session_id,
+            remote_path,
+            control,
+            destination,
+        } = event.event
+        {
+            if self.session.metadata(&session_id).is_none() {
+                control.cancel();
+                return false;
+            }
+            let kind = match destination {
+                Some(destination) => {
+                    self.transfer.bind_promised_download(
+                        &event.id,
+                        destination.options,
+                        destination.source,
+                    );
+                    TransferJobKind::Download {
+                        remote_path,
+                        raw_path_token: destination.raw_path_token,
+                        local_path: destination.local_path,
+                    }
+                }
+                None => TransferJobKind::DragExport { remote_path },
+            };
+            self.transfer
+                .enqueue_transfer_job(crate::models::TransferJobState {
+                    id: event.id,
+                    session_id: Some(session_id),
+                    kind,
+                    status: TransferJobStatus::Running,
+                    detail: t!("fileExplorer.exportContent").to_string(),
+                    created_at_ms: crate::models::TransferJobState::now_ms(),
+                    display_name: String::new(),
+                    entries: Vec::new(),
+                    summary: None,
+                    progress: None,
+                    control: Some(control),
+                    speed: Default::default(),
+                });
+            return true;
+        }
         let Some((job_index, mut job)) = self.transfer.take_transfer_job_for_event(&event.id)
         else {
             // The job was cancelled or removed while its worker was still running.
@@ -236,6 +295,19 @@ impl ZzClawTermApp {
         let mut dirty = false;
         let event_id = event.id.clone();
         let job_session_id = job.session_id.clone();
+        if let (TransferJobKind::Delete { batch_id, .. }, TransferJobEvent::Finished(result)) =
+            (&job.kind, &event.event)
+        {
+            if let Some(outcome) = self.transfer.settle_delete_job(
+                batch_id,
+                &event.id,
+                result.as_ref().map(|_| ()).map_err(Clone::clone),
+            ) {
+                self.finish_transfer_delete_batch(job_session_id.as_deref(), outcome, window, cx);
+                return true;
+            }
+            return false;
+        }
         let reveal_tree_after_navigation = matches!(
             &job.kind,
             TransferJobKind::InitialDirectory
@@ -298,7 +370,7 @@ impl ZzClawTermApp {
         let mut external_sync_to_start: Option<ExternalEditorSyncStart> = None;
         let mut external_watch_to_start: Option<ExternalEditorWatchStart> = None;
         let mut external_sync_prompt_to_open: Option<String> = None;
-        let mut zmodem_upload_after_probe: Option<(String, Vec<PathBuf>)> = None;
+        let mut zmodem_upload_after_probe: Option<(String, Vec<PathBuf>, bool)> = None;
         let mut open_after_create: Option<SftpFileEntry> = None;
         let mut browser_navigation_rollback = None;
         let mut browser_listing_completed = false;
@@ -321,6 +393,9 @@ impl ZzClawTermApp {
             && !job.is_user_transfer()
             && (!matches!(&job.kind, TransferJobKind::OpenExternal { .. }) || event_failed);
         match event.event {
+            TransferJobEvent::DragExportOpened { .. } => {
+                unreachable!()
+            }
             TransferJobEvent::Started { detail } => {
                 job.status = TransferJobStatus::Running;
                 job.detail = detail;
@@ -594,33 +669,7 @@ impl ZzClawTermApp {
                     "remote move completed from {parent_path}: {new_path}"
                 ));
             }
-            TransferJobEvent::Finished(Ok(TransferJobOutput::Deleted {
-                remote_path,
-                parent_path,
-                entries,
-            })) => {
-                job.status = TransferJobStatus::Completed;
-                job.detail = format!("Deleted {remote_path}");
-                self.transfer.browser.path = parent_path.clone();
-                self.transfer.browser.entries = Arc::new(entries.clone());
-                self.transfer.browser.status = format!("{} item(s)", entries.len());
-                job.entries = entries;
-                job.summary = None;
-                job.progress = None;
-                job.control = None;
-                if self.transfer.browser.selected_remote_path.as_deref()
-                    == Some(remote_path.as_str())
-                {
-                    self.transfer.browser.selected_remote_path = None;
-                }
-                self.transfer
-                    .browser
-                    .selected_remote_paths
-                    .remove(&remote_path);
-                self.shell.set_status(format!(
-                    "remote delete completed in {parent_path}: {remote_path}"
-                ));
-            }
+            TransferJobEvent::Finished(Ok(TransferJobOutput::Deleted)) => {}
             TransferJobEvent::Finished(Ok(TransferJobOutput::Sent {
                 source_path,
                 source_parent_path,
@@ -1036,6 +1085,12 @@ impl ZzClawTermApp {
                 };
                 job.detail = if summary.skipped {
                     "Cancelled (duplicate skipped)".to_string()
+                } else if matches!(job.kind, TransferJobKind::DragExport { .. }) {
+                    t!(
+                        "fileExplorer.exportProvided",
+                        size = format_file_size(Some(summary.bytes))
+                    )
+                    .to_string()
                 } else {
                     format!("{} transferred", format_file_size(Some(summary.bytes)))
                 };
@@ -1045,10 +1100,13 @@ impl ZzClawTermApp {
                     local_path: summary.local_path.clone(),
                     bytes_transferred: summary.bytes,
                     total_bytes: Some(summary.bytes),
-                    item_count_completed: job
-                        .progress
-                        .as_ref()
-                        .and_then(|progress| progress.item_count_total),
+                    item_count_completed: job.progress.as_ref().and_then(|progress| {
+                        if matches!(job.kind, TransferJobKind::DragExport { .. }) {
+                            progress.item_count_completed
+                        } else {
+                            progress.item_count_total
+                        }
+                    }),
                     item_count_total: job
                         .progress
                         .as_ref()
@@ -1075,10 +1133,13 @@ impl ZzClawTermApp {
                     local_path: summary.local_path.clone(),
                     bytes_transferred: summary.bytes,
                     total_bytes: Some(summary.bytes),
-                    item_count_completed: job
-                        .progress
-                        .as_ref()
-                        .and_then(|progress| progress.item_count_total),
+                    item_count_completed: job.progress.as_ref().and_then(|progress| {
+                        if matches!(job.kind, TransferJobKind::DragExport { .. }) {
+                            progress.item_count_completed
+                        } else {
+                            progress.item_count_total
+                        }
+                    }),
                     item_count_total: job
                         .progress
                         .as_ref()
@@ -1113,6 +1174,7 @@ impl ZzClawTermApp {
                 session_id,
                 files,
                 probe_skipped,
+                overwrite,
             })) => {
                 job.status = TransferJobStatus::Completed;
                 job.detail = if probe_skipped {
@@ -1130,7 +1192,7 @@ impl ZzClawTermApp {
                         "ZMODEM upload cancelled — all conflicting files skipped".to_string(),
                     );
                 } else {
-                    zmodem_upload_after_probe = Some((session_id, files));
+                    zmodem_upload_after_probe = Some((session_id, files, overwrite));
                 }
             }
             TransferJobEvent::Finished(Err(error)) => {
@@ -1270,8 +1332,8 @@ impl ZzClawTermApp {
         {
             self.shell.set_status(error);
         }
-        if let Some((session_id, files)) = zmodem_upload_after_probe {
-            self.begin_zmodem_upload_after_probe(session_id, files, cx);
+        if let Some((session_id, files, overwrite)) = zmodem_upload_after_probe {
+            self.begin_zmodem_upload_after_probe(session_id, files, overwrite, cx);
         }
         if let Some(entry) = open_after_create
             && inactive_browser_snapshot.is_none()
@@ -1383,6 +1445,7 @@ fn transfer_navigation_job_is_stale(
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -1397,7 +1460,6 @@ mod tests {
     };
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::models::{
         TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
         TransferJobStatus,

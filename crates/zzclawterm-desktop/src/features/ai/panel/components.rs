@@ -1,98 +1,68 @@
+use rust_i18n::t;
+
 use gpui::{
     App, ClickEvent, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
     rgb, svg,
 };
-use zzclawterm_core::AiCommandCard;
+use zzclawterm_core::ai::AiCommandCard;
+use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant};
 
-use crate::features::formatting::risk_label;
+use crate::features::formatting::compact_id;
 use crate::theme::ThemePalette;
 
 use super::AiPanel;
 
-pub(super) struct AiCommandCardPresentation {
-    pub palette: ThemePalette,
-    pub key: String,
-    pub risk: &'static str,
-    pub title: String,
-    pub command: String,
-    pub explanation: String,
-    pub risk_reason: String,
-    pub agent_command: bool,
-    pub expected: String,
-    pub rollback: String,
-}
-
-impl AiCommandCardPresentation {
-    pub(super) fn new(palette: ThemePalette, key: String, card: AiCommandCard) -> Self {
-        Self {
-            palette,
-            key,
-            risk: risk_label(card.risk_level.as_ref()),
-            title: if card.title.trim().is_empty() {
-                "Command".to_string()
-            } else {
-                card.title
-            },
-            command: card.command,
-            explanation: card.explanation,
-            risk_reason: card.risk_reason.unwrap_or_default(),
-            agent_command: card.id.starts_with("agent-"),
-            expected: card.expected_effect,
-            rollback: card.rollback.unwrap_or_default(),
-        }
-    }
+pub(super) fn ai_command_target_label(card: &AiCommandCard) -> String {
+    card.target
+        .as_ref()
+        .map(|target| target.label.trim())
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .or_else(|| card.target_terminal_session_id.as_deref().map(compact_id))
+        .unwrap_or_default()
 }
 
 pub(super) fn ai_send_button(
-    palette: ThemePalette,
+    _palette: ThemePalette,
     running: bool,
     disabled: bool,
     cx: &mut Context<AiPanel>,
 ) -> impl IntoElement {
-    let icon = if running {
-        "icons/ai/stop.svg"
-    } else {
-        "icons/ai/send.svg"
-    };
     div()
-        .id(SharedString::from("ai-ask-run"))
+        .debug_selector(|| "ai-send-control".to_string())
         .size(px(28.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .text_color(if disabled {
-            rgb(palette.text_dimmed)
-        } else {
-            rgb(palette.text_muted)
-        })
-        .opacity(if disabled { 0.48 } else { 1.0 })
-        .when(!disabled, |this| {
-            this.cursor_pointer().hover(move |this| {
-                this.bg(rgb(palette.surface_elevated))
-                    .text_color(rgb(palette.text))
-            })
-        })
+        .flex_none()
         .child(
-            svg()
-                .size(px(16.))
-                .flex_none()
-                .path(icon)
-                .text_color(if disabled {
-                    rgb(palette.text_dimmed)
+            ZzClawButton::new("ai-ask-run", "")
+                .small()
+                .full_width()
+                .height(px(28.))
+                .icon(if running {
+                    "icons/ai/stop.svg"
                 } else {
-                    rgb(palette.text_muted)
-                }),
+                    "icons/ai/send.svg"
+                })
+                .variant(if running {
+                    ZzClawButtonVariant::Secondary
+                } else {
+                    ZzClawButtonVariant::Primary
+                })
+                .tooltip(if running {
+                    t!("ai.cancelTask")
+                } else {
+                    t!("ai.sendMessage")
+                })
+                .disabled(disabled)
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.with_app(cx, move |app, cx| {
+                        if app.ai.chat_or_agent_is_running() {
+                            app.cancel_ai_chat(cx);
+                        } else if !disabled {
+                            app.start_ai_ask(cx);
+                        }
+                    });
+                })),
         )
-        .on_click(cx.listener(move |panel, _, _, cx| {
-            panel.with_app(cx, move |app, cx| {
-                if app.ai.chat_or_agent_is_running() {
-                    app.cancel_ai_chat(cx);
-                } else if !disabled {
-                    app.start_ai_ask(cx);
-                }
-            });
-        }))
 }
 
 pub(super) fn ai_user_pre_wrap_text(palette: ThemePalette, text: &str) -> gpui::AnyElement {
@@ -196,4 +166,41 @@ pub(super) fn ai_message_menu_position(
     let max_x = (viewport_width - menu_width - margin).max(margin);
     let max_y = (viewport_height - height - margin).max(margin);
     (x.clamp(margin, max_x), y.clamp(margin, max_y), max_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use zzclawterm_core::ai::{AiCommandCard, AiTerminalTarget};
+
+    use super::ai_command_target_label;
+
+    #[test]
+    fn legacy_command_target_is_compact_and_keeps_its_execution_id() {
+        let mut card: AiCommandCard = serde_json::from_value(serde_json::json!({
+            "id": "legacy-command",
+            "title": "Inspect resources",
+            "command": "pwd",
+            "explanation": "",
+            "expectedEffect": "",
+            "targetTerminalSessionId": "af0280b6-e62b-4d17-8f3c-000000000001"
+        }))
+        .unwrap();
+        assert_eq!(ai_command_target_label(&card), "af0280b6..0001");
+        assert_eq!(
+            card.target_terminal_session_id.as_deref(),
+            Some("af0280b6-e62b-4d17-8f3c-000000000001")
+        );
+
+        card.target = Some(AiTerminalTarget {
+            terminal_session_id: card.target_terminal_session_id.clone().unwrap(),
+            connection_id: None,
+            label: "Production SSH".into(),
+            host: Some("example.test".into()),
+            username: None,
+            session_type: "SSH".into(),
+        });
+        assert_eq!(ai_command_target_label(&card), "Production SSH");
+        card.target.as_mut().unwrap().label = " ".into();
+        assert_eq!(ai_command_target_label(&card), "af0280b6..0001");
+    }
 }

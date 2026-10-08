@@ -677,6 +677,10 @@ impl SettingsFeatureState {
         };
     }
 
+    pub(in crate::features) fn toggle_recording_input(&mut self) {
+        self.summary.recording_include_input = !self.summary.recording_include_input;
+    }
+
     pub(in crate::features) fn toggle_recording_io_labels(&mut self) {
         self.summary.recording_include_io_labels = !self.summary.recording_include_io_labels;
     }
@@ -957,6 +961,10 @@ impl SettingsFeatureState {
 
     pub(in crate::features) fn set_tab_right_click_action(&mut self, action: String) {
         self.summary.interaction_tab_right_click_action = action;
+    }
+
+    pub(in crate::features) fn set_send_command_clear_after_send(&mut self, enabled: bool) {
+        self.summary.ui_serial_send_clear_after_send = enabled;
     }
 
     pub(in crate::features) fn apply_ui_layout(&mut self, update: UiLayoutSettingsUpdate) {

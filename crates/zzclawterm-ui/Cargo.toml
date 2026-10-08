@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+zzclawterm-core.workspace = true
 gpui.workspace = true
 ropey = "=2.0.0-beta.1"
 gpui-base.workspace = true

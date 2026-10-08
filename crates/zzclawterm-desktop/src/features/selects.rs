@@ -170,28 +170,6 @@ impl ZzClawTermApp {
     }
 
     /// A select with no chrome of its own, for a control strip that draws its own.
-    pub(in crate::features) fn bare_select_control<I>(
-        &mut self,
-        id: I,
-        options: Vec<ZzClawSelectOption>,
-        selected_value: Option<String>,
-        disabled: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<I>
-    where
-        I: Into<SharedString>,
-    {
-        let id = id.into();
-        let select = self.select_entity(id.clone(), options, selected_value, disabled, cx);
-
-        div()
-            .id(id)
-            .w_full()
-            .max_w(px(360.))
-            .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
-            .child(ZzClawSelect::new(&select).appearance(false))
-    }
-
     pub(in crate::features) fn form_select_control<I>(
         &mut self,
         id: I,
@@ -231,7 +209,12 @@ impl ZzClawTermApp {
             return;
         }
 
+        if let Some(credential_id) = id.strip_prefix("ai-provider-protocol.") {
+            self.set_ai_provider_protocol(credential_id.to_string(), value.to_string(), cx);
+            return;
+        }
         match id {
+            "remote.stats.network" => self.select_stats_network_interface(value, cx),
             "appearance-ui-theme" => self.update_appearance_theme(value, cx),
             "appearance-terminal-theme" => {
                 self.set_terminal_theme((value != FOLLOW_UI_THEME_VALUE).then_some(value), cx)
@@ -272,10 +255,16 @@ impl ZzClawTermApp {
                 "disabled" => self.set_terminal_keep_alive_mode("disabled", cx),
                 _ => self.set_terminal_keep_alive_mode("compatible", cx),
             },
-            "settings.interaction.default-encoding" => match value {
-                "GBK" => self.set_interaction_encoding("GBK", cx),
-                _ => self.set_interaction_encoding("UTF-8", cx),
-            },
+            "settings.interaction.default-encoding" => {
+                match zzclawterm_core::character_encoding::CharacterEncoding::parse(value) {
+                    Ok(encoding) => self.set_interaction_encoding(encoding.label(), cx),
+                    Err(error) => {
+                        self.shell
+                            .set_status(crate::features::terminal::encoding_error_text(error));
+                        cx.notify();
+                    }
+                }
+            }
             "settings.interaction.tab-double" => {
                 self.set_tab_mouse_action(TabMouseActionTarget::Double, value, cx);
             }
@@ -403,6 +392,10 @@ impl ZzClawTermApp {
                 self.apply_temporary_serial_port_name(value.to_string(), cx);
             }
             "cloud-provider-select" => self.update_cloud_sync_provider(value, cx),
+            "ai-proxy-mode" | "ai-proxy-protocol" => {
+                self.ai.set_proxy_selection(id, value);
+                cx.notify();
+            }
             "ai-smart-risk" => {
                 let risk = match value {
                     "low" => Some(RiskLevel::Low),
@@ -427,6 +420,16 @@ impl ZzClawTermApp {
                 if let Some(mode) = ai_permission_mode(value) {
                     self.request_ai_permission_mode(AiFullAccessSetting::ExternalAgent, mode, cx);
                 }
+            }
+            "ai-codex-default-model" => {
+                self.ai.settings_config_mut().codex.default_model =
+                    (value != "__none__").then(|| value.to_string());
+                self.reset_text_input(
+                    "ai.input.codex-default-model",
+                    if value == "__none__" { "" } else { value },
+                    cx,
+                );
+                self.persist_ai_settings_now(cx);
             }
             "ai-codex-permission" => {
                 if let Some(mode) = ai_permission_mode(value) {
@@ -512,6 +515,7 @@ impl ZzClawTermApp {
                     "connection-editor-baud-rate" => ConnectionEditorSelect::BaudRate,
                     "connection-editor-data-bits" => ConnectionEditorSelect::DataBits,
                     "connection-editor-parity" => ConnectionEditorSelect::Parity,
+                    "connection-editor-flow-control" => ConnectionEditorSelect::FlowControl,
                     "connection-editor-stop-bits" => ConnectionEditorSelect::StopBits,
                     _ => return,
                 };

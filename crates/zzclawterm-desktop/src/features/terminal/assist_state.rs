@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 
-use zzclawterm_core::TerminalInputState as CommandInputState;
-
 use super::state::TerminalFeatureState;
 use crate::models::{
     CommandSuggestionState, CredentialAutofillMatchPipeline, CredentialAutofillMatchRequestKey,
@@ -17,7 +15,6 @@ use crate::models::{
 /// matcher remains a background pipeline and never runs in a render path.
 pub(super) struct TerminalAssistState {
     pub(super) command_suggestions: Option<CommandSuggestionState>,
-    pub(super) command_input_tracker: CommandInputState,
     pub(super) command_suggestions_suppressed: bool,
     pub(super) pending_command_history_entry: Option<String>,
     pub(super) command_suggestion_search_gen: u64,
@@ -38,7 +35,6 @@ impl TerminalAssistState {
     pub(super) fn new() -> Self {
         Self {
             command_suggestions: None,
-            command_input_tracker: CommandInputState::new(),
             command_suggestions_suppressed: false,
             pending_command_history_entry: None,
             command_suggestion_search_gen: 0,
@@ -58,7 +54,6 @@ impl TerminalAssistState {
 
     fn clear_command_tracking(&mut self) {
         self.command_suggestions = None;
-        self.command_input_tracker = CommandInputState::new();
         self.command_suggestions_suppressed = false;
         self.pending_command_history_entry = None;
     }
@@ -122,7 +117,7 @@ impl TerminalFeatureState {
     }
 
     pub(in crate::features) fn clear_active_session_assist(&mut self) {
-        self.assist.command_input_tracker = CommandInputState::new();
+        self.editing.clear_active();
         self.assist.command_suggestions = None;
         self.assist.credential_suggestions = None;
     }

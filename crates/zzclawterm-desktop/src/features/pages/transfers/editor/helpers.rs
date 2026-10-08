@@ -29,17 +29,33 @@ pub(super) fn open_local_path_with_editor(path: &Path, editor_command: &str) -> 
     if command.is_empty() {
         open_local_path_with_system_default(path)
     } else {
-        let mut parts = command.split_whitespace();
-        let Some(program) = parts.next() else {
-            return open_local_path_with_system_default(path);
-        };
-        Command::new(program)
-            .args(parts)
-            .arg(path)
+        editor_process(path, command)?
             .spawn()
             .map(|_| ())
-            .map_err(|error| format!("failed to open {} with {program}: {error}", path.display()))
+            .map_err(|error| format!("failed to open {} with {command}: {error}", path.display()))
     }
+}
+
+fn editor_process(path: &Path, command: &str) -> Result<Command, String> {
+    // The picker stores a literal executable path, including spaces. Resolve that
+    // before interpreting the legacy command-with-arguments setting.
+    let (program, arguments) = if Path::new(command).is_file() {
+        (command, "")
+    } else if let Some(quoted) = command.strip_prefix('"') {
+        quoted
+            .split_once('"')
+            .ok_or_else(|| "unterminated quoted editor executable".to_string())?
+    } else {
+        command
+            .split_once(char::is_whitespace)
+            .unwrap_or((command, ""))
+    };
+    if program.is_empty() {
+        return Err("editor executable is empty".to_string());
+    }
+    let mut process = Command::new(program);
+    process.args(arguments.split_whitespace()).arg(path);
+    Ok(process)
 }
 
 pub(super) fn open_local_path_with_system_default(path: &Path) -> Result<(), String> {
@@ -353,4 +369,54 @@ pub(super) fn upload_external_editor_file(
         id: job_id.to_string(),
         event: TransferJobEvent::Finished(result),
     });
+}
+
+#[cfg(test)]
+mod editor_process_tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::editor_process;
+
+    #[test]
+    fn literal_editor_path_with_spaces_is_one_executable() {
+        let root =
+            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-editor path with spaces");
+        let editor = root.path().join("Microsoft VS Code").join("Code.exe");
+        std::fs::create_dir_all(editor.parent().unwrap()).unwrap();
+        std::fs::write(&editor, []).unwrap();
+        let file = Path::new("download folder/中文 file.txt");
+        let process = editor_process(file, editor.to_str().unwrap()).unwrap();
+        assert_eq!(process.get_program(), editor.as_os_str());
+        assert_eq!(process.get_args().collect::<Vec<_>>(), [file.as_os_str()]);
+    }
+
+    #[test]
+    fn quoted_windows_executable_preserves_backslashes_and_legacy_arguments() {
+        let file = Path::new("download folder/file.txt");
+        let process = editor_process(
+            file,
+            r#""D:\Softwares\Microsoft VS Code\Code.exe" --reuse-window --wait"#,
+        )
+        .unwrap();
+        assert_eq!(
+            process.get_program(),
+            OsStr::new(r"D:\Softwares\Microsoft VS Code\Code.exe")
+        );
+        assert_eq!(
+            process.get_args().collect::<Vec<_>>(),
+            [
+                OsStr::new("--reuse-window"),
+                OsStr::new("--wait"),
+                file.as_os_str()
+            ]
+        );
+        let legacy = editor_process(file, "code --wait").unwrap();
+        assert_eq!(legacy.get_program(), OsStr::new("code"));
+        assert_eq!(
+            legacy.get_args().collect::<Vec<_>>(),
+            [OsStr::new("--wait"), file.as_os_str()]
+        );
+        assert!(editor_process(file, "\"unterminated").is_err());
+    }
 }

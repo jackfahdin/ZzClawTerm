@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
@@ -19,6 +20,8 @@ use crate::models::{
 };
 use crate::temporary_ssh_link::TemporaryLinkProtocol;
 use crate::test_support::{TestConfigDir, blocking_test_store};
+
+use crate::app_shell::session_hub::ssh_connections::SshConnectionPool;
 
 use super::{
     CredentialPromptState, FailedSessionStart, HostKeyPromptRequest,
@@ -61,16 +64,31 @@ fn prompt_state(cx: &TestAppContext, root: &Path) -> SessionPromptState {
 }
 
 fn session_state(cx: &TestAppContext, root: &Path) -> SessionFeatureState {
-    let manager = Arc::new(SessionManager::new());
+    session_state_with_runtime(
+        cx,
+        root,
+        Arc::new(SessionManager::new()),
+        SshConnectionPool::default(),
+    )
+}
+
+fn session_state_with_runtime(
+    cx: &TestAppContext,
+    root: &Path,
+    manager: Arc<SessionManager>,
+    ssh_connections: SshConnectionPool,
+) -> SessionFeatureState {
     let event_bridge = SessionEventBridge::spawn(
         Arc::clone(&manager),
         TerminalFramePipeline::default(),
+        None,
         "utf-8".to_string(),
         10_000,
     );
     let focus = || cx.update(|cx| cx.focus_handle());
     SessionFeatureState::new(
         manager,
+        ssh_connections,
         event_bridge,
         test_otp_provider(root),
         SessionFeatureFocus {
@@ -427,12 +445,14 @@ fn session_state_owns_live_runtime_and_initializes_transient_state() {
     let event_bridge = SessionEventBridge::spawn(
         Arc::clone(&manager),
         TerminalFramePipeline::default(),
+        None,
         "utf-8".to_string(),
         10_000,
     );
     let otp_provider = test_otp_provider(test_dir.path());
     let mut sessions = SessionFeatureState::new(
         Arc::clone(&manager),
+        SshConnectionPool::default(),
         event_bridge,
         Arc::clone(&otp_provider),
         SessionFeatureFocus {
@@ -840,7 +860,7 @@ fn active_session_selection_derives_configuration_from_the_catalog() {
 }
 
 #[test]
-fn session_disconnect_transition_is_idempotent_and_reports_multiplex_owner() {
+fn session_disconnect_transition_is_idempotent() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
     let mut sessions = session_state(&cx, test_dir.path());
@@ -849,26 +869,21 @@ fn session_disconnect_transition_is_idempotent_and_reports_multiplex_owner() {
     sessions.register_session_metadata("session-a", session_metadata("first", Some("multiplex-a")));
     sessions
         .register_session_metadata("session-b", session_metadata("second", Some("multiplex-a")));
-    assert!(sessions.other_live_session_uses_multiplex_key("session-a", "multiplex-a"));
 
     let changed = sessions
         .mark_session_disconnected("session-a")
         .expect("registered session should transition");
     assert!(!changed.already_disconnected);
-    assert_eq!(changed.multiplex_key.as_deref(), Some("multiplex-a"));
     assert!(sessions.metadata("session-a").unwrap().disconnected);
-    assert!(sessions.other_live_session_uses_multiplex_key("session-a", "multiplex-a"));
 
     let unchanged = sessions
         .mark_session_disconnected("session-a")
         .expect("disconnected session should remain registered");
     assert!(unchanged.already_disconnected);
-    assert_eq!(unchanged.multiplex_key.as_deref(), Some("multiplex-a"));
 
     sessions
         .mark_session_disconnected("session-b")
         .expect("shared session should transition");
-    assert!(!sessions.other_live_session_uses_multiplex_key("session-a", "multiplex-a"));
 }
 
 #[test]
@@ -1467,4 +1482,158 @@ fn closing_pending_starts_preserves_non_reconnect_and_failed_fallback_order() {
     assert!(starts.active_pending.is_none());
     assert_eq!(starts.active_failed.as_deref(), Some("request-failed"));
     assert!(starts.pending.contains_key("request-reconnect"));
+}
+
+#[test]
+fn moved_ssh_connection_survives_source_shutdown_and_repeated_transfers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let source_dir = TestConfigDir::new("zzclawterm-ssh-move-source");
+    let target_dir = TestConfigDir::new("zzclawterm-ssh-move-target");
+    let cx = TestAppContext::single();
+    let mut source = session_state(&cx, source_dir.path());
+    let pool = source.ssh_connection_pool();
+    let mut target = session_state_with_runtime(
+        &cx,
+        target_dir.path(),
+        source.manager_handle(),
+        pool.clone(),
+    );
+    let count = Arc::new(AtomicUsize::new(0));
+    let disconnected = Arc::clone(&count);
+    let connection = pool.register_for_test("ssh-shared", move || {
+        disconnected.fetch_add(1, Ordering::SeqCst);
+    });
+    source.register_session_metadata("moved", session_metadata("ssh", Some("ssh-shared")));
+    source.register_ssh_connection("moved".into(), connection);
+    let ids = vec!["moved".into()];
+
+    // The bundle itself owns the lease, including while a failed attach rolls back.
+    let events = source.pause_sessions_for_transfer(&ids);
+    let bundle = source.detach_sessions_for_transfer(&ids, events).unwrap();
+    assert!(source.protocols.ssh_connections.is_empty());
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    source.attach_sessions_from_transfer(bundle, None);
+
+    for _ in 0..2 {
+        let events = source.pause_sessions_for_transfer(&ids);
+        let bundle = source.detach_sessions_for_transfer(&ids, events).unwrap();
+        target.attach_sessions_from_transfer(bundle, None);
+        assert!(target.ssh_connection_for_session("moved").is_some());
+        let events = target.pause_sessions_for_transfer(&ids);
+        let bundle = target.detach_sessions_for_transfer(&ids, events).unwrap();
+        source.attach_sessions_from_transfer(bundle, None);
+    }
+    let events = source.pause_sessions_for_transfer(&ids);
+    let bundle = source.detach_sessions_for_transfer(&ids, events).unwrap();
+    target.attach_sessions_from_transfer(bundle, None);
+    source.shutdown_workers();
+    drop(source);
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(target.ssh_connection_for_session("moved").is_some());
+    target.shutdown_workers();
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn closing_and_disconnecting_sessions_in_other_windows_release_only_their_leases() {
+    let source_dir = TestConfigDir::new("zzclawterm-ssh-shared-source");
+    let target_dir = TestConfigDir::new("zzclawterm-ssh-shared-target");
+    let cx = TestAppContext::single();
+    let mut source = session_state(&cx, source_dir.path());
+    let pool = source.ssh_connection_pool();
+    let mut target = session_state_with_runtime(
+        &cx,
+        target_dir.path(),
+        source.manager_handle(),
+        pool.clone(),
+    );
+    let count = Arc::new(AtomicUsize::new(0));
+    let disconnected = Arc::clone(&count);
+    let connection = pool.register_for_test("shared", move || {
+        disconnected.fetch_add(1, Ordering::SeqCst);
+    });
+    for id in ["first", "second", "third"] {
+        source.register_session_metadata(id, session_metadata(id, Some("shared")));
+        source.register_ssh_connection(id.into(), connection.clone());
+    }
+    drop(connection);
+    let ids = vec!["third".into()];
+    let events = source.pause_sessions_for_transfer(&ids);
+    let bundle = source.detach_sessions_for_transfer(&ids, events).unwrap();
+    target.attach_sessions_from_transfer(bundle, None);
+    source.mark_session_disconnected("first").unwrap();
+    assert!(source.ssh_connection_for_session("first").is_none());
+    source.remove_session_catalog("second");
+    source.shutdown_workers();
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(target.ssh_connection_for_session("third").is_some());
+    target.mark_session_disconnected("third").unwrap();
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    target.mark_session_disconnected("third").unwrap();
+    target.remove_session_catalog("third");
+    pool.finish_disconnects();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn window_shutdown_marks_pending_starts_cancelled_before_late_results_arrive() {
+    let dir = TestConfigDir::new("zzclawterm-late-start-shutdown");
+    let cx = TestAppContext::single();
+    let mut sessions = session_state(&cx, dir.path());
+    sessions
+        .start
+        .register_pending("pending".into(), pending("ssh"));
+    sessions.shutdown_workers();
+    assert!(!sessions.start.has_pending());
+    assert!(sessions.start.sender().is_closed());
+    assert!(matches!(
+        sessions.start.take_event_request("pending"),
+        SessionStartEventRequest::Cancelled
+    ));
+}
+
+#[test]
+fn reconnect_releases_old_lease_without_disconnecting_shared_sibling_or_replacement() {
+    let dir = TestConfigDir::new("zzclawterm-ssh-reconnect-leases");
+    let cx = TestAppContext::single();
+    let mut sessions = session_state(&cx, dir.path());
+    let pool = sessions.ssh_connection_pool();
+    let old_disconnects = Arc::new(AtomicUsize::new(0));
+    let old_count = Arc::clone(&old_disconnects);
+    let old = pool.register_for_test("old-connection", move || {
+        old_count.fetch_add(1, Ordering::SeqCst);
+    });
+    for id in ["old", "sibling"] {
+        sessions.register_session_metadata(id, session_metadata(id, Some("old-connection")));
+        sessions.register_ssh_connection(id.into(), old.clone());
+    }
+    drop(old);
+    sessions.mark_session_disconnected("old").unwrap();
+    let new_disconnects = Arc::new(AtomicUsize::new(0));
+    let new_count = Arc::clone(&new_disconnects);
+    let new = pool.register_for_test("new-connection", move || {
+        new_count.fetch_add(1, Ordering::SeqCst);
+    });
+    sessions.register_ssh_connection("new".into(), new);
+    sessions.register_provisional_reconnect("new", session_metadata("new", Some("new-connection")));
+    sessions.replace_session_order_id("old", "new");
+    sessions.remove_session_catalog("old");
+    pool.finish_disconnects();
+    assert_eq!(old_disconnects.load(Ordering::SeqCst), 0);
+    assert_eq!(new_disconnects.load(Ordering::SeqCst), 0);
+    assert!(sessions.ssh_connection_for_session("new").is_some());
+    assert!(sessions.ssh_connection_for_session("sibling").is_some());
+    sessions.remove_session_catalog("sibling");
+    pool.finish_disconnects();
+    assert_eq!(old_disconnects.load(Ordering::SeqCst), 1);
+    assert_eq!(new_disconnects.load(Ordering::SeqCst), 0);
+    sessions.shutdown_workers();
+    pool.finish_disconnects();
+    assert_eq!(new_disconnects.load(Ordering::SeqCst), 1);
 }

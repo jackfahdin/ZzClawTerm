@@ -132,3 +132,26 @@ fn typed_sources_round_trip_and_cleared_fields_do_not_resurrect_from_extensions(
             .is_err()
     );
 }
+
+#[test]
+fn legacy_accounts_and_keys_default_to_zero_and_round_trip_explicit_order() {
+    use zzclawterm_core::models::credentials::SshKey;
+
+    let mut account: SavedPassword = serde_json::from_value(serde_json::json!({
+        "id": "account", "name": "Legacy", "password": null
+    }))
+    .unwrap();
+    let mut key: SshKey = serde_json::from_value(serde_json::json!({
+        "id": "key", "name": "Legacy", "key": null
+    }))
+    .unwrap();
+    assert_eq!(account.sort_order, 0);
+    assert_eq!(key.sort_order, 0);
+    account.sort_order = 7;
+    key.sort_order = 3;
+    let account: SavedPassword =
+        serde_json::from_value(serde_json::to_value(account).unwrap()).unwrap();
+    let key: SshKey = serde_json::from_value(serde_json::to_value(key).unwrap()).unwrap();
+    assert_eq!(account.sort_order, 7);
+    assert_eq!(key.sort_order, 3);
+}

@@ -239,15 +239,31 @@ impl ZzClawTermApp {
         self.terminal_scrollback_line_limit().saturating_mul(96)
     }
 
+    pub(in crate::features) fn submit_terminal_decoded_output(
+        &self,
+        session_id: &str,
+        text: String,
+    ) {
+        self.terminal.view.frame_pipeline.ensure_session(
+            session_id.to_string(),
+            self.effective_session_encoding(session_id),
+            self.terminal_scrollback_line_limit(),
+        );
+        self.terminal
+            .view
+            .frame_pipeline
+            .submit_decoded_output(session_id.to_string(), text);
+    }
+
     pub(in crate::features) fn submit_terminal_frame_output(
         &self,
         session_id: &str,
         data: Vec<u8>,
     ) {
-        self.terminal.view.frame_pipeline.submit_output(
+        self.terminal.view.frame_pipeline.submit_captured_output(
             session_id.to_string(),
             data,
-            self.settings.summary().interaction_default_encoding.clone(),
+            self.effective_session_encoding(session_id),
             self.terminal_scrollback_line_limit(),
         );
     }
@@ -259,16 +275,16 @@ impl ZzClawTermApp {
         if outputs.is_empty() {
             return;
         }
-        let encoding = self.settings.summary().interaction_default_encoding.clone();
         let scrollback_limit = self.terminal_scrollback_line_limit();
         let submissions = outputs
             .into_iter()
             .filter_map(|(session_id, data)| {
                 (!data.is_empty()).then_some(TerminalFrameOutputSubmission {
-                    session_id,
+                    raw_already_captured: true,
                     data,
-                    encoding: encoding.clone(),
+                    encoding: self.effective_session_encoding(&session_id),
                     scrollback_limit,
+                    session_id,
                 })
             })
             .collect::<Vec<_>>();
@@ -854,7 +870,55 @@ impl ZzClawTermApp {
             TerminalFrameEvent::Snapshot(snapshot) => {
                 self.apply_terminal_snapshot_frame(snapshot, cx)
             }
+            TerminalFrameEvent::CommandNavigation { session_id, result } => {
+                if self.session.active_id() == Some(session_id.as_str()) {
+                    self.clear_terminal_selection(cx);
+                    self.clear_terminal_scroll_residual_for_session(Some(&session_id));
+                    self.set_terminal_scroll_offset_for_session_state_only(
+                        Some(&session_id),
+                        result.display_offset,
+                    );
+                    self.request_terminal_frame_snapshot_for_user_scroll(
+                        &session_id,
+                        result.display_offset,
+                    );
+                    if let Some((start, end)) = result.selection {
+                        self.terminal.selection.session_id = Some(session_id.clone());
+                        self.terminal.selection.selection =
+                            Some(crate::models::TerminalSelection::from_range(
+                                crate::models::TerminalBufferCellPos::new(start, 0),
+                                crate::models::TerminalBufferCellPos::new(
+                                    end,
+                                    result.cols.saturating_sub(1),
+                                ),
+                            ));
+                    }
+                    self.notify_terminal_surface_only(Some(&session_id), cx);
+                }
+                TerminalFrameApplyResult {
+                    chrome_dirty: false,
+                    surface_notify: None,
+                }
+            }
             TerminalFrameEvent::ClearExceptInput(snapshot) => {
+                // Readline shells can repaint their input after the local clear.
+                // Windows local shells retain the ConPTY host's physical cursor.
+                let redraw = self
+                    .session
+                    .metadata(&snapshot.session_id)
+                    .is_some_and(|metadata| {
+                        !metadata.disconnected
+                            && match &metadata.launch_config {
+                                crate::models::SessionLaunchConfig::Ssh(config) => {
+                                    !config.is_network_device()
+                                }
+                                crate::models::SessionLaunchConfig::Local(_) => !cfg!(windows),
+                                _ => false,
+                            }
+                    });
+                if redraw {
+                    let _ = self.write_session_raw_input_recorded(&snapshot.session_id, &[0x0c]);
+                }
                 if let Some(view) = self.terminal.view.views.get_mut(&snapshot.session_id) {
                     view.clear_presentation_except_input(snapshot.revision, &snapshot.snapshot);
                 }
@@ -907,6 +971,7 @@ impl ZzClawTermApp {
                 "terminal output frame geometry"
             );
         }
+        self.observe_recording_prompt_output(&session_id, &visible_text);
         let is_active = self.session.active_id() == Some(session_id.as_str());
         let presentation = TerminalPresentation::resolve(
             is_active,
@@ -922,6 +987,7 @@ impl ZzClawTermApp {
         // Worker may already omit snapshot for low-priority sessions.
         let keep_hidden_snapshot = !self.runtime_output_pressure_active();
         let mut need_live_snapshot = false;
+        let mut shell_edit_snapshot_available = false;
         let (unread_changed, output_scroll_offset) = {
             let view = self
                 .terminal
@@ -943,6 +1009,7 @@ impl ZzClawTermApp {
             });
             if is_visible {
                 if let Some(snapshot) = snapshot {
+                    shell_edit_snapshot_available = true;
                     view.apply_terminal_frame_parts(TerminalFrameParts {
                         visible_text: &visible_text,
                         snapshot,
@@ -977,6 +1044,7 @@ impl ZzClawTermApp {
                 }
             } else {
                 let retain = keep_hidden_snapshot.then_some(snapshot).flatten();
+                shell_edit_snapshot_available = retain.is_some();
                 view.apply_terminal_background_frame_parts(
                     retain,
                     if keep_hidden_snapshot {
@@ -991,6 +1059,28 @@ impl ZzClawTermApp {
             }
             (unread_changed, view.scroll_offset)
         };
+        if shell_edit_snapshot_available {
+            if let Some(state) = self.terminal.editing.sessions.get_mut(&session_id) {
+                state.awaiting_snapshot = false;
+            }
+            self.reconcile_shell_editing(&session_id, cx);
+        } else if accepted_bytes > 0 {
+            let state = self
+                .terminal
+                .editing
+                .sessions
+                .entry(session_id.clone())
+                .or_default();
+            if state.model.phase == zzclawterm_core::terminal::editing::EditPhase::Ready {
+                state.invalidate();
+            } else {
+                state.mapping = None;
+                state.selection = None;
+                state.selection_origin_version = None;
+                state.model.queued_cursor = None;
+            }
+            state.awaiting_snapshot = true;
+        }
         if output_scroll_offset == 0 {
             self.clear_terminal_scroll_residual_for_session(Some(&session_id));
         }
@@ -1063,10 +1153,20 @@ impl ZzClawTermApp {
         if self.shell.main_mode() != MainMode::Workspace {
             return Vec::new();
         }
-        if let Some(root) = self.terminal.windows.tree.as_ref()
-            && matches!(root, TerminalWindowNode::Split { .. })
-        {
-            return terminal_window_node_visible_tab_ids(root);
+        if self.shell.pane_focus_mode() {
+            if self.session.start_has_active_pending() || self.session.start_has_active_failed() {
+                return Vec::new();
+            }
+            return self.session.active_id().into_iter().collect();
+        }
+        if let Some(root) = self.terminal.windows.tree.as_ref() {
+            let mut visible = terminal_window_node_visible_tab_ids(root);
+            if (self.session.start_has_active_pending() || self.session.start_has_active_failed())
+                && let Some(group) = self.current_terminal_group()
+            {
+                visible.retain(|tab| root.leaf_for_tab(tab) != Some(group.as_str()));
+            }
+            return visible;
         }
         if let Some(root) = self.shell.workspace_split() {
             return workspace_pane_node_visible_session_ids(root);
@@ -1144,6 +1244,12 @@ impl ZzClawTermApp {
                 view.scrollback_action_links.remove(&frame.offset);
             }
             view.prune_scrollback_snapshot_cache(frame.offset);
+        }
+        if frame.offset == 0 {
+            if let Some(state) = self.terminal.editing.sessions.get_mut(&frame.session_id) {
+                state.awaiting_snapshot = false;
+            }
+            self.reconcile_shell_editing(&frame.session_id, cx);
         }
         if frame.process_duration >= Duration::from_millis(20)
             && self.should_log_slow_diagnostic("terminal_frame_snapshot", Instant::now())
@@ -1370,23 +1476,17 @@ impl ZzClawTermApp {
         session_id: &str,
         data: &[u8],
     ) -> String {
-        let encoding = self.settings.summary().interaction_default_encoding.clone();
+        let encoding = self.effective_session_encoding(session_id);
         let view = self
             .terminal
             .view
             .views
             .entry(session_id.to_string())
             .or_insert_with(TerminalViewState::new);
-        view.recording_decoder.set_encoding(&encoding);
+        if let Err(error) = view.recording_decoder.set_encoding(&encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         view.recording_decoder.decode_output_text(data)
-    }
-
-    pub(in crate::features) fn encode_visible_terminal_text_for_output(
-        &self,
-        session_id: &str,
-        text: &str,
-    ) -> Vec<u8> {
-        self.encode_session_outgoing(session_id, text.as_bytes())
     }
 
     pub(in crate::features) fn append_terminal_log_for_session(
@@ -1419,7 +1519,7 @@ impl ZzClawTermApp {
 
         if let Some(session_id) = session_id {
             let is_active = self.session.active_id() == Some(session_id);
-            let encoding = self.settings.summary().interaction_default_encoding.clone();
+            let encoding = self.effective_session_encoding(session_id);
             let view = self
                 .terminal
                 .view

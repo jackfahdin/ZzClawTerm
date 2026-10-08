@@ -1,4 +1,4 @@
-use gpui::Context;
+use gpui::{AppContext as _, Context, Task};
 use zzclawterm_core::{
     AiSettings, AppSettingsSummary, KeywordHighlightConfig, TranslationSettings,
     WorkspaceRestoreState, WorkspaceSessionState, WorkspaceUiState,
@@ -50,8 +50,7 @@ impl ZzClawTermApp {
             right_panel_width: self.shell.right_panel_width().round().clamp(200., 720.) as u32,
             bottom_panel_height: self.shell.quick_commands_height().round().clamp(60., 600.) as u32,
             transfer_panel_height: self.transfer.panel_height().round().clamp(60., 600.) as u32,
-            serial_send_panel_height: self.shell.command_send_height().round().clamp(60., 600.)
-                as u32,
+            serial_send_panel_height: self.shell.command_send_height().round() as u32,
             bottom_panel_mode: bottom_panel_mode.to_string(),
             active_left_panel: self
                 .shell
@@ -146,18 +145,39 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(crate) fn shutdown_blocking_jobs(&mut self) {
+    pub(crate) fn shutdown_blocking_jobs(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.plugins.shutdown(cx);
+        self.ai.invalidate_provider_jobs();
+        self.ai.cancel_chat_and_agent();
+        let agent_worker = self.ai.shutdown_agent_management_worker();
+        let stop_jobs = self.blocking_jobs.begin_shutdown();
+        let ssh_connections = self.session.ssh_connection_pool();
         self.remote_desktop.routes.clear();
         self.remote_desktop.prepared_routes.clear();
         // Kill the VcXsrv we spawned before the sessions it serves disappear;
         // a no-op off Windows or when the server was reused, never spawned.
         zzclawterm_transport::shutdown_managed_x11_server();
         self.shutdown_remote_desktop_workers();
-        self.session.shutdown_workers();
-        self.terminal.shutdown_workers();
-        self.recording.shutdown_worker();
+        let session_shutdown = self.session.take_shutdown();
+        let frame_worker = self.terminal.take_frame_shutdown();
+        let recording_shutdown = self.recording.take_shutdown();
         self.transfer.shutdown_external_editor_watchers();
-        self.blocking_jobs.shutdown();
+        cx.background_spawn(async move {
+            session_shutdown();
+            if let Some(shutdown) = frame_worker {
+                shutdown();
+            }
+            if let Some(shutdown) = recording_shutdown {
+                for error in shutdown() {
+                    tracing::warn!(%error, "recording shutdown failed");
+                }
+            }
+            if let Some(worker) = agent_worker {
+                let _ = worker.join();
+            }
+            stop_jobs();
+            ssh_connections.finish_disconnects();
+        })
     }
 
     pub(crate) fn report_shutdown_retry_required(&mut self, cx: &mut Context<Self>) {
@@ -363,5 +383,56 @@ impl ZzClawTermApp {
                 Ok(())
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::test_support::TestTempDir;
+
+    use crate::features::test_support::app_with_visible_local_session;
+
+    #[gpui::test]
+    fn workspace_shutdown_keeps_gpui_updates_responsive_while_a_request_finishes(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = TestTempDir::new("zzclawterm-workspace-worker-shutdown");
+        let app = app_with_visible_local_session(cx, directory.path(), "shutdown-fixture");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        cx.update_entity(&app, |app, _| {
+            app.blocking_jobs
+                .submit_detached("held-provider-request", move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let watchdog_timeout = Arc::clone(&timed_out);
+        let (responsive_tx, responsive_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            if responsive_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                watchdog_timeout.store(true, Ordering::Release);
+            }
+            release_tx.send(()).unwrap();
+        });
+        let cleanup = cx.update_entity(&app, |app, cx| app.shutdown_blocking_jobs(cx));
+        cx.update_entity(&app, |_, _| {
+            responsive_tx.send(()).unwrap();
+        });
+        watchdog.join().unwrap();
+        cleanup.detach();
+        cx.run_until_parked();
+        assert!(
+            !timed_out.load(Ordering::Acquire),
+            "shutdown must yield the UI thread before waiting"
+        );
     }
 }

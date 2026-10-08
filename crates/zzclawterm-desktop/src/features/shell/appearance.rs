@@ -165,8 +165,8 @@ impl ZzClawTermApp {
         if !self.shell.request_wallpaper(path.clone()) {
             return;
         }
+        self.refresh_wallpaper_surfaces(cx);
         let Some(path) = path else {
-            cx.notify();
             return;
         };
         let task_path = path.clone();
@@ -180,7 +180,9 @@ impl ZzClawTermApp {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok((image, width, height)) => {
-                        this.shell.cache_wallpaper(path, image, width, height);
+                        if this.shell.cache_wallpaper(path, image, width, height) {
+                            this.refresh_wallpaper_surfaces(cx);
+                        }
                     }
                     Err(()) if this.shell.wallpaper_is_requested(&path) => {
                         this.shell
@@ -192,6 +194,17 @@ impl ZzClawTermApp {
             });
         })
         .detach();
+    }
+
+    fn refresh_wallpaper_surfaces(&mut self, cx: &mut Context<Self>) {
+        // Cached panel entities retain their resolved colours until their own
+        // snapshots are flushed; notifying only the shell leaves them stale.
+        self.flush_remote_panel_snapshots(cx);
+        self.flush_connection_panel_snapshot(cx);
+        self.flush_transfer_panel_snapshot(cx);
+        self.flush_ai_panel_snapshot(cx);
+        self.refresh_visible_terminal_surfaces(cx);
+        cx.notify();
     }
 
     pub(crate) fn ensure_appearance_font_options(&mut self, cx: &mut Context<Self>) {
@@ -327,7 +340,15 @@ impl ZzClawTermApp {
         rgba((color << 8) | alpha.min(0xff))
     }
 
-    /// Tauri's terminal and explicitly transparent surfaces reveal wallpaper.
+    /// Preserve the workbench's two-layer shading with one background, including
+    /// connection and reconnect placeholders, so state changes cannot alter opacity.
+    pub(in crate::features) fn shell_terminal_surface_color(&self, color: u32) -> gpui::Rgba {
+        let mut background = self.shell_surface_color(color);
+        background.a += (1.0 - background.a) * background.a;
+        background
+    }
+
+    /// Explicitly transparent surfaces reveal wallpaper.
     pub(in crate::features) fn shell_transparent_color(&self, color: u32) -> gpui::Rgba {
         if self.wallpaper_enabled() {
             rgba(color << 8)
@@ -747,6 +768,7 @@ impl ZzClawTermApp {
             return;
         }
         self.sync_component_theme(cx);
+        self.defer_transfer_panel_snapshot_flush(cx);
         self.save_appearance_settings(cx);
     }
 

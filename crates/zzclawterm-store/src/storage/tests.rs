@@ -1,14 +1,13 @@
 use aes_gcm::{Aes256Gcm, Key, KeyInit, aead::Aead};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use redb::{Database, ReadableDatabase};
-use sha2::{Digest, Sha256};
 use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_core::{
     AccountAuthError, AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType,
     AssetMetadata, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth,
-    ConnectionType, ExistingFileBehavior, InternalEditorDisplay, MainWindowBounds, MainWindowState,
-    OtpEntry, PortableSnapshotKind, RecordingMode, RecordingRotationPolicy, SavedCredential,
-    SearchEngineConfig, SshKey, TerminalRightClickAction, export_quick_commands_json,
+    ConnectionPasswordSource, ConnectionType, ExistingFileBehavior, InternalEditorDisplay,
+    MainWindowBounds, MainWindowState, OtpEntry, PortableSnapshotKind, RecordingMode,
+    RecordingRotationPolicy, SavedCredential, SavedPassword, SearchEngineConfig, SshKey,
+    TerminalRightClickAction, export_quick_commands_json,
 };
 
 #[test]
@@ -154,6 +153,8 @@ fn assert_new_settings_loaded(store: &ConnectionStore) {
         "keep"
     );
 }
+use redb::{Database, ReadableDatabase};
+use sha2::{Digest, Sha256};
 
 use super::{
     AiSettings, COMMAND_HISTORY_PREFIX, COMMAND_HISTORY_TABLE, CONNECTION_PASSWORD_PREFIX,
@@ -166,8 +167,8 @@ use super::{
     RdpKnownHostCheck, SETTINGS_CLOUD_SYNC, SETTINGS_DEFAULT, SETTINGS_MAIN_WINDOW_STATE,
     SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SSH_KEY_FILE_IMPORT_MAX_BYTES, SSH_KEY_PREFIX,
     SavedConnection, SessionsConfig, StorageError, TEXT_DOCS_TABLE, TUNNELS_TABLE, TunnelConfig,
-    TunnelGroup, could_be_current_secret_ciphertext, current_time_ms, default_settings_value,
-    deserialize_json, entity_key, json_path, set_nested_json_value, stable_id, write_json_in_txn,
+    TunnelGroup, current_time_ms, default_settings_value, deserialize_json, entity_key, json_path,
+    set_nested_json_value, stable_id, write_json_in_txn,
 };
 
 #[test]
@@ -178,6 +179,7 @@ fn accounts_preserve_masking_legacy_references_and_portable_snapshot_contracts()
     let source = ConnectionStore::open(&source_dir).unwrap();
     source
         .save_password(SavedPassword {
+            sort_order: 0,
             id: "account".into(),
             name: "Shared account".into(),
             username: "shared-user".into(),
@@ -241,7 +243,6 @@ fn accounts_preserve_masking_legacy_references_and_portable_snapshot_contracts()
 
 #[test]
 fn connection_source_reads_account_username_without_decrypting_corrupt_password() {
-    use zzclawterm_core::models::credentials::{ConnectionPasswordSource, SavedPassword};
     let dir = unique_temp_dir("account-metadata-only");
     let store = ConnectionStore::open(&dir).unwrap();
     let txn = store.db.begin_write().unwrap();
@@ -250,6 +251,7 @@ fn connection_source_reads_account_username_without_decrypting_corrupt_password(
         CREDENTIALS_TABLE,
         &entity_key(super::PASSWORD_PREFIX, "metadata"),
         &SavedPassword {
+            sort_order: 0,
             id: "metadata".into(),
             name: "Metadata".into(),
             username: "metadata-user".into(),
@@ -597,7 +599,7 @@ fn exports_and_imports_portable_snapshot() {
     let source_dir = unique_temp_dir("portable-source");
     let target_dir = unique_temp_dir("portable-target");
     let snapshot_dir = unique_temp_dir("portable-output");
-    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
+    let snapshot_path = snapshot_dir.join("zzclawterm.nya");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -724,6 +726,7 @@ fn exports_and_imports_portable_snapshot() {
             CREDENTIALS_TABLE,
             &entity_key(SSH_KEY_PREFIX, "key-1"),
             &SshKey {
+                sort_order: 0,
                 id: "key-1".to_string(),
                 name: "Deploy".to_string(),
                 key: Some("encrypted-key".to_string().into()),
@@ -887,7 +890,7 @@ fn encrypted_portable_snapshot_requires_master_password() {
     let target_dir = unique_temp_dir("portable-encrypted-target");
     let wrong_target_dir = unique_temp_dir("portable-encrypted-wrong-target");
     let snapshot_dir = unique_temp_dir("portable-encrypted-output");
-    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
+    let snapshot_path = snapshot_dir.join("zzclawterm.nya");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -1068,6 +1071,7 @@ fn legacy_tauri_snapshot_reencrypts_settings_and_rewraps_master_key() {
         .expect("save source cloud settings");
     source
         .save_password(zzclawterm_core::SavedPassword {
+            sort_order: 0,
             id: "legacy-account".to_string(),
             name: "Legacy account".to_string(),
             username: "legacy-user".to_string(),
@@ -1191,6 +1195,7 @@ fn legacy_tauri_cloud_pull_rewraps_vault_key_and_preserves_local_master_password
         .expect("source master password");
     source
         .save_password(zzclawterm_core::SavedPassword {
+            sort_order: 0,
             id: "legacy-secret".into(),
             name: "Legacy".into(),
             username: "user".into(),
@@ -1232,6 +1237,7 @@ fn current_gpui_cloud_pull_rewraps_vault_key_for_local_master_password() {
         .expect("source master password");
     source
         .save_password(zzclawterm_core::SavedPassword {
+            sort_order: 0,
             id: "shared-account".into(),
             name: "Shared".into(),
             username: "user".into(),
@@ -1627,6 +1633,7 @@ fn load_decrypted_ssh_key_reads_legacy_key_store() {
     let master_key = test_key(7);
     let master_key_token = encrypt_for_test(master_key.as_slice(), &home_wrapping_key());
     let key = SshKey {
+        sort_order: 0,
         id: "key-1".to_string(),
         name: "Deploy Key".to_string(),
         key: Some(encrypt_for_test(b"-----BEGIN PRIVATE KEY-----", &master_key).into()),
@@ -1688,6 +1695,7 @@ fn save_ssh_key_rejects_oversized_key_file_import() {
     let store = ConnectionStore::open(&dir).expect("store");
     let error = store
         .save_ssh_key(SshKey {
+            sort_order: 0,
             id: "key-1".to_string(),
             name: "Large Key".to_string(),
             key: None,
@@ -1716,6 +1724,7 @@ fn save_ssh_key_rejects_oversized_cert_file_import() {
     let store = ConnectionStore::open(&dir).expect("store");
     let error = store
         .save_ssh_key(SshKey {
+            sort_order: 0,
             id: "key-1".to_string(),
             name: "Large Cert".to_string(),
             key: Some("-----BEGIN PRIVATE KEY-----\nsmall\n".to_string().into()),
@@ -2242,42 +2251,6 @@ fn save_empty_search_engine_list_roundtrip() {
 }
 
 #[test]
-fn x11_server_settings_default_for_legacy_document_and_roundtrip() {
-    let dir = unique_temp_dir("settings-x11-server");
-    let store = ConnectionStore::open(&dir).expect("store");
-
-    // A legacy settings document has no `x11_server_autostart` /
-    // `x11_server_path` keys under `terminal`; they must fall back to
-    // autostart-on and an empty (auto-discover) path.
-    let legacy = store.load_app_settings_summary().expect("load legacy");
-    assert!(legacy.x11_server_autostart);
-    assert!(legacy.x11_server_path.is_empty());
-
-    let mut summary = legacy;
-    summary.x11_server_autostart = false;
-    summary.x11_server_path = "D:\\tools\\vcxsrv\\vcxsrv.exe".to_string();
-    let saved = store.save_terminal_settings(&summary).expect("save");
-    assert!(!saved.x11_server_autostart);
-    assert_eq!(saved.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
-
-    let raw = store.load_settings_value().expect("raw");
-    assert_eq!(
-        raw["terminal"]["x11_server_autostart"],
-        serde_json::Value::Bool(false)
-    );
-    assert_eq!(
-        raw["terminal"]["x11_server_path"],
-        "D:\\tools\\vcxsrv\\vcxsrv.exe"
-    );
-
-    let reloaded = store.load_app_settings_summary().expect("reload");
-    assert!(!reloaded.x11_server_autostart);
-    assert_eq!(reloaded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
-
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[test]
 fn save_general_and_diagnostics_settings_roundtrip() {
     let dir = unique_temp_dir("settings-general-diag");
     let store = ConnectionStore::open(&dir).expect("store");
@@ -2333,17 +2306,23 @@ fn save_ui_layout_bottom_panel_state_roundtrip_and_clamp() {
     summary.ui_quick_cmd_visible = false;
     summary.ui_serial_send_height = 284;
     summary.ui_serial_send_visible = true;
+    summary.ui_serial_send_clear_after_send = true;
 
     let saved = store.save_ui_layout_settings(&summary).expect("save");
     assert_eq!(saved.ui_quick_cmd_height, 312);
     assert!(!saved.ui_quick_cmd_visible);
     assert_eq!(saved.ui_serial_send_height, 284);
     assert!(saved.ui_serial_send_visible);
+    assert!(saved.ui_serial_send_clear_after_send);
     let raw = store.load_settings_value().expect("raw");
     assert_eq!(raw["ui"]["quick_cmd_height"], serde_json::json!(312));
     assert_eq!(raw["ui"]["show_quick_cmd_bar"], serde_json::json!(false));
     assert_eq!(raw["ui"]["serial_send_height"], serde_json::json!(284));
     assert_eq!(raw["ui"]["show_serial_send_panel"], serde_json::json!(true));
+    assert_eq!(
+        raw["ui"]["serial_send_clear_after_send"],
+        serde_json::json!(true)
+    );
 
     summary.ui_quick_cmd_height = 0;
     summary.ui_serial_send_height = 999;
@@ -2352,7 +2331,50 @@ fn save_ui_layout_bottom_panel_state_roundtrip_and_clamp() {
         .expect("save clamped");
     assert_eq!(clamped.ui_quick_cmd_height, 36);
     assert_eq!(clamped.ui_serial_send_height, 520);
+    summary.ui_serial_send_height = 60;
+    assert_eq!(
+        store
+            .save_ui_layout_settings(&summary)
+            .unwrap()
+            .ui_serial_send_height,
+        120
+    );
 
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn command_send_preferences_load_legacy_defaults_and_preserve_unknown_settings() {
+    let dir = unique_temp_dir("settings-command-send-compatibility");
+    let store = ConnectionStore::open(&dir).expect("store");
+    store
+        .save_settings_value(&serde_json::json!({
+            "ui": {"serial_send_height": 60, "future_option": {"enabled": true}}
+        }))
+        .unwrap();
+    let mut summary = store.load_app_settings_summary().unwrap();
+    assert_eq!(summary.ui_serial_send_height, 120);
+    assert!(!summary.ui_serial_send_clear_after_send);
+    store
+        .save_settings_value(&serde_json::json!({
+            "ui": {"serial_send_clear_after_send": true, "future_option": {"enabled": true}}
+        }))
+        .unwrap();
+    summary = store.load_app_settings_summary().unwrap();
+    assert!(summary.ui_serial_send_clear_after_send);
+    summary.ui_serial_send_clear_after_send = false;
+    store.save_ui_layout_settings(&summary).unwrap();
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(
+        raw["ui"]["future_option"],
+        serde_json::json!({"enabled": true})
+    );
+    assert!(
+        !store
+            .load_app_settings_summary()
+            .unwrap()
+            .ui_serial_send_clear_after_send
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -2422,8 +2444,67 @@ fn legacy_settings_default_hidden_items_and_docked_panel_mode() {
     assert!(summary.ui_activity_bar_hidden_items.is_empty());
     assert_eq!(summary.ui_panel_open_mode, "docked");
     assert!(!summary.ui_panel_multi_open);
+    assert_eq!(
+        summary.ui_activity_bar_left_bottom,
+        ["syncBackupHistory", "plugins", "settings"]
+    );
 
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn plugin_layout_roundtrips_without_losing_legacy_or_unknown_settings() {
+    let dir = unique_temp_dir("settings-plugin-layout-compatibility");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let legacy = serde_json::json!({
+        "ui": {
+            "activity_bar_layout": {
+                "left_bottom": ["futureEntry", "syncBackupHistory", "settings"],
+                "right_top": ["savedConnections"],
+                "hidden_items": ["futureEntry"],
+                "futureLayoutOption": { "enabled": true }
+            },
+            "futureUiOption": "preserve"
+        },
+        "futureRootOption": [1, 2]
+    });
+    store
+        .save_settings_value(&legacy)
+        .expect("save legacy document");
+    let mut summary = store
+        .load_app_settings_summary()
+        .expect("load legacy document");
+    assert_eq!(
+        summary.ui_activity_bar_left_bottom,
+        ["futureEntry", "syncBackupHistory", "settings"]
+    );
+    assert_eq!(store.load_settings_value().expect("raw"), legacy);
+
+    // The desktop can add and later move the entry using the existing layout contract.
+    summary.ui_activity_bar_right_top.push("plugins".into());
+    summary.ui_activity_bar_hidden_items.push("plugins".into());
+    let saved = store
+        .save_ui_layout_settings(&summary)
+        .expect("save plugin placement");
+    assert_eq!(
+        saved.ui_activity_bar_left_bottom,
+        summary.ui_activity_bar_left_bottom
+    );
+    assert_eq!(
+        saved.ui_activity_bar_right_top,
+        ["savedConnections", "plugins"]
+    );
+    assert_eq!(
+        saved.ui_activity_bar_hidden_items,
+        ["futureEntry", "plugins"]
+    );
+    let raw = store.load_settings_value().expect("raw");
+    assert_eq!(
+        raw["ui"]["activity_bar_layout"]["futureLayoutOption"],
+        legacy["ui"]["activity_bar_layout"]["futureLayoutOption"]
+    );
+    assert_eq!(raw["ui"]["futureUiOption"], legacy["ui"]["futureUiOption"]);
+    assert_eq!(raw["futureRootOption"], legacy["futureRootOption"]);
 }
 
 #[test]
@@ -3195,6 +3276,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     recording_update.recording_rotation = RecordingRotationPolicy::Daily;
     recording_update.recording_existing_file_behavior = ExistingFileBehavior::Overwrite;
     recording_update.recording_include_binary_transfer_payloads = true;
+    recording_update.recording_include_input = true;
     recording_update.recording_include_io_labels = true;
     recording_update.recording_include_timestamps = true;
     recording_update.recording_memory_limit_bytes = 2 * 1024 * 1024;
@@ -3218,6 +3300,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
         ExistingFileBehavior::Overwrite
     );
     assert!(saved_recording.recording_include_binary_transfer_payloads);
+    assert!(saved_recording.recording_include_input);
     assert!(saved_recording.recording_include_io_labels);
     assert!(saved_recording.recording_include_timestamps);
     assert_eq!(
@@ -4439,6 +4522,7 @@ fn ai_settings_encrypt_and_merge_masked_provider_secrets() {
         default_mode: zzclawterm_core::AiMode::Agent,
         ..AiSettings::default()
     };
+    settings.proxy.password = Some("proxy-fixture-key".into());
     settings.provider_profiles[0].enabled = true;
     settings.provider_profiles[0].api_key = Some("profile-key".to_string().into());
     settings.provider_credentials[0].enabled = true;
@@ -4467,6 +4551,10 @@ fn ai_settings_encrypt_and_merge_masked_provider_secrets() {
         .expect("raw settings");
     let raw_ai = raw.get("ai").expect("ai field");
     assert_ne!(
+        raw_ai["proxy"]["password"].as_str(),
+        Some("proxy-fixture-key")
+    );
+    assert_ne!(
         raw_ai["provider_profiles"][0]["api_key"].as_str(),
         Some("profile-key")
     );
@@ -4478,7 +4566,20 @@ fn ai_settings_encrypt_and_merge_masked_provider_secrets() {
     let loaded = store.load_ai_settings().expect("load ai");
     assert_eq!(loaded, saved);
 
+    assert_eq!(loaded.proxy.password.as_deref(), Some("proxy-fixture-key"));
+    let restore_dir = unique_temp_dir("ai-proxy-portable-roundtrip");
+    let restore = ConnectionStore::open(&restore_dir).unwrap();
+    for kind in [PortableSnapshotKind::Backup, PortableSnapshotKind::Sync] {
+        let mut snapshot = store
+            .build_raw_portable_snapshot(kind, "fixture", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        assert!(!snapshot.entities["settings"].contains("proxy-fixture-key"));
+        restore.apply_raw_portable_snapshot(&snapshot).unwrap();
+        assert_eq!(restore.load_ai_settings().unwrap().proxy, loaded.proxy);
+    }
     let mut masked_update = loaded.clone();
+    masked_update.proxy.password = Some(zzclawterm_core::MASKED_SECRET_VALUE.into());
     masked_update.provider_profiles[0].api_key =
         Some(zzclawterm_core::MASKED_SECRET_VALUE.to_string().into());
     masked_update.provider_credentials[0].api_key = Some("replacement-key".to_string().into());
@@ -4493,7 +4594,18 @@ fn ai_settings_encrypt_and_merge_masked_provider_secrets() {
         merged.provider_credentials[0].api_key.as_deref(),
         Some("replacement-key")
     );
+    assert_eq!(merged.proxy.password.as_deref(), Some("proxy-fixture-key"));
     assert_eq!(store.load_ai_settings().expect("reload ai"), merged);
+    let mut cleared = merged;
+    cleared.proxy.password = Some("".into());
+    assert!(
+        store
+            .save_ai_settings(cleared)
+            .unwrap()
+            .proxy
+            .password
+            .is_none()
+    );
 
     std::fs::remove_dir_all(dir).ok();
 }
@@ -6345,157 +6457,257 @@ fn editing_keywords_preserves_both_values_of_the_retired_soft_wrap_setting() {
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
 
-fn direct_password_test_connection(id: &str, password: &str) -> SavedConnection {
-    SavedConnection {
-        extensions: Default::default(),
-        id: id.to_string(),
-        name: "SSH".to_string(),
-        tags: Vec::new(),
-        config: ConnectionType::Ssh {
-            host: "127.0.0.1".to_string(),
-            port: 22,
-            username: "root".to_string(),
-            backspace_mode: "del".to_string(),
-            ai_execution_profile: AiExecutionProfile::Auto,
-            x11_forwarding: false,
-            auth_agent_endpoint: None,
-            agent_forwarding_config: None,
-            legacy_agent_forwarding: None,
-            encoding: String::new(),
-            dynamic_tab_title: false,
-        },
-        group_id: None,
-        description: None,
-        sort_order: 0,
-        icon: None,
-        icon_auto_detect: None,
-        auth: Some(ConnectionAuth {
-            mode: "password".to_string(),
-            password: Some(password.into()),
-            ..Default::default()
-        }),
-        ssh_algorithms: None,
-        ssh_profile: Default::default(),
-        terminal_type: None,
-        sftp: Default::default(),
-        network: None,
-        post_login: None,
-        recording: None,
-        asset: None,
-        created_at_ms: None,
-        updated_at_ms: None,
-        last_used_at_ms: None,
-    }
-}
-
 #[test]
-fn save_connection_encrypts_direct_password_and_roundtrips() {
-    let dir = unique_temp_dir("direct-password-roundtrip");
-    let store = ConnectionStore::open(&dir).expect("store");
+fn tauri_ai_extensions_follow_account_and_model_ids_through_reorder_delete_and_backup() {
+    let dir = unique_temp_dir("ai-tauri-fields");
+    let restore_dir = unique_temp_dir("ai-tauri-restore");
+    let backup = dir.join("tauri-ai.nya");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut raw = default_settings_value();
+    raw["ai"] = serde_json::json!({
+        "provider_credentials": [
+            {"id":"first","name":"First","provider_kind":"openai","api_protocol":"openai_compatible","icon_data_url":"data:image/png;base64,fixture","future_account":"first-extension"},
+            {"id":"second","name":"Second","provider_kind":"openai","api_protocol":"anthropic","future_account":"second-extension"}
+        ],
+        "models": [
+            {"id":"first:model","name":"model","credential_id":"first","provider_kind":"openai","supported_reasoning_efforts":["minimal","max","ultra"],"future_model":"first-extension"},
+            {"id":"second:model","name":"model","credential_id":"second","provider_kind":"openai","supported_reasoning_efforts":[],"future_model":"second-extension"}
+        ],"default_model_id":"first:model","future_ai":{"keep":true}
+    });
+    store.save_settings_value(&raw).unwrap();
+    let mut settings = store.load_ai_settings().unwrap();
+    settings.provider_credentials[0].api_key = Some("fixture-first".into());
+    settings.provider_credentials[1].api_key = Some("fixture-second".into());
+    let mut settings = store.save_ai_settings(settings).unwrap();
+    settings.provider_credentials.reverse();
+    settings.models.reverse();
+    let saved = store
+        .save_ai_settings(zzclawterm_core::mask_ai_settings(settings))
+        .unwrap();
+    assert_eq!(
+        saved.provider_credentials[0].api_key.as_deref(),
+        Some("fixture-second")
+    );
+    assert_eq!(
+        saved.provider_credentials[1].api_key.as_deref(),
+        Some("fixture-first")
+    );
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(
+        raw["ai"]["provider_credentials"][0]["future_account"],
+        "second-extension"
+    );
+    assert_eq!(
+        raw["ai"]["provider_credentials"][1]["future_account"],
+        "first-extension"
+    );
+    assert_eq!(raw["ai"]["models"][0]["future_model"], "second-extension");
+    assert_eq!(raw["ai"]["models"][1]["future_model"], "first-extension");
+    assert_ne!(
+        raw["ai"]["provider_credentials"][0]["api_key"].as_str(),
+        Some("fixture-second")
+    );
+    assert_eq!(
+        raw["ai"]["provider_credentials"][1]["icon_data_url"],
+        "data:image/png;base64,fixture"
+    );
+    assert_eq!(
+        raw["ai"]["provider_credentials"][0]["api_protocol"],
+        "anthropic"
+    );
+    assert_eq!(
+        raw["ai"]["models"][1]["supported_reasoning_efforts"],
+        serde_json::json!(["minimal", "max", "ultra"])
+    );
+    let sync_dir = unique_temp_dir("ai-tauri-sync");
     store
-        .save_connection(&direct_password_test_connection("ssh-direct", "secret123"))
-        .expect("save");
-
-    let stored_record: ConnectionPasswordRecord = {
-        let txn = store.db.begin_read().expect("txn");
-        let table = txn.open_table(CREDENTIALS_TABLE).expect("credentials");
-        let raw = table
-            .get(entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-direct").as_str())
-            .expect("get")
-            .expect("record");
-        deserialize_json(raw.value()).expect("deserialize")
-    };
-    let stored = stored_record.password.expose_secret().to_string();
-    assert_ne!(stored, "secret123");
-    assert!(could_be_current_secret_ciphertext(&stored));
-
-    let loaded = store.load_sessions().expect("load");
-    let auth = loaded.connections[0].auth.as_ref().expect("auth");
-    assert_eq!(auth.password.as_deref(), Some("secret123"));
-    assert!(!auth.has_password);
+        .save_master_password(Some("fixture-sync-password"))
+        .unwrap();
+    let mut snapshot = store
+        .build_raw_portable_snapshot(
+            zzclawterm_core::PortableSnapshotKind::Sync,
+            "fixture",
+            "2.0.0",
+        )
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    let synced = ConnectionStore::open(&sync_dir).unwrap();
+    synced
+        .save_master_password(Some("fixture-local-password"))
+        .unwrap();
+    assert!(
+        synced
+            .apply_cloud_sync_snapshot(&sync_dir, &snapshot, "fixture-wrong-password")
+            .is_err()
+    );
+    synced
+        .apply_cloud_sync_snapshot(&sync_dir, &snapshot, "fixture-sync-password")
+        .unwrap();
+    assert_eq!(synced.load_ai_settings().unwrap(), saved);
+    assert_eq!(
+        synced.load_settings_value().unwrap()["ai"]["models"][1]["future_model"],
+        "first-extension"
+    );
+    drop(synced);
+    std::fs::remove_dir_all(sync_dir).ok();
+    store.save_master_password(None).unwrap();
+    let mut updated = saved;
+    updated
+        .provider_credentials
+        .retain(|item| item.id != "first");
+    updated
+        .models
+        .retain(|item| item.credential_id.as_deref() != Some("first"));
+    let saved = store.save_ai_settings(updated).unwrap();
+    assert_eq!(saved.default_model_id.as_deref(), Some("second:model"));
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(
+        raw["ai"]["provider_credentials"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(raw["ai"]["models"][0]["future_model"], "second-extension");
+    assert_eq!(raw["ai"]["future_ai"]["keep"], true);
+    drop(store);
+    ConnectionStore::export_config_database(&dir, None, &backup).unwrap();
+    ConnectionStore::import_config_database(&restore_dir, None, &backup).unwrap();
+    let restored = ConnectionStore::open(&restore_dir).unwrap();
+    assert_eq!(restored.load_ai_settings().unwrap(), saved);
+    assert_eq!(
+        restored.load_settings_value().unwrap()["ai"]["models"][0]["future_model"],
+        "second-extension"
+    );
+    drop(restored);
     std::fs::remove_dir_all(dir).ok();
+    std::fs::remove_dir_all(restore_dir).ok();
 }
 
 #[test]
-fn load_sessions_heals_legacy_plaintext_connection_password_record() {
-    let dir = unique_temp_dir("heal-plaintext-password");
-    let store = ConnectionStore::open(&dir).expect("store");
-    let mut connection = direct_password_test_connection("ssh-legacy", "plaintext-secret");
-    connection.auth.as_mut().expect("auth").password = None;
-    store.save_connection(&connection).expect("save");
-
-    let master_key = test_key(7);
-    let master_key_token = encrypt_for_test(master_key.as_slice(), &home_wrapping_key());
-    let now = current_time_ms();
-    let record = ConnectionPasswordRecord {
-        id: "ssh-legacy".to_string(),
-        connection_id: "ssh-legacy".to_string(),
-        password: "plaintext-secret".into(),
-        created_at_ms: now,
-        updated_at_ms: now,
-    };
-    {
-        let txn = store.db.begin_write().expect("txn");
-        txn.open_table(META_TABLE)
-            .expect("meta")
-            .insert(META_MASTER_KEY, master_key_token.as_str())
-            .expect("insert master");
-        write_json_in_txn(
-            &txn,
-            CREDENTIALS_TABLE,
-            &entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-legacy"),
-            &record,
-        )
-        .expect("write credential");
-        txn.commit().expect("commit");
+fn vnc_trust_cas_and_portable_roundtrip_preserve_tauri_records() {
+    let source_dir = unique_temp_dir("vnc-trust-source");
+    let target_dir = unique_temp_dir("vnc-trust-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    let first = format!("SHA256:{}", "a1".repeat(32));
+    let next = format!("SHA256:{}", "b2".repeat(32));
+    let checks = std::cell::Cell::new(0);
+    assert!(
+        !source
+            .remember_vnc_known_host_if_current("cancelled", 5900, &first, None, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() == 1
+            })
+            .unwrap()
+    );
+    assert!(
+        source
+            .load_vnc_known_host("cancelled", 5900)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        source
+            .remember_vnc_known_host(" Example.COM ", 5900, &first, None)
+            .unwrap()
+    );
+    assert!(
+        !source
+            .remember_vnc_known_host("example.com", 5900, &next, None)
+            .unwrap()
+    );
+    assert!(
+        source
+            .remember_vnc_known_host("example.com", 5900, &next, Some(&first))
+            .unwrap()
+    );
+    let record = source
+        .load_vnc_known_host("EXAMPLE.COM", 5900)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.sha256_fingerprint, next);
+    for kind in [PortableSnapshotKind::Backup, PortableSnapshotKind::Sync] {
+        let mut snapshot = source
+            .build_raw_portable_snapshot(kind, "fixture", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        target.apply_raw_portable_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            target.load_vnc_known_host("example.com", 5900).unwrap(),
+            Some(record.clone())
+        );
+        snapshot.entities.remove("vnc_known_hosts");
+        snapshot.recalculate_hash().unwrap();
+        target.apply_raw_portable_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            target.load_vnc_known_host("example.com", 5900).unwrap(),
+            Some(record.clone())
+        );
+        snapshot.entities.insert("vnc_known_hosts".into(), r#"[{"host":"x","port":5900,"sha256_fingerprint":"bad","created_at_ms":1,"updated_at_ms":1}]"#.into());
+        snapshot.recalculate_hash().unwrap();
+        assert!(target.apply_raw_portable_snapshot(&snapshot).is_err());
+        assert_eq!(
+            target.load_vnc_known_host("example.com", 5900).unwrap(),
+            Some(record.clone())
+        );
     }
-
-    let loaded = store.load_sessions().expect("load");
-    let auth = loaded.connections[0].auth.as_ref().expect("auth");
-    assert_eq!(auth.password.as_deref(), Some("plaintext-secret"));
-    assert!(!auth.has_password);
-    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
-fn load_sessions_keeps_undecryptable_ciphertext_locked() {
-    let dir = unique_temp_dir("locked-ciphertext-password");
-    let store = ConnectionStore::open(&dir).expect("store");
-    let mut connection = direct_password_test_connection("ssh-locked", "whatever");
-    connection.auth.as_mut().expect("auth").password = None;
-    store.save_connection(&connection).expect("save");
-
-    // Record encrypted under a different master key than the one in META.
-    let record_key = test_key(8);
-    let meta_key = test_key(9);
-    let meta_key_token = encrypt_for_test(meta_key.as_slice(), &home_wrapping_key());
-    let now = current_time_ms();
-    let record = ConnectionPasswordRecord {
-        id: "ssh-locked".to_string(),
-        connection_id: "ssh-locked".to_string(),
-        password: encrypt_for_test(b"real-secret", &record_key).into(),
-        created_at_ms: now,
-        updated_at_ms: now,
-    };
-    {
-        let txn = store.db.begin_write().expect("txn");
-        txn.open_table(META_TABLE)
-            .expect("meta")
-            .insert(META_MASTER_KEY, meta_key_token.as_str())
-            .expect("insert master");
-        write_json_in_txn(
-            &txn,
-            CREDENTIALS_TABLE,
-            &entity_key(CONNECTION_PASSWORD_PREFIX, "ssh-locked"),
-            &record,
-        )
-        .expect("write credential");
-        txn.commit().expect("commit");
+fn recording_input_opt_in_preserves_legacy_unknown_fields_sync_and_backup() {
+    let source_dir = unique_temp_dir("recording-settings-source");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    source
+        .save_settings_value(&serde_json::json!({
+            "recording": { "path": "synthetic/logs", "future_option": { "retain": 7 } }
+        }))
+        .unwrap();
+    let mut settings = source.load_app_settings_summary().unwrap();
+    assert!(!settings.recording_include_input);
+    settings.recording_include_input = true;
+    source.save_recording_settings(&settings).unwrap();
+    assert_eq!(
+        source.load_settings_value().unwrap()["recording"]["future_option"]["retain"],
+        7
+    );
+    for kind in [PortableSnapshotKind::Sync, PortableSnapshotKind::Backup] {
+        let target_dir = unique_temp_dir("recording-settings-portable");
+        let mut snapshot = source
+            .build_raw_portable_snapshot(kind, "fixture", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        let target = ConnectionStore::open(&target_dir).unwrap();
+        target.apply_raw_portable_snapshot(&snapshot).unwrap();
+        assert!(
+            target
+                .load_app_settings_summary()
+                .unwrap()
+                .recording_include_input
+        );
+        assert_eq!(
+            target.load_settings_value().unwrap()["recording"]["future_option"]["retain"],
+            7
+        );
+        drop(target);
+        std::fs::remove_dir_all(target_dir).ok();
     }
-
-    let loaded = store.load_sessions().expect("load");
-    let auth = loaded.connections[0].auth.as_ref().expect("auth");
-    assert!(auth.has_password);
-    assert_ne!(auth.password.as_deref(), Some("real-secret"));
-    std::fs::remove_dir_all(dir).ok();
+    drop(source);
+    let backup_dir = unique_temp_dir("recording-settings-backup");
+    let backup_path = backup_dir.join("recording.nya");
+    let restore_dir = unique_temp_dir("recording-settings-restore");
+    ConnectionStore::export_config_database(&source_dir, None, &backup_path).unwrap();
+    ConnectionStore::import_config_database(&restore_dir, None, &backup_path).unwrap();
+    let restored = ConnectionStore::open(&restore_dir).unwrap();
+    assert!(
+        restored
+            .load_app_settings_summary()
+            .unwrap()
+            .recording_include_input
+    );
+    assert_eq!(
+        restored.load_settings_value().unwrap()["recording"]["future_option"]["retain"],
+        7
+    );
+    drop(restored);
+    for dir in [source_dir, backup_dir, restore_dir] {
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

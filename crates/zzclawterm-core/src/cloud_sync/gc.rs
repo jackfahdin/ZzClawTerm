@@ -75,6 +75,102 @@ pub fn cleanup_sync_snapshots_with_remote(
     first_error.map_or(Ok(()), Err)
 }
 
+/// Capacity cleanup never borrows slots from other roots or unverified data.
+pub(super) fn reserve_snapshot_capacity(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    expected: Option<&RemoteSyncPointer>,
+    target_revision: &str,
+) -> Result<(), CloudSyncError> {
+    let Some(capacity) = remote.file_capacity()? else {
+        return Ok(());
+    };
+    let target = remote_path(
+        &options.remote_root,
+        &super::legacy_sync_snapshot_file(target_revision),
+    );
+    let mut additional = 0;
+    for path in [
+        &target,
+        &remote_path(&options.remote_root, super::SYNC_LATEST_FILE),
+        &remote_path(&options.remote_root, super::SYNC_CURRENT_FILE),
+    ] {
+        additional += usize::from(remote.read_if_exists(path)?.is_none());
+    }
+    let needed = capacity
+        .used
+        .saturating_add(additional)
+        .saturating_sub(capacity.limit);
+    if needed == 0 {
+        return Ok(());
+    }
+    let mut protected = HashSet::from([target_revision.to_owned()]);
+    if let Some(expected) = expected {
+        protected.insert(expected.revision_id.clone());
+    }
+    if let Some(bytes) =
+        remote.read_if_exists(&remote_path(&options.remote_root, super::SYNC_CURRENT_FILE))?
+        && let Ok(snapshot) =
+            local_store.decode_sync_snapshot(&bytes, options.master_password.expose_secret())
+    {
+        protected.insert(snapshot.meta.revision_id);
+    }
+    let prefix = format!(
+        "{}/",
+        remote_path(&options.remote_root, SYNC_SNAPSHOTS_DIR).trim_end_matches('/')
+    );
+    let mut candidates = Vec::new();
+    for path in remote.list_files(&prefix)? {
+        let Some(name) = path
+            .strip_prefix(&prefix)
+            .filter(|name| !name.contains('/'))
+        else {
+            continue;
+        };
+        let Some(revision) = snapshot_revision_from_path(name) else {
+            continue;
+        };
+        if protected.contains(&revision) {
+            continue;
+        }
+        let Some(bytes) = remote.read_if_exists(&path)? else {
+            continue;
+        };
+        let Ok(snapshot) =
+            local_store.decode_sync_snapshot(&bytes, options.master_password.expose_secret())
+        else {
+            continue;
+        };
+        if snapshot.meta.revision_id == revision
+            && crate::portable_snapshot::validate_raw_snapshot(&snapshot).is_ok()
+        {
+            candidates.push((snapshot.meta.created_at_ms, path, revision));
+        }
+    }
+    candidates.sort();
+    let mut freed = 0;
+    for (_, path, revision) in candidates {
+        // Re-read before every deletion; an unreadable head aborts cleanup.
+        if let Some(head) =
+            super::load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?
+        {
+            protected.insert(head.revision_id);
+        }
+        if protected.contains(&revision) {
+            continue;
+        }
+        remote.delete(&path)?;
+        if remote.read_if_exists(&path)?.is_none() {
+            freed += 1;
+        }
+        if freed >= needed {
+            return Ok(());
+        }
+    }
+    Err(CloudSyncError::GistCapacity)
+}
+
 fn plan_snapshot_gc(
     mut snapshots: Vec<SnapshotGcEntry>,
     latest_revision: Option<&str>,

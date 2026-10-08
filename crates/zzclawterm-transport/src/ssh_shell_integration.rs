@@ -970,7 +970,7 @@ __nya_bp_preexec_invoke_exec(){
   __nya_bp_set_ret_value "$preexec_ret" "$__nya_bp_last_argument"
 }
 __nya_bp_install(){
-  case "${PROMPT_COMMAND[*]:-}" in (*__nya_bp_precmd_invoke_cmd*) return 1 ;; esac
+  case "${PROMPT_COMMAND[*]:-}" in (*__nya_bp_precmd_invoke_cmd*|*__nya_bp_precmd_hook*) return 1 ;; esac
   trap '__nya_bp_preexec_invoke_exec "$_"' DEBUG || return 1
   local prior_trap
   prior_trap=$(sed "s/[^']*'\(.*\)'[^']*/\1/" <<<"${__nya_bp_trap_string:-}")
@@ -979,18 +979,30 @@ __nya_bp_install(){
     eval '__nya_bp_original_debug_trap(){ '"$prior_trap"'; }'
     preexec_functions+=(__nya_bp_original_debug_trap)
   fi
-  local existing_prompt_command="${PROMPT_COMMAND:-}"
-  existing_prompt_command="${existing_prompt_command//$__nya_bp_install_string/:}"
-  existing_prompt_command="${existing_prompt_command//$'\n':$'\n'/$'\n'}"
-  existing_prompt_command="${existing_prompt_command//$'\n':;/$'\n'}"
-  __nya_bp_sanitize_string existing_prompt_command "$existing_prompt_command"
-  [ "${existing_prompt_command:-:}" = : ] && existing_prompt_command=
-  PROMPT_COMMAND=__nya_bp_precmd_invoke_cmd
-  PROMPT_COMMAND+=${existing_prompt_command:+$'\n'$existing_prompt_command}
-  if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-    PROMPT_COMMAND+=(__nya_bp_interactive_mode)
+  local decl precmd_hook=__nya_bp_precmd_invoke_cmd interactive_hook=__nya_bp_interactive_mode
+  decl="$(declare -p PROMPT_COMMAND 2>/dev/null || true)"
+  if [[ "$decl" =~ ^declare\ -[^[:space:]]*x ]]; then
+    __nya_bp_precmd_hook=$precmd_hook || return 1
+    __nya_bp_interactive_hook=$interactive_hook || return 1
+    export -n __nya_bp_precmd_hook __nya_bp_interactive_hook || return 1
+    precmd_hook='${__nya_bp_precmd_hook-$(exit $?)}'
+    interactive_hook='${__nya_bp_interactive_hook-$(exit $?)}'
+  fi
+  if [[ "$decl" =~ ^declare\ -[^[:space:]]*a[^[:space:]]*\ PROMPT_COMMAND= ]]; then
+    local -a existing_prompt_commands=()
+    local existing
+    for existing in "${PROMPT_COMMAND[@]}"; do
+      [ "$existing" = "$__nya_bp_install_string" ] || existing_prompt_commands+=("$existing")
+    done
+    PROMPT_COMMAND=("$precmd_hook" "${existing_prompt_commands[@]}" "$interactive_hook")
   else
-    PROMPT_COMMAND+=$'\n__nya_bp_interactive_mode'
+    local existing_prompt_command="${PROMPT_COMMAND:-}"
+    existing_prompt_command="${existing_prompt_command//$__nya_bp_install_string/:}"
+    existing_prompt_command="${existing_prompt_command//$'\n':$'\n'/$'\n'}"
+    existing_prompt_command="${existing_prompt_command//$'\n':;/$'\n'}"
+    __nya_bp_sanitize_string existing_prompt_command "$existing_prompt_command"
+    [ "${existing_prompt_command:-:}" = : ] && existing_prompt_command=
+    PROMPT_COMMAND="$precmd_hook${existing_prompt_command:+$'\n'$existing_prompt_command}"$'\n'"$interactive_hook"
   fi
   ZZCLAWTERM_BASH_HOOKS_READY=1
   unset ZZCLAWTERM_BASH_INSTALL_PENDING
@@ -999,24 +1011,35 @@ __nya_bp_install(){
 }
 __nya_bp_install_after_session_init(){
   __nya_bp_require_not_readonly PROMPT_COMMAND HISTCONTROL HISTTIMEFORMAT || return 1
-  local sanitized_prompt_command
-  __nya_bp_sanitize_string sanitized_prompt_command "${PROMPT_COMMAND:-}"
-  [ -z "$sanitized_prompt_command" ] || PROMPT_COMMAND=${sanitized_prompt_command}$'\n'
-  PROMPT_COMMAND+=${__nya_bp_install_string}
+  local decl sanitized_prompt_command
+  decl="$(declare -p PROMPT_COMMAND 2>/dev/null || true)"
+  if [[ "$decl" =~ ^declare\ -[^[:space:]]*a[^[:space:]]*\ PROMPT_COMMAND= ]]; then
+    PROMPT_COMMAND+=("$__nya_bp_install_string")
+  else
+    __nya_bp_sanitize_string sanitized_prompt_command "${PROMPT_COMMAND:-}"
+    PROMPT_COMMAND="${sanitized_prompt_command:+$sanitized_prompt_command$'\n'}${__nya_bp_install_string}"
+  fi
 }
 __zzclawterm_install_cwd(){
   [ -n "${ZZCLAWTERM_BASH_CWD_READY:-}" ] && return 0
   local decl hook
   decl="$(declare -p PROMPT_COMMAND 2>/dev/null || true)"
+  [[ ! "$decl" =~ ^declare\ -[^[:space:]]*r ]] || return 1
   if [[ "$decl" =~ ^declare\ -[^[:space:]]*a[^[:space:]]*\ PROMPT_COMMAND= ]]; then
     for hook in "${PROMPT_COMMAND[@]}"; do
       [ "$hook" = __zzclawterm_cwd_prompt ] && { ZZCLAWTERM_BASH_CWD_READY=1; return 0; }
     done
     PROMPT_COMMAND=(__zzclawterm_cwd_prompt "${PROMPT_COMMAND[@]}")
   else
+    hook=__zzclawterm_cwd_prompt
+    if [[ "$decl" =~ ^declare\ -[^[:space:]]*x ]]; then
+      __zzclawterm_cwd_prompt_hook=$hook || return 1
+      export -n __zzclawterm_cwd_prompt_hook || return 1
+      hook='${__zzclawterm_cwd_prompt_hook-$(exit $?)}'
+    fi
     case "${PROMPT_COMMAND-}" in
       (*__zzclawterm_cwd_prompt*) ;;
-      (*) PROMPT_COMMAND="__zzclawterm_cwd_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+      (*) PROMPT_COMMAND="$hook${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
     esac
   fi
   ZZCLAWTERM_BASH_CWD_READY=1
@@ -1040,7 +1063,10 @@ __zzclawterm_install_full(){
   __nya_bp_inside_precmd=0
   __nya_bp_inside_preexec=0
   __nya_bp_preexec_interactive_mode=
-  __nya_bp_install_string=$'__nya_bp_trap_string="$(trap -p DEBUG)"\ntrap - DEBUG\n__nya_bp_install'
+  # Child shells must not execute our deferred installer.
+  __nya_bp_install_payload=$'__nya_bp_trap_string="$(trap -p DEBUG)"\ntrap - DEBUG\n__nya_bp_install'
+  export -n __nya_bp_install_payload || return 1
+  __nya_bp_install_string='eval "${__nya_bp_install_payload-:}"'
   __zzclawterm_register_full_hooks
   ZZCLAWTERM_BASH_INSTALL_PENDING=1
   __nya_bp_install_after_session_init || { unset ZZCLAWTERM_BASH_INSTALL_PENDING; return 1; }
@@ -1238,15 +1264,22 @@ __zzclawterm_install_prompt(){
   [ -n "${ZZCLAWTERM_BASH_CWD_READY:-}" ] && return 0
   local decl hook
   decl="$(declare -p PROMPT_COMMAND 2>/dev/null || true)"
+  [[ ! "$decl" =~ ^declare\ -[^[:space:]]*r ]] || return 1
   if [[ "$decl" =~ ^declare\ -[^[:space:]]*a[^[:space:]]*\ PROMPT_COMMAND= ]]; then
     for hook in "${PROMPT_COMMAND[@]}"; do
       [ "$hook" = __zzclawterm_cwd_prompt ] && { ZZCLAWTERM_BASH_CWD_READY=1; return 0; }
     done
     PROMPT_COMMAND=(__zzclawterm_cwd_prompt "${PROMPT_COMMAND[@]}")
   else
+    hook=__zzclawterm_cwd_prompt
+    if [[ "$decl" =~ ^declare\ -[^[:space:]]*x ]]; then
+      __zzclawterm_cwd_prompt_hook=$hook || return 1
+      export -n __zzclawterm_cwd_prompt_hook || return 1
+      hook='${__zzclawterm_cwd_prompt_hook-$(exit $?)}'
+    fi
     case "${PROMPT_COMMAND-}" in
       (*__zzclawterm_cwd_prompt*) ;;
-      (*) PROMPT_COMMAND="__zzclawterm_cwd_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+      (*) PROMPT_COMMAND="$hook${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
     esac
   fi
   ZZCLAWTERM_BASH_CWD_READY=1
@@ -1510,16 +1543,15 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     use super::{
         PreparedSshShellIntegration, SSH_INTEGRATION_TIMEOUT, ShellIntegrationMode, ShellKind,
         SshShellIntegrationPhase, SshShellIntegrationState, build_legacy_ssh_ready_marker,
         build_ssh_ready_marker,
     };
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use std::time::{Duration, Instant};
 
     fn shell_integration_state(session_id: &str) -> SshShellIntegrationState {
         let ready_marker = build_ssh_ready_marker(session_id);

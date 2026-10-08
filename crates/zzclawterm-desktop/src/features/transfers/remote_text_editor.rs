@@ -42,12 +42,7 @@ impl RemoteTextEditor {
                         cx.notify();
                     });
                 }
-                ZzClawDocumentEditorEvent::Updated => {
-                    app_for_events.update(cx, |app, cx| {
-                        app.mark_user_activity();
-                        cx.notify();
-                    });
-                }
+                ZzClawDocumentEditorEvent::Updated => cx.notify(),
                 ZzClawDocumentEditorEvent::Blurred(_) => {}
             },
         );
@@ -160,8 +155,15 @@ impl Render for RemoteTextEditor {
             .min_w_0()
             .font(font)
             .text_size(px(font_size))
+            .capture_key_down(cx.listener(|this, _, _, cx| {
+                this.app.update(cx, |app, _| app.mark_user_activity());
+            }))
             .on_key_down(cx.listener(Self::on_key_down))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.app.update(cx, |app, _| app.mark_user_activity());
+            }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.app.update(cx, |app, _| app.mark_user_activity());
                 if !event.modifiers.control && !event.modifiers.platform {
                     return;
                 }

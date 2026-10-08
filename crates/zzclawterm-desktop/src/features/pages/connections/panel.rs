@@ -303,6 +303,7 @@ impl Render for ConnectionPanel {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::Arc;
@@ -315,7 +316,6 @@ mod tests {
     use zzclawterm_ui::ZzClawInputEvent;
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::features::connections::{
         ConnectionDragKind, ConnectionDropPosition, ConnectionDropTarget,
     };
@@ -554,6 +554,55 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[test]
+    fn all_folder_actions_persist_expansion_and_publish_the_cached_panel() {
+        let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
+        let mut cx = TestAppContext::single();
+        let mut child = group("child", "Child");
+        child.parent_id = Some("parent".to_string());
+        let (app, vcx) = hosted(
+            &mut cx,
+            test_dir.path(),
+            vec![connection("a", "Alpha", Some("child"))],
+            vec![group("parent", "Parent"), child],
+        );
+
+        for expanded in [true, false] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.set_all_connection_groups_expanded(expanded, cx);
+                    let persisted: HashSet<_> = app
+                        .settings
+                        .summary()
+                        .ui_saved_connections_expanded_group_ids
+                        .iter()
+                        .cloned()
+                        .collect();
+                    let expected = if expanded {
+                        HashSet::from(["parent".to_string(), "child".to_string()])
+                    } else {
+                        HashSet::new()
+                    };
+                    assert_eq!(persisted, expected);
+                });
+            });
+            vcx.run_until_parked();
+
+            vcx.update(|_, cx| {
+                let panel = app.read(cx).connection_panel.read(cx);
+                let snapshot = panel.snapshot().expect("flushed");
+                assert_eq!(snapshot.group_is_expanded(Some("parent")), expanded);
+                assert_eq!(snapshot.group_is_expanded(Some("child")), expanded);
+                assert_eq!(
+                    snapshot.rows.iter().any(|row| {
+                        matches!(row, super::ConnectionListRow::Connection { connection_id, .. } if connection_id == "a")
+                    }),
+                    expanded
+                );
+            });
+        }
     }
 
     /// The bug the expansion guard used to have, driven through the real panel.

@@ -22,6 +22,7 @@ struct TerminalSessionTransferEntry {
     search_wrap: Option<bool>,
     scroll_residual: Option<f32>,
     selection: Option<TerminalSelection>,
+    editing: Option<super::editing_state::SessionEditingState>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,6 +115,7 @@ impl TerminalFeatureState {
                     search_wrap: self.search.wrap_around_by_session.remove(&session_id),
                     scroll_residual: self.view.scroll_delta_residuals.remove(&session_id),
                     selection,
+                    editing: self.editing.sessions.remove(&session_id),
                     session_id,
                     frame,
                 }
@@ -184,6 +186,12 @@ impl TerminalFeatureState {
             return Err(bundle);
         }
         for entry in bundle.entries {
+            if let Some(mut editing) = entry.editing {
+                editing.invalidate();
+                self.editing
+                    .sessions
+                    .insert(entry.session_id.clone(), editing);
+            }
             if let Some(wrap) = entry.search_wrap {
                 self.search
                     .wrap_around_by_session
@@ -246,6 +254,7 @@ impl TerminalFeatureState {
     }
 
     pub(in crate::features) fn remove_frame_session(&mut self, session_id: &str) {
+        self.editing.sessions.remove(session_id);
         self.view.views.remove(session_id);
         self.view
             .frame_pipeline
@@ -324,6 +333,8 @@ impl TerminalFeatureState {
         new_id: &str,
         encoding: &str,
     ) {
+        self.editing.sessions.remove(old_id);
+        self.editing.sessions.remove(new_id);
         self.view.retired_session_ids.push_back(old_id.to_string());
         if self.view.retired_session_ids.len() > 256 {
             self.view.retired_session_ids.pop_front();

@@ -103,6 +103,31 @@ mod tests {
 
     use super::transfer_progress_ratio;
 
+    #[test]
+    fn drag_export_never_offers_an_invented_local_target_or_retry() {
+        let mut job = crate::models::TransferJobState {
+            id: "export".into(),
+            session_id: Some("session".into()),
+            kind: crate::models::TransferJobKind::DragExport {
+                remote_path: "/remote/file".into(),
+            },
+            status: crate::models::TransferJobStatus::Failed,
+            detail: String::new(),
+            created_at_ms: 0,
+            display_name: String::new(),
+            entries: Vec::new(),
+            summary: None,
+            progress: Some(progress(4, Some(8), None, None)),
+            control: Some(zzclawterm_transport::SftpTransferControl::new()),
+            speed: Default::default(),
+        };
+        assert!(job.is_user_transfer());
+        assert!(!super::transfer_job_has_local_target(&job));
+        assert!(!super::transfer_job_can_retry(&job));
+        job.status = crate::models::TransferJobStatus::Completed;
+        assert!(!super::transfer_job_has_local_target(&job));
+    }
+
     fn progress(
         bytes_transferred: u64,
         total_bytes: Option<u64>,

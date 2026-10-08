@@ -156,20 +156,20 @@ impl SettingsTab {
 
     pub(crate) fn icon_path(self) -> &'static str {
         match self {
-            Self::General => "icons/settings.svg",
-            Self::Appearance => "icons/menu/palette.svg",
-            Self::Interaction => "icons/mouse.svg",
-            Self::Keybindings => "icons/keyboard.svg",
-            Self::TerminalGeneral => "icons/settings.svg",
-            Self::Search => "icons/fe/search.svg",
-            Self::Translation => "icons/translation.svg",
-            Self::AiGeneral => "icons/ai/settings.svg",
-            Self::AiModels => "icons/ai.svg",
-            Self::AiRules => "icons/menu/book.svg",
-            Self::AiAgents => "icons/ai.svg",
-            Self::Transfer => "icons/swap-horiz.svg",
-            Self::Security => "icons/security.svg",
-            Self::SyncBackup => "icons/sync.svg",
+            Self::General => "icons/settings/settings.svg",
+            Self::Appearance => "icons/settings/palette.svg",
+            Self::Interaction => "icons/settings/mouse.svg",
+            Self::Keybindings => "icons/settings/keyboard.svg",
+            Self::TerminalGeneral => "icons/settings/settings.svg",
+            Self::Search => "icons/settings/search.svg",
+            Self::Translation => "icons/settings/translate.svg",
+            Self::AiGeneral => "icons/settings/settings.svg",
+            Self::AiModels => "icons/settings/model.svg",
+            Self::AiRules => "icons/settings/rules.svg",
+            Self::AiAgents => "icons/settings/agent.svg",
+            Self::Transfer => "icons/settings/transfer.svg",
+            Self::Security => "icons/settings/security.svg",
+            Self::SyncBackup => "icons/settings/backup.svg",
         }
     }
 

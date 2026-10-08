@@ -178,6 +178,7 @@ pub enum SftpWriteTextResult {
 pub struct SftpTransferControl {
     cancelled: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    parent: Option<Arc<SftpTransferControl>>,
 }
 
 impl SftpTransferControl {
@@ -185,6 +186,7 @@ impl SftpTransferControl {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
+            parent: None,
         }
     }
 
@@ -195,6 +197,10 @@ impl SftpTransferControl {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_cancelled())
     }
 
     pub fn pause(&self) {
@@ -209,6 +215,18 @@ impl SftpTransferControl {
 
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_paused())
+    }
+
+    /// A stream may stop independently without cancelling the directory that owns it.
+    pub fn child(&self) -> Self {
+        Self {
+            parent: Some(Arc::new(self.clone())),
+            ..Self::new()
+        }
     }
 
     pub fn check_cancelled(&self) -> anyhow::Result<()> {
@@ -254,6 +272,22 @@ impl SftpTransferControl {
 mod cancellation_tests {
     use super::SftpTransferControl;
     use std::time::Duration;
+
+    #[test]
+    fn child_controls_inherit_parent_pause_and_cancel_without_cancelling_siblings() {
+        let parent = SftpTransferControl::new();
+        let child = parent.child();
+        let sibling = parent.child();
+        parent.pause();
+        assert!(child.is_paused());
+        child.cancel();
+        assert!(!parent.is_cancelled());
+        assert!(!sibling.is_cancelled());
+        parent.resume();
+        assert!(!sibling.is_paused());
+        parent.cancel();
+        assert!(sibling.is_cancelled());
+    }
 
     #[tokio::test]
     async fn cancelling_wakes_an_inflight_request_without_waiting_for_network_timeout() {

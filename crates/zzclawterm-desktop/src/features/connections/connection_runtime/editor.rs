@@ -68,6 +68,9 @@ impl ZzClawTermApp {
             ConnectionEditorValidationError::VncReconnectAttemptsInvalid => {
                 "VNC reconnect attempts must be between 0 and 20".to_string()
             }
+            ConnectionEditorValidationError::VncUsernameTooLong => {
+                t!("dialog.vncUsernameTooLong").into()
+            }
             ConnectionEditorValidationError::VncPasswordTooLong => {
                 t!("dialog.vncPasswordTooLong").into()
             }
@@ -197,7 +200,7 @@ impl ZzClawTermApp {
                 agent_preview: None,
                 agent_preview_loading: false,
                 backspace_mode: "del".to_string(),
-                encoding: "global".to_string(),
+                encoding: String::new(),
                 ssh_profile: Default::default(),
                 terminal_type: None,
                 sftp_enabled: true,
@@ -206,7 +209,7 @@ impl ZzClawTermApp {
                 sftp_shell_detection_timeout_ms: "3000".to_string(),
                 sftp_pipeline_depth: None,
                 sftp_extra: Default::default(),
-                sftp_filename_encoding: "terminal".to_string(),
+                sftp_filename_encoding: String::new(),
                 ssh_algorithm_mode: "compatible".to_string(),
                 ssh_algorithm_kex: Vec::new(),
                 ssh_algorithm_ciphers: Vec::new(),
@@ -225,6 +228,7 @@ impl ZzClawTermApp {
                 baud_rate: "115200".to_string(),
                 data_bits: "8".to_string(),
                 parity: "none".to_string(),
+                flow_control: Default::default(),
                 stop_bits: "1".to_string(),
                 raw_tcp_cli: false,
                 telnet_enter_mode: "cr".to_string(),
@@ -399,7 +403,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn add_connection_editor_tag(&mut self, cx: &mut Context<Self>) {
-        if self.connection_state.add_editor_tag() {
+        if self.connection_state.add_editor_tag(cx) {
             self.connection_state
                 .reset_editor_field(ConnectionEditorField::NewTag, "", cx);
             cx.notify();
@@ -411,7 +415,7 @@ impl ZzClawTermApp {
         tag: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.connection_state.remove_editor_tag(tag) {
+        if self.connection_state.remove_editor_tag(tag, cx) {
             cx.notify();
         }
     }
@@ -690,6 +694,11 @@ impl ZzClawTermApp {
                 if let Some(path) = selected {
                     let path = path.display().to_string();
                     this.connection_state.apply_editor_shell_path(path.clone());
+                    this.connection_state.reset_editor_field(
+                        ConnectionEditorField::ShellPath,
+                        &path,
+                        cx,
+                    );
                     this.shell
                         .set_status(t!("dialog.shellPathSelected", path = path).to_string());
                 } else {
@@ -727,6 +736,11 @@ impl ZzClawTermApp {
                 if let Some(path) = selected {
                     let path = path.display().to_string();
                     this.connection_state.apply_editor_working_dir(path.clone());
+                    this.connection_state.reset_editor_field(
+                        ConnectionEditorField::WorkingDir,
+                        &path,
+                        cx,
+                    );
                     this.shell
                         .set_status(t!("dialog.workingDirectorySelected", path = path).to_string());
                 } else {

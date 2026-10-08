@@ -94,7 +94,15 @@ fn terminal_keyword_highlight_request_key(
     let rows = snapshot.rows().get(row_start..row_end).unwrap_or_default();
     rows.len().hash(&mut hasher);
     for row in rows {
-        (row.signature, row.wrapped).hash(&mut hasher);
+        (
+            row.signature,
+            row.wrapped,
+            row.command_mark,
+            row.shell_input,
+            row.shell_input_columns,
+            row.shell_integration,
+        )
+            .hash(&mut hasher);
     }
     TerminalKeywordHighlightRequestKey {
         rules_key,
@@ -1188,6 +1196,7 @@ impl TerminalSurface {
 
         Some(Arc::new(TerminalSnapshot::from_rows(
             zzclawterm_terminal::TerminalSnapshotMeta {
+                shell_input_anchor: None,
                 cols,
                 viewport_rows,
                 cursor: hidden_terminal_cursor_snapshot(),
@@ -1227,6 +1236,7 @@ impl TerminalSurface {
         }
         Some(Arc::new(TerminalSnapshot::from_rows(
             zzclawterm_terminal::TerminalSnapshotMeta {
+                shell_input_anchor: None,
                 cols,
                 viewport_rows,
                 cursor: hidden_terminal_cursor_snapshot(),

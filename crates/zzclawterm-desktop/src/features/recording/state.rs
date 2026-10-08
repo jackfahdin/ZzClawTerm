@@ -1,22 +1,29 @@
 use std::collections::HashMap;
 
-use futures::channel::mpsc::UnboundedReceiver;
+use zzclawterm_terminal::recording_sanitizer::RecordingSanitizer;
 use zzclawterm_transport::RecordingStatus;
 
 use crate::models::{
-    RecordingHistorySearchKey, RecordingPathPromptKind, RecordingWriteEvent, RecordingWriteHandle,
-    RecordingWritePipeline,
+    RecordingEventReceiver, RecordingHistorySearchKey, RecordingPathPromptKind,
+    RecordingWriteHandle, RecordingWritePipeline,
 };
 
 pub(in crate::features) struct RecordingFeatureState {
     active_count: usize,
-    pending_auto_start: Option<(String, String)>,
     pipeline: RecordingWritePipeline,
     search_draft: String,
     busy_actions: HashMap<String, String>,
     rekeyed_sessions: HashMap<String, String>,
     statuses: HashMap<String, RecordingStatus>,
     path_prompt: Option<RecordingPathPromptKind>,
+    prompts: HashMap<String, RecordingPrompt>,
+}
+
+#[derive(Default)]
+struct RecordingPrompt {
+    tail: String,
+    sensitive: bool,
+    sanitizer: RecordingSanitizer,
 }
 
 impl RecordingFeatureState {
@@ -24,22 +31,53 @@ impl RecordingFeatureState {
         let pipeline = RecordingWritePipeline::spawn(memory_limit_bytes);
         Self {
             active_count: 0,
-            pending_auto_start: None,
             pipeline,
             search_draft: String::new(),
             busy_actions: HashMap::new(),
             rekeyed_sessions: HashMap::new(),
             statuses: HashMap::new(),
             path_prompt: None,
+            prompts: HashMap::new(),
         }
+    }
+
+    pub(in crate::features) fn observe_prompt(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        classify: impl FnOnce(&str) -> bool,
+    ) {
+        let prompt = self.prompts.entry(session_id.to_string()).or_default();
+        let text = prompt.sanitizer.feed(text);
+        if let Some(newline) = text.rfind('\n') {
+            prompt.tail.clear();
+            prompt.tail.push_str(&text[newline + 1..]);
+            prompt.sensitive = false;
+        } else {
+            prompt.tail.push_str(&text);
+        }
+        if prompt.tail.len() > 2048 {
+            let mut start = prompt.tail.len() - 2048;
+            while !prompt.tail.is_char_boundary(start) {
+                start += 1;
+            }
+            prompt.tail.drain(..start);
+        }
+        prompt.sensitive |= classify(&prompt.tail);
+    }
+
+    pub(in crate::features) fn has_observed_prompt(&self, session_id: &str) -> bool {
+        self.prompts.contains_key(session_id)
+    }
+
+    pub(in crate::features) fn input_is_sensitive(&self, session_id: &str) -> bool {
+        self.prompts
+            .get(session_id)
+            .is_some_and(|prompt| prompt.sensitive)
     }
 
     pub(in crate::features) fn writer(&self) -> RecordingWriteHandle {
         self.pipeline.writer()
-    }
-
-    pub(in crate::features) fn shutdown_worker(&mut self) {
-        self.pipeline.shutdown();
     }
 
     pub(in crate::features) fn set_memory_limit(&self, memory_limit_bytes: usize) {
@@ -127,26 +165,29 @@ impl RecordingFeatureState {
         self.path_prompt = None;
     }
 
-    pub(in crate::features) fn has_pending_auto_start(&self) -> bool {
-        self.pending_auto_start.is_some()
+    pub(in crate::features) fn set_history_include_input(&self, enabled: bool) {
+        self.pipeline.set_history_include_input(enabled);
     }
 
-    pub(in crate::features) fn schedule_auto_start(
+    pub(in crate::features) fn take_shutdown(
         &mut self,
-        session_id: String,
-        session_name: String,
-    ) {
-        self.pending_auto_start = Some((session_id, session_name));
-    }
-
-    pub(in crate::features) fn take_pending_auto_start(&mut self) -> Option<(String, String)> {
-        self.pending_auto_start.take()
+    ) -> Option<impl FnOnce() -> Vec<String> + Send + 'static> {
+        self.pipeline.take_shutdown()
     }
 
     pub(in crate::features) fn cleanup_writer_session(&self, session_id: &str) {
         self.pipeline.cleanup_session(session_id.to_string());
     }
 
+    pub(in crate::features) fn write_local_message(
+        &self,
+        session_id: impl Into<String>,
+        text: impl Into<String>,
+    ) {
+        self.pipeline.writer().write_local_message(session_id, text);
+    }
+
+    #[cfg(test)]
     pub(in crate::features) fn write_output(
         &self,
         session_id: impl Into<String>,
@@ -183,13 +224,12 @@ impl RecordingFeatureState {
         self.pipeline.request_history_search(key);
     }
 
-    pub(in crate::features) fn take_event_receiver(
-        &mut self,
-    ) -> Option<UnboundedReceiver<RecordingWriteEvent>> {
+    pub(in crate::features) fn take_event_receiver(&mut self) -> Option<RecordingEventReceiver> {
         self.pipeline.take_event_receiver()
     }
 
     pub(in crate::features) fn cleanup_session(&mut self, session_id: &str) {
+        self.prompts.remove(session_id);
         self.busy_actions.remove(session_id);
         self.statuses.remove(session_id);
         self.active_count = self.statuses.len();
@@ -204,11 +244,8 @@ impl RecordingFeatureState {
         if old_id == new_id {
             return;
         }
-        if let Some((session_id, _)) = self.pending_auto_start.as_mut()
-            && session_id == old_id
-        {
-            *session_id = new_id.to_string();
-        }
+        self.prompts.remove(old_id);
+        self.prompts.remove(new_id);
         if let Some(action) = self.busy_actions.remove(old_id) {
             self.busy_actions.insert(new_id.to_string(), action);
         }
@@ -228,7 +265,6 @@ mod tests {
         let mut recording = RecordingFeatureState::new(1024);
         assert!(recording.begin_action("session-1", "record"));
         assert!(!recording.begin_action("session-1", "save"));
-        recording.schedule_auto_start("session-1".to_string(), "local shell".to_string());
         assert!(recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
         assert!(!recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
 
@@ -237,29 +273,35 @@ mod tests {
 
         assert_eq!(recording.active_count(), 0);
         assert!(recording.busy_action("session-1").is_none());
-        assert_eq!(
-            recording
-                .take_pending_auto_start()
-                .as_ref()
-                .map(|value| value.0.as_str()),
-            Some("session-1")
-        );
         recording.finish_path_prompt();
         assert!(recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
     }
 
     #[test]
-    fn reconnect_moves_pending_auto_start_and_busy_action_once() {
+    fn sensitive_prompts_are_incremental_and_owned_by_each_session() {
         let mut recording = RecordingFeatureState::new(1024);
-        recording.schedule_auto_start("s1".to_string(), "shell".to_string());
+        let classify = |text: &str| text.trim() == "Password:" || text.trim() == "OTP:";
+        recording.observe_prompt("first", "Pass", classify);
+        recording.observe_prompt("first", "word:", classify);
+        recording.observe_prompt("second", "shell$ ", classify);
+        assert!(recording.input_is_sensitive("first"));
+        assert!(!recording.input_is_sensitive("second"));
+        recording.observe_prompt("first", "*", classify);
+        assert!(recording.input_is_sensitive("first"));
+        recording.observe_prompt("first", "\nready$ ", classify);
+        assert!(!recording.input_is_sensitive("first"));
+        recording.observe_prompt("second", "\nOTP:", classify);
+        assert!(recording.input_is_sensitive("second"));
+        recording.cleanup_session("second");
+        assert!(!recording.input_is_sensitive("second"));
+    }
+
+    #[test]
+    fn reconnect_moves_busy_action_once() {
+        let mut recording = RecordingFeatureState::new(1024);
         assert!(recording.begin_action("s1", "record"));
         recording.rekey_session("s1", "s2");
         assert_eq!(recording.busy_action("s2"), Some("record"));
         assert!(recording.busy_action("s1").is_none());
-        assert_eq!(
-            recording.take_pending_auto_start(),
-            Some(("s2".into(), "shell".into()))
-        );
-        assert!(recording.take_pending_auto_start().is_none());
     }
 }

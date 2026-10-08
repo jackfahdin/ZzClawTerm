@@ -295,6 +295,18 @@ impl CommandFeatureState {
         &self.quick.list.selected_category
     }
 
+    pub(in crate::features) fn quick_command_creation_category(&self) -> Option<String> {
+        let selected = self.quick_selected_category();
+        if matches!(selected, "all" | "uncategorized") {
+            return None;
+        }
+        self.catalog
+            .categories
+            .iter()
+            .find(|category| category.id == selected)
+            .map(|category| category.id.clone())
+    }
+
     pub(in crate::features) fn quick_sort_mode(&self) -> QuickCommandSortMode {
         self.quick.list.sort_mode
     }
@@ -1120,6 +1132,27 @@ mod tests {
             parent_id: parent.map(ToString::to_string),
             sort_order: order,
         }
+    }
+
+    #[test]
+    fn command_creation_inherits_only_an_existing_selected_category() {
+        let dir = TestConfigDir::new("zzclawterm-command-creation-category");
+        let mut state = command_state_with_category(
+            dir.path(),
+            "category-1",
+            vec![category("category-1", None, 0)],
+        );
+        assert_eq!(
+            state.quick_command_creation_category().as_deref(),
+            Some("category-1")
+        );
+        for selected in ["all", "uncategorized", "removed-category"] {
+            state.select_quick_category(selected.to_string());
+            assert_eq!(state.quick_command_creation_category(), None);
+        }
+        state.select_quick_category("category-1".to_string());
+        state.replace_quick_command_catalog(Vec::new(), Vec::new());
+        assert_eq!(state.quick_command_creation_category(), None);
     }
 
     #[test]

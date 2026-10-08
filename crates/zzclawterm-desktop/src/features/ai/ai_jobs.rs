@@ -40,6 +40,7 @@ pub(in crate::features) struct AiJobRunOptions {
     pub cancel: Arc<AtomicBool>,
     pub job_id: u64,
     pub agent_history: Option<Vec<AiMessage>>,
+    pub persist_user_message: bool,
 }
 
 pub(in crate::features) fn run_ai_ask_job(
@@ -54,6 +55,7 @@ pub(in crate::features) fn run_ai_ask_job(
         cancel,
         job_id,
         agent_history,
+        persist_user_message,
     } = run;
     if ai_job_cancelled(&cancel) {
         return Err("AI request cancelled".to_string());
@@ -72,10 +74,14 @@ pub(in crate::features) fn run_ai_ask_job(
         .unwrap_or_else(|| format!("ai-session-{}", uuid()));
     request.session_id = Some(session_id.clone());
 
-    let history = store
-        .request_fn(StoreDomain::Ai, |database| database.load_ai_history())
-        .map_err(|error| error.to_string())?;
-    if settings.record_history {
+    let history = if agent_history.is_none() {
+        store
+            .request_fn(StoreDomain::Ai, |database| database.load_ai_history())
+            .map_err(|error| error.to_string())?
+    } else {
+        Default::default()
+    };
+    if settings.record_history && persist_user_message {
         let user_session_id = session_id.clone();
         let connection_id = request.connection_id.clone();
         let user_input = request.user_input.clone();
@@ -196,6 +202,7 @@ pub(in crate::features) fn run_ai_ask_job(
             Some(started_at.elapsed()),
         );
         let output = AiChatJobOutput {
+            native_call: None,
             mode: AiMode::Agent,
             text: completion.text,
             reasoning: completion.reasoning,
@@ -348,6 +355,7 @@ pub(in crate::features) fn run_ai_ask_job(
             Some(started_at.elapsed()),
         );
         let output = AiChatJobOutput {
+            native_call: None,
             mode: AiMode::Agent,
             text: completion.text,
             reasoning: None,
@@ -441,7 +449,11 @@ pub(in crate::features) fn run_ai_ask_job(
             completion.tool_calls,
         ) {
             Ok(output) => output,
-            Err(error) if !request.options.agent_json_protocol && !ai_job_cancelled(&cancel) => {
+            Err(error)
+                if request.options.agent_context.is_none()
+                    && !request.options.agent_json_protocol
+                    && !ai_job_cancelled(&cancel) =>
+            {
                 request.options.agent_json_protocol = true;
                 notify_agent_json_fallback(stream_tx.as_ref(), job_id, &session_id);
                 let fallback = stream_ai_completion(
@@ -474,6 +486,7 @@ pub(in crate::features) fn run_ai_ask_job(
         let (text, reasoning, command_cards) =
             parse_model_output(&completion.text, completion.reasoning_content);
         AiChatJobOutput {
+            native_call: None,
             mode: AiMode::Ask,
             text,
             reasoning,
@@ -483,7 +496,7 @@ pub(in crate::features) fn run_ai_ask_job(
         }
     };
     bind_command_card_targets(&mut output.command_cards, &request);
-    if settings.record_history {
+    if settings.record_history && request.options.agent_context.is_none() {
         let message = AiMessage {
             id: format!("msg-{}", uuid()),
             session_id,
@@ -645,6 +658,19 @@ fn ai_agent_job_output(
     reasoning: Option<String>,
     tool_calls: Vec<zzclawterm_core::AiToolCall>,
 ) -> Result<AiChatJobOutput, String> {
+    if request.options.agent_context.is_some() {
+        let call = zzclawterm_core::ai::harness::AgentToolRegistry::parse(&tool_calls, &text)
+            .map_err(|error| error.to_string())?;
+        return Ok(AiChatJobOutput {
+            text: call.thought.clone(),
+            reasoning,
+            native_call: Some(call),
+            mode: AiMode::Agent,
+            command_cards: Vec::new(),
+            auto_execute_first: false,
+            approval_note: None,
+        });
+    }
     let parsed = if tool_calls.is_empty() {
         parse_agent_model_output(&text).map_err(|error| error.to_string())?
     } else {
@@ -662,6 +688,7 @@ fn ai_agent_job_output(
             .unwrap_or("Agent finished without a final answer")
             .to_string();
         return Ok(AiChatJobOutput {
+            native_call: None,
             mode: AiMode::Agent,
             text: answer,
             reasoning: Some(parsed.thought).or(reasoning),
@@ -706,12 +733,11 @@ fn ai_agent_job_output(
     } else {
         approval_note
     };
-    let text = approval_note
-        .as_deref()
-        .map(|note| format!("Agent proposed `{}`; {note}", card.command))
-        .unwrap_or_else(|| format!("Agent proposed `{}`", card.command));
+    // The command and approval note are presented by the linked execution block.
+    let text = String::new();
 
     Ok(AiChatJobOutput {
+        native_call: None,
         mode: AiMode::Agent,
         text,
         reasoning: Some(parsed.thought).or(reasoning),
@@ -798,6 +824,7 @@ mod tests {
             arguments["targetTerminalSessionId"] = serde_json::json!(target_id);
         }
         AiToolCall {
+            thought_signature: None,
             id: Some("call-1".to_string()),
             name: "execute_command".to_string(),
             arguments,
@@ -814,6 +841,10 @@ mod tests {
             vec![execute_tool(Some("terminal-b"))],
         )
         .expect("target-aware Agent output");
+        assert!(
+            output.text.is_empty(),
+            "command proposal belongs only in the execution block"
+        );
 
         assert_eq!(
             output.command_cards[0]

@@ -20,6 +20,7 @@ use super::ai_jobs::{
     AiJobRunOptions, ai_job_cancelled, observation_summary, remote_command_observation,
     run_ai_ask_job,
 };
+use super::presentation::AiAgentStepKind;
 use super::state::AiAgentObservationPoll;
 use super::{
     AGENT_DEFAULT_STEP_TIMEOUT, AGENT_OBSERVATION_MIN_WAIT, AGENT_OBSERVATION_POLL_INTERVAL,
@@ -31,10 +32,12 @@ impl ZzClawTermApp {
         &mut self,
         step_index: u16,
         status: AiAgentStepStatus,
+        kind: AiAgentStepKind,
         title: impl Into<String>,
         detail: impl Into<String>,
     ) {
-        self.ai.upsert_agent_step(step_index, status, title, detail);
+        self.ai
+            .upsert_agent_step(step_index, status, kind, title, detail);
     }
 
     pub(in crate::features) fn toggle_ai_agent_thought_expanded(
@@ -62,6 +65,13 @@ impl ZzClawTermApp {
         inserted_to_terminal: bool,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .ai
+            .native_pending_call()
+            .is_some_and(|call| call.id == card.id)
+        {
+            return;
+        }
         let target_session_id = card.target_terminal_session_id.as_deref().or_else(|| {
             card.target
                 .as_ref()
@@ -120,10 +130,11 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn begin_ai_agent_observation(
         &mut self,
-        command: &str,
+        card: &AiCommandCard,
         terminal_session_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<Option<String>, String> {
+        let command = card.command.as_str();
         let before = self.ai_header_presentation();
         let terminal_session_id = terminal_session_id.to_string();
         if self.session.session_info(&terminal_session_id).is_none()
@@ -144,6 +155,8 @@ impl ZzClawTermApp {
             .ai
             .settings_config()
             .agent_step_timeout_ms
+            .map(|timeout| self.ai.native_step_timeout().unwrap_or(timeout))
+            .or_else(|| self.ai.native_step_timeout())
             .map(Duration::from_millis)
             .unwrap_or(AGENT_DEFAULT_STEP_TIMEOUT);
         let profile = self.ai_execution_profile_for_session(&terminal_session_id);
@@ -165,6 +178,7 @@ impl ZzClawTermApp {
         let available_target_ids = self.ai_effective_target_session_ids();
         let available_targets = self.ai_terminal_targets_for_sessions(&available_target_ids);
         self.ai.set_agent_loop(AiAgentLoopState {
+            command_card_id: Some(card.id.clone()),
             ai_session_id: self.ai.chat_session_id().to_string(),
             terminal_session_id: terminal_session_id.clone(),
             available_targets,
@@ -191,6 +205,7 @@ impl ZzClawTermApp {
         self.upsert_ai_agent_step(
             step_index,
             AiAgentStepStatus::Running,
+            AiAgentStepKind::Command,
             "Running",
             truncate_preview(command.trim(), 140),
         );
@@ -200,10 +215,11 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn begin_ai_agent_background_execution(
         &mut self,
-        command: &str,
+        card: &AiCommandCard,
         terminal_session_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let command = card.command.as_str();
         let before = self.ai_header_presentation();
         let terminal_session_id = terminal_session_id.to_string();
         let session = self
@@ -252,6 +268,8 @@ impl ZzClawTermApp {
             .ai
             .settings_config()
             .agent_step_timeout_ms
+            .map(|timeout| self.ai.native_step_timeout().unwrap_or(timeout))
+            .or_else(|| self.ai.native_step_timeout())
             .map(Duration::from_millis)
             .unwrap_or(AGENT_DEFAULT_STEP_TIMEOUT);
         let launch = self.ai.begin_chat_job();
@@ -263,6 +281,7 @@ impl ZzClawTermApp {
         let available_target_ids = self.ai_effective_target_session_ids();
         let available_targets = self.ai_terminal_targets_for_sessions(&available_target_ids);
         let state = AiAgentLoopState {
+            command_card_id: Some(card.id.clone()),
             ai_session_id: self.ai.chat_session_id().to_string(),
             terminal_session_id: terminal_session_id.clone(),
             available_targets,
@@ -289,6 +308,7 @@ impl ZzClawTermApp {
         self.upsert_ai_agent_step(
             step_index,
             AiAgentStepStatus::Running,
+            AiAgentStepKind::Command,
             format!("{target_label} background"),
             truncate_preview(command.trim(), 140),
         );
@@ -422,19 +442,21 @@ impl ZzClawTermApp {
                 self.upsert_ai_agent_step(
                     state.step_index,
                     AiAgentStepStatus::Failed,
+                    AiAgentStepKind::Diagnostic,
                     "Timed out",
                     observation_summary(&observation),
                 );
-                self.start_ai_agent_continuation(state, observation, cx);
+                if !self.complete_native_terminal_observation(&observation, true, false) {
+                    self.start_ai_agent_continuation(state, observation, cx);
+                }
                 true
             }
             AiAgentObservationPoll::Target(state) => {
                 let terminal_output =
                     self.terminal_buffer_text_for_session(&state.terminal_session_id);
-                let output = terminal_output
-                    .get(state.output_start_len..)
-                    .unwrap_or_default()
-                    .to_string();
+                let captured = terminal_output.get(state.output_start_len..);
+                let source_truncated = captured.is_none();
+                let output = captured.unwrap_or_default().to_string();
                 let duration_ms = now
                     .duration_since(state.started_at)
                     .as_millis()
@@ -445,13 +467,15 @@ impl ZzClawTermApp {
                     exit_code: None,
                     duration_ms,
                 };
-                self.upsert_ai_agent_step(
+                self.ai.record_agent_observation(
                     state.step_index,
-                    AiAgentStepStatus::Completed,
-                    "Observed",
+                    &observation,
                     observation_summary(&observation),
                 );
-                self.start_ai_agent_continuation(state, observation, cx);
+                if !self.complete_native_terminal_observation(&observation, false, source_truncated)
+                {
+                    self.start_ai_agent_continuation(state, observation, cx);
+                }
                 true
             }
         }
@@ -480,13 +504,14 @@ impl ZzClawTermApp {
             Some(code) => format!("AI Agent captured command output with exit code {code}"),
             None => "AI Agent captured command output".to_string(),
         });
-        self.upsert_ai_agent_step(
+        self.ai.record_agent_observation(
             state.step_index,
-            AiAgentStepStatus::Completed,
-            "Observed",
+            &observation,
             observation_summary(&observation),
         );
-        self.start_ai_agent_continuation(state, observation, cx);
+        if !self.complete_native_terminal_observation(&observation, false, false) {
+            self.start_ai_agent_continuation(state, observation, cx);
+        }
         self.defer_ai_panel_snapshot_flush(cx);
         self.ai.switch_scope(&visible_scope);
     }
@@ -528,10 +553,13 @@ impl ZzClawTermApp {
         self.upsert_ai_agent_step(
             state.step_index,
             AiAgentStepStatus::Failed,
+            AiAgentStepKind::Diagnostic,
             "Output dropped",
             observation_summary(&observation),
         );
-        self.start_ai_agent_continuation(state, observation, cx);
+        if !self.complete_native_terminal_observation(&observation, false, true) {
+            self.start_ai_agent_continuation(state, observation, cx);
+        }
         self.defer_ai_panel_snapshot_flush(cx);
         self.ai.switch_scope(&visible_scope);
         true
@@ -570,6 +598,9 @@ impl ZzClawTermApp {
         observation: CommandObservation,
         cx: &mut Context<Self>,
     ) {
+        if self.complete_native_terminal_observation(&observation, false, false) {
+            return;
+        }
         let observation_message = build_observation_message(
             &observation,
             &state.command,
@@ -584,6 +615,15 @@ impl ZzClawTermApp {
         observation_message: String,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .ai
+            .complete_native_terminal(Err(zzclawterm_mcp_protocol::RpcError {
+                code: "execution_failed".into(),
+                message: observation_message.clone(),
+            }))
+        {
+            return;
+        }
         let conversation = self.ai.agent_conversation_snapshot();
         let Some(launch) = self
             .ai
@@ -667,6 +707,7 @@ impl ZzClawTermApp {
                                 cancel,
                                 job_id,
                                 agent_history: Some(conversation),
+                                persist_user_message: false,
                             },
                         )
                     };
@@ -686,21 +727,26 @@ impl ZzClawTermApp {
         self.defer_ai_panel_snapshot_flush(cx);
     }
 
-    pub(in crate::features) fn reject_ai_agent_command_card(
-        &mut self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(card) = self.ai.command_card(index) {
-            self.reject_ai_agent_command_card_value(card, cx);
-        }
-    }
-
     pub(in crate::features) fn reject_ai_agent_command_card_by_id(
         &mut self,
         card_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .ai
+            .native_pending_call()
+            .is_some_and(|call| call.id == card_id)
+        {
+            self.respond_to_mcp_approval(
+                &format!(
+                    "{}:{card_id}",
+                    self.ai.native_owner().expect("native owner")
+                ),
+                crate::features::mcp::McpApprovalDecision::Deny,
+                cx,
+            );
+            return;
+        }
         if let Some(card) = self.ai.find_command_card(&card_id) {
             self.reject_ai_agent_command_card_value(card, cx);
         }
@@ -732,9 +778,11 @@ impl ZzClawTermApp {
         self.ai.upsert_agent_step(
             step_index,
             AiAgentStepStatus::Rejected,
+            AiAgentStepKind::Diagnostic,
             "Rejected",
             "User denied command execution",
         );
+        self.ai.associate_agent_command(step_index, &card.id);
         self.ai.clear_chat_command_cards();
         self.submit_ai_command_audit(
             AppendAiAuditRequest {
@@ -755,6 +803,7 @@ impl ZzClawTermApp {
         let now = Instant::now();
         let target_ids = self.ai_effective_target_session_ids();
         let state = AiAgentLoopState {
+            command_card_id: Some(card.id.clone()),
             ai_session_id: self.ai.chat_session_id().to_string(),
             terminal_session_id: terminal_session_id.clone(),
             available_targets: self.ai_terminal_targets_for_sessions(&target_ids),

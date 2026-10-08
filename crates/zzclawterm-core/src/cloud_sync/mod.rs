@@ -49,6 +49,11 @@ pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum CloudSyncError {
+    #[error(
+        "gist_capacity: Gitee snippet has insufficient file slots; remove unrelated files or choose a new snippet, then retry sync"
+    )]
+    GistCapacity,
+
     #[error("cloud sync is disabled")]
     Disabled,
     #[error("automatic cloud pull was deferred because a session or settings editor is active")]
@@ -112,6 +117,26 @@ pub enum CloudSyncError {
     Base64(#[from] base64::DecodeError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+pub const GIST_CAPACITY_ERROR_CODE: &str = "gist_capacity";
+
+impl CloudSyncError {
+    pub fn code(&self) -> Option<&'static str> {
+        matches!(self, Self::GistCapacity).then_some(GIST_CAPACITY_ERROR_CODE)
+    }
+}
+
+pub fn needs_gist_capacity_recovery(provider: &str, status: &str) -> bool {
+    provider == "gitee_snippet"
+        && [
+            GIST_CAPACITY_ERROR_CODE,
+            "was not accepted by remote storage",
+            "rejected file",
+            "gist may be at file capacity",
+        ]
+        .iter()
+        .any(|message| status.contains(message))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -290,7 +315,17 @@ pub struct CloudSyncBackupInfo {
     pub safety_backup_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteFileCapacity {
+    pub used: usize,
+    pub limit: usize,
+}
+
 pub trait CloudSyncRemote {
+    fn file_capacity(&self) -> Result<Option<RemoteFileCapacity>, CloudSyncError> {
+        Ok(None)
+    }
+
     fn provider(&self) -> &'static str;
     fn create_dir(&self, path: &str) -> Result<(), CloudSyncError>;
     fn read_if_exists(&self, path: &str) -> Result<Option<Vec<u8>>, CloudSyncError>;
@@ -433,7 +468,7 @@ pub fn push_snapshot_with_remote(
         return Err(CloudSyncError::RemoteNewer);
     }
 
-    protocol::upload_sync_snapshot(local_store, remote, options, &snapshot)?;
+    protocol::upload_sync_snapshot(local_store, remote, options, &snapshot, latest.as_ref())?;
     let pointer = protocol::pointer_from_snapshot(&snapshot);
     protocol::read_snapshot_for_pointer(local_store, remote, options, &pointer)?;
     next_state.last_validated_remote_revision = Some(pointer.revision_id.clone());
@@ -739,7 +774,17 @@ fn write_sync_pointer(
     pointer: &RemoteSyncPointer,
 ) -> Result<(), CloudSyncError> {
     let bytes = local_store.encode_sync_pointer(pointer)?;
-    remote.write(&remote_path(remote_root, SYNC_LATEST_FILE), &bytes)
+    let path = remote_path(remote_root, SYNC_LATEST_FILE);
+    remote.write(&path, &bytes)?;
+    let verified = load_sync_pointer_from_remote(local_store, remote, remote_root)?;
+    if verified.as_ref() != Some(pointer) {
+        return Err(if remote.file_capacity()?.is_some() {
+            CloudSyncError::GistCapacity
+        } else {
+            CloudSyncError::Remote("Remote head write could not be verified".into())
+        });
+    }
+    Ok(())
 }
 
 fn conflict_preview(

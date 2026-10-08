@@ -1,16 +1,18 @@
 use gpui::{
     Action as _, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render,
-    RenderOnce, SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
-    px,
+    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _,
+    Render, RenderOnce, SharedString, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_kit::component::input::SelectAll;
+use gpui_base::input::InputContextMenuCapabilities;
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, Textarea, TextareaState,
+    Copy, Cut, Editor, EditorState, Enter, Input, InputEvent, InputState, Paste, SelectAll,
+    Textarea, TextareaState,
 };
-use gpui_kit::component::{Icon, IconName, Sizable, Size};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable, Size};
 
 use crate::input_focus::{preserve_nya_input_focus_on_pointer_down, register_nya_input_focus};
+use crate::menu::{ZzClawContextMenu, ZzClawMenuItem};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ZzClawInputEvent {
@@ -29,6 +31,28 @@ enum ComponentState {
 }
 
 impl ComponentState {
+    fn set_context_menu_enabled(&self, enabled: bool, cx: &mut App) {
+        match self {
+            Self::Input(state) => {
+                state.update(cx, |state, _| state.set_context_menu_enabled(enabled))
+            }
+            Self::Textarea(state) => {
+                state.update(cx, |state, _| state.set_context_menu_enabled(enabled))
+            }
+            Self::Editor(state) => {
+                state.update(cx, |state, _| state.set_context_menu_enabled(enabled))
+            }
+        }
+    }
+
+    fn context_menu_capabilities(&self, cx: &App) -> InputContextMenuCapabilities {
+        match self {
+            Self::Input(state) => state.read(cx).context_menu_capabilities(),
+            Self::Textarea(state) => state.read(cx).context_menu_capabilities(),
+            Self::Editor(state) => state.read(cx).context_menu_capabilities(),
+        }
+    }
+
     fn value(&self, cx: &App) -> String {
         match self {
             Self::Input(state) => state.read(cx).value().to_string(),
@@ -89,6 +113,7 @@ pub struct ZzClawInputState {
     pending_value: Option<SharedString>,
     silent_value: Option<SharedString>,
     placeholder: SharedString,
+    placeholder_pending: bool,
     masked: bool,
     applied_masked: bool,
     multi_line: bool,
@@ -113,6 +138,7 @@ impl ZzClawInputState {
             pending_value: None,
             silent_value: None,
             placeholder: SharedString::default(),
+            placeholder_pending: false,
             masked: false,
             applied_masked: false,
             multi_line: false,
@@ -163,6 +189,19 @@ impl ZzClawInputState {
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
+    }
+
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            self.placeholder_pending = true;
+            cx.notify();
+        }
     }
 
     pub fn masked(mut self, masked: bool) -> Self {
@@ -271,6 +310,26 @@ impl ZzClawInputState {
 
     fn ensure_component(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ComponentState {
         if let Some(state) = self.state.clone() {
+            if std::mem::take(&mut self.placeholder_pending) {
+                let placeholder = component_placeholder(self.placeholder.clone(), self.multi_line);
+                match &state {
+                    ComponentState::Input(input) => {
+                        input.update(cx, |input, cx| {
+                            input.set_placeholder(placeholder, window, cx)
+                        });
+                    }
+                    ComponentState::Textarea(input) => {
+                        input.update(cx, |input, cx| {
+                            input.set_placeholder(placeholder, window, cx)
+                        });
+                    }
+                    ComponentState::Editor(input) => {
+                        input.update(cx, |input, cx| {
+                            input.set_placeholder(placeholder, window, cx)
+                        });
+                    }
+                }
+            }
             if let Some(value) = self.pending_value.take() {
                 state.set_value(value, window, cx);
             }
@@ -283,6 +342,7 @@ impl ZzClawInputState {
             .unwrap_or_else(|| self.seed.clone());
         let masked = self.masked;
         let multi_line = self.multi_line;
+        self.placeholder_pending = false;
         let placeholder = component_placeholder(self.placeholder.clone(), multi_line);
         let language = self.language.clone();
         let rows = self.rows;
@@ -435,13 +495,21 @@ impl Render for ZzClawInputState {
 #[derive(IntoElement)]
 pub struct ZzClawInput {
     state: Entity<ZzClawInputState>,
+    font_size: Option<gpui::Pixels>,
 }
 
 impl ZzClawInput {
     pub fn new(state: &Entity<ZzClawInputState>) -> Self {
         Self {
             state: state.clone(),
+            font_size: None,
         }
+    }
+
+    /// Override the compact component size for fields that follow the UI font.
+    pub fn text_size(mut self, font_size: gpui::Pixels) -> Self {
+        self.font_size = Some(font_size);
+        self
     }
 }
 
@@ -453,6 +521,11 @@ impl RenderOnce for ZzClawInput {
         let input = match state {
             ComponentState::Input(state) => Input::new(&state)
                 .xsmall()
+                .when_some(self.font_size, |this, font_size| {
+                    this.text_size(font_size)
+                        .line_height(font_size * 1.5)
+                        .h_full()
+                })
                 .appearance(false)
                 .bordered(false)
                 .focus_bordered(false)
@@ -466,6 +539,7 @@ impl RenderOnce for ZzClawInput {
                 .readonly(readonly)
                 .h_full()
                 .text_xs()
+                .when_some(self.font_size, |this, font_size| this.text_size(font_size))
                 .into_any_element(),
             ComponentState::Editor(state) => Editor::new(&state)
                 .appearance(false)
@@ -474,6 +548,7 @@ impl RenderOnce for ZzClawInput {
                 .readonly(readonly)
                 .h_full()
                 .text_xs()
+                .when_some(self.font_size, |this, font_size| this.text_size(font_size))
                 .into_any_element(),
         };
         div()
@@ -492,6 +567,7 @@ impl RenderOnce for ZzClawInput {
 }
 
 type KeyDownHandler = Box<dyn Fn(&KeyDownEvent, &mut Window, &mut App) + 'static>;
+type SecondaryEnterHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 
 fn prepare_input_component(
     input_state: &Entity<ZzClawInputState>,
@@ -534,8 +610,13 @@ pub struct ZzClawInputShell {
     multi_line: bool,
     search: bool,
     framed: bool,
+    height: Option<gpui::Pixels>,
+    fill_height: bool,
     trailing: Vec<AnyElement>,
+    footer: Option<AnyElement>,
     on_key_down: Option<KeyDownHandler>,
+    on_secondary_enter: Option<SecondaryEnterHandler>,
+    context_menu_labels: Option<[SharedString; 4]>,
 }
 
 impl ZzClawInputShell {
@@ -547,8 +628,13 @@ impl ZzClawInputShell {
             multi_line: false,
             search: false,
             framed: true,
+            height: None,
+            fill_height: false,
             trailing: Vec::new(),
+            footer: None,
             on_key_down: None,
+            on_secondary_enter: None,
+            context_menu_labels: None,
         }
     }
 
@@ -560,6 +646,26 @@ impl ZzClawInputShell {
 
     pub fn multi_line(mut self) -> Self {
         self.multi_line = true;
+        self
+    }
+
+    /// Opt into the ZzClawTerm popup menu. Labels are Cut, Copy, Paste, Select All,
+    /// localized by the caller. Other inputs keep the platform's default menu.
+    pub fn gpui_context_menu(mut self, labels: [SharedString; 4]) -> Self {
+        self.context_menu_labels = Some(labels);
+        self
+    }
+
+    pub fn height(mut self, height: gpui::Pixels) -> Self {
+        self.height = Some(height);
+        self.fill_height = false;
+        self
+    }
+
+    /// Fill a definite-height parent instead of using the default textarea height.
+    pub fn fill_height(mut self) -> Self {
+        self.height = None;
+        self.fill_height = true;
         self
     }
 
@@ -579,11 +685,25 @@ impl ZzClawInputShell {
         self
     }
 
+    /// Add a fixed action row inside a textarea's frame, outside its scroll viewport.
+    pub fn footer(mut self, child: impl IntoElement) -> Self {
+        self.footer = Some(child.into_any_element());
+        self
+    }
+
     pub fn on_key_down(
         mut self,
         handler: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_key_down = Some(Box::new(handler));
+        self
+    }
+
+    /// Take Ctrl/Cmd+Enter before the field sees it. A multi-line field binds
+    /// that keystroke to a newline and stops propagation, so an `on_key_down`
+    /// on an ancestor never receives it.
+    pub fn on_secondary_enter(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_secondary_enter = Some(Box::new(handler));
         self
     }
 }
@@ -597,14 +717,24 @@ impl RenderOnce for ZzClawInputShell {
             multi_line,
             search,
             framed,
+            height,
+            fill_height,
             trailing,
+            footer,
             on_key_down,
+            on_secondary_enter,
+            context_menu_labels,
         } = self;
         let (state, disabled, readonly, state_multi_line) =
             prepare_input_component(&state, window, cx);
+        state.set_context_menu_enabled(context_menu_labels.is_none(), cx);
+        let menu_state = state.clone();
+        let capture_focus_state = state.clone();
+        let gpui_context_menu = context_menu_labels.is_some();
         let focus_state = state.clone();
         let debug_selector = id.to_string();
         let prefix_debug_selector = format!("{}-prefix", id);
+        let has_footer = footer.is_some();
         let input = match state {
             ComponentState::Input(state) => {
                 let mut input = Input::new(&state)
@@ -631,17 +761,60 @@ impl RenderOnce for ZzClawInputShell {
                 }
                 input.into_any_element()
             }
+            ComponentState::Textarea(state) if has_footer => {
+                let theme = cx.theme();
+                let focused = state.read(cx).focus_handle(cx).is_focused(window);
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .h(if fill_height {
+                        gpui::relative(1.)
+                    } else {
+                        height.unwrap_or(px(88.)).into()
+                    })
+                    .when(framed, |this| {
+                        this.rounded(theme.radius)
+                            .border_1()
+                            .border_color(if focused { theme.ring } else { theme.input })
+                            .bg(theme.input.opacity(if theme.is_dark() { 0.3 } else { 0.0 }))
+                    })
+                    .child(
+                        div().flex_1().min_h_0().min_w_0().overflow_hidden().child(
+                            Textarea::new(&state)
+                                .appearance(false)
+                                .bordered(false)
+                                .disabled(disabled)
+                                .readonly(readonly)
+                                .h_full(),
+                        ),
+                    )
+                    .child(footer.unwrap())
+                    .into_any_element()
+            }
             ComponentState::Textarea(state) => Textarea::new(&state)
+                .appearance(framed)
+                .bordered(framed)
                 .disabled(disabled)
                 .readonly(readonly)
-                .h(px(88.))
+                .h(if fill_height {
+                    gpui::relative(1.)
+                } else {
+                    height.unwrap_or(px(88.)).into()
+                })
                 .into_any_element(),
             ComponentState::Editor(state) => Editor::new(&state)
                 .disabled(disabled)
                 .readonly(readonly)
                 // A script box needs more than the two-line note height a textarea
                 // gets; the gutter makes short boxes read as cramped.
-                .h(px(168.))
+                .h(if fill_height {
+                    gpui::relative(1.)
+                } else {
+                    height.unwrap_or(px(168.)).into()
+                })
                 .text_size(px(14.))
                 .into_any_element(),
         };
@@ -651,18 +824,80 @@ impl RenderOnce for ZzClawInputShell {
             .debug_selector(move || debug_selector.clone())
             .w_full()
             .min_w_0()
-            .capture_any_mouse_down(|_, _, cx| {
+            .when(fill_height, |this| this.h_full().min_h_0())
+            .capture_any_mouse_down(move |event, window, cx| {
                 preserve_nya_input_focus_on_pointer_down(cx);
-            })
-            .on_any_mouse_down(move |_, window, cx| {
-                if !disabled {
-                    focus_state.focus(window, cx);
+                // ContextMenu captures the focus to restore before bubble handlers.
+                // Right-clicking an unfocused field must restore this input on Esc.
+                if gpui_context_menu && !disabled && event.button == MouseButton::Right {
+                    capture_focus_state.focus(window, cx);
                 }
+            })
+            .when(!has_footer, |this| {
+                this.on_any_mouse_down(move |_, window, cx| {
+                    if !disabled {
+                        focus_state.focus(window, cx);
+                    }
+                })
             });
         if let Some(handler) = on_key_down {
             container = container.on_key_down(handler);
         }
-        container.child(input)
+        if let Some(handler) = on_secondary_enter {
+            container = container.capture_action(move |action: &Enter, window, cx| {
+                if action.secondary {
+                    cx.stop_propagation();
+                    handler(window, cx);
+                }
+            });
+        }
+        let container = container.child(input);
+        if let Some(labels) = context_menu_labels {
+            ZzClawContextMenu::new_dynamic(container, move |_, cx| {
+                let capabilities = menu_state.context_menu_capabilities(cx);
+                let focus = menu_state.focus_handle(cx);
+                let editable = capabilities.is_editable();
+                let copyable = capabilities.is_copyable();
+                let actions: [Box<dyn gpui::Action>; 4] = [
+                    Box::new(Cut),
+                    Box::new(Copy),
+                    Box::new(Paste),
+                    Box::new(SelectAll),
+                ];
+                let enabled = [
+                    editable && copyable,
+                    copyable,
+                    editable && cx.read_from_clipboard().is_some(),
+                    true,
+                ];
+                let mut items = Vec::with_capacity(5);
+                for (index, ((label, action), enabled)) in
+                    labels.iter().zip(actions).zip(enabled).enumerate()
+                {
+                    if index == 3 {
+                        items.push(ZzClawMenuItem::separator());
+                    }
+                    let focus = focus.clone();
+                    items.push(
+                        ZzClawMenuItem::action(label.clone())
+                            .disabled(!enabled)
+                            .on_click(move |_, window, cx| {
+                                // PopupMenu can initially select a disabled first row.
+                                // Keep keyboard confirmation under the same policy as clicks.
+                                if enabled {
+                                    focus.dispatch_action(action.as_ref(), window, cx);
+                                }
+                            }),
+                    );
+                }
+                items
+            })
+            .min_width(px(144.))
+            .enabled(!disabled)
+            .into_any_element()
+        } else {
+            container.into_any_element()
+        }
     }
 }
 
@@ -717,13 +952,269 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
-        AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-        TestAppContext, div,
+        AppContext as _, ClipboardItem, InteractiveElement as _, IntoElement, MouseButton,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, div, point,
+        prelude::FluentBuilder as _, px,
     };
 
     use gpui_kit::component::highlighter::LanguageRegistry;
 
-    use super::{ZzClawInputState, component_placeholder};
+    use super::{ComponentState, ZzClawInputShell, ZzClawInputState, component_placeholder};
+
+    struct InputHeightFixture {
+        height: f32,
+        footer: bool,
+        flexible: gpui::Entity<ZzClawInputState>,
+        fixed: gpui::Entity<ZzClawInputState>,
+        ordinary: gpui::Entity<ZzClawInputState>,
+    }
+
+    impl Render for InputHeightFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .w(px(320.))
+                .flex()
+                .flex_col()
+                .child(
+                    div().h(px(self.height)).flex_none().child(
+                        ZzClawInputShell::new("flexible-textarea", &self.flexible)
+                            .multi_line()
+                            .fill_height()
+                            .when(self.footer, |this| {
+                                this.footer(
+                                    div()
+                                        .id("textarea-footer")
+                                        .debug_selector(|| "textarea-footer".into())
+                                        .h(px(34.))
+                                        .flex_none()
+                                        .child("Send"),
+                                )
+                            }),
+                    ),
+                )
+                .child(ZzClawInputShell::new("fixed-textarea", &self.fixed).multi_line())
+                .child(ZzClawInputShell::new("ordinary-input", &self.ordinary))
+        }
+    }
+
+    #[gpui::test]
+    fn textarea_fills_resized_parent_without_changing_default_input_heights(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| InputHeightFixture {
+            height: 68.,
+            footer: false,
+            flexible: cx
+                .new(|cx| ZzClawInputState::new(cx, "draft\nsecond line").multi_line(Some(4))),
+            fixed: cx.new(|cx| ZzClawInputState::new(cx, "fixed").multi_line(Some(4))),
+            ordinary: cx.new(|cx| ZzClawInputState::new(cx, "ordinary")),
+        });
+        let field = fixture.read_with(cx, |fixture, _| fixture.flexible.clone());
+        for (height, footer) in [
+            (68., false),
+            (128., false),
+            (468., false),
+            (68., false),
+            (68., true),
+            (128., true),
+            (468., true),
+            (68., true),
+        ] {
+            fixture.update(cx, |fixture, cx| {
+                fixture.height = height;
+                fixture.footer = footer;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+            assert_eq!(
+                cx.debug_bounds("flexible-textarea").unwrap().size.height,
+                px(height),
+            );
+            assert_eq!(
+                cx.debug_bounds("fixed-textarea").unwrap().size.height,
+                px(88.)
+            );
+            assert_eq!(
+                cx.debug_bounds("ordinary-input").unwrap().size.height,
+                px(32.)
+            );
+            let footer_bounds = footer.then(|| cx.debug_bounds("textarea-footer").unwrap());
+            field.read_with(cx, |field, cx| {
+                let Some(ComponentState::Textarea(component)) = field.state.as_ref() else {
+                    panic!("expected a rendered textarea");
+                };
+                // Check the editing engine, not just the shell hit target.
+                let bounds = component.read(cx).input_bounds();
+                let editing_height = height - if footer { 34. } else { 0. };
+                assert!(bounds.size.height > px((editing_height - 24.).max(0.)));
+                assert!(bounds.size.height <= px(height));
+                if let Some(footer_bounds) = footer_bounds {
+                    assert_eq!(footer_bounds.size.height, px(34.));
+                    assert!(
+                        bounds.bottom() <= footer_bounds.origin.y,
+                        "height {height}: editing bounds {bounds:?}, footer {footer_bounds:?}"
+                    );
+                    assert!(footer_bounds.bottom() <= px(height));
+                }
+                assert_eq!(field.value(cx), "draft\nsecond line");
+            });
+        }
+    }
+
+    struct InputContextMenuFixture {
+        field: gpui::Entity<ZzClawInputState>,
+    }
+
+    impl Render for InputContextMenuFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(320.)).child(
+                ZzClawInputShell::new("popup-input", &self.field).gpui_context_menu([
+                    "Cut".into(),
+                    "Copy".into(),
+                    "Paste".into(),
+                    "Select All".into(),
+                ]),
+            )
+        }
+    }
+
+    fn open_input_context_menu(cx: &mut VisualTestContext) {
+        cx.simulate_mouse_down(
+            point(px(12.), px(12.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(12.), px(12.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn popup_input_menu_reuses_edit_actions_and_restores_input_focus(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| InputContextMenuFixture {
+            field: cx.new(|cx| ZzClawInputState::new(cx, "hello").multi_line(Some(3))),
+        });
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        // A right click from outside the field must restore focus to the field.
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(field.read(cx).component_focus_handle(cx).is_focused(window));
+            field.update(cx, |field, cx| field.select_all(window, cx));
+        });
+        cx.run_until_parked();
+
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("hello".into())
+            );
+            assert!(field.read(cx).component_focus_handle(cx).is_focused(window));
+        });
+        assert_eq!(field.read_with(cx, |field, cx| field.value(cx)), "hello");
+
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(field.read_with(cx, |field, cx| field.value(cx)), "");
+        // Undo verifies Cut went through the editor's history.
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        cx.run_until_parked();
+        assert_eq!(field.read_with(cx, |field, cx| field.value(cx)), "hello");
+
+        cx.update(|window, cx| {
+            field.update(cx, |field, cx| field.select_all(window, cx));
+            cx.write_to_clipboard(ClipboardItem::new_string("world".into()));
+        });
+        cx.run_until_parked();
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("down down down enter");
+        cx.run_until_parked();
+        assert_eq!(field.read_with(cx, |field, cx| field.value(cx)), "world");
+
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("up enter");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let state = field.read(cx).state.as_ref().expect("rendered input");
+            assert!(state.context_menu_capabilities(cx).has_selection());
+        });
+    }
+
+    #[gpui::test]
+    fn readonly_popup_input_menu_allows_copy_without_editing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| InputContextMenuFixture {
+            field: cx.new(|cx| ZzClawInputState::new(cx, "read only").readonly(true)),
+        });
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            field.update(cx, |field, cx| field.select_all(window, cx));
+            cx.write_to_clipboard(ClipboardItem::new_string("replacement".into()));
+        });
+        cx.run_until_parked();
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("replacement".into())
+            );
+        });
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            field.read_with(cx, |field, cx| field.value(cx)),
+            "read only"
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("read only".into())
+            );
+        });
+        open_input_context_menu(cx);
+        cx.simulate_keystrokes("up enter");
+        cx.run_until_parked();
+        assert_eq!(
+            field.read_with(cx, |field, cx| field.value(cx)),
+            "read only"
+        );
+    }
 
     struct AncestorKeyListenerFixture {
         plain: gpui::Entity<ZzClawInputState>,

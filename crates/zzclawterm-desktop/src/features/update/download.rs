@@ -223,6 +223,19 @@ fn download_signed_update(
     Err(last_error)
 }
 
+fn defer_update_quit(
+    controller: gpui::WeakEntity<crate::app_shell::DesktopController>,
+    cx: &mut Context<ZzClawTermApp>,
+) {
+    // Quit coordination reads each workspace's app, including the caller.
+    // Release the button callback's entity lease before visiting those apps;
+    // calling request_quit inline aborts the process on the entity borrow
+    // check (0xc0000409) and the prepared update is never installed.
+    cx.defer(move |cx| {
+        let _ = controller.update(cx, |controller, cx| controller.request_quit(cx));
+    });
+}
+
 impl ZzClawTermApp {
     pub(crate) fn native_update_install_requested(&self, cx: &gpui::App) -> bool {
         let update = self.update.read(cx);
@@ -372,14 +385,7 @@ impl ZzClawTermApp {
         });
         self.close_update_dialog(window, cx);
         if let Some(controller) = self.desktop_controller.clone() {
-            // This handler runs inside a mutable borrow of the app entity, and
-            // `Controller::request_quit` reads that same entity while ranking
-            // candidate windows. Defer so the quit runs after the borrow ends;
-            // calling it inline aborts the process on the entity borrow check
-            // and the prepared update is never installed.
-            cx.defer(move |cx| {
-                let _ = controller.update(cx, |controller, cx| controller.request_quit(cx));
-            });
+            defer_update_quit(controller, cx);
         } else {
             self.handle_window_close_request(window, cx);
         }
@@ -390,6 +396,93 @@ impl ZzClawTermApp {
 mod tests {
     use super::{PUBLIC_KEY, decode_update_signature, supports_native_install};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    #[cfg(windows)]
+    #[test]
+    fn restart_update_releases_the_app_before_quit_coordination_reads_it() {
+        use gpui::{AppContext as _, EmptyView, TestAppContext, px, size};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zzclawterm_core::models::window_state::{MainWindowBounds, MainWindowState};
+        use zzclawterm_core::{WorkspaceId, test_support::TestTempDir};
+
+        use super::{DownloadState, defer_update_quit};
+        use crate::app_shell::{AppShellStartup, DesktopController};
+        use crate::features::AppLifecycleEvent;
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::features::update::install::PreparedUpdate;
+
+        let root = TestTempDir::new("zzclawterm-update-quit-lease");
+        let mut cx = TestAppContext::single();
+        let app = app_with_visible_local_session(&mut cx, &root, "update-session");
+        let runtime = cx.read(|cx| app.read(cx).runtime.clone());
+        let startup = AppShellStartup::prepare(&runtime);
+        let controller = cx.new(|cx| DesktopController::new(runtime, startup, cx));
+        let workspace_id = WorkspaceId::new();
+        let handle = cx.open_window(size(px(800.), px(600.)), |_, _| EmptyView);
+        let shell = controller.update(&mut cx, |controller, cx| {
+            let shell = controller.register_tab_drag_test_workspace(
+                workspace_id,
+                app.clone(),
+                handle.into(),
+                cx,
+            );
+            drop(
+                controller
+                    .submit_window_state(
+                        workspace_id,
+                        MainWindowState::new(
+                            None,
+                            MainWindowBounds {
+                                x: 0,
+                                y: 0,
+                                width: 800,
+                                height: 600,
+                            },
+                            false,
+                        ),
+                        0,
+                    )
+                    .unwrap(),
+            );
+            shell
+        });
+        app.update(&mut cx, |app, cx| {
+            app.set_desktop_controller(controller.downgrade());
+            let mut settings = app.settings.summary().clone();
+            settings.confirm_on_close = false;
+            settings.startup_restore = false;
+            app.settings.replace_summary(settings);
+            app.update.update(cx, |update, _| {
+                update.install_requested = true;
+                update.download = DownloadState::Ready(PreparedUpdate::WindowsInstalled {
+                    helper: root.join("unused-helper.exe"),
+                    installer: root.join("unused-installer.exe"),
+                    target: root.join("ZzClawTerm.exe"),
+                    work_dir: root.join("update-work"),
+                });
+            });
+        });
+        let shutdown_requests = Arc::new(AtomicUsize::new(0));
+        let observed = shutdown_requests.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&app, move |_, event, _| {
+                if matches!(event, AppLifecycleEvent::ShutdownRequested) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        });
+        app.update(&mut cx, |_, cx| {
+            defer_update_quit(controller.downgrade(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(shutdown_requests.load(Ordering::SeqCst), 1);
+        cx.read(|cx| {
+            assert!(app.read(cx).update.read(cx).install_requested);
+            assert!(app.read(cx).has_live_sessions());
+        });
+        drop(shell);
+    }
 
     #[test]
     fn published_signing_key_loads_and_debug_builds_do_not_self_update() {

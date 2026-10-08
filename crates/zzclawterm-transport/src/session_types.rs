@@ -39,6 +39,11 @@ pub enum SessionEvent {
 pub trait TerminalTransport: Send {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()>;
 
+    /// Protocol bytes bypass text editing and backspace translation.
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.write(data)
+    }
+
     fn resize(
         &mut self,
         cols: u16,

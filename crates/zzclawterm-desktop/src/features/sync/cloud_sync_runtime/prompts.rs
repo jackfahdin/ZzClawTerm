@@ -6,6 +6,31 @@ use crate::features::ZzClawTermApp;
 use crate::models::SnapshotPasswordPromptKind;
 
 impl ZzClawTermApp {
+    pub(crate) fn cloud_sync_session_restore_blocked(&self) -> bool {
+        cloud_sync_restore_is_blocked(
+            !self.session.ordered_sessions().is_empty()
+                || self.remote_desktop.has_active_sessions(),
+            self.session.start_has_pending(),
+        )
+    }
+
+    pub(in crate::features) fn cloud_sync_restore_blocked(&self, cx: &gpui::App) -> bool {
+        self.cloud_sync_session_restore_blocked()
+            || self
+                .desktop_controller
+                .as_ref()
+                .and_then(gpui::WeakEntity::upgrade)
+                .is_some_and(|controller| {
+                    controller
+                        .read(cx)
+                        .cloud_sync_pull_blocked_excluding(self.workspace_id, cx)
+                })
+    }
+
+    pub(crate) fn cloud_sync_job_running(&self) -> bool {
+        self.cloud_sync.job_running()
+    }
+
     pub(in crate::features) fn prompt_provider_cloud_sync_push(
         &mut self,
         window: &mut Window,
@@ -29,10 +54,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if cloud_sync_restore_is_blocked(
-            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
-            self.session.start_has_pending(),
-        ) {
+        if self.cloud_sync_restore_blocked(cx) {
             self.shell
                 .set_status(t!("settings.syncCloseActiveSessionBeforePull"));
             self.cloud_sync
@@ -73,10 +95,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if cloud_sync_restore_is_blocked(
-            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
-            self.session.start_has_pending(),
-        ) {
+        if self.cloud_sync_restore_blocked(cx) {
             self.shell
                 .set_status(t!("settings.syncCloseActiveSessionBeforeForcePull"));
             self.cloud_sync
@@ -101,10 +120,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if cloud_sync_restore_is_blocked(
-            self.session.session_order_len() > 0 || self.remote_desktop.has_active_sessions(),
-            self.session.start_has_pending(),
-        ) {
+        if self.cloud_sync_restore_blocked(cx) {
             self.shell
                 .set_status(t!("settings.syncCloseActiveSessionBeforeRecovery"));
             self.cloud_sync

@@ -1,6 +1,7 @@
 use zzclawterm_core::RestorableTerminalWindowNode;
 
-use super::{TerminalWindowNode, WorkspacePaneNode, WorkspaceSplitDirection, uuid_v4_like};
+use super::{TerminalWindowNode, WorkspaceSplitDirection};
+use crate::models::uuid_v4_like;
 
 impl TerminalWindowNode {
     /// Serialize to Tauri `ui.terminal_window_layout` using ordered tab indexes.
@@ -63,15 +64,13 @@ impl TerminalWindowNode {
                     (None, None) => None,
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (Some(first), Some(second)) => {
-                        let ratio = (WorkspacePaneNode::clamped_ratio_percent(*ratio_percent)
-                            as f64)
-                            / 100.0;
+                        let ratio = ((*ratio_percent).clamp(1, 99) as f64) / 100.0;
                         Some(RestorableTerminalWindowNode::Split {
                             direction: match direction {
                                 WorkspaceSplitDirection::Horizontal => "horizontal".to_string(),
                                 WorkspaceSplitDirection::Vertical => "vertical".to_string(),
                             },
-                            ratio: ratio.clamp(0.2, 0.8),
+                            ratio: ratio.clamp(0.01, 0.99),
                             first: Box::new(first),
                             second: Box::new(second),
                         })
@@ -131,20 +130,21 @@ impl TerminalWindowNode {
                 first,
                 second,
             } => {
+                let direction = match direction.to_ascii_lowercase().as_str() {
+                    "horizontal" | "row" => WorkspaceSplitDirection::Horizontal,
+                    "vertical" | "column" => WorkspaceSplitDirection::Vertical,
+                    _ => return None,
+                };
+                if !ratio.is_finite() {
+                    return None;
+                }
                 let first = Self::restore_layout_inner(first, ordered_tab_ids, used);
                 let second = Self::restore_layout_inner(second, ordered_tab_ids, used);
                 match (first, second) {
                     (None, None) => None,
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (Some(first), Some(second)) => {
-                        let direction = match direction.to_ascii_lowercase().as_str() {
-                            "horizontal" | "row" => WorkspaceSplitDirection::Horizontal,
-                            _ => WorkspaceSplitDirection::Vertical,
-                        };
-                        let ratio_percent = ((*ratio * 100.0).round() as u8).clamp(
-                            WorkspacePaneNode::MIN_RATIO_PERCENT,
-                            WorkspacePaneNode::MAX_RATIO_PERCENT,
-                        );
+                        let ratio_percent = ((*ratio * 100.0).round() as u8).clamp(1, 99);
                         Some(Self::Split {
                             id: format!("tw-split-{}", uuid_v4_like()),
                             direction,

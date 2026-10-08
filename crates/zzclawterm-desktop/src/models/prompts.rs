@@ -121,6 +121,12 @@ pub(crate) enum AiInputField {
     BaseUrl,
     ApiKey,
     RequestUserAgent,
+    ProxyHost,
+    ProxyPort,
+    ProxyUsername,
+    ProxyPassword,
+    ProxyBypass,
+
     CodexExecutable,
     CodexDefaultModel,
     CodexConfigDirectory,
@@ -223,11 +229,16 @@ impl CloudSyncInputField {
 
 impl AiInputField {
     /// Every variant, so a text-input id can be mapped back to its field.
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::Model,
         Self::BaseUrl,
         Self::ApiKey,
         Self::RequestUserAgent,
+        Self::ProxyHost,
+        Self::ProxyPort,
+        Self::ProxyUsername,
+        Self::ProxyPassword,
+        Self::ProxyBypass,
         Self::CodexExecutable,
         Self::CodexDefaultModel,
         Self::CodexConfigDirectory,
@@ -243,6 +254,12 @@ impl AiInputField {
             Self::BaseUrl => "base-url",
             Self::ApiKey => "api-key",
             Self::RequestUserAgent => "request-user-agent",
+            Self::ProxyHost => "proxy-host",
+            Self::ProxyPort => "proxy-port",
+            Self::ProxyUsername => "proxy-username",
+            Self::ProxyPassword => "proxy-password",
+            Self::ProxyBypass => "proxy-bypass",
+
             Self::CodexExecutable => "codex-executable",
             Self::CodexDefaultModel => "codex-default-model",
             Self::CodexConfigDirectory => "codex-config-directory",
@@ -329,13 +346,6 @@ pub(crate) enum AiActionEditorField {
 }
 
 impl AiActionEditorField {
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::Name => Self::Prompt,
-            Self::Prompt => Self::Name,
-        }
-    }
-
     pub(crate) fn input_key(self) -> &'static str {
         match self {
             Self::Name => "name",

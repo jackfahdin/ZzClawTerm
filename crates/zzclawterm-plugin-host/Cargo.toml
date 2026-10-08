@@ -1,0 +1,23 @@
+[package]
+name = "zzclawterm-plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zzclawterm-core.workspace = true
+zzclawterm-store.workspace = true
+futures.workspace = true
+wasmtime.workspace = true
+wasmparser.workspace = true
+uuid.workspace = true
+zip.workspace = true
+serde_json.workspace = true
+wit-component = "=0.243.0"
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }
+
+[[bin]]
+name = "zzclawterm-plugin-tool"
+path = "src/bin/plugin_tool.rs"

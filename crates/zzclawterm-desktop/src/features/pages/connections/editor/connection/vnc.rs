@@ -218,6 +218,13 @@ pub(super) fn connection_editor_vnc_section(
                 },
             )
         })
+        .child(editor_field(
+            palette,
+            t!("dialog.username"),
+            ConnectionEditorField::Username,
+            fields,
+            cx,
+        ))
         .child(
             div()
                 .id("connection-editor-vnc-advanced-toggle")

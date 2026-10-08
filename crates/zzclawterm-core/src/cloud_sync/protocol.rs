@@ -35,16 +35,57 @@ pub(super) fn upload_sync_snapshot(
     remote: &dyn CloudSyncRemote,
     options: &LocalCloudSyncOptions,
     snapshot: &RawPortableSnapshot,
+    expected: Option<&RemoteSyncPointer>,
 ) -> Result<(), CloudSyncError> {
     let bytes =
         local_store.encode_sync_snapshot(snapshot, options.master_password.expose_secret())?;
-    remote.write(
-        &remote_path(
-            &options.remote_root,
-            &legacy_sync_snapshot_file(&snapshot.meta.revision_id),
-        ),
+    upload_verified_snapshot(
+        local_store,
+        remote,
+        options,
+        &pointer_from_snapshot(snapshot),
+        expected,
         &bytes,
     )
+}
+
+fn upload_verified_snapshot(
+    local_store: &dyn CloudLocalStore,
+    remote: &dyn CloudSyncRemote,
+    options: &LocalCloudSyncOptions,
+    pointer: &RemoteSyncPointer,
+    expected: Option<&RemoteSyncPointer>,
+    bytes: &[u8],
+) -> Result<(), CloudSyncError> {
+    let path = remote_path(
+        &options.remote_root,
+        &legacy_sync_snapshot_file(&pointer.revision_id),
+    );
+    for attempt in 0..2 {
+        super::gc::reserve_snapshot_capacity(
+            local_store,
+            options,
+            remote,
+            expected,
+            &pointer.revision_id,
+        )?;
+        let result = remote.write(&path, bytes).and_then(|()| {
+            read_snapshot_for_pointer(local_store, remote, options, pointer).map(|_| ())
+        });
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if remote.file_capacity()?.is_none() => return Err(error),
+            Err(error) if attempt == 1 => {
+                return Err(if matches!(error, CloudSyncError::SnapshotMissing { .. }) {
+                    CloudSyncError::GistCapacity
+                } else {
+                    error
+                });
+            }
+            Err(_) => {}
+        }
+    }
+    unreachable!()
 }
 
 pub(super) fn read_snapshot_for_pointer(
@@ -182,11 +223,12 @@ pub(super) fn resolve_remote_snapshot(
             .ok_or(CloudSyncError::SnapshotMissing {
                 revision: "current".to_string(),
             })?;
-        remote.write(
-            &remote_path(
-                &options.remote_root,
-                &legacy_sync_snapshot_file(&pointer.revision_id),
-            ),
+        upload_verified_snapshot(
+            local_store,
+            remote,
+            options,
+            pointer,
+            Some(pointer),
             &current_bytes,
         )?;
         read_snapshot_for_pointer(local_store, remote, options, pointer)?;
@@ -215,13 +257,16 @@ pub(super) fn recover_current_remote_snapshot(
         .ok_or(CloudSyncError::SnapshotMissing {
             revision: "current".to_string(),
         })?;
-    remote.write(
-        &remote_path(
-            &options.remote_root,
-            &legacy_sync_snapshot_file(&snapshot.meta.revision_id),
-        ),
+    let expected = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
+    upload_verified_snapshot(
+        local_store,
+        remote,
+        options,
+        &pointer,
+        expected.as_ref(),
         &current_bytes,
     )?;
+    ensure_remote_head_unchanged(local_store, remote, &options.remote_root, expected.as_ref())?;
     read_snapshot_for_pointer(local_store, remote, options, &pointer)?;
     write_sync_pointer(local_store, remote, &options.remote_root, &pointer)?;
     Ok(snapshot)

@@ -175,3 +175,33 @@ pub(super) fn edit_telnet_line_input(
 pub(super) fn telnet_auto_login_line_bytes(value: &str, config: &TelnetSessionConfig) -> Vec<u8> {
     telnet_prompts::telnet_auto_login_line_bytes(value, config, normalize_telnet_input)
 }
+
+/// Telnet protocol escaping without text-input normalization.
+pub(super) fn escape_telnet_application_data(data: &[u8], raw_tcp: bool) -> Vec<u8> {
+    if raw_tcp {
+        return data.to_vec();
+    }
+    let mut escaped = Vec::with_capacity(data.len());
+    for &byte in data {
+        escaped.push(byte);
+        if byte == IAC {
+            escaped.push(IAC);
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod raw_input_tests {
+    use super::escape_telnet_application_data;
+
+    #[test]
+    fn binary_input_preserves_controls_and_only_escapes_telnet_iac() {
+        let bytes = [0, 13, 10, 127, 255, 128];
+        assert_eq!(
+            escape_telnet_application_data(&bytes, false),
+            [0, 13, 10, 127, 255, 255, 128]
+        );
+        assert_eq!(escape_telnet_application_data(&bytes, true), bytes);
+    }
+}

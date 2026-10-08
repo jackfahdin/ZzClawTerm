@@ -20,6 +20,7 @@ const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/";
 const OLLAMA_LEGACY_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1/";
 
 pub fn mask_ai_settings(mut settings: AiSettings) -> AiSettings {
+    settings.proxy.password = mask_secret(settings.proxy.password.take());
     for profile in &mut settings.provider_profiles {
         profile.api_key = mask_secret(profile.api_key.take());
     }
@@ -30,6 +31,10 @@ pub fn mask_ai_settings(mut settings: AiSettings) -> AiSettings {
 }
 
 pub fn merge_masked_ai_settings(current: &AiSettings, mut next: AiSettings) -> AiSettings {
+    next.proxy.password = merge_secret(
+        current.proxy.password.as_ref(),
+        next.proxy.password.as_ref(),
+    );
     for profile in &mut next.provider_profiles {
         let current_secret = current
             .provider_profiles
@@ -75,7 +80,9 @@ pub fn normalize_ai_settings(settings: &mut AiSettings) -> bool {
             .collect();
     }
     for credential in &mut settings.provider_credentials {
-        if is_builtin_ollama_provider(&credential.id, &credential.provider_kind) {
+        if credential.api_protocol.is_none()
+            && is_builtin_ollama_provider(&credential.id, &credential.provider_kind)
+        {
             migrate_legacy_ollama_base_url(&mut credential.base_url);
         }
     }
@@ -159,10 +166,11 @@ pub fn normalize_ai_settings(settings: &mut AiSettings) -> bool {
 }
 
 pub fn ai_settings_has_secret(settings: &AiSettings) -> bool {
-    settings
-        .provider_profiles
-        .iter()
-        .any(|profile| optional_secret_present(&profile.api_key))
+    optional_secret_present(&settings.proxy.password)
+        || settings
+            .provider_profiles
+            .iter()
+            .any(|profile| optional_secret_present(&profile.api_key))
         || settings
             .provider_credentials
             .iter()
@@ -178,6 +186,7 @@ impl Default for AiSettings {
             .map(|item| item.id.clone());
 
         Self {
+            proxy: Default::default(),
             schema_version: default_schema_version(),
             enabled: true,
             context_line_limit: default_context_line_limit(),
@@ -432,6 +441,8 @@ pub(super) fn provider_kind_key(kind: &AiProviderKind) -> &'static str {
 
 fn credential_from_profile(profile: &AiProviderProfile) -> AiProviderCredential {
     AiProviderCredential {
+        icon_data_url: None,
+        api_protocol: None,
         id: profile.id.clone(),
         name: profile.name.clone(),
         provider_kind: profile.provider_kind.clone(),
@@ -460,6 +471,7 @@ fn model_from_profile(profile: &AiProviderProfile) -> Option<AiModelConfigItem> 
     };
 
     Some(AiModelConfigItem {
+        supported_reasoning_efforts: None,
         id,
         name: name.to_string(),
         backend: AiBackendKind::Genai,

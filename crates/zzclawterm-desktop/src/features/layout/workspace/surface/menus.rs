@@ -178,14 +178,22 @@ fn new_session_connections_for_group(
 }
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn render_open_tabs_menu(
+    pub(in crate::features) fn render_open_tabs_menu_for_group(
         &mut self,
+        group: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
         let hover_bg = self.shell_surface_color(palette.hover);
         // Tauri openTabsMenuItems is reversed (rightmost first) but keeps global ordinals.
-        let ordered = self.ordered_tab_sessions();
+        let ordered = group
+            .and_then(|id| self.terminal.terminal_group_tabs(id))
+            .map(|(tabs, _)| {
+                tabs.iter()
+                    .filter_map(|id| self.session.session_info(id))
+                    .collect()
+            })
+            .unwrap_or_else(|| self.ordered_tab_sessions());
         let ordinals: std::collections::HashMap<String, usize> = ordered
             .iter()
             .enumerate()
@@ -271,7 +279,7 @@ impl ZzClawTermApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.close_open_tabs_menu(cx);
                             this.select_session(session_id.clone(), cx);
-                            window.focus(this.terminal.input_focus(), cx);
+                            this.focus_terminal_session(&session_id, window, cx);
                         }))
                         .child(
                             div()

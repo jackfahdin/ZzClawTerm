@@ -567,6 +567,7 @@ impl<'a> ImportBuilder<'a> {
         let id = uuid::Uuid::new_v4().to_string();
         self.key_ids.insert(path.to_path_buf(), id.clone());
         self.keys.push(SshKey {
+            sort_order: 0,
             id: id.clone(),
             name: path
                 .file_name()

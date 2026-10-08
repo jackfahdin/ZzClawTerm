@@ -96,7 +96,6 @@ impl ZzClawTermApp {
                 .set_status("multi-line paste confirmation opened".to_string());
             editor.update(cx, |editor, cx| {
                 editor.move_cursor_to_end(cx);
-                editor.focus(window, cx);
             });
             cx.notify();
             return;
@@ -104,7 +103,7 @@ impl ZzClawTermApp {
         let payload = normalize_paste_newlines(&text);
         // Tauri pasteText: replace smart input selection when present.
         if let Some(selected) = self.smart_cursor_selected_input_range()
-            && self.replace_smart_input_selection(selected, &payload, cx)
+            && self.replace_smart_input_selection_with_paste(selected, &payload, cx)
         {
             return;
         }
@@ -124,12 +123,12 @@ impl ZzClawTermApp {
         &self,
         session_id: &str,
         text: &str,
-    ) -> Vec<u8> {
-        let body = self.encode_session_outgoing(session_id, text.as_bytes());
-        Self::wrap_terminal_paste_wire_bytes_for_bracketed(
+    ) -> Result<Vec<u8>, String> {
+        let body = self.encode_session_outgoing(session_id, text.as_bytes())?;
+        Ok(Self::wrap_terminal_paste_wire_bytes_for_bracketed(
             &body,
             self.session_bracketed_paste(session_id),
-        )
+        ))
     }
 
     pub(in crate::features) fn wrap_terminal_paste_wire_bytes_for_bracketed(
@@ -181,7 +180,14 @@ impl ZzClawTermApp {
         let peers = self.sync_peer_session_ids(&session_id);
         let mut ok_sessions = Vec::new();
         let recording_bytes = text.as_bytes();
-        let primary_bytes = self.wrap_terminal_paste_bytes_for_session(&session_id, text);
+        let primary_bytes = match self.wrap_terminal_paste_bytes_for_session(&session_id, text) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.set_terminal_status_if_changed(format!("paste failed: {error}"));
+                cx.notify();
+                return;
+            }
+        };
         let byte_count = primary_bytes.len();
         match self.write_session_wire_input_recorded_as(
             &session_id,
@@ -200,7 +206,13 @@ impl ZzClawTermApp {
         let mut synced = 0usize;
         let mut failed = 0usize;
         for peer_id in peers {
-            let peer_bytes = self.wrap_terminal_paste_bytes_for_session(&peer_id, text);
+            let peer_bytes = match self.wrap_terminal_paste_bytes_for_session(&peer_id, text) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
             match self.write_session_wire_input_recorded_as(&peer_id, &peer_bytes, recording_bytes)
             {
                 Ok(()) => {
@@ -211,6 +223,7 @@ impl ZzClawTermApp {
             }
         }
 
+        self.note_shell_editing_input(text.as_bytes(), cx);
         // History tracks the logical pasted text, not per-session framing bytes.
         let history_bytes = text.as_bytes();
         let session_refs: Vec<&str> = ok_sessions.iter().map(String::as_str).collect();
@@ -253,7 +266,11 @@ impl ZzClawTermApp {
             return;
         };
         self.terminal.paste.clear();
-        self.send_terminal_paste_input(&text, cx);
+        if let Some(selected) = self.smart_cursor_selected_input_range() {
+            self.replace_smart_input_selection_with_paste(selected, &text, cx);
+        } else {
+            self.send_terminal_paste_input(&text, cx);
+        }
         self.focus_active_workspace_surface(window, cx);
     }
 
@@ -347,12 +364,12 @@ fn line_by_line_paste_bytes(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use gpui::{
         Entity, InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render,
         Styled as _, TestAppContext, div,
     };
 
-    use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
     use crate::test_support::TestConfigDir;
 

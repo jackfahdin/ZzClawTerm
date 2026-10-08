@@ -1,69 +1,11 @@
 use futures::StreamExt as _;
 use gpui::Context;
 
-use crate::http::ai::discover_openai_compatible_models;
 use zzclawterm_core::AiModelDiscovery;
 
 use crate::features::{ZzClawTermApp, runtime_jobs::AiDiscoveryJobResult};
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn discover_ai_models(&mut self, cx: &mut Context<Self>) {
-        if self.ai.discovery_is_pending() {
-            self.ai
-                .set_panel_status("AI model discovery already running".to_string());
-            self.request_settings_panel_refresh(cx);
-            self.defer_ai_panel_snapshot_flush(cx);
-            return;
-        }
-
-        let (settings, credentials) = self.ai.discovery_settings();
-        if credentials.is_empty() {
-            self.ai.set_panel_status(
-                "AI model discovery requires an enabled custom provider".to_string(),
-            );
-            self.request_settings_panel_refresh(cx);
-            self.defer_ai_panel_snapshot_flush(cx);
-            return;
-        }
-
-        let Some(tx) = self.ai.begin_discovery_job() else {
-            self.request_settings_panel_refresh(cx);
-            self.defer_ai_panel_snapshot_flush(cx);
-            return;
-        };
-        self.request_settings_panel_refresh(cx);
-        self.defer_ai_panel_snapshot_flush(cx);
-        let rejected_tx = tx.clone();
-        if let Err(error) = self
-            .blocking_jobs
-            .submit_detached("ai-model-discovery", move |_| {
-                let mut discoveries = Vec::new();
-                let mut errors = Vec::new();
-                for credential in credentials {
-                    match discover_openai_compatible_models(&settings, &credential) {
-                        Ok(models) => discoveries.extend(models),
-                        Err(error) => errors.push(format!("{}: {error}", credential.name)),
-                    }
-                }
-                let result = if discoveries.is_empty() && !errors.is_empty() {
-                    Err(errors.join("; "))
-                } else {
-                    Ok(discoveries)
-                };
-                let _ = tx.unbounded_send(AiDiscoveryJobResult {
-                    profile_id: String::new(),
-                    result,
-                });
-            })
-        {
-            let _ = rejected_tx.unbounded_send(AiDiscoveryJobResult {
-                profile_id: String::new(),
-                result: Err(error.to_string()),
-            });
-        }
-        self.defer_ai_panel_snapshot_flush(cx);
-    }
-
     /// Deliver AI model-discovery replies as they arrive.
     ///
     /// Started once at window open; before this the runtime tick polled for them.

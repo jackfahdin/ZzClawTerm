@@ -32,5 +32,5 @@ pub(in crate::features) use icons::{
     transfer_entry_icon, zzclawterm_app_icon, zzclawterm_logo_mark,
 };
 
-mod markdown;
+pub(in crate::features) mod markdown;
 pub(in crate::features) use markdown::markdown_content_view;

@@ -5,7 +5,6 @@ use gpui::{
 };
 
 use super::super::super::ZzClawTermApp;
-use super::PaneBorderEdges;
 use crate::features::formatting::short_id;
 use crate::features::view_widgets::connection_spinner;
 use crate::models::{WorkspacePaneNode, WorkspaceSplitDirection};
@@ -27,7 +26,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_transparent_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
             .child(connection_spinner(
                 SharedString::from(format!("reconnect-spinner-{session_id}")),
                 rgb(palette.primary).into(),
@@ -73,7 +72,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_transparent_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
             .child(
                 svg()
                     .size(px(32.))
@@ -143,17 +142,13 @@ impl ZzClawTermApp {
     pub(super) fn render_workspace_pane_node(
         &mut self,
         node: WorkspacePaneNode,
-        show_chrome: bool,
-        border_edges: PaneBorderEdges,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let palette = self.theme_palette();
         match node {
             WorkspacePaneNode::Leaf { session_id } => {
-                let is_active = self.session.active_id() == Some(session_id.as_str());
                 let content = self.workspace_session_content(session_id.clone(), cx);
                 let focus_id = session_id.clone();
-                let mut pane = div()
+                let pane = div()
                     .id(SharedString::from(format!("workspace-leaf-{session_id}")))
                     .size_full()
                     .min_h_0()
@@ -171,19 +166,6 @@ impl ZzClawTermApp {
                         }
                         cx.notify();
                     }));
-                if show_chrome {
-                    // Tauri PaneWorkspace uses the pane border as the only split chrome.
-                    pane = pane
-                        .border_t(if border_edges.top { px(1.) } else { px(0.) })
-                        .border_r(if border_edges.right { px(1.) } else { px(0.) })
-                        .border_b(if border_edges.bottom { px(1.) } else { px(0.) })
-                        .border_l(if border_edges.left { px(1.) } else { px(0.) })
-                        .border_color(if is_active {
-                            rgb(palette.primary)
-                        } else {
-                            rgb(palette.border)
-                        });
-                }
                 pane.child(div().flex_1().min_h_0().overflow_hidden().child(content))
                     .into_any_element()
             }
@@ -194,9 +176,8 @@ impl ZzClawTermApp {
                 first,
                 second,
             } => {
-                let (first_edges, second_edges) = border_edges.split(direction);
-                let first_el = self.render_workspace_pane_node(*first, true, first_edges, cx);
-                let second_el = self.render_workspace_pane_node(*second, true, second_edges, cx);
+                let first_el = self.render_workspace_pane_node(*first, cx);
+                let second_el = self.render_workspace_pane_node(*second, cx);
                 let divider = self.workspace_split_resize_handle(id.clone(), direction, cx);
                 let primary_basis =
                     relative(WorkspacePaneNode::primary_weight(ratio_percent) / 100.);
@@ -254,6 +235,118 @@ impl ZzClawTermApp {
                         .into_any_element(),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::{
+        AppContext as _, Context, Entity, Hsla, IntoElement, ParentElement as _, Render,
+        RenderImage, Styled as _, TestAppContext, VisualTestContext, Window, div, rgb,
+    };
+    use zzclawterm_core::test_support::TestTempDir;
+
+    use crate::features::{ZzClawTermApp, test_support::app_with_visible_local_session};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Stage {
+        Empty,
+        Pending,
+        Failed,
+        Terminal,
+        ReconnectPending,
+        ReconnectFailed,
+    }
+
+    struct WorkspaceBackgroundFixture {
+        app: Entity<ZzClawTermApp>,
+        stage: Stage,
+    }
+
+    impl Render for WorkspaceBackgroundFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let stage = self.stage;
+            let content = self.app.update(cx, |app, cx| match stage {
+                Stage::Empty => app.empty_workspace_state(cx),
+                Stage::Pending => app.pending_workspace_state().into_any_element(),
+                Stage::Failed => app.failed_workspace_state().into_any_element(),
+                Stage::Terminal => app
+                    .terminal_canvas_for("s0".to_string(), cx)
+                    .into_any_element(),
+                Stage::ReconnectPending => app
+                    .workspace_reconnect_pending_state("s0")
+                    .into_any_element(),
+                Stage::ReconnectFailed => app
+                    .workspace_reconnect_failed_state("s0".to_string(), String::new(), cx)
+                    .into_any_element(),
+            });
+            div().size_full().flex().child(content)
+        }
+    }
+
+    #[test]
+    fn connecting_and_reconnecting_preserve_the_painted_workbench_background() {
+        let root = TestTempDir::new("zzclawterm-workspace-background");
+        let mut cx = TestAppContext::single();
+        let app = app_with_visible_local_session(&mut cx, root.path(), "s0");
+        let (terminal_color, expected_alpha) = cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.settings.set_background_content_opacity(35);
+            let path = "wallpaper.png".to_string();
+            app.shell.request_wallpaper(Some(path.clone()));
+            app.shell.cache_wallpaper(
+                path,
+                Arc::new(RenderImage::new(vec![image::Frame::new(
+                    image::RgbaImage::new(1, 1),
+                )])),
+                1,
+                1,
+            );
+            let color = app.terminal_theme_palette().terminal_bg;
+            let alpha = app.shell_surface_color(color).a;
+            // The existing workbench paints this tint twice. Keep its appearance.
+            (Hsla::from(rgb(color)), 1.0 - (1.0 - alpha).powi(2))
+        });
+        let fixture_app = app.clone();
+        let (fixture, vcx) = cx.add_window_view(move |_, _| WorkspaceBackgroundFixture {
+            app: fixture_app,
+            stage: Stage::Empty,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        for stage in [
+            Stage::Empty,
+            Stage::Pending,
+            Stage::Failed,
+            Stage::Terminal,
+            Stage::ReconnectPending,
+            Stage::ReconnectFailed,
+        ] {
+            vcx.update(|window, cx| {
+                fixture.update(cx, |fixture, cx| {
+                    fixture.stage = stage;
+                    cx.notify();
+                });
+                _ = window.draw(cx);
+                let mut transparency = 1.0;
+                for quad in window.painted_quads() {
+                    if quad.bounds.size.width.0 > 400.0
+                        && quad.bounds.size.height.0 > 300.0
+                        && let Some(color) = quad.background.as_solid()
+                        && color.h == terminal_color.h
+                        && color.s == terminal_color.s
+                        && color.l == terminal_color.l
+                    {
+                        transparency *= 1.0 - color.a;
+                    }
+                }
+                assert!(
+                    (1.0 - transparency - expected_alpha).abs() < 0.0001,
+                    "{stage:?} must preserve the workbench shading"
+                );
+            });
         }
     }
 }

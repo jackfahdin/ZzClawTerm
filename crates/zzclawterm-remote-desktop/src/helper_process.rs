@@ -50,6 +50,17 @@ pub(crate) struct IpcWriter {
 }
 
 impl IpcWriter {
+    #[cfg(test)]
+    pub(crate) fn test_mailbox() -> Self {
+        Self {
+            inner: Arc::new(WriterInner {
+                state: Mutex::new(WriterState::default()),
+                changed: Condvar::new(),
+            }),
+            worker: None,
+        }
+    }
+
     pub(crate) fn spawn(stdin: ChildStdin, thread_name: String) -> io::Result<Self> {
         let inner = Arc::new(WriterInner {
             state: Mutex::new(WriterState::default()),
@@ -338,11 +349,11 @@ fn configure_child(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Condvar, Mutex};
 
     use crate::{PROTOCOL_VERSION, RdpControlMessage, encode_control};
 
     use super::{IpcWriter, RELIABLE_INPUT_LIMIT, WriterInner, WriterState, resolve_helper};
+    use std::sync::{Arc, Condvar, Mutex};
 
     fn packet(version: u32) -> crate::Packet {
         encode_control(&RdpControlMessage::ClientHello { version }).expect("small control packet")

@@ -7,7 +7,9 @@ use crate::features::ZzClawTermApp;
 use crate::theme::ThemePalette;
 use crate::widgets::empty_panel;
 
+use super::drag::{security_drag_handle, security_sortable_row};
 use super::{security_auth_body_base, security_tab_toolbar};
+use crate::models::SecurityAuthTab;
 
 impl ZzClawTermApp {
     pub(super) fn security_passwords_body(
@@ -62,7 +64,7 @@ impl ZzClawTermApp {
                 } else {
                     t!("secretUnlock.emptySecret").to_string()
                 };
-                rows = rows.child(
+                rows = rows.child(security_sortable_row(
                     div()
                         .min_h(px(42.))
                         .when(index + 1 < entry_count, |this| {
@@ -80,61 +82,75 @@ impl ZzClawTermApp {
                                 .min_w_0()
                                 .flex_1()
                                 .flex()
-                                .flex_col()
-                                .gap(px(1.))
+                                .items_center()
+                                .gap_2()
+                                .child(security_drag_handle(
+                                    SecurityAuthTab::Passwords,
+                                    entry.id.clone(),
+                                    entry.name.clone(),
+                                    palette,
+                                ))
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(FontWeight(600.))
-                                        .text_color(rgb(palette.text))
-                                        .overflow_hidden()
-                                        .child(truncate_preview(&entry.name, 28)),
-                                )
-                                .when(!entry.username.is_empty(), |this| {
-                                    this.child(div().text_xs().text_color(rgb(palette.text_muted)).child(truncate_preview(&entry.username, 36)))
-                                })
-                                .when(is_revealed, |this| {
-                                    this.child(
-                                        div()
-                                            .flex()
-                                            .items_start()
-                                            .gap_1()
-                                            .child(
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight(600.))
+                                                .text_color(rgb(palette.text))
+                                                .overflow_hidden()
+                                                .child(truncate_preview(&entry.name, 28)),
+                                        )
+                                        .when(!entry.username.is_empty(), |this| {
+                                            this.child(div().text_xs().text_color(rgb(palette.text_muted)).child(truncate_preview(&entry.username, 36)))
+                                        })
+                                        .when(is_revealed, |this| {
+                                            this.child(
                                                 div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .font_family(
-                                                        crate::features::shell::gpui_code_font_family(),
+                                                    .flex()
+                                                    .items_start()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .font_family(
+                                                                crate::features::shell::gpui_code_font_family(),
+                                                            )
+                                                            .text_size(px(11.))
+                                                            .text_color(rgb(palette.text_muted))
+                                                            .child(truncate_preview(&secret_line, 36)),
                                                     )
-                                                    .text_size(px(11.))
-                                                    .text_color(rgb(palette.text_muted))
-                                                    .child(truncate_preview(&secret_line, 36)),
+                                                    .when(
+                                                        revealed_value
+                                                            .as_ref()
+                                                            .is_some_and(|v| !v.is_empty()),
+                                                        |this| {
+                                                            this.child(
+                                                                zzclawterm_ui::ZzClawIconButton::new(
+                                                                    format!("security-pw-copy-{id}"),
+                                                                    "icons/copy.svg",
+                                                                )
+                                                                .tooltip(t!("common.copyToClipboard"))
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        this.copy_security_password(
+                                                                            copy_id.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            )
+                                                        },
+                                                    ),
                                             )
-                                            .when(
-                                                revealed_value
-                                                    .as_ref()
-                                                    .is_some_and(|v| !v.is_empty()),
-                                                |this| {
-                                                    this.child(
-                                                        zzclawterm_ui::ZzClawIconButton::new(
-                                                            format!("security-pw-copy-{id}"),
-                                                            "icons/copy.svg",
-                                                        )
-                                                        .tooltip(t!("common.copyToClipboard"))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                this.copy_security_password(
-                                                                    copy_id.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                    )
-                                                },
-                                            ),
-                                    )
-                                }),
+                                        }),
+                                ),
                         )
                         .child(
                             div()
@@ -200,7 +216,8 @@ impl ZzClawTermApp {
                                     )),
                                 ),
                         ),
-                );
+                    SecurityAuthTab::Passwords, entry.id.clone(), palette, self, cx,
+                ));
             }
             body = body.child(rows);
         }

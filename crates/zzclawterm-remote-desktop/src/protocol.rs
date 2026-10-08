@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use zzclawterm_core::SecretString;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Maximum UTF-8 payload accepted for a single committed-text event.
 ///
@@ -455,6 +455,8 @@ pub const MAX_VNC_FRAMEBUFFER_HEIGHT: u32 = 4320;
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VncSessionConfig {
     #[serde(default)]
+    pub username: String,
+    #[serde(default)]
     pub relay: Option<zzclawterm_core::connection_route::RelayEndpoint>,
     pub name: String,
     pub host: String,
@@ -732,8 +734,21 @@ impl From<&VncSessionState> for RemoteDesktopViewState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VncServerKeyRequest {
+    pub session_id: String,
+    pub generation: u64,
+    pub request_id: String,
+    pub host: String,
+    pub port: u16,
+    pub sha256_fingerprint: String,
+    pub key_bits: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VncRuntimeEvent {
+    ServerKeyRequest(VncServerKeyRequest),
+    ServerKeyAuthenticated(VncServerKeyRequest),
     State {
         session_id: String,
         state: VncSessionState,
@@ -842,6 +857,14 @@ pub enum RdpControlMessage {
 /// and cursor payloads reuse the protocol-neutral binary packets in `crate::ipc`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VncControlMessage {
+    ServerKeyRequest(VncServerKeyRequest),
+    ServerKeyAuthenticated(VncServerKeyRequest),
+    ServerKeyResponse {
+        session_id: String,
+        generation: u64,
+        request_id: String,
+        accept: bool,
+    },
     ClientHello {
         version: u32,
     },

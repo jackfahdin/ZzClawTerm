@@ -4,6 +4,130 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    volume: u64,
+    index: u64,
+}
+
+impl FileIdentity {
+    pub(crate) fn from_file(file: &fs::File) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = file.metadata()?;
+            Ok(Self {
+                volume: metadata.dev(),
+                index: metadata.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+            };
+            let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: the file owns a live handle and the output is correctly sized.
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                volume: u64::from(information.dwVolumeSerialNumber),
+                index: (u64::from(information.nFileIndexHigh) << 32)
+                    | u64::from(information.nFileIndexLow),
+            })
+        }
+    }
+
+    pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(io::Error::other("download target is a symbolic link"));
+            }
+            Ok(Self {
+                volume: metadata.dev(),
+                index: metadata.ino(),
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+            };
+            let file = OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)?;
+            if file.metadata()?.file_attributes() & 0x400 != 0 {
+                return Err(io::Error::other("download target is a reparse point"));
+            }
+            Self::from_file(&file)
+        }
+    }
+}
+
+pub(crate) fn open_without_following(
+    path: &Path,
+    write: bool,
+    directory: bool,
+) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(!write).write(write);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = directory;
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if file.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other("download target is a reparse point"));
+        }
+    }
+    Ok(file)
+}
+
+/// Authorization captured when choosing a destination, before any remote IO.
+#[derive(Clone, Debug)]
+pub(crate) enum DownloadTargetAccess {
+    CreateNew,
+    ReplaceKnownTarget(FileIdentity, Option<(u64, std::time::SystemTime)>),
+}
+
+impl DownloadTargetAccess {
+    pub(crate) fn capture(root: &Path, target: &Path) -> anyhow::Result<Self> {
+        let permissions = existing_file_permissions(root, target)?;
+        Ok(if permissions.is_some() {
+            Self::ReplaceKnownTarget(FileIdentity::from_path(target)?, None)
+        } else {
+            Self::CreateNew
+        })
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 
@@ -130,7 +254,7 @@ pub(crate) fn root_for_target(target: &Path) -> &Path {
 /// to avoid deleting a file owned by someone else.
 pub(crate) struct DownloadTemporary {
     path: PathBuf,
-    replace_existing: bool,
+    access: DownloadTargetAccess,
 }
 
 struct NewTargetGuard {
@@ -158,11 +282,12 @@ impl NewTargetGuard {
             .expect("new download target file must remain open until commit")
     }
 
-    fn commit(mut self) -> io::Result<()> {
+    fn commit(mut self) -> io::Result<FileIdentity> {
         self.file_mut().sync_all()?;
+        let identity = FileIdentity::from_file(self.file_mut())?;
         self.file.take();
         self.committed = true;
-        Ok(())
+        Ok(identity)
     }
 }
 
@@ -171,12 +296,19 @@ impl Drop for NewTargetGuard {
         if self.committed {
             return;
         }
+        let owned = self
+            .file
+            .as_ref()
+            .and_then(|file| FileIdentity::from_file(file).ok());
+        let current = FileIdentity::from_path(&self.path).ok();
         self.file.take();
-        let _ = fs::remove_file(&self.path);
+        if owned.is_some() && owned == current {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
-fn populate_new_target<R: Read>(source: &mut R, target: &Path) -> anyhow::Result<()> {
+fn populate_new_target<R: Read>(source: &mut R, target: &Path) -> anyhow::Result<FileIdentity> {
     use anyhow::Context as _;
     let mut destination = NewTargetGuard::create(target)?;
     io::copy(source, destination.file_mut())
@@ -189,19 +321,38 @@ fn populate_new_target<R: Read>(source: &mut R, target: &Path) -> anyhow::Result
 impl DownloadTemporary {
     /// Copy the resume prefix during preparation, before entering the download loop.
     /// Any preparation failure leaves the original file intact.
+    #[cfg(test)]
     pub(crate) async fn prepare_async(
         root: &Path,
         target: &Path,
         resume_offset: u64,
     ) -> anyhow::Result<(Self, tokio::fs::File)> {
+        let access = DownloadTargetAccess::capture(root, target)?;
+        Self::prepare_with_access(root, target, resume_offset, access).await
+    }
+
+    pub(crate) async fn prepare_with_access(
+        root: &Path,
+        target: &Path,
+        resume_offset: u64,
+        access: DownloadTargetAccess,
+    ) -> anyhow::Result<(Self, tokio::fs::File)> {
         let root = root.to_path_buf();
         let target = target.to_path_buf();
         let (file, temporary) = tokio::task::spawn_blocking(move || {
             use std::io::Read as _;
-            let (temporary, mut file) = Self::create(&root, &target)?;
+            let (temporary, mut file) = Self::create_with_access(&root, &target, access)?;
             if resume_offset > 0 {
                 ensure_no_symlink(&root, &target)?;
-                let source = fs::File::open(&target)?;
+                let source = open_without_following(&target, false, false)?;
+                if let DownloadTargetAccess::ReplaceKnownTarget(identity, _) = &temporary.access {
+                    anyhow::ensure!(
+                        FileIdentity::from_file(&source)? == *identity,
+                        "local resume source changed"
+                    );
+                } else {
+                    anyhow::bail!("new download target cannot supply a resume prefix");
+                }
                 let copied = io::copy(&mut source.take(resume_offset), &mut file)?;
                 anyhow::ensure!(copied == resume_offset, "local resume source changed");
                 file.flush()?;
@@ -214,21 +365,35 @@ impl DownloadTemporary {
     }
 
     pub(crate) fn create(root: &Path, target: &Path) -> anyhow::Result<(Self, fs::File)> {
-        let replace_existing = existing_file_permissions(root, target)?.is_some();
+        Self::create_with_access(root, target, DownloadTargetAccess::capture(root, target)?)
+    }
+
+    fn create_with_access(
+        root: &Path,
+        target: &Path,
+        access: DownloadTargetAccess,
+    ) -> anyhow::Result<(Self, fs::File)> {
+        ensure_no_symlink(root, target)?;
+        match &access {
+            DownloadTargetAccess::CreateNew => anyhow::ensure!(
+                !target_exists(target)?,
+                "download target appeared before preparation"
+            ),
+            DownloadTargetAccess::ReplaceKnownTarget(identity, _) => anyhow::ensure!(
+                FileIdentity::from_path(target)? == *identity,
+                "download target was replaced before preparation"
+            ),
+        }
         let path = root_for_target(target)
             .join(format!(".zzclawterm-download-{}", zzclawterm_core::uuid()));
         ensure_no_symlink(root, &path)?;
-        let temporary = Self {
-            path,
-            replace_existing,
-        };
+        let temporary = Self { path, access };
         #[cfg(not(windows))]
         let file = {
             let mut options = OpenOptions::new();
             options.read(true).write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt as _;
                 options.mode(0o600);
             }
             options.open(&temporary.path)?
@@ -243,16 +408,27 @@ impl DownloadTemporary {
     /// from the temporary file without replacing a name that appeared during the transfer. The
     /// root and its ancestors must be user-controlled because path checks do not protect against
     /// concurrent directory replacement.
-    fn commit(self, root: &Path, target: &Path) -> anyhow::Result<()> {
-        let permissions = writable_file_permissions(root, target)?;
-        anyhow::ensure!(
-            self.replace_existing || permissions.is_none(),
-            "download target appeared during transfer"
-        );
+    fn commit(self, root: &Path, target: &Path) -> anyhow::Result<FileIdentity> {
+        use anyhow::Context as _;
+        ensure_no_symlink(root, target)?;
         ensure_no_symlink(root, &self.path)?;
-        if let Some(permissions) = permissions {
+        if let DownloadTargetAccess::ReplaceKnownTarget(identity, _) = &self.access {
             let mut source = fs::File::open(&self.path)?;
-            let mut destination = OpenOptions::new().write(true).open(target)?;
+            let mut destination = open_without_following(target, true, false)?;
+            if let DownloadTargetAccess::ReplaceKnownTarget(_, Some((length, modified))) =
+                &self.access
+            {
+                let metadata = destination.metadata()?;
+                anyhow::ensure!(
+                    metadata.len() == *length && metadata.modified()? == *modified,
+                    "task-owned download file was modified before commit"
+                );
+            }
+            anyhow::ensure!(
+                FileIdentity::from_file(&destination)? == *identity,
+                "download target was replaced during transfer"
+            );
+            let permissions = destination.metadata()?.permissions();
             anyhow::ensure!(
                 destination.metadata()?.is_file(),
                 "download target is not a regular file"
@@ -260,22 +436,25 @@ impl DownloadTemporary {
             // Clear special permission bits before writing, using the same file handle throughout.
             sanitize_existing_permissions(&destination, permissions)?;
             destination.set_len(0)?;
-            use anyhow::Context as _;
             io::copy(&mut source, &mut destination)
                 .context("download commit failed; target may contain partial data")?;
             destination
                 .sync_all()
                 .context("failed to sync committed download")?;
+            Ok(identity.clone())
         } else {
             let mut source = fs::File::open(&self.path)?;
-            populate_new_target(&mut source, target)?;
+            populate_new_target(&mut source, target)
         }
-        Ok(())
     }
 
     /// Move the commit and guard into the blocking pool so dropping the outer future
     /// does not interrupt the file writeback.
-    pub(crate) async fn commit_async(self, root: &Path, target: &Path) -> anyhow::Result<()> {
+    pub(crate) async fn commit_async(
+        self,
+        root: &Path,
+        target: &Path,
+    ) -> anyhow::Result<FileIdentity> {
         let root = root.to_path_buf();
         let target = target.to_path_buf();
         tokio::task::spawn_blocking(move || self.commit(&root, &target)).await?
@@ -296,7 +475,7 @@ pub(crate) fn staged_write_file(root: &Path, target: &Path, contents: &[u8]) -> 
     file.write_all(contents)?;
     file.sync_all()?;
     drop(file);
-    temporary.commit(root, target)
+    temporary.commit(root, target).map(|_| ())
 }
 
 /// Extract and validate the final component of a remote POSIX path.
@@ -383,7 +562,86 @@ pub fn target_key(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::path::Path;
+    use tokio::io::AsyncWriteExt as _;
+
+    #[tokio::test]
+    async fn captured_new_target_permission_rejects_races_before_preparation_and_commit()
+    -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("result");
+        let access = super::DownloadTargetAccess::capture(root.path(), &target)?;
+        std::fs::write(&target, b"external")?;
+        assert!(
+            super::DownloadTemporary::prepare_with_access(root.path(), &target, 0, access)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&target)?, b"external");
+        std::fs::remove_file(&target)?;
+        let access = super::DownloadTargetAccess::capture(root.path(), &target)?;
+        let (temporary, mut file) =
+            super::DownloadTemporary::prepare_with_access(root.path(), &target, 0, access).await?;
+        use tokio::io::AsyncWriteExt as _;
+        file.write_all(b"download").await?;
+        drop(file);
+        std::fs::write(&target, b"external")?;
+        assert!(temporary.commit_async(root.path(), &target).await.is_err());
+        assert_eq!(std::fs::read(&target)?, b"external");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn captured_overwrite_permission_rejects_replaced_target_before_commit()
+    -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("result");
+        std::fs::write(&target, b"original")?;
+        let access = super::DownloadTargetAccess::capture(root.path(), &target)?;
+        let (temporary, mut file) =
+            super::DownloadTemporary::prepare_with_access(root.path(), &target, 0, access).await?;
+        file.write_all(b"download").await?;
+        drop(file);
+        std::fs::rename(&target, root.path().join("original"))?;
+        std::fs::write(&target, b"replacement")?;
+        assert!(temporary.commit_async(root.path(), &target).await.is_err());
+        assert_eq!(std::fs::read(&target)?, b"replacement");
+        assert_eq!(std::fs::read(root.path().join("original"))?, b"original");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_owned_target_metadata_is_rechecked_on_the_commit_handle() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("result");
+        std::fs::write(&target, b"completed")?;
+        let metadata = std::fs::metadata(&target)?;
+        let access = super::DownloadTargetAccess::ReplaceKnownTarget(
+            super::FileIdentity::from_path(&target)?,
+            Some((metadata.len(), metadata.modified()?)),
+        );
+        let (temporary, mut file) =
+            super::DownloadTemporary::prepare_with_access(root.path(), &target, 0, access).await?;
+        file.write_all(b"retry").await?;
+        drop(file);
+        std::fs::write(&target, b"external modification")?;
+        assert!(temporary.commit_async(root.path(), &target).await.is_err());
+        assert_eq!(std::fs::read(&target)?, b"external modification");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_new_target_cleanup_does_not_remove_an_external_replacement() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let target = root.path().join("result");
+        let guard = super::NewTargetGuard::create(&target)?;
+        std::fs::rename(&target, root.path().join("partial"))?;
+        std::fs::write(&target, b"external")?;
+        drop(guard);
+        assert_eq!(std::fs::read(&target)?, b"external");
+        Ok(())
+    }
 
     #[test]
     fn ignored_directory_entries_do_not_block_regular_downloads() -> anyhow::Result<()> {
@@ -434,8 +692,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn new_downloads_use_normal_creation_permissions() -> anyhow::Result<()> {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root =
             std::env::temp_dir().join(format!("zzclawterm-final-mode-{}", zzclawterm_core::uuid()));
         std::fs::create_dir(&root)?;
@@ -452,7 +708,6 @@ mod tests {
         let target = root.join("async-download");
         let (temporary, mut file) =
             super::DownloadTemporary::prepare_async(&root, &target, 0).await?;
-        use tokio::io::AsyncWriteExt as _;
         file.write_all(b"downloaded").await?;
         file.flush().await?;
         drop(file);
@@ -534,7 +789,6 @@ mod tests {
         assert_eq!(path.parent(), Some(root.as_path()));
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o077, 0);
         }
         assert_eq!(std::fs::read(&path)?, b"prefix");
@@ -624,20 +878,15 @@ mod tests {
         std::fs::write(&target, b"old")?;
         let (temporary, mut file) = super::DownloadTemporary::create(&root, &target)?;
         let temporary_path = temporary.path.clone();
-        use std::io::Write as _;
         file.write_all(b"new")?;
         drop(file);
         #[cfg(unix)]
-        let inode_before = {
-            use std::os::unix::fs::MetadataExt as _;
-            std::fs::metadata(&target)?.ino()
-        };
+        let inode_before = { std::fs::metadata(&target)?.ino() };
 
         temporary.commit_async(&root, &target).await?;
         assert_eq!(std::fs::read(&target)?, b"new");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
             assert_eq!(std::fs::metadata(&target)?.ino(), inode_before);
         }
         assert!(!temporary_path.exists());
@@ -728,8 +977,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn staged_write_never_follows_a_target_symlink() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
-
         let root = std::env::temp_dir().join(format!(
             "zzclawterm-atomic-link-{}",
             zzclawterm_core::uuid()

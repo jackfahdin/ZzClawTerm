@@ -481,60 +481,6 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn reorder_security_credentials(
-        &mut self,
-        source_id: String,
-        target_id: String,
-        after: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(next) = self
-            .security
-            .reordered_credentials(&source_id, &target_id, after)
-        else {
-            return;
-        };
-        let updates = next
-            .iter()
-            .map(|entry| (entry.id.clone(), entry.sort_order))
-            .collect::<Vec<_>>();
-        let location = SecurityStoreLocation::new(self.store_blocking_client());
-        let request_id = self.security.begin_reorder_request();
-        let scheduler = self.blocking_jobs.clone();
-        cx.spawn(async move |this, cx| {
-            let task = scheduler.submit_task("credential-reorder", move |_| {
-                let store = location.open()?;
-                store
-                    .reorder_credentials(&updates)
-                    .map_err(|error| error.to_string())?;
-                load_security_catalog(&store)
-            });
-            let result = await_blocking_job(task).await.and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                if !this.security.finish_reorder_request(request_id) {
-                    return;
-                }
-                this.security.set_credential_drop_target(None);
-                let status = match result {
-                    Ok(catalog) => {
-                        this.security.replace_catalog_state(catalog);
-                        this.request_shared_state_refresh(
-                            crate::app_shell::SharedStateDomain::Security,
-                            cx,
-                        );
-                        t!("credentialManager.reorderSuccess").to_string()
-                    }
-                    Err(error) => {
-                        format!("{}: {error}", t!("credentialManager.reorderFailed"))
-                    }
-                };
-                this.security.set_status(status);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     fn load_security_credential_editor_secret(
         &mut self,
         credential_id: String,

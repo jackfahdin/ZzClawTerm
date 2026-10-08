@@ -191,7 +191,8 @@ fn transfer_job_file_name(job: &TransferJobRowSnapshot) -> String {
             })
         })
         .unwrap_or_else(|| match &job.kind {
-            TransferJobKind::Download { remote_path, .. }
+            TransferJobKind::DragExport { remote_path }
+            | TransferJobKind::Download { remote_path, .. }
             | TransferJobKind::OpenExternal { remote_path, .. }
             | TransferJobKind::LoadEditor { remote_path, .. }
             | TransferJobKind::SaveEditor { remote_path, .. }
@@ -335,11 +336,10 @@ fn local_file_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
     use std::path::PathBuf;
 
     use zzclawterm_transport::SftpTransferProgress;
-
-    use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
 
     use super::{
         TransferJobRowLabels, format_transfer_row_time, transfer_job_file_name,

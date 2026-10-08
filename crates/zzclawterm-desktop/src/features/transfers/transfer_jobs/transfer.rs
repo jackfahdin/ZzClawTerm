@@ -389,19 +389,23 @@ impl ZzClawTermApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.active_ssh_config_owned().is_none() {
-            self.shell
-                .set_status("start an SSH session first".to_string());
-            self.ensure_panel_open(NavItem::Transfers);
-            cx.notify();
-            return;
-        }
-        let service = match self.active_remote_file_service() {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
+        let promised_source = self.transfer.promised_download_source(&job_id);
+        let service = if let Some(source) = &promised_source {
+            let Some(source) = source.upgrade() else {
+                self.shell
+                    .set_status("Source session is closed; drag the item again".to_string());
                 cx.notify();
                 return;
+            };
+            (*source).clone()
+        } else {
+            match self.active_remote_file_service() {
+                Ok(service) => service,
+                Err(error) => {
+                    self.shell.set_status(error.to_string());
+                    cx.notify();
+                    return;
+                }
             }
         };
         let Some(job) = self.transfer.transfer_job(&job_id) else {
@@ -466,6 +470,23 @@ impl ZzClawTermApp {
                     job_id.clone(),
                     finished_tx.clone(),
                     move || {
+                        let _lifetime = if let Some(source) = promised_source {
+                            match zzclawterm_transport::drag_export::DragSourceLifetime::new(
+                                source,
+                                vec![control.clone()],
+                            ) {
+                                Ok(lifetime) => Some(lifetime),
+                                Err(error) => {
+                                    let _ = finished_tx.unbounded_send(TransferJobResult {
+                                        id: job_id,
+                                        event: TransferJobEvent::Finished(Err(error.to_string())),
+                                    });
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         let mut progress_sender =
                             TransferProgressEventSender::new(job_id.clone(), progress_tx);
                         let result = service

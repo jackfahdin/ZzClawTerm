@@ -521,6 +521,7 @@ impl ZzClawTermApp {
                 baud_rate,
                 data_bits,
                 parity,
+                flow_control,
                 stop_bits,
                 ai_execution_profile,
                 backspace_mode,
@@ -533,6 +534,7 @@ impl ZzClawTermApp {
                     baud_rate,
                     data_bits,
                     parity,
+                    flow_control,
                     stop_bits,
                     backspace_mode,
                     encoding,
@@ -666,6 +668,7 @@ impl ZzClawTermApp {
                 cx.notify();
             }
             ConnectionType::Vnc {
+                username,
                 host,
                 port,
                 security,
@@ -676,6 +679,7 @@ impl ZzClawTermApp {
                 view_only,
             } => {
                 let config = VncSessionConfig {
+                    username: username.clone(),
                     relay: self
                         .remote_desktop
                         .prepared_routes
@@ -873,7 +877,7 @@ impl ZzClawTermApp {
                 insert_index,
                 seed_output,
                 startup_command,
-                multiplex_key: Some(multiplex_key),
+                multiplex_key: Some(multiplex_key.clone()),
                 source_connection_id,
                 reconnect_session_id,
                 workspace_split,
@@ -885,6 +889,7 @@ impl ZzClawTermApp {
         );
 
         let session_manager = self.session.manager_handle();
+        let ssh_connections = self.session.ssh_connection_pool();
         let session_start_tx = self.session.start.sender();
         build_context.attempt = self.session.start.attempt(&request_id);
         build_context.host_key_prompts = Arc::new(
@@ -924,26 +929,18 @@ impl ZzClawTermApp {
                         .collect();
                 let multiplex =
                     open_ssh_multiplex_handle(config.clone()).map_err(|error| error.to_string())?;
-                let session_info = match session_manager
-                    .create_ssh_session_with_multiplex(config.clone(), multiplex.clone())
-                {
-                    Ok(info) => info,
-                    Err(error) => {
-                        if let Err(disconnect_error) = multiplex.disconnect() {
-                            tracing::warn!(
-                                error = %disconnect_error,
-                                "failed to disconnect unused SSH multiplex handle after session start failure"
-                            );
-                        }
-                        return Err(error.to_string());
-                    }
-                };
-                Ok(SessionStartSuccess {
+                let connection = ssh_connections.register(multiplex_key, multiplex);
+                let session_info = session_manager
+                    .create_ssh_session_with_multiplex(config.clone(), connection.handle())
+                    .map_err(|error| error.to_string())?;
+                let mut success = SessionStartSuccess::ssh(
+                    Arc::clone(&session_manager),
                     session_info,
-                    multiplex_handle: Some(multiplex),
-                    launch_config: Some(SessionLaunchConfig::Ssh(Box::new(config))),
-                    start_warnings,
-                })
+                    connection,
+                    Some(SessionLaunchConfig::Ssh(Box::new(config))),
+                );
+                success.start_warnings = start_warnings;
+                Ok(success)
             },
         );
     }
@@ -1139,11 +1136,13 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     let key_auth = load_ssh_key_auth_with_context(context, auth.key_id.as_deref(), &auth.mode)?;
     let proxy_jump = load_proxy_jump_config_with_context(context, connection, visited_proxy_jumps)?;
     let proxy = load_proxy_config_with_context(context, connection)?;
-    let encoding = if encoding.trim().is_empty() {
-        context.default_encoding.clone()
-    } else {
-        encoding
-    };
+    let encoding = zzclawterm_core::character_encoding::CharacterEncoding::resolve_connection(
+        &encoding,
+        &context.default_encoding,
+    )
+    .map_err(crate::features::terminal::encoding_error_text)?
+    .label()
+    .to_string();
     let host_key_alias = connection.network.as_ref().and_then(|network| {
         network
             .host_key_alias
@@ -1363,7 +1362,7 @@ fn stored_connection_password_id(auth: Option<&ConnectionAuth>) -> Option<String
 }
 
 fn resolve_effective_connection_encoding(value: &str, app: &ZzClawTermApp) -> String {
-    if value.trim().is_empty() {
+    if value.trim().is_empty() || value.trim().eq_ignore_ascii_case("global") {
         app.settings.summary().interaction_default_encoding.clone()
     } else {
         value.trim().to_string()
@@ -1696,6 +1695,7 @@ mod tests {
             .store
             .request_fn(StoreDomain::Security, |store| {
                 store.save_password(zzclawterm_core::SavedPassword {
+                    sort_order: 0,
                     username: String::new(),
                     id: "pw-1".to_string(),
                     name: "Primary".to_string(),

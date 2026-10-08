@@ -40,6 +40,34 @@ fn edit_snapshot_row(
 }
 
 #[test]
+fn current_keyword_layout_key_changes_when_osc133_changes_identical_text() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let highlighter =
+        compile_terminal_keyword_highlighter(&zzclawterm_core::get_builtin_keyword_rules(true));
+    let mut screen = TerminalScreen::new(30, 2);
+    screen.advance(b"ERROR");
+    let output = screen.snapshot();
+    let previous = precompute_terminal_keyword_highlights(&output, &highlighter, palette, None);
+    screen.advance(b"\r\x1b]133;B\x07");
+    let input = screen.snapshot();
+    let current =
+        precompute_terminal_keyword_highlights(&input, &highlighter, palette, Some(&previous));
+    assert_eq!(
+        output.row(0).unwrap().revision,
+        input.row(0).unwrap().revision
+    );
+    let old_lookup = previous.lookup(0, &output);
+    let new_lookup = current.lookup(0, &input);
+    let old_key = super::terminal_keyword_row_paint_style_key(7, 0, old_lookup.as_ref());
+    let new_key = super::terminal_keyword_row_paint_style_key(7, 0, new_lookup.as_ref());
+    assert_ne!(old_key, new_key);
+    assert_eq!(
+        new_key,
+        super::terminal_keyword_row_paint_style_key(7, 0, current.lookup(0, &input).as_ref())
+    );
+}
+
+#[test]
 fn append_padded_wide_cells_matches_allocating_padding() {
     let input = "a界e\u{301} 🚀";
     let expected = pad_wide_cells(input);

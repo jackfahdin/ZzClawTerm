@@ -5,17 +5,26 @@ use crate::models::{BottomPanelMode, NavItem, StartupCommandAction};
 use crate::shortcuts::{
     CloseTab, CopySelectedConnections, DuplicateSession, DuplicateSessionWithCommand, LockScreen,
     ManageSyncGroups, MultiplexSsh, MultiplexSshWithCommand, NewLocalTerminal, NewSession, NextTab,
-    OpenChat, OpenNewSessionMenu, OpenSettings, PreviousTab, QuickSwitch, RenameFile, ResetZoom,
-    ShortcutId, ShortcutInvocation, ShowAllCommands, ShowCommandSuggestions, SwitchToTab,
-    TemporarySshLink, TerminalClear, TerminalCopy, TerminalFind, TerminalPaste,
-    TerminalPasteSelected, TerminalSelectAll, ToggleLeftSidebar, ToggleNativeFullscreen,
-    TogglePaneFocus, ToggleRecording, ToggleRightSidebar, ZoomIn, ZoomOut,
+    NextTerminalGroup, OpenChat, OpenNewSessionMenu, OpenSettings, PreviousTab,
+    PreviousTerminalGroup, QuickSwitch, RenameFile, ResetZoom, ShortcutId, ShortcutInvocation,
+    ShowAllCommands, ShowCommandSuggestions, SwitchToTab, TemporarySshLink, TerminalClear,
+    TerminalClearAll, TerminalCommandNext, TerminalCommandPrevious, TerminalCommandSelect,
+    TerminalCopy, TerminalFind, TerminalPaste, TerminalPasteSelected, TerminalSelectAll,
+    ToggleLeftSidebar, ToggleNativeFullscreen, TogglePaneFocus, ToggleRecording,
+    ToggleRightSidebar, ZoomIn, ZoomOut,
 };
 
 fn shortcut_interceptor_dispatches(id: ShortcutId) -> bool {
     // GPUI still delivers KeyDown after an interceptor stops propagation.
     // This action must run in the keymap instead, or the terminal sends ^L twice.
-    id != ShortcutId::TerminalClear
+    !matches!(
+        id,
+        ShortcutId::TerminalClear
+            | ShortcutId::TerminalClearAll
+            | ShortcutId::TerminalCommandPrevious
+            | ShortcutId::TerminalCommandNext
+            | ShortcutId::TerminalCommandSelect
+    )
 }
 
 impl ZzClawTermApp {
@@ -70,6 +79,19 @@ impl ZzClawTermApp {
             }
             ShortcutId::TerminalFind => self.open_terminal_search(window, cx),
             ShortcutId::TerminalClear => self.send_terminal_clear_screen(cx),
+            ShortcutId::TerminalClearAll => self.clear_terminal(cx),
+            ShortcutId::TerminalCommandPrevious => self.navigate_terminal_command(
+                zzclawterm_terminal::command_navigation::CommandNavigationAction::Previous,
+                cx,
+            ),
+            ShortcutId::TerminalCommandNext => self.navigate_terminal_command(
+                zzclawterm_terminal::command_navigation::CommandNavigationAction::Next,
+                cx,
+            ),
+            ShortcutId::TerminalCommandSelect => self.navigate_terminal_command(
+                zzclawterm_terminal::command_navigation::CommandNavigationAction::Select,
+                cx,
+            ),
             ShortcutId::TerminalSelectAll => self.select_all_terminal(cx),
             ShortcutId::ManageSyncGroups => self.open_sync_groups(window, cx),
             ShortcutId::ShowCommandSuggestions => self.show_manual_command_suggestions(cx),
@@ -78,8 +100,8 @@ impl ZzClawTermApp {
             ShortcutId::OpenNewSessionMenu => {
                 if self.session.active_id().is_some() {
                     let anchor = self
-                        .shell
-                        .focused_terminal_leaf()
+                        .current_terminal_group()
+                        .as_deref()
                         .map(|id| {
                             crate::features::shell::NewSessionMenuAnchor::TerminalLeaf(
                                 id.to_string(),
@@ -93,16 +115,34 @@ impl ZzClawTermApp {
             ShortcutId::QuickSwitch => self.open_quick_switch(window, cx),
             ShortcutId::NewLocalTerminal => self.start_local_session(window, cx),
             ShortcutId::CloseTab => self.close_active_session(cx),
-            ShortcutId::NextTab => self.select_relative_session(1, cx),
-            ShortcutId::PreviousTab => self.select_relative_session(-1, cx),
+            ShortcutId::NextTab | ShortcutId::PreviousTab => {
+                self.select_relative_session(
+                    if invocation.id == ShortcutId::NextTab {
+                        1
+                    } else {
+                        -1
+                    },
+                    cx,
+                );
+                if let Some(active) = self.session.active_id_owned() {
+                    self.focus_terminal_session(&active, window, cx);
+                }
+            }
+            ShortcutId::NextTerminalGroup => self.select_relative_terminal_group(1, window, cx),
+            ShortcutId::PreviousTerminalGroup => {
+                self.select_relative_terminal_group(-1, window, cx)
+            }
             ShortcutId::SwitchToTab => {
                 let index = invocation.tab_index.unwrap_or(1);
                 let index = if index == 9 {
-                    self.session.ordered_sessions().len().saturating_sub(1)
+                    self.terminal_group_tab_count().saturating_sub(1)
                 } else {
                     index.saturating_sub(1)
                 };
                 self.select_session_index(index, cx);
+                if let Some(active) = self.session.active_id_owned() {
+                    self.focus_terminal_session(&active, window, cx);
+                }
             }
             ShortcutId::DuplicateSession => self.duplicate_active_session(window, cx),
             ShortcutId::MultiplexSsh => self.multiplex_active_ssh_session(window, cx),
@@ -116,6 +156,7 @@ impl ZzClawTermApp {
                 if self.session.active_id().is_some() {
                     self.shell
                         .set_pane_focus_mode(!self.shell.pane_focus_mode());
+                    self.sync_terminal_frame_snapshot_priority();
                     cx.notify();
                 }
             }
@@ -185,6 +226,16 @@ impl ZzClawTermApp {
             ))
             .on_action(direct_handler!(TerminalFind, TerminalFind))
             .on_action(direct_handler!(TerminalClear, TerminalClear))
+            .on_action(direct_handler!(TerminalClearAll, TerminalClearAll))
+            .on_action(direct_handler!(
+                TerminalCommandPrevious,
+                TerminalCommandPrevious
+            ))
+            .on_action(direct_handler!(TerminalCommandNext, TerminalCommandNext))
+            .on_action(direct_handler!(
+                TerminalCommandSelect,
+                TerminalCommandSelect
+            ))
             .on_action(direct_handler!(TerminalSelectAll, TerminalSelectAll))
             .on_action(direct_handler!(ManageSyncGroups, ManageSyncGroups))
             .on_action(direct_handler!(
@@ -200,6 +251,11 @@ impl ZzClawTermApp {
             .on_action(direct_handler!(CloseTab, CloseTab))
             .on_action(direct_handler!(NextTab, NextTab))
             .on_action(direct_handler!(PreviousTab, PreviousTab))
+            .on_action(direct_handler!(NextTerminalGroup, NextTerminalGroup))
+            .on_action(direct_handler!(
+                PreviousTerminalGroup,
+                PreviousTerminalGroup
+            ))
             .on_action(cx.listener(|this, action: &SwitchToTab, window, cx| {
                 this.execute_shortcut_invocation(
                     ShortcutInvocation {

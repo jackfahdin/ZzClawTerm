@@ -27,16 +27,19 @@ Agent mode characteristics:
 - Uses `Terminal Output Lines` to control how much AI-executed command output is shown inline near the terminal
 - High-risk commands still require manual approval before execution
 
-## Agent tools and final answers
+## Agent tools, plans and questions
 
-The Agent workflow separates "run terminal commands" from "summarize the result":
+Native Agent and external MCP share capability contracts, scope, risk checks, approvals, output paging and redacted audits. Native does not need the MCP service or helper. Claude/Codex continue to access capabilities exclusively through MCP.
 
-- Agent can propose commands to run in the active terminal session
-- Commands still go through risk levels, policy checks, and manual approval
-- Execution state is recorded, and output summaries can be shown near the terminal according to `Terminal Output Lines`
-- After terminal steps finish, Agent uses a final-answer tool to provide the user-facing summary instead of mixing it into command output
+Native can query the environment and sessions, execute terminal commands, read recent output, list/stat/read text through SFTP, and read subsequent output pages. SFTP writes are outside this stage. Available targets are fixed when the run starts; calls with multiple targets must select one explicitly.
 
-With the two split apart, the terminal keeps the real execution record while the final answer explains the outcome and next steps, so multi-step troubleshooting and deployment checks are easier to review afterwards.
+Multi-step tasks can maintain a plan with stable task IDs and pending, in-progress, completed or blocked states. At most one task is in progress. Simple tasks may finish directly. Agent can ask 1–3 questions with optional choices and free-text answers. Answers require submission; the same run then resumes. Cancel ends the run, while switching conversations preserves the waiting state.
+
+Each tool decision, including planning and questions, consumes one step. At the limit only the final summary is allowed. Waiting for approval or answers does not start a command timeout. Final answers include verified, unverified or blocked status and verification notes. An unfinished plan cannot be marked verified.
+
+Foreground execution keeps terminal capture; background execution keeps the existing separate backend. Unknown exit codes from quiet observation, timeouts and lost output are explicit and cannot mean a successful exit. Large output is paged per run or MCP connection and cleared when the owner ends or credentials expire.
+
+Runs, plans and tool transcripts live only in memory. Chat history stores display text and does not resume execution. Settings, history, audit and MCP wire formats stay compatible. Capability audits contain no commands, output, file content or user answers.
 
 ## Conversation management
 
@@ -62,7 +65,7 @@ AI commands are displayed as structured cards with:
 
 ### How the risk level is decided
 
-The risk level is not the model's call alone. ZzClawTerm takes the **higher** of the model's self-reported level and the **local rule verdict** as the effective level, so a model that underestimates risk still gets stopped by local rules. The command card lists both sources.
+The risk level is not the model's call alone. ZzClawTerm takes the **higher** of the model's self-reported level and the **local rule verdict** as the effective level, so a model that underestimates risk still gets stopped by local rules. The command card shows the effective risk.
 
 Local rules use four tiers, and they classify by command *shape* rather than command name:
 
@@ -84,10 +87,10 @@ The effective level decides whether a command may run, together with **Command e
 | Policy | Behavior |
 |--------|----------|
 | Confirm before execution | Every command needs your confirmation |
-| Fully automatic | No confirmation; commands run directly |
-| Smart approval | Runs automatically when the effective level is at or below **Smart mode auto-execute ceiling**, otherwise waits for approval |
+| Fully automatic | Ordinary and sensitive reads are allowed; only explicitly classified commands below High run automatically |
+| Smart approval | Further tightens automatic execution using the **Smart mode auto-execute ceiling** |
 
-**Smart approval** has one hard rule: **critical risk always requires manual confirmation**, even with the auto-execute ceiling raised to its maximum.
+Every Native mode requires approval for unknown, High and Critical commands. Confirm mode offers only per-call command approval. Other Native session grants cover only the current run, target, tool and identical arguments. Critical and destructive operations always require per-call approval. Approval is followed by another scope, live-session and execution-disabled check.
 
 **Settings → AI** also configures:
 

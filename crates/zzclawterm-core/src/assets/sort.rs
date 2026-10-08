@@ -13,7 +13,9 @@ use crate::assets::formatters::{
     format_asset_address, get_asset_connection_time_ms, get_disk_total_bytes, has_gpu, has_npu,
     is_linux_asset, is_windows_asset,
 };
-use crate::assets::groups::{connections_for_asset_group, group_path_label};
+use crate::assets::groups::{
+    build_group_index, connections_for_asset_group, group_path_label_with_index,
+};
 use crate::models::{Group, SavedConnection};
 use crate::natural_order::natural_compare;
 
@@ -168,6 +170,8 @@ pub fn build_asset_records(
     groups: &[Group],
     root_label: &str,
 ) -> Vec<AssetRecord> {
+    let group_index = build_group_index(groups);
+    let mut paths = HashMap::new();
     let group_sort_by_id: HashMap<&str, i32> = groups
         .iter()
         .map(|group| (group.id.as_str(), group.sort_order))
@@ -176,7 +180,16 @@ pub fn build_asset_records(
     connections
         .iter()
         .map(|connection| {
-            let group_path = group_path_label(groups, connection.group_id.as_deref(), root_label);
+            let group_path = paths
+                .entry(connection.group_id.as_deref())
+                .or_insert_with(|| {
+                    group_path_label_with_index(
+                        &group_index,
+                        connection.group_id.as_deref(),
+                        root_label,
+                    )
+                })
+                .clone();
             let group_sort_order = connection
                 .group_id
                 .as_deref()
@@ -196,10 +209,12 @@ pub fn build_asset_records(
 
 /// Builds the sorted, searchable group options for the breadcrumb picker.
 pub fn build_group_options(groups: &[Group], root_label: &str) -> Vec<AssetGroupOption> {
+    let group_index = build_group_index(groups);
     let mut options: Vec<AssetGroupOption> = groups
         .iter()
         .map(|group| {
-            let path = group_path_label(groups, Some(group.id.as_str()), root_label);
+            let path =
+                group_path_label_with_index(&group_index, Some(group.id.as_str()), root_label);
             let search_text = format!("{} {}", group.name, path).to_lowercase();
             AssetGroupOption {
                 group: group.clone(),

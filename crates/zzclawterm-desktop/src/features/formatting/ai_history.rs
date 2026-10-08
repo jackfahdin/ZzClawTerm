@@ -8,12 +8,12 @@ pub(in crate::features) enum AiHistoryDateGroup {
 }
 
 impl AiHistoryDateGroup {
-    pub(in crate::features) fn label(self) -> &'static str {
+    pub(in crate::features) fn label_key(self) -> &'static str {
         match self {
-            Self::Today => "Today",
-            Self::Yesterday => "Yesterday",
-            Self::Last7Days => "Last 7 Days",
-            Self::Earlier => "Earlier",
+            Self::Today => "ai.historyToday",
+            Self::Yesterday => "ai.historyYesterday",
+            Self::Last7Days => "ai.historyLast7Days",
+            Self::Earlier => "ai.historyEarlier",
         }
     }
 }

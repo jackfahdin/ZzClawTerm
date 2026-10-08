@@ -1,9 +1,10 @@
-use gpui::{Context, IntoElement, div, prelude::*, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use rust_i18n::t;
-use zzclawterm_ui::ZzClawIconButton;
+use zzclawterm_ui::{ZzClawIconButton, ZzClawInput, ZzClawTag};
 
 use crate::features::ZzClawTermApp;
-use crate::features::pages::connections::list::{ConnectionEditorFields, editor_field};
+use crate::features::pages::connections::list::{ConnectionEditorFields, EDITOR_CONTROL_HEIGHT_PX};
+use crate::features::text_inputs::{ordinary_input_focus_ring, ordinary_input_shell_border_color};
 use crate::models::{ConnectionEditorField, ConnectionEditorState};
 use crate::theme::ThemePalette;
 
@@ -13,20 +14,47 @@ pub(super) fn connection_tags_field(
     fields: &ConnectionEditorFields,
     cx: &mut Context<ZzClawTermApp>,
 ) -> impl IntoElement {
-    let mut tags = div().flex().flex_wrap().gap_2();
+    let entity = fields.get(&ConnectionEditorField::NewTag);
+    let handle = entity.map(|field| field.read(cx).focus_handle());
+    let focused = entity.is_some_and(|field| field.read(cx).has_focus());
+    let mut tags = div()
+        .id("connection-editor-tags")
+        .debug_selector(|| "connection-editor-tags".to_string())
+        .w_full()
+        .min_w_0()
+        .min_h(px(EDITOR_CONTROL_HEIGHT_PX))
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(ordinary_input_shell_border_color(palette, focused))
+        .when(focused, |this| {
+            this.shadow(ordinary_input_focus_ring(palette))
+        })
+        .bg(rgb(palette.input))
+        .cursor_text()
+        .when_some(handle.clone(), |this, handle| {
+            this.on_click(move |_, window, cx| window.focus(&handle, cx))
+        });
     for (index, tag) in editor.tags.iter().enumerate() {
         let remove = tag.clone();
+        let input_focus = handle.clone();
         tags = tags.child(
-            div()
-                .max_w_full()
+            ZzClawTag::secondary()
+                .max_w(px(192.))
                 .min_w_0()
-                .flex()
-                .items_center()
-                .gap_1()
+                .h(px(24.))
+                .py_0()
+                .px_1p5()
                 .child(
                     div()
                         .min_w_0()
-                        .text_xs()
+                        .text_size(px(11.))
                         .text_color(rgb(palette.text))
                         .truncate()
                         .child(tag.clone()),
@@ -36,38 +64,35 @@ pub(super) fn connection_tags_field(
                         format!("connection-remove-tag-{index}"),
                         "icons/close.svg",
                     )
+                    .size(px(16.))
+                    .icon_size(px(10.))
                     .tooltip(t!("dialog.removeTag", tag = tag))
-                    .on_click(cx.listener(move |app, _, _, cx| {
-                        app.remove_connection_editor_tag(&remove, cx)
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.remove_connection_editor_tag(&remove, cx);
+                        if let Some(handle) = &input_focus {
+                            window.focus(handle, cx);
+                        }
                     })),
                 ),
         );
     }
-    let tag = editor.new_tag.trim();
+    tags = tags.children(entity.map(|field| {
+        div()
+            .h(px(24.))
+            .min_w(px(80.))
+            .flex_1()
+            .text_color(rgb(palette.text))
+            .child(ZzClawInput::new(field))
+    }));
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .child(
             div()
-                .flex()
-                .items_end()
-                .gap_2()
-                .child(div().min_w_0().flex_1().child(editor_field(
-                    palette,
-                    t!("dialog.tags"),
-                    ConnectionEditorField::NewTag,
-                    fields,
-                    cx,
-                )))
-                .child(
-                    ZzClawIconButton::new("connection-add-tag", "icons/plus.svg")
-                        .tooltip(t!("dialog.addTag"))
-                        .disabled(
-                            tag.is_empty() || editor.tags.iter().any(|existing| existing == tag),
-                        )
-                        .on_click(cx.listener(|app, _, _, cx| app.add_connection_editor_tag(cx))),
-                ),
+                .text_xs()
+                .text_color(rgb(palette.text_muted))
+                .child(t!("dialog.tags")),
         )
         .child(tags)
 }

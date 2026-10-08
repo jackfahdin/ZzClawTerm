@@ -160,7 +160,7 @@ pub(super) fn set_connection_editor_select_value(
             editor.backspace_mode = value.unwrap_or_else(|| "del".to_string());
         }
         ConnectionEditorSelect::Encoding => {
-            editor.encoding = value.unwrap_or_else(|| "global".to_string());
+            editor.encoding = value.filter(|value| value != "global").unwrap_or_default();
         }
         ConnectionEditorSelect::SftpCwdFollowMode => {
             editor.sftp_cwd_follow_mode = value.unwrap_or_else(|| "shell_integration".to_string());
@@ -171,7 +171,9 @@ pub(super) fn set_connection_editor_select_value(
                 .map(|value| value.clamp(4, 64));
         }
         ConnectionEditorSelect::SftpFilenameEncoding => {
-            editor.sftp_filename_encoding = value.unwrap_or_else(|| "terminal".to_string());
+            editor.sftp_filename_encoding = value
+                .filter(|value| value != "terminal")
+                .unwrap_or_default();
         }
         ConnectionEditorSelect::SshAlgorithmMode => {
             let mode = value.unwrap_or_else(|| "compatible".to_string());
@@ -254,6 +256,14 @@ pub(super) fn set_connection_editor_select_value(
         }
         ConnectionEditorSelect::Parity => {
             editor.parity = value.unwrap_or_else(|| "none".to_string());
+        }
+        ConnectionEditorSelect::FlowControl => {
+            use zzclawterm_core::models::connection::SerialFlowControl;
+            editor.flow_control = match value.as_deref() {
+                Some("software") => SerialFlowControl::Software,
+                Some("hardware") => SerialFlowControl::Hardware,
+                _ => SerialFlowControl::None,
+            };
         }
         ConnectionEditorSelect::StopBits => {
             editor.stop_bits = value.unwrap_or_else(|| "1".to_string());
@@ -927,7 +937,11 @@ pub(super) fn editor_field_seeds(
             ConnectionEditorField::NewTag,
             draft.new_tag.clone(),
             false,
-            I18n("dialog.newTag"),
+            if draft.tags.is_empty() {
+                I18n("dialog.tagsPlaceholder")
+            } else {
+                Empty
+            },
         ),
         (
             ConnectionEditorField::Description,

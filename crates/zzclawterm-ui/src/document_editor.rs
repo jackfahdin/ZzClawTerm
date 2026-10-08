@@ -12,6 +12,7 @@ use crate::input_focus::register_nya_input_focus;
 pub enum ZzClawDocumentEditorEvent {
     Changed(String),
     Blurred(String),
+    /// Cursor position changed; visual-only notifications do not emit this.
     Updated,
 }
 
@@ -23,6 +24,7 @@ pub struct ZzClawDocumentEditorState {
     editor: Entity<EditorState>,
     subscription: Subscription,
     observation: Subscription,
+    observed_cursor: usize,
     pending_content: Option<SharedString>,
     silent_content: Option<SharedString>,
     read_only: bool,
@@ -99,13 +101,20 @@ impl ZzClawDocumentEditorState {
                 InputEvent::Focus | InputEvent::PressEnter { .. } => {}
             }
         });
-        let observation = cx.observe(&editor, |_, _, cx| {
-            cx.emit(ZzClawDocumentEditorEvent::Updated);
+        let observed_cursor = editor.read(cx).cursor();
+        let observation = cx.observe(&editor, |this, editor, cx| {
+            let cursor = editor.read(cx).cursor();
+            if this.observed_cursor != cursor {
+                this.observed_cursor = cursor;
+                cx.emit(ZzClawDocumentEditorEvent::Updated);
+            }
+            cx.notify();
         });
         Self {
             editor,
             subscription,
             observation,
+            observed_cursor,
             pending_content: None,
             silent_content: None,
             read_only: false,
@@ -265,5 +274,64 @@ impl ZzClawDocumentEditor {
 impl gpui::RenderOnce for ZzClawDocumentEditor {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         div().size_full().min_h_0().min_w_0().child(self.state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ZzClawDocumentEditorEvent, ZzClawDocumentEditorState};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn visual_editor_notifications_do_not_emit_document_activity(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (document, window_cx) =
+            cx.add_window_view(|window, cx| ZzClawDocumentEditorState::new(window, cx, "hello"));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        window_cx.update(|_, cx| {
+            document.update(cx, |_, cx| {
+                let collected = events.clone();
+                cx.subscribe(
+                    &document,
+                    move |_, _, event: &ZzClawDocumentEditorEvent, _| {
+                        collected.lock().unwrap().push(event.clone());
+                    },
+                )
+                .detach();
+            });
+        });
+        window_cx.update(|_, cx| {
+            document
+                .read(cx)
+                .editor
+                .clone()
+                .update(cx, |_, cx| cx.notify());
+        });
+        window_cx.run_until_parked();
+        assert!(events.lock().unwrap().is_empty());
+        window_cx.update(|window, cx| {
+            document.read(cx).editor.clone().update(cx, |editor, cx| {
+                editor.set_value("edited", window, cx);
+                cx.emit(gpui_kit::component::input::InputEvent::Change);
+            });
+        });
+        window_cx.run_until_parked();
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .contains(&ZzClawDocumentEditorEvent::Changed("edited".to_string()))
+        );
+        events.lock().unwrap().clear();
+        window_cx.update(|_, cx| {
+            document.read(cx).editor.clone().update(cx, |editor, cx| {
+                editor.set_selected_range(1..1, cx);
+            });
+        });
+        window_cx.run_until_parked();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![ZzClawDocumentEditorEvent::Updated]
+        );
     }
 }

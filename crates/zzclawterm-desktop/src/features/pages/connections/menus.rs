@@ -324,7 +324,23 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> Vec<ZzClawMenuItem> {
         let selected = self.connection_state.selected_connections();
-        let mut items = vec![
+        let mut items = Vec::new();
+        if !self.connection_state.groups().is_empty() {
+            items.extend([
+                ZzClawMenuItem::action(t!("savedConnections.expandAllFolders"))
+                    .icon("icons/conn/unfold-more.svg")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_all_connection_groups_expanded(true, cx);
+                    })),
+                ZzClawMenuItem::action(t!("savedConnections.collapseAllFolders"))
+                    .icon("icons/conn/unfold-less.svg")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_all_connection_groups_expanded(false, cx);
+                    })),
+                ZzClawMenuItem::separator(),
+            ]);
+        }
+        items.extend([
             ZzClawMenuItem::action(t!("settings.exportConfig"))
                 .icon("icons/menu/export.svg")
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -337,7 +353,7 @@ impl ZzClawTermApp {
                     window.close_nya_dialog(cx);
                     this.open_connection_import_dialog(window, cx);
                 })),
-        ];
+        ]);
         if !selected.is_empty() {
             items.push(ZzClawMenuItem::separator());
             items.extend(self.connection_selected_menu_items(selected, cx));

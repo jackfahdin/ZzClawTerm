@@ -151,7 +151,7 @@ fn queued_transport_writer_returns_before_blocking_write_completes() {
             release_rx,
             output: output.clone(),
         },
-        false,
+        crate::WriterFlushPolicy::AfterWrite,
         SessionEventQueue::new(),
     );
 
@@ -172,7 +172,7 @@ fn queued_transport_writer_preserves_character_at_a_time_mode() {
     let mut writer = QueuedTransportWriter::spawn(
         "character-mode".to_string(),
         WriteCapture(writes.clone()),
-        true,
+        crate::WriterFlushPolicy::EachByte,
         SessionEventQueue::new(),
     );
 
@@ -2542,4 +2542,174 @@ fn ssh_keepalive_policy_reaches_the_client_configuration() {
         ssh_client_config(&disabled).unwrap().keepalive_interval,
         None
     );
+}
+
+#[test]
+fn serial_writer_does_not_flush_on_windows() {
+    struct NoFlushWriter;
+    impl std::io::Write for NoFlushWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("unexpected serial flush")
+        }
+    }
+    let policy = if cfg!(windows) {
+        crate::WriterFlushPolicy::serial()
+    } else {
+        crate::WriterFlushPolicy::Never
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(crate::TransportWriterCommand::Write(b"command\r".to_vec()))
+        .unwrap();
+    tx.send(crate::TransportWriterCommand::Close).unwrap();
+    crate::run_transport_writer(
+        "serial".into(),
+        NoFlushWriter,
+        policy,
+        rx,
+        SessionEventQueue::new(),
+    );
+}
+
+#[test]
+fn bash_prompt_hooks_do_not_leak_into_child_shells() {
+    let Some(_) = gnu_bash_for_syntax_check() else {
+        return;
+    };
+    for mode in [
+        super::ShellIntegrationMode::Full,
+        super::ShellIntegrationMode::CwdOnly,
+    ] {
+        let script = super::ssh_shell_injection_script(
+            super::ShellKind::Bash,
+            &super::build_ssh_ready_marker("child-shell"),
+            mode,
+        )
+        .unwrap();
+        let input = format!(
+            r#"
+export PROMPT_COMMAND='printf "hook=%s\n" "$?"'
+export __zzclawterm_cwd_prompt_hook=stale __nya_bp_precmd_hook=stale __nya_bp_interactive_hook=stale __nya_bp_install_payload=stale
+{script}
+if [ -n "${{ZZCLAWTERM_BASH_INSTALL_PENDING:-}}" ]; then eval "$PROMPT_COMMAND"; fi
+false; eval "$PROMPT_COMMAND"
+bash --noprofile --norc -c 'false; eval "$PROMPT_COMMAND"'
+"#
+        );
+        let mut child = gnu_bash_for_syntax_check()
+            .unwrap()
+            .args(["--noprofile", "--norc"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(!stderr.contains("command not found"), "{stderr}");
+        assert_eq!(stdout.matches("hook=1").count(), 2, "{stdout} {stderr}");
+    }
+}
+
+#[test]
+fn bash_exported_arrays_and_readonly_prompt_commands_preserve_user_hooks() {
+    for mode in [
+        super::ShellIntegrationMode::Full,
+        super::ShellIntegrationMode::CwdOnly,
+    ] {
+        for declaration in [
+            "declare -ax PROMPT_COMMAND=('printf user-hook-ok')",
+            "declare -rx PROMPT_COMMAND='printf user-hook-ok'",
+        ] {
+            let Some(mut command) = gnu_bash_for_syntax_check() else {
+                return;
+            };
+            let script = super::ssh_shell_injection_script(
+                super::ShellKind::Bash,
+                &super::build_ssh_ready_marker("array-prompt"),
+                mode,
+            )
+            .unwrap();
+            let input = format!(
+                "{declaration}\n{script}\nfor hook in \"${{PROMPT_COMMAND[@]}}\"; do eval \"$hook\"; done\n"
+            );
+            let mut child = command
+                .args(["--noprofile", "--norc"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{declaration}: {stderr}");
+            assert!(!stderr.contains("command not found"), "{stderr}");
+            assert!(
+                stdout.contains("user-hook-ok"),
+                "{declaration}: {stdout} {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn raw_wire_input_bypasses_text_policies_and_only_escapes_telnet_iac() {
+    for raw_tcp in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = if raw_tcp {
+            b"\r\n\x7f\xff\x80".to_vec()
+        } else {
+            b"\r\n\x7f\xff\xff\x80".to_vec()
+        };
+        let size = expected.len();
+        let (tx, rx) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = vec![0; size];
+            stream.read_exact(&mut bytes).unwrap();
+            tx.send(bytes).unwrap();
+        });
+        let manager = SessionManager::new();
+        let info = manager
+            .create_telnet_session(TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port,
+                raw_tcp,
+                backspace_mode: "bs".into(),
+                local_line_edit: true,
+                local_echo: true,
+                encoding: "gbk".into(),
+                send_naws: false,
+                send_sga: false,
+                force_character_at_a_time: false,
+                ..Default::default()
+            })
+            .unwrap();
+        manager.write_raw(&info.id, b"\r\n\x7f\xff\x80").unwrap();
+        let actual = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        manager.close(&info.id).unwrap();
+        peer.join().unwrap();
+        assert_eq!(actual, expected);
+    }
 }

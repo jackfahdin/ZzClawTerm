@@ -20,6 +20,9 @@ pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String 
             format!("List child directories in {remote_path}")
         }
         TransferJobKind::ResolveHome => "Resolve remote home".to_string(),
+        TransferJobKind::DragExport { remote_path } => {
+            format!("Export {remote_path} to native destination")
+        }
         TransferJobKind::SyncCwd => "Sync remote cwd".to_string(),
         TransferJobKind::Download {
             remote_path,

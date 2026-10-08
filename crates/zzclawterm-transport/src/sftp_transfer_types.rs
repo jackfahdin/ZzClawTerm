@@ -217,6 +217,8 @@ struct DownloadTargetOwner {
     source: SftpDuplicateCacheKey,
 }
 
+mod download_targets;
+
 /// Ordinary clones are independent tasks. Use clone_for_download_batch for sibling
 /// downloads and with_transfer_options for retries of the same task.
 pub struct SftpPathTransferOptions {
@@ -226,16 +228,30 @@ pub struct SftpPathTransferOptions {
     duplicate_decisions: Arc<SftpDuplicateDecisionCache>,
     download_targets: Arc<Mutex<HashMap<String, DownloadTargetOwner>>>,
     download_owner: String,
+    promised_type: Option<crate::SftpFileType>,
+    download_runtime: Arc<Mutex<download_targets::DownloadRuntime>>,
+}
+
+impl std::fmt::Debug for SftpPathTransferOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SftpPathTransferOptions")
+            .field("duplicate_policy", &self.duplicate_policy)
+            .field("promised_type", &self.promised_type)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Clone for SftpPathTransferOptions {
     fn clone(&self) -> Self {
         // Copy configuration without leaking task or batch state into an independent operation.
-        Self::new(
+        let mut cloned = Self::new(
             self.duplicate_policy,
             self.duplicate_resolver.clone(),
             self.transfer.clone(),
-        )
+        );
+        cloned.promised_type = self.promised_type;
+        cloned
     }
 }
 
@@ -248,6 +264,8 @@ impl Default for SftpPathTransferOptions {
             duplicate_decisions: Arc::new(SftpDuplicateDecisionCache::default()),
             download_targets: Arc::default(),
             download_owner: zzclawterm_core::uuid(),
+            promised_type: None,
+            download_runtime: Arc::default(),
         }
     }
 }
@@ -265,11 +283,39 @@ impl SftpPathTransferOptions {
             duplicate_decisions: Arc::new(SftpDuplicateDecisionCache::default()),
             download_targets: Arc::default(),
             download_owner: zzclawterm_core::uuid(),
+            promised_type: None,
+            download_runtime: Arc::default(),
         }
     }
 
     pub fn duplicate_policy(&self) -> SftpDuplicatePolicy {
         self.duplicate_policy
+    }
+
+    /// Finder-negotiated destinations may only replace entries owned by this task.
+    pub fn for_promised_download(
+        transfer: SftpTransferOptions,
+        source_type: crate::SftpFileType,
+    ) -> Self {
+        let mut options = Self::new(SftpDuplicatePolicy::Skip, None, transfer);
+        options.promised_type = Some(source_type);
+        options
+    }
+
+    pub fn is_promised_download(&self) -> bool {
+        self.promised_type.is_some()
+    }
+
+    pub(crate) fn expected_source_type(&self) -> Option<crate::SftpFileType> {
+        self.promised_type
+    }
+
+    pub(crate) fn download_runtime(
+        &self,
+    ) -> anyhow::Result<std::sync::MutexGuard<'_, download_targets::DownloadRuntime>> {
+        self.download_runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("download destination state is poisoned"))
     }
 
     pub fn duplicate_resolver(&self) -> Option<&dyn SftpDuplicateResolver> {
@@ -297,6 +343,8 @@ impl SftpPathTransferOptions {
             duplicate_decisions: Arc::clone(&self.duplicate_decisions),
             download_targets: Arc::clone(&self.download_targets),
             download_owner: self.download_owner.clone(),
+            promised_type: self.promised_type,
+            download_runtime: Arc::clone(&self.download_runtime),
         }
     }
 

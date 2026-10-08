@@ -9,6 +9,9 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.cancel_session_tab_drag_on_escape(event, window, cx) {
+            return true;
+        }
         if self.security.screen_locked() {
             return false;
         }

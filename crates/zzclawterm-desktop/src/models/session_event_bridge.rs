@@ -13,7 +13,7 @@ use zzclawterm_transport::{
 };
 
 use super::event_wake::{ANY_INTEREST, EventWake};
-use super::{TerminalFrameOutputSubmission, TerminalFramePipeline};
+use super::{RecordingWriteHandle, TerminalFrameOutputSubmission, TerminalFramePipeline};
 
 const SESSION_EVENT_BRIDGE_DRAIN_BATCH: usize = 512;
 const SESSION_EVENT_BRIDGE_OUTPUT_BUDGET: usize = 128 * 1024;
@@ -80,6 +80,8 @@ struct SessionEventBridgeControl {
     owned_sessions: HashSet<String>,
     ui_routed_sessions: HashSet<String>,
     encoding: String,
+    // Read-only projection of launch metadata; default changes cannot alter live streams.
+    session_encodings: HashMap<String, String>,
     scrollback_limit: usize,
     source_queued_events: usize,
     source_queued_output_bytes: usize,
@@ -88,7 +90,8 @@ struct SessionEventBridgeControl {
 #[derive(Clone)]
 struct SessionEventBridgeControlSnapshot {
     ui_routed_sessions: HashSet<String>,
-    encoding: String,
+    // Read-only projection of launch metadata; default changes cannot alter live streams.
+    session_encodings: HashMap<String, String>,
     scrollback_limit: usize,
 }
 
@@ -115,6 +118,7 @@ impl SessionEventBridge {
     pub(crate) fn spawn(
         session_manager: Arc<SessionManager>,
         frame_pipeline: TerminalFramePipeline,
+        recording_writer: Option<RecordingWriteHandle>,
         encoding: String,
         scrollback_limit: usize,
     ) -> Self {
@@ -125,6 +129,7 @@ impl SessionEventBridge {
                 owned_sessions: HashSet::new(),
                 ui_routed_sessions: HashSet::new(),
                 encoding,
+                session_encodings: HashMap::new(),
                 scrollback_limit,
                 source_queued_events: 0,
                 source_queued_output_bytes: 0,
@@ -145,7 +150,13 @@ impl SessionEventBridge {
         let worker = thread::Builder::new()
             .name("zzclawterm-session-event-bridge".to_string())
             .spawn(move || {
-                run_session_event_bridge(worker_manager, consumer_id, frame_pipeline, worker_state)
+                run_session_event_bridge(
+                    worker_manager,
+                    consumer_id,
+                    frame_pipeline,
+                    recording_writer,
+                    worker_state,
+                )
             })
             .expect("failed to spawn session event bridge");
         Self {
@@ -218,14 +229,23 @@ impl SessionEventBridge {
         self.state.ui_queue.push(event);
     }
 
-    pub(crate) fn configure(&self, encoding: String, scrollback_limit: usize) {
+    pub(crate) fn configure(
+        &self,
+        encoding: String,
+        scrollback_limit: usize,
+        session_encodings: HashMap<String, String>,
+    ) {
         let Ok(mut control) = self.state.control.lock() else {
             return;
         };
-        if control.encoding == encoding && control.scrollback_limit == scrollback_limit {
+        if control.encoding == encoding
+            && control.scrollback_limit == scrollback_limit
+            && control.session_encodings == session_encodings
+        {
             return;
         }
         control.encoding = encoding;
+        control.session_encodings = session_encodings;
         control.scrollback_limit = scrollback_limit;
     }
 
@@ -327,23 +347,31 @@ impl SessionEventBridge {
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub(crate) fn take_shutdown(&mut self) -> impl FnOnce() + Send + 'static {
         self.state.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("session event bridge panicked during shutdown");
+        let worker = self.worker.take();
+        let state = Arc::clone(&self.state);
+        let manager = Arc::clone(&self.session_manager);
+        let consumer_id = self.consumer_id;
+        move || {
+            if let Some(worker) = worker
+                && worker.join().is_err()
+            {
+                tracing::warn!("session event bridge panicked during shutdown");
+            }
+            let owned_sessions = state
+                .control
+                .lock()
+                .map(|mut control| std::mem::take(&mut control.owned_sessions))
+                .unwrap_or_default();
+            for session_id in owned_sessions {
+                manager.clear_session_event_consumer(&session_id, consumer_id);
+            }
         }
-        let owned_sessions = self
-            .state
-            .control
-            .lock()
-            .map(|mut control| std::mem::take(&mut control.owned_sessions))
-            .unwrap_or_default();
-        for session_id in owned_sessions {
-            self.session_manager
-                .clear_session_event_consumer(&session_id, self.consumer_id);
-        }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.take_shutdown()();
     }
 }
 
@@ -358,7 +386,7 @@ impl SessionEventBridgeState {
         let control = self.control.lock().ok()?;
         Some(SessionEventBridgeControlSnapshot {
             ui_routed_sessions: control.ui_routed_sessions.clone(),
-            encoding: control.encoding.clone(),
+            session_encodings: control.session_encodings.clone(),
             scrollback_limit: control.scrollback_limit,
         })
     }
@@ -574,6 +602,7 @@ fn run_session_event_bridge(
     session_manager: Arc<SessionManager>,
     consumer_id: SessionEventConsumerId,
     frame_pipeline: TerminalFramePipeline,
+    recording_writer: Option<RecordingWriteHandle>,
     state: Arc<SessionEventBridgeState>,
 ) {
     let mut sideband_probe_sessions: HashMap<String, SessionEventBridgeSidebandProbe> =
@@ -640,10 +669,14 @@ fn run_session_event_bridge(
                         state
                             .direct_output_bytes
                             .fetch_add(data.len() as u64, Ordering::Relaxed);
+                        if let Some(writer) = recording_writer.as_ref() {
+                            writer.write_raw_output(&session_id, &data);
+                        }
                         pending_direct_outputs.push(TerminalFrameOutputSubmission {
-                            session_id,
+                            raw_already_captured: true,
+                            session_id: session_id.clone(),
                             data,
-                            encoding: control.encoding.clone(),
+                            encoding: control.session_encodings[&session_id].clone(),
                             scrollback_limit: control.scrollback_limit,
                         });
                     } else if bridge_output_is_backpressured(
@@ -658,10 +691,14 @@ fn run_session_event_bridge(
                         state
                             .direct_backpressure_bytes
                             .fetch_add(data.len() as u64, Ordering::Relaxed);
+                        if let Some(writer) = recording_writer.as_ref() {
+                            writer.write_raw_output(&session_id, &data);
+                        }
                         pending_direct_outputs.push(TerminalFrameOutputSubmission {
-                            session_id,
+                            raw_already_captured: true,
+                            session_id: session_id.clone(),
                             data,
-                            encoding: control.encoding.clone(),
+                            encoding: control.session_encodings[&session_id].clone(),
                             scrollback_limit: control.scrollback_limit,
                         });
                     } else {
@@ -680,6 +717,9 @@ fn run_session_event_bridge(
                     }
                 }
                 SessionEvent::OutputDropped { session_id, bytes } => {
+                    if let Some(writer) = recording_writer.as_ref() {
+                        writer.report_output_gap(&session_id, bytes);
+                    }
                     flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
                     sideband_probe_sessions.remove(&session_id);
                     state.route_session_to_ui(&session_id);
@@ -755,7 +795,8 @@ fn bridge_output_can_go_direct(
     session_id: &str,
     needs_ui_probe: bool,
 ) -> bool {
-    !control.ui_routed_sessions.contains(session_id)
+    control.session_encodings.contains_key(session_id)
+        && !control.ui_routed_sessions.contains(session_id)
         && frame_pipeline_queued_output_bytes < SESSION_EVENT_BRIDGE_DIRECT_OUTPUT_BACKPRESSURE
         && !needs_ui_probe
 }
@@ -766,7 +807,8 @@ fn bridge_output_is_backpressured(
     session_id: &str,
     needs_ui_probe: bool,
 ) -> bool {
-    !control.ui_routed_sessions.contains(session_id)
+    control.session_encodings.contains_key(session_id)
+        && !control.ui_routed_sessions.contains(session_id)
         && frame_pipeline_queued_output_bytes >= SESSION_EVENT_BRIDGE_DIRECT_OUTPUT_BACKPRESSURE
         && !needs_ui_probe
 }
@@ -839,7 +881,12 @@ mod tests {
     fn bridge_direct_policy_rejects_sideband_triggers() {
         let control = SessionEventBridgeControlSnapshot {
             ui_routed_sessions: HashSet::new(),
-            encoding: "UTF-8".to_string(),
+            session_encodings: [
+                ("s1".to_string(), "UTF-8".to_string()),
+                ("s2".to_string(), "UTF-8".to_string()),
+            ]
+            .into_iter()
+            .collect(),
             scrollback_limit: 1000,
         };
         assert!(bridge_output_can_go_direct(&control, 0, "s1", false));
@@ -854,7 +901,12 @@ mod tests {
         routed.insert("s1".to_string());
         let control = SessionEventBridgeControlSnapshot {
             ui_routed_sessions: routed,
-            encoding: "UTF-8".to_string(),
+            session_encodings: [
+                ("s1".to_string(), "UTF-8".to_string()),
+                ("s2".to_string(), "UTF-8".to_string()),
+            ]
+            .into_iter()
+            .collect(),
             scrollback_limit: 1000,
         };
         assert!(!bridge_output_can_go_direct(&control, 0, "s1", false));
@@ -865,7 +917,12 @@ mod tests {
     fn bridge_direct_policy_yields_under_frame_backpressure() {
         let control = SessionEventBridgeControlSnapshot {
             ui_routed_sessions: HashSet::new(),
-            encoding: "UTF-8".to_string(),
+            session_encodings: [
+                ("s1".to_string(), "UTF-8".to_string()),
+                ("s2".to_string(), "UTF-8".to_string()),
+            ]
+            .into_iter()
+            .collect(),
             scrollback_limit: 1000,
         };
 

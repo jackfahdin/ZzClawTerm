@@ -49,6 +49,38 @@ impl ZzClawTermApp {
         }
     }
 
+    pub(in crate::features) fn observe_recording_prompt_output(
+        &mut self,
+        session_id: &str,
+        text: &str,
+    ) {
+        self.recording.observe_prompt(session_id, text, |prompt| {
+            matches!(
+                credential_autofill_detect_prompt_kind(prompt),
+                Some(CredentialPromptKind::Password)
+            )
+        });
+    }
+
+    pub(in crate::features) fn recording_input_is_sensitive(&self, session_id: &str) -> bool {
+        // Inspect this session's prompt; active-session suggestion state cannot classify peers.
+        if self.recording.has_observed_prompt(session_id) {
+            return self.recording.input_is_sensitive(session_id);
+        }
+        self.terminal
+            .view
+            .views
+            .get(session_id)
+            .and_then(|view| view.frame_snapshot.as_deref())
+            .and_then(credential_autofill_prompt_text_from_snapshot)
+            .is_some_and(|prompt| {
+                matches!(
+                    credential_autofill_detect_prompt_kind(&prompt),
+                    Some(CredentialPromptKind::Password)
+                )
+            })
+    }
+
     pub(in crate::features) fn is_credential_prompt_input_mode(&self) -> bool {
         let now = Self::now_unix_ms();
         self.terminal.assist.credential_prompt_input_mode(now)
@@ -243,7 +275,7 @@ impl ZzClawTermApp {
             if self.terminal.assist.command_suggestions.take().is_some() {
                 root_overlay_dirty = true;
             }
-            self.terminal.assist.command_input_tracker = TerminalInputState::new();
+            *self.terminal.editing.input_mut() = TerminalInputState::new();
         }
 
         if self.terminal.assist.credential_suggestions.is_some()
@@ -1222,11 +1254,14 @@ fn credential_autofill_detect_prompt_kind(prompt: &str) -> Option<CredentialProm
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use gpui::{AppContext as _, TestAppContext};
     use zzclawterm_core::{
         AiExecutionProfile, ConnectionAuth, ConnectionPasswordSource, ConnectionType,
         CredentialPromptKind, SavedConnection,
     };
+    use zzclawterm_core::{SavedPassword, SecretString};
+    use zzclawterm_store::ConnectionStore;
     use zzclawterm_transport::SshSessionConfig;
 
     use super::{
@@ -1240,7 +1275,6 @@ mod tests {
         credential_autofill_snapshot_detection_can_run, credential_autofill_visible_tail,
         resolve_connection_password_from_store,
     };
-    use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{ConnectionPasswordTarget, CredentialAutofillTarget, SessionLaunchConfig};
     use crate::test_support::TestConfigDir;
@@ -1488,7 +1522,6 @@ mod tests {
 
     #[test]
     fn connection_has_resolvable_password_reads_catalog_shape() {
-        use zzclawterm_core::{ConnectionAuth, SecretString};
         // Catalog (unhydrated): ciphertext inline with has_password = true.
         let catalog_inline = ConnectionAuth {
             mode: "password".into(),
@@ -1570,7 +1603,6 @@ mod tests {
     /// carriage return.
     #[test]
     fn connection_password_resolves_from_store_to_the_terminal_payload() {
-        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
         use zzclawterm_store::ConnectionStore;
 
         let root = crate::test_support::TestConfigDir::new("zzclawterm-connection-password-fill");
@@ -1620,6 +1652,7 @@ mod tests {
 
         store
             .save_password(SavedPassword {
+                sort_order: 0,
                 id: "account-1".into(),
                 name: "Login account".into(),
                 username: "root".into(),
@@ -1632,7 +1665,6 @@ mod tests {
     #[test]
     fn account_source_uses_account_password_despite_stale_connection_record() {
         use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
 
         let root = TestConfigDir::new("zzclawterm-account-source-stale-connection");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
@@ -1652,9 +1684,6 @@ mod tests {
 
     #[test]
     fn connection_source_never_uses_saved_account_password() {
-        use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
-
         let root = TestConfigDir::new("zzclawterm-connection-source-with-account");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1693,9 +1722,6 @@ mod tests {
 
     #[test]
     fn non_password_auth_never_resolves_connection_password() {
-        use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
-
         let root = TestConfigDir::new("zzclawterm-non-password-auth");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let auth = ConnectionAuth {
@@ -1719,9 +1745,6 @@ mod tests {
 
     #[test]
     fn legacy_password_source_follows_hydrated_auth_rule() {
-        use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
-
         let root = TestConfigDir::new("zzclawterm-legacy-password-source");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1754,9 +1777,6 @@ mod tests {
 
     #[test]
     fn account_source_does_not_fall_back_to_stale_connection_password() {
-        use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
-
         let root = TestConfigDir::new("zzclawterm-account-source-unavailable");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let mut auth = account_password_auth();
@@ -1783,9 +1803,6 @@ mod tests {
     #[test]
     fn account_source_decryption_error_does_not_use_stale_connection_password() {
         use redb::{Database, TableDefinition};
-        use zzclawterm_core::SecretString;
-        use zzclawterm_core::models::credentials::SavedPassword;
-        use zzclawterm_store::ConnectionStore;
 
         let root = TestConfigDir::new("zzclawterm-account-source-corrupt");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
@@ -1804,6 +1821,7 @@ mod tests {
             .open_table(TableDefinition::<&str, &[u8]>::new("credentials"))
             .expect("credentials table");
         let corrupt = SavedPassword {
+            sort_order: 0,
             id: "account-1".into(),
             name: "Login account".into(),
             username: "root".into(),
@@ -1829,8 +1847,6 @@ mod tests {
     #[test]
     fn account_source_locked_vault_does_not_use_stale_connection_password() {
         use redb::{Database, TableDefinition};
-        use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
 
         let root = TestConfigDir::new("zzclawterm-account-source-locked");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");

@@ -212,7 +212,6 @@ impl SettingsPanel {
         let active_cloud_provider = configured_cloud_sync_provider(self.cloud_sync.settings());
         let form_enabled = self.cloud_sync_form_enabled();
         let auto_sync_enabled = form_enabled && self.cloud_sync.settings().enabled;
-        let _debounce_enabled = auto_sync_enabled && self.cloud_sync.settings().auto_push_on_change;
         let validation_key = cloud_sync_validation_key(&self.cloud_sync.pending_settings());
         let validation_message = (form_enabled && self.cloud_sync.settings().enabled)
             .then(|| validation_key.map(|key| t!(key)))
@@ -227,8 +226,6 @@ impl SettingsPanel {
         };
         let prompt_busy = self.settings.snapshot_password_prompt_active()
             || self.settings.config_path_prompt_active();
-        let local_backup_status = self.settings.local_backup_status.clone();
-        let local_backup_ready = self.settings.local_backup_ready;
         let actions_busy = prompt_busy || self.cloud_sync.job_running();
         let can_run_actions = action_block_message.is_none() && !actions_busy;
         let can_run_enabled_actions = can_run_actions && self.cloud_sync.settings().enabled;
@@ -383,62 +380,6 @@ impl SettingsPanel {
             .gap_5()
             .child(settings_form_section(
                 palette,
-                Some(t!("settings.localBackup")),
-                Some(t!("settings.localBackupDesc")),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.exportConfig"),
-                        Some(SharedString::from(t!("settings.exportConfigDesc"))),
-                        cloud_sync_action_button(
-                            palette,
-                            "settings-local-backup-export",
-                            t!("settings.exportConfig"),
-                            !actions_busy,
-                            cx.listener(|this, _, window, cx| {
-                                this.prompt_encrypted_portable_snapshot_export(window, cx);
-                            }),
-                        ),
-                    ))
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.importConfig"),
-                        Some(SharedString::from(t!("settings.importConfigDesc"))),
-                        cloud_sync_action_button(
-                            palette,
-                            "settings-local-backup-import",
-                            t!("settings.importConfig"),
-                            !actions_busy,
-                            cx.listener(|this, _, window, cx| {
-                                this.prompt_encrypted_portable_snapshot_import(window, cx);
-                            }),
-                        ),
-                    ))
-                    .when(!local_backup_status.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .min_w_0()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(if local_backup_ready {
-                                    palette.success
-                                } else {
-                                    palette.border
-                                }))
-                                .bg(rgb(palette.surface_elevated))
-                                .px_3()
-                                .py_2()
-                                .text_size(px(12.))
-                                .text_color(rgb(palette.text_muted))
-                                .child(local_backup_status.clone()),
-                        )
-                    }),
-            ))
-            .child(settings_form_section(
-                palette,
                 Some(t!("settings.syncProviderConfig")),
                 Some(t!("settings.syncProviderConfigDesc")),
                 div()
@@ -544,20 +485,6 @@ impl SettingsPanel {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .when_some(action_block_message, |this, message| {
-                        this.child(
-                            div()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(rgb(palette.warning))
-                                .bg(rgba((palette.warning << 8) | 0x14))
-                                .px_3()
-                                .py_2()
-                                .text_size(px(12.))
-                                .text_color(rgb(palette.text_muted))
-                                .child(message),
-                        )
-                    })
                     .child(settings_form_row(
                         palette,
                         t!("settings.autoCheckOnStartup"),
@@ -615,6 +542,20 @@ impl SettingsPanel {
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .when_some(action_block_message, |this, message| {
+                        this.child(
+                            div()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(palette.warning))
+                                .bg(rgba((palette.warning << 8) | 0x14))
+                                .px_3()
+                                .py_2()
+                                .text_size(px(12.))
+                                .text_color(rgb(palette.text_muted))
+                                .child(message),
+                        )
+                    })
                     .child(
                         div()
                             .grid()
@@ -684,6 +625,23 @@ impl SettingsPanel {
                                     this.prompt_provider_cloud_sync_push(window, cx);
                                 }),
                             ))
+                            .when(
+                                zzclawterm_core::cloud_sync::needs_gist_capacity_recovery(
+                                    &self.cloud_sync.settings().provider,
+                                    self.cloud_sync.status(),
+                                ),
+                                |row| {
+                                    row.child(cloud_sync_action_button(
+                                        palette,
+                                        "settings-provider-capacity-retry",
+                                        t!("settings.syncCapacityRetry"),
+                                        can_run_enabled_actions,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.prompt_provider_cloud_sync_push(window, cx)
+                                        }),
+                                    ))
+                                },
+                            )
                             .child(cloud_sync_action_button(
                                 palette,
                                 "settings-provider-cloud-sync-pull",

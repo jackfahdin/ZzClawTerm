@@ -4,7 +4,9 @@ pub mod ai;
 pub mod app_identity;
 pub mod assets;
 pub mod capabilities;
+pub mod character_encoding;
 pub mod cloud_sync;
+pub mod command_draft;
 pub mod command_search;
 pub mod command_suggestion_suppression;
 pub mod connection_route;
@@ -12,10 +14,12 @@ pub mod credential_autofill;
 pub mod credentials_crypto;
 pub mod diagnostics;
 pub mod document_edit;
+pub mod hex_document;
 pub mod keyword_highlight_presets;
 pub mod models;
 pub mod natural_order;
 pub mod note_export;
+pub mod plugins;
 pub mod portable_snapshot;
 pub mod remote_preview;
 pub mod runtime;
@@ -25,6 +29,7 @@ pub mod ssh_keys;
 pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod vnc_known_hosts;
 pub mod terminal_file_drop {
     pub use super::terminal::file_drop::*;
 }
@@ -144,8 +149,8 @@ pub use command_search::{
     fuzzy_search_items, manual_empty_command_suggestions, search_command_sources,
 };
 pub use command_suggestion_suppression::{
-    command_starts_suggestion_suppressing_program, is_pager_search_or_command_input,
-    is_pager_single_key_input,
+    command_starts_interactive_input, command_starts_suggestion_suppressing_program,
+    is_pager_search_or_command_input, is_pager_single_key_input,
 };
 pub use credential_autofill::{
     CredentialPromptKind, compile_prompt_regex, credential_matches_prompt,

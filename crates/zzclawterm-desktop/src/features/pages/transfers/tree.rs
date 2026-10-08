@@ -31,7 +31,7 @@ pub(super) fn transfer_tree_view(
         .track_focus(&snapshot.browser.tree_focus)
         .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
             panel.with_app(cx, |app, cx| {
-                app.handle_transfer_tree_key_down(event, window, cx)
+                app.handle_transfer_browser_key_down(event, window, cx)
             });
         }))
         .child(
@@ -63,7 +63,7 @@ pub(super) fn transfer_tree_view(
                     uniform_list(
                         "transfer-tree-rows",
                         count,
-                        cx.processor(|panel, range: std::ops::Range<usize>, _, cx| {
+                        cx.processor(|panel, range: std::ops::Range<usize>, window, cx| {
                             let Some(snapshot) = panel.snapshot() else {
                                 return Vec::new();
                             };
@@ -108,11 +108,18 @@ pub(super) fn transfer_tree_view(
                                             .compact()
                                             .into_any_element()
                                         });
+                                    let drag_app = panel.app_handle();
+                                    let drag_name = row.label.clone();
+                                    let drag_entry = row.entry.clone().filter(|_| !is_renaming && crate::features::transfers::drag_export::transfer_drag_supported(snapshot.browser.local_backend, window.supports_virtual_file_drag(), window.supports_file_promise_drag())).filter(|entry| matches!(entry.file_type, SftpFileType::File | SftpFileType::Directory));
                                     div()
                                         .id(SharedString::from(format!(
                                             "transfer-tree-row:{}",
                                             row.key
                                         )))
+                                        .debug_selector({
+                                            let key = row.key.clone();
+                            move || format!("transfer-tree-row:{key}")
+                                        })
                                         .h(px(28.))
                                         .w_full()
                                         .min_w_0()
@@ -137,6 +144,10 @@ pub(super) fn transfer_tree_view(
                                         .cursor_pointer()
                                         .when(!is_selected, |this| {
                                             this.hover(|this| this.bg(rgb(palette.hover)))
+                                        })
+                                        .when_some(drag_entry, |this, entry| {
+                                            let drag = crate::features::transfers::drag_export::DraggedSelection::new_tree(entry);
+                                            super::drag_preview::with_transfer_drag(this, drag, drag_app, drag_name, palette)
                                         })
                                         .on_click(cx.listener(
                                             move |panel, event: &gpui::ClickEvent, window, cx| {
@@ -357,7 +368,8 @@ fn transfer_tree_hover_details(entry: &SftpFileEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_transport::{SftpFileEntry, SftpFileType};
+    use zzclawterm_transport::SftpFileEntry;
+    use zzclawterm_transport::SftpFileType;
 
     use super::transfer_tree_hover_details;
 

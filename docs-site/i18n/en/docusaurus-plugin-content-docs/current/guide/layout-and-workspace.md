@@ -1,6 +1,6 @@
 # Layout & Workspace
 
-ZzClawTerm is built around a composable workspace rather than a single terminal tab. You can open multiple sessions, split panes inside a tab, and keep common tools docked around the sides of the app.
+ZzClawTerm provides a workspace with multiple sessions and independent tab groups, with common tools docked around the sides of the app.
 
 ## Workspace areas
 
@@ -15,7 +15,7 @@ These areas are not isolated pages. They cooperate around the currently active s
 
 ## Tabs
 
-Each tab can hold a session, and each tab can also be split into multiple panes.
+Each tab holds one session. Each split area has its own tab bar and selected tab.
 
 Common tab actions include:
 
@@ -47,10 +47,10 @@ The palette only searches sessions and connections. It does **not** contain app-
 
 Right-click a tab to split the current session into:
 
-- **Horizontal Split**
-- **Vertical Split**
+- **Split Below** duplicates the current session into a new group below the current area.
+- **Split Right** duplicates the current session into a new group to its right.
 
-The panes still belong to the same tab, but each holds its own independent session. You can also drag a tab into a target docking area to move a session into a horizontal or vertical split. Typical uses:
+The new group appears after the connection succeeds. A failed connection stays as a failed tab in the source area, while other groups remain usable. Drop a tab in an area's center to join its group, on an edge to create a split, or in its tab bar to reorder it. Moving the last tab out collapses an empty group. Typical uses:
 
 - Watching logs in one pane and running commands in another
 - Comparing two hosts side by side
@@ -59,20 +59,15 @@ The panes still belong to the same tab, but each holds its own independent sessi
 
 ## Sessions and workspace structure
 
-There are two concepts that are easy to mix up:
+Each group displays its selected session. Clicking a terminal or tab chooses the input target. `Ctrl+Tab`, `Ctrl+Shift+Tab`, and numbered tab shortcuts switch tabs within the current group. Previous/next group commands can be assigned shortcuts in settings.
 
-1. **Logical tabs / pane tree** — how a tab is split internally
-2. **Runtime window layout** — where tabs are currently attached in the live workspace
+**Smart Split** arranges existing sessions. Auto mode chooses split directions using the center area's actual dimensions; when space is limited, a group keeps multiple tabs. **Unsplit** merges every group in layout and tab order, preserving connections and the active session.
 
-For day-to-day usage, the simple mental model is:
-
-- Tabs organize tasks
-- Splits let you observe things side by side
-- The active pane decides where input goes
+Drag a divider to resize groups, or double-click it to restore equal sizes. Shrinking the window preserves the layout. Focus mode temporarily displays only the current session; leaving it restores the layout.
 
 ## Layout restoration and workspace padding
 
-ZzClawTerm saves the terminal window layout and tries to restore tabs, splits, and active positions when the workspace is reopened. This helps if you maintain the same set of hosts, logs, and local build tasks over time.
+ZzClawTerm saves the tab group layout and restores tabs, splits, and active positions when the workspace is reopened. Older splits inside a tab convert to independent tab groups, preserving their directions, proportions, names, colors, and locks.
 
 If you want clearer visual separation between terminal areas, adjust **Workspace Padding** in terminal-related settings. This only changes the workspace spacing; it does not change remote or local shell behavior.
 

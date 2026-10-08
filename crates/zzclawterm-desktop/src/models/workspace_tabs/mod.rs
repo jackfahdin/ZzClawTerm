@@ -1,4 +1,4 @@
-use super::{SmartSplitMode, WorkspacePaneNode, WorkspaceSplitDirection, uuid_v4_like};
+use super::{SmartSplitMode, WorkspacePaneNode, WorkspaceSplitDirection};
 
 /// In-window multi-leaf tab groups (Tauri `TerminalWindowNode` / TabWindowsWorkspace).
 /// Distinct from per-tab pane splits (`WorkspacePaneNode`).
@@ -19,6 +19,7 @@ pub(crate) enum TerminalWindowNode {
 }
 
 mod docking;
+mod groups;
 mod mutation;
 mod persistence;
 mod tree;

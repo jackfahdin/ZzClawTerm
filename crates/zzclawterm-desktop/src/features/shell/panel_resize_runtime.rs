@@ -11,7 +11,6 @@ use crate::features::{
 use crate::models::{BottomPanelMode, PanelResizeSide};
 
 const QUICK_CMD_HEIGHT_MIN: f32 = 36.;
-const SERIAL_SEND_HEIGHT_MIN: f32 = 60.;
 const BOTTOM_PANEL_HEIGHT_MAX: f32 = 520.;
 impl ZzClawTermApp {
     pub(in crate::features) fn update_resize_handle_hover(
@@ -132,13 +131,7 @@ impl ZzClawTermApp {
                 .clamp(QUICK_CMD_HEIGHT_MIN, BOTTOM_PANEL_HEIGHT_MAX)
                 as u32,
             quick_command_visible: self.shell.bottom_panel.mode == BottomPanelMode::QuickCommands,
-            serial_send_height: self
-                .shell
-                .bottom_panel
-                .command_send_height
-                .round()
-                .clamp(SERIAL_SEND_HEIGHT_MIN, BOTTOM_PANEL_HEIGHT_MAX)
-                as u32,
+            serial_send_height: self.shell.command_send_height().round() as u32,
             serial_send_visible: self.shell.bottom_panel.mode == BottomPanelMode::CommandSend,
             active_left_panel: self
                 .shell

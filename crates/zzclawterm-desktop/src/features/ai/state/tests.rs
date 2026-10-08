@@ -1,6 +1,9 @@
+use crate::features::ai::presentation::{AiAgentStepKind, AiCommandPhase};
+use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+use zzclawterm_core::ai::harness::{AgentRunStatus, AgentToolRegistry, AgentToolResult};
 
 use gpui::{TestAppContext, px};
 use zzclawterm_core::{
@@ -16,12 +19,193 @@ use crate::models::{AiMessageMenuState, AiPreparedRequest};
 
 use super::{AiFeatureFocus, AiFeatureInit, AiFeatureState, AiSettingsMutation};
 
+#[test]
+fn history_load_keeps_the_current_chat_on_failure_or_after_a_new_request() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("original".into(), AiMode::Ask, None);
+    state.apply_chat_delta(launch.job_id, "answer", None);
+    state.cancel_chat_and_agent();
+    let source = state.chat_session_id().to_string();
+    let messages = state.chat_messages().to_vec();
+    let job = state.begin_history_operation("load").unwrap();
+    assert!(state.history_load_is_current(job, "unbound:", &source));
+    state.finish_history_message_load(
+        job,
+        &source,
+        "other".into(),
+        Err("fixture failure".into()),
+        "loaded".into(),
+    );
+    assert_eq!(state.chat_session_id(), source);
+    assert_eq!(state.chat_messages(), messages);
+    assert_eq!(state.history_error(), Some("fixture failure"));
+
+    let job = state.begin_history_operation("load").unwrap();
+    let (epoch, captured) = state.visible_scope_guard();
+    state.begin_chat_request("new question".into(), AiMode::Ask, None);
+    assert!(!state.history_load_is_current(job, "unbound:", &source));
+    assert_ne!(epoch.load(Ordering::Acquire), captured);
+    let current = state.chat_messages().to_vec();
+    state.finish_history_message_load(
+        job,
+        &source,
+        "other".into(),
+        Ok(Vec::new()),
+        "loaded".into(),
+    );
+    assert_eq!(state.chat_session_id(), source);
+    assert_eq!(state.chat_messages(), current);
+}
+
+#[test]
+fn switching_terminals_or_starting_a_new_chat_invalidates_the_history_binding_guard() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_visible_scope("terminal:a");
+    let source = state.chat_session_id().to_string();
+    let job = state.begin_history_operation("load").unwrap();
+    let (epoch, captured) = state.visible_scope_guard();
+    state.switch_visible_scope("terminal:b");
+    assert!(!state.history_load_is_current(job, "terminal:a", &source));
+    state.switch_visible_scope("terminal:a");
+    assert_ne!(epoch.load(Ordering::Acquire), captured);
+    state.start_new_chat();
+    assert!(!state.history_load_is_current(job, "terminal:a", &source));
+    let current = state.chat_session_id().to_string();
+    state.finish_history_message_load(
+        job,
+        &source,
+        "other".into(),
+        Ok(Vec::new()),
+        "loaded".into(),
+    );
+    assert_eq!(state.chat_session_id(), current);
+}
+
+#[test]
+fn stream_refreshes_coalesce_and_immediate_flush_invalidates_old_timers() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let generation = state.request_stream_refresh().unwrap();
+    assert!(state.request_stream_refresh().is_none());
+    state.clear_panel_refresh_request();
+    assert!(!state.take_stream_refresh(generation));
+    let next = state.request_stream_refresh().unwrap();
+    assert!(state.take_stream_refresh(next));
+    assert!(!state.take_stream_refresh(next));
+}
+
+#[test]
+fn native_questions_keep_the_owner_run_across_scope_switches_and_reject_stale_answers() {
+    use serde_json::json;
+    use zzclawterm_core::ai::harness::{AgentRunStatus, AgentToolRegistry, AgentToolResult};
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_scope("terminal:a");
+    let request = serde_json::from_value(
+        json!({"mode":"agent","action":"generate_command","userInput":"diagnose",
+        "targets":[{"terminalSessionId":"a","label":"A","sessionType":"local"}]}),
+    )
+    .unwrap();
+    state.begin_native_run(request);
+    let call = AgentToolRegistry::parse(&[],r#"{"action":"request_user_input","arguments":{"questions":[{"id":"choice","question":"Which service?","options":["web","db"]}]}}"#).unwrap();
+    let call_id = call.id.clone();
+    let questions = serde_json::from_value(call.arguments["questions"].clone()).unwrap();
+    let (run_id, _, _) = state.begin_native_call(call).unwrap();
+    state.wait_native_user(questions).unwrap();
+    assert!(state.native_answers(&run_id, &call_id).is_none());
+    state.switch_scope("terminal:b");
+    assert!(!state.set_native_answer(&run_id, &call_id, "choice", "web".into()));
+    state.switch_scope("terminal:a");
+    assert_eq!(
+        state.native_run_view().unwrap().status,
+        AgentRunStatus::WaitingForUser
+    );
+    assert!(!state.set_native_answer(&run_id, "stale-call", "choice", "web".into()));
+    assert!(state.set_native_answer(&run_id, &call_id, "choice", "web".into()));
+    let value = state.native_answers(&run_id, &call_id).unwrap();
+    let result = AgentToolResult {
+        call_id: call_id.clone(),
+        value,
+        is_error: false,
+    };
+    assert!(state.complete_native_call(&run_id, result.clone()));
+    assert!(!state.complete_native_call(&run_id, result));
+    assert!(!state.native_question_matches(&run_id, &call_id));
+    assert_eq!(state.native_request_context().unwrap().calls.len(), 1);
+    let read = AgentToolRegistry::parse(
+        &[],
+        r#"{"action":"session_get","arguments":{"sessionId":"a"}}"#,
+    )
+    .unwrap();
+    let read_id = read.id.clone();
+    state.begin_native_call(read).unwrap();
+    state.cancel_chat_and_agent();
+    assert!(!state.complete_native_call(
+        &run_id,
+        AgentToolResult {
+            call_id: read_id,
+            value: json!({}),
+            is_error: false
+        }
+    ));
+    assert_eq!(
+        state.native_run_view().unwrap().status,
+        AgentRunStatus::Cancelled
+    );
+}
+
+#[test]
+fn native_provider_failure_preserves_the_previous_completed_tool_step() {
+    use crate::features::ai::presentation::AiAgentStepKind;
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.begin_native_run(
+        serde_json::from_value(
+            json!({"action":"generate_command","mode":"agent","userInput":"inspect"}),
+        )
+        .unwrap(),
+    );
+    let call =
+        AgentToolRegistry::parse(&[], r#"{"action":"get_environment","arguments":{}}"#).unwrap();
+    let call_id = call.id.clone();
+    let (run_id, _, _) = state.begin_native_call(call).unwrap();
+    state.upsert_agent_step(
+        0,
+        AiAgentStepStatus::Completed,
+        AiAgentStepKind::ToolProgress,
+        "Tool result",
+        "read completed",
+    );
+    assert!(state.complete_native_call(
+        &run_id,
+        AgentToolResult {
+            call_id,
+            value: json!({}),
+            is_error: false
+        }
+    ));
+    let (launch, _) = state.begin_native_continuation().unwrap();
+    state
+        .finish_chat_job(
+            launch.job_id,
+            launch.session_id,
+            Err("fixture provider unavailable".into()),
+        )
+        .unwrap();
+    assert_eq!(state.agent_steps()[0].status, AiAgentStepStatus::Completed);
+    assert_eq!(state.agent_steps()[1].status, AiAgentStepStatus::Failed);
+    assert_eq!(
+        state.native_run_view().unwrap().status,
+        AgentRunStatus::Failed
+    );
+}
+
 fn state(cx: &TestAppContext) -> AiFeatureState {
     let focus = cx.update(|cx| AiFeatureFocus {
         chat: cx.focus_handle(),
-        action: cx.focus_handle(),
         manual_model: cx.focus_handle(),
-        credential: cx.focus_handle(),
     });
     AiFeatureState::new(
         AiFeatureInit {
@@ -154,6 +338,7 @@ fn model_catalog_mutations_keep_default_model_valid() {
     let fallback = "openai:model-b".to_string();
     state.settings.config.models = vec![
         AiModelConfigItem {
+            supported_reasoning_efforts: None,
             backend: Default::default(),
             id: first.clone(),
             name: "model-a".to_string(),
@@ -164,6 +349,7 @@ fn model_catalog_mutations_keep_default_model_valid() {
             last_seen_at: None,
         },
         AiModelConfigItem {
+            supported_reasoning_efforts: None,
             backend: Default::default(),
             id: fallback.clone(),
             name: "model-b".to_string(),
@@ -188,6 +374,8 @@ fn model_catalog_mutations_keep_default_model_valid() {
         .config
         .provider_credentials
         .push(AiProviderCredential {
+            icon_data_url: None,
+            api_protocol: None,
             api_format: Default::default(),
             id: "custom".to_string(),
             name: "Custom".to_string(),
@@ -242,6 +430,7 @@ fn credential_catalog_changes_preserve_an_absent_default_model() {
     let mut state = state(&cx);
     state.settings.config.default_model_id = None;
     state.settings.config.models.push(AiModelConfigItem {
+        supported_reasoning_efforts: None,
         backend: Default::default(),
         id: "openai:model-a".to_string(),
         name: "model-a".to_string(),
@@ -263,6 +452,8 @@ fn credential_catalog_changes_preserve_an_absent_default_model() {
         .config
         .provider_credentials
         .push(AiProviderCredential {
+            icon_data_url: None,
+            api_protocol: None,
             api_format: Default::default(),
             id: "custom".to_string(),
             name: "Custom".to_string(),
@@ -558,6 +749,7 @@ fn chat_start_stream_and_finish_are_reduced_by_the_owner() {
             launch.job_id,
             launch.session_id,
             Ok(AiChatJobOutput {
+                native_call: None,
                 mode: AiMode::Agent,
                 text: "done".to_string(),
                 reasoning: Some("final reason".to_string()),
@@ -648,6 +840,7 @@ fn awaiting_agent_approval_remains_an_active_cancellable_run() {
                 launch.job_id,
                 launch.session_id.clone(),
                 Ok(AiChatJobOutput {
+                    native_call: None,
                     mode: AiMode::Agent,
                     text: "Run pwd".to_string(),
                     reasoning: None,
@@ -724,6 +917,7 @@ fn parallel_terminal_chats_isolate_cancel_and_late_results() {
                 second.job_id,
                 second.session_id,
                 Ok(AiChatJobOutput {
+                    native_call: None,
                     mode: AiMode::Ask,
                     text: "finished B".to_string(),
                     reasoning: None,
@@ -741,6 +935,9 @@ fn parallel_terminal_chats_isolate_cancel_and_late_results() {
 fn terminal_scopes_keep_run_mode_and_agent_protocol_independent() {
     let cx = TestAppContext::single();
     let mut state = state(&cx);
+    state.settings.config.codex.enabled = true;
+    // Existing terminal drafts retain their mode; fresh drafts inherit the saved default.
+    state.switch_scope("terminal:b");
     state.switch_scope("terminal:a");
     state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm);
     let first = state.begin_chat_request("inspect".to_string(), AiMode::Agent, None);
@@ -771,6 +968,7 @@ fn new_chat_preserves_idle_agent_steps_for_history_reload() {
             job_id,
             session_id.clone(),
             Ok(AiChatJobOutput {
+                native_call: None,
                 mode: AiMode::Agent,
                 text: "done".to_string(),
                 reasoning: None,
@@ -829,6 +1027,7 @@ fn background_completion_distinguishes_foreign_and_matched_stale_jobs() {
     let launch = state.begin_chat_job();
     let now = Instant::now();
     let loop_state = AiAgentLoopState {
+        command_card_id: None,
         available_targets: Vec::new(),
         default_target_session_id: None,
         ai_session_id: "session-a".to_string(),
@@ -871,6 +1070,7 @@ fn agent_step_limit_and_observation_poll_stay_on_the_owner() {
 
     let now = Instant::now();
     state.set_agent_loop(AiAgentLoopState {
+        command_card_id: None,
         available_targets: Vec::new(),
         default_target_session_id: None,
         ai_session_id: "session-a".to_string(),
@@ -955,4 +1155,779 @@ fn panel_status_and_error_banner_change_only_through_owner_operations() {
     state.clear_detected_error();
     assert!(state.panel_detected_error().is_none());
     assert_eq!(state.panel_status(), "terminal error detected");
+}
+
+#[test]
+fn provider_presets_keep_accounts_models_and_secret_drafts_isolated() {
+    use zzclawterm_core::ai::provider_settings::model_belongs_to_provider;
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.settings.config.provider_credentials.clear();
+    state.settings.config.models.clear();
+    let first = state.add_settings_provider_preset(AiProviderKind::Openai);
+    let second = state.add_settings_provider_preset(AiProviderKind::Openai);
+    assert_ne!(first, second);
+    let credentials = &state.settings.config.provider_credentials;
+    assert_ne!(credentials[0].name, credentials[1].name);
+    assert!(
+        state
+            .settings
+            .config
+            .models
+            .iter()
+            .filter(|model| model_belongs_to_provider(model, &credentials[0]))
+            .all(|model| !model_belongs_to_provider(model, &credentials[1]))
+    );
+    state.apply_settings_credential_input(&format!("{first}.api-key"), "fixture-first".into());
+    state.apply_settings_credential_input(&format!("{second}.api-key"), "fixture-second".into());
+    let pending = state.pending_settings();
+    assert_eq!(
+        pending
+            .provider_credentials
+            .iter()
+            .find(|item| item.id == first)
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("fixture-first")
+    );
+    assert_eq!(
+        pending
+            .provider_credentials
+            .iter()
+            .find(|item| item.id == second)
+            .unwrap()
+            .api_key
+            .as_deref(),
+        Some("fixture-second")
+    );
+    state.remove_settings_credential(&first);
+    assert!(
+        !state
+            .settings
+            .config
+            .models
+            .iter()
+            .any(|model| model.credential_id.as_deref() == Some(&first))
+    );
+    assert!(
+        state
+            .settings
+            .config
+            .models
+            .iter()
+            .any(|model| model.credential_id.as_deref() == Some(&second))
+    );
+}
+
+#[test]
+fn manual_model_add_updates_visible_rows_and_preserves_a_valid_default() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.settings.config.provider_credentials.clear();
+    state.settings.config.models.clear();
+    let id = state.add_settings_provider_preset(AiProviderKind::OpenaiCompatible);
+    state.add_settings_manual_model(&id, "first");
+    let default = state.settings.config.default_model_id.clone();
+    state.add_settings_manual_model(&id, "second");
+    assert_eq!(state.provider_view().model_order.len(), 2);
+    assert_eq!(state.settings.config.default_model_id, default);
+    let second = state
+        .settings
+        .config
+        .models
+        .iter()
+        .find(|model| model.name == "second")
+        .unwrap()
+        .id
+        .clone();
+    let order = state.provider_view().model_order.clone();
+    state.toggle_settings_model_enabled(&second);
+    state.add_settings_manual_model(&id, "second");
+    assert_eq!(state.provider_view().model_order, order);
+    assert_eq!(state.settings.config.default_model_id, default);
+    assert_eq!(
+        state.add_settings_manual_model(&id, "second"),
+        AiSettingsMutation::Notify
+    );
+}
+
+#[test]
+fn provider_model_rows_keep_order_when_toggled_and_deleted_default_falls_back() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.settings.config.provider_credentials.clear();
+    state.settings.config.models.clear();
+    let id = state.add_settings_provider_preset(AiProviderKind::Openai);
+    state.add_settings_manual_model(&id, "first");
+    state.add_settings_manual_model(&id, "second");
+    state.select_settings_provider(Some(id));
+    let before = state.provider_view().model_order.clone();
+    let first = before[0].clone();
+    let second = before[1].clone();
+    state.toggle_settings_model_enabled(&first);
+    state.refresh_provider_model_order();
+    assert_eq!(state.provider_view().model_order, before);
+    state.toggle_settings_model_enabled(&first);
+    state.set_settings_default_model(&first);
+    state.remove_settings_model(&first);
+    assert_eq!(
+        state.settings.config.default_model_id.as_deref(),
+        Some(second.as_str())
+    );
+}
+
+#[test]
+fn provider_changes_and_cancel_invalidate_background_results_and_secret_drafts() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let baseline = state.settings_draft_snapshot();
+    assert!(state.settings_draft_matches(&baseline.0, &baseline.1, &baseline.2, &baseline.3));
+    state.add_settings_provider_preset(AiProviderKind::Openai);
+    state.prepare_provider_settings();
+    let id = state.provider_view().selected_id.clone().unwrap();
+    let generation = state.provider_view().generation;
+    state.apply_settings_credential_input(
+        &format!("{id}.base-url"),
+        "http://example.invalid/".into(),
+    );
+    assert_ne!(state.provider_view().generation, generation);
+    let generation = state.provider_view().generation;
+    state.apply_settings_credential_input(&format!("{id}.api-key"), "fixture-draft".into());
+    assert_ne!(state.provider_view().generation, generation);
+    assert!(!state.settings_draft_matches(&baseline.0, &baseline.1, &baseline.2, &baseline.3));
+    let generation = state.provider_view().generation;
+    state.restore_settings_draft(baseline.0, baseline.1, baseline.2, baseline.3);
+    assert_ne!(state.provider_view().generation, generation);
+    assert!(state.settings_credential_secret_drafts().is_empty());
+    let restored = state.settings_draft_snapshot();
+    state.replace_settings_config(restored.0, true);
+    assert!(state.settings_credential_secret_drafts().is_empty());
+}
+
+#[test]
+fn provider_batch_keeps_successes_when_an_account_fails_and_ignores_stale_results() {
+    use crate::features::ai::ConnectionStatus;
+    use zzclawterm_core::ai::AiModelDiscovery;
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let id = state.add_settings_provider_preset(AiProviderKind::OpenaiCompatible);
+    let generation = state.provider_view().generation;
+    let discovery = AiModelDiscovery {
+        id: format!("{id}:fixture"),
+        name: "fixture".into(),
+        provider_kind: Some(AiProviderKind::OpenaiCompatible),
+        credential_id: Some(id.clone()),
+        source: AiModelSource::RustGenai,
+    };
+    assert!(state.complete_provider_discoveries(
+        generation,
+        vec![
+            (id.clone(), Ok(vec![discovery.clone()])),
+            ("failed-account".into(), Err("fixture failure".into()))
+        ],
+        true
+    ));
+    assert!(
+        state
+            .settings
+            .config
+            .models
+            .iter()
+            .any(|model| model.id == discovery.id)
+    );
+    assert!(state.provider_view().statuses[&id] == ConnectionStatus::Success);
+    assert!(state.provider_view().statuses["failed-account"] == ConnectionStatus::Error);
+    state.remove_settings_model(&discovery.id);
+    assert!(!state.complete_provider_discoveries(
+        generation,
+        vec![(id, Ok(vec![discovery.clone()]))],
+        true
+    ));
+    assert!(
+        !state
+            .settings
+            .config
+            .models
+            .iter()
+            .any(|model| model.id == discovery.id)
+    );
+}
+
+#[test]
+fn connection_checks_do_not_modify_settings_and_reasoning_edits_fall_back_to_auto() {
+    use zzclawterm_core::ai::{AiModelDiscovery, AiModelReasoningEffort, AiReasoningEffort};
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let id = state.add_settings_provider_preset(AiProviderKind::OpenaiCompatible);
+    state.add_settings_manual_model(&id, "fixture");
+    let before = state.settings.config.clone();
+    assert!(state.complete_provider_discoveries(
+        state.provider_view().generation,
+        vec![(
+            id.clone(),
+            Ok(vec![AiModelDiscovery {
+                id: format!("{id}:other"),
+                name: "other".into(),
+                provider_kind: Some(AiProviderKind::OpenaiCompatible),
+                credential_id: Some(id.clone()),
+                source: AiModelSource::RustGenai
+            }])
+        )],
+        false
+    ));
+    assert_eq!(state.settings.config, before);
+    let model_id = format!("{id}:fixture");
+    state.set_settings_default_model(&model_id);
+    state.set_settings_reasoning_effort(AiReasoningEffort::High);
+    state.toggle_model_reasoning(&model_id, AiModelReasoningEffort::High);
+    assert_eq!(
+        state.settings.config.default_reasoning_effort,
+        AiReasoningEffort::Auto
+    );
+}
+
+#[test]
+fn selected_run_mode_survives_settings_round_trip_and_seeds_new_terminal_drafts() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.settings.config.codex.enabled = true;
+    assert!(state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Codex));
+    let encoded = serde_json::to_string(state.settings_config()).unwrap();
+    let restored: AiSettings = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(restored.default_mode, AiMode::Agent);
+    assert_eq!(restored.default_agent_kind, AiAgentKind::Codex);
+    state.switch_scope("terminal:new");
+    assert_eq!(state.chat_run_mode(), AiMode::Agent);
+    assert_eq!(state.chat_agent_kind(), AiAgentKind::Codex);
+    assert!(state.set_chat_run_mode(AiMode::Ask, AiAgentKind::Codex));
+    assert_eq!(state.settings_config().default_mode, AiMode::Ask);
+    assert_eq!(
+        state.settings_config().default_agent_kind,
+        AiAgentKind::Zzclawterm
+    );
+}
+
+#[test]
+fn disabled_external_agent_cannot_replace_the_current_mode_or_saved_default() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    assert!(state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm));
+    for kind in [AiAgentKind::Codex, AiAgentKind::ClaudeCode] {
+        assert!(!state.set_chat_run_mode(AiMode::Agent, kind));
+        assert_eq!(state.chat_run_mode(), AiMode::Agent);
+        assert_eq!(state.chat_agent_kind(), AiAgentKind::Zzclawterm);
+        assert_eq!(
+            state.settings_config().default_agent_kind,
+            AiAgentKind::Zzclawterm
+        );
+    }
+}
+
+#[test]
+fn disabling_an_external_agent_falls_back_to_ask_for_its_existing_terminal_draft() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.settings.config.codex.enabled = true;
+    state.set_chat_run_mode(AiMode::Agent, AiAgentKind::Codex);
+    state.toggle_settings_codex_enabled();
+    assert_eq!(state.chat_run_mode(), AiMode::Ask);
+    assert_eq!(state.chat_agent_kind(), AiAgentKind::Zzclawterm);
+}
+
+#[test]
+fn response_phases_stop_thinking_when_visible_text_or_tool_arguments_arrive() {
+    use crate::features::ai::presentation::AiResponsePhase;
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".into(), AiMode::Ask, None);
+    assert_eq!(state.response_phase(), AiResponsePhase::Waiting);
+    assert!(state.apply_chat_delta(launch.job_id, "<think>consider", None));
+    assert_eq!(state.response_phase(), AiResponsePhase::Thinking);
+    assert!(state.apply_chat_delta(launch.job_id, "</think>Answer", None));
+    assert_eq!(state.response_phase(), AiResponsePhase::Responding);
+    assert!(state.apply_chat_delta(launch.job_id, "", Some("late thought")));
+    assert_eq!(state.response_phase(), AiResponsePhase::Responding);
+    state.cancel_chat_and_agent();
+    assert_eq!(state.response_phase(), AiResponsePhase::Ended);
+    assert!(!state.apply_chat_delta(launch.job_id, "late output", None));
+    assert!(!state.apply_agent_tool_delta(launch.job_id, Some("execute_command"), 4));
+
+    let launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+    assert!(state.apply_agent_tool_delta(launch.job_id, Some("execute_command"), 4));
+    assert_eq!(state.response_phase(), AiResponsePhase::ToolArguments);
+    assert!(state.apply_chat_delta(launch.job_id, "", Some("reason")));
+    assert_eq!(state.response_phase(), AiResponsePhase::ToolArguments);
+    assert!(state.apply_agent_protocol_fallback(launch.job_id));
+    assert_eq!(state.response_phase(), AiResponsePhase::Waiting);
+}
+
+fn presentation_command(id: &str) -> zzclawterm_core::AiCommandCard {
+    zzclawterm_core::AiCommandCard {
+        id: id.into(),
+        title: "Inspect".into(),
+        command: "echo fixture".into(),
+        explanation: "Read only".into(),
+        risk_level: Some(zzclawterm_core::RiskLevel::Low),
+        risk_reason: Some("No changes".into()),
+        expected_effect: String::new(),
+        rollback: None,
+        category: None,
+        references: Vec::new(),
+        target_terminal_session_id: Some("terminal-a".into()),
+        target: None,
+    }
+}
+
+#[test]
+fn agent_proposals_link_the_exact_message_and_card_before_execution() {
+    use crate::features::ai::presentation::{AiAgentStepKind, AiCommandPhase, AiResponsePhase};
+    let cx = TestAppContext::single();
+    for automatic in [false, true] {
+        let mut state = state(&cx);
+        let launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+        let assistant_id = state.chat_streaming_assistant_id().unwrap().to_string();
+        state.apply_chat_delta(launch.job_id, "streamed protocol", None);
+        state
+            .finish_chat_job(
+                launch.job_id,
+                launch.session_id,
+                Ok(AiChatJobOutput {
+                    native_call: None,
+                    mode: AiMode::Agent,
+                    text: String::new(),
+                    reasoning: Some("Read only".into()),
+                    command_cards: vec![presentation_command("agent-fixture")],
+                    auto_execute_first: automatic,
+                    approval_note: Some("Review this command".into()),
+                }),
+            )
+            .unwrap();
+        let step = &state.agent_steps()[0];
+        assert_eq!(
+            step.source_message_id.as_deref(),
+            Some(assistant_id.as_str())
+        );
+        assert_eq!(step.command_card_id.as_deref(), Some("agent-fixture"));
+        assert_eq!(step.command.as_deref(), Some("echo fixture"));
+        assert_eq!(step.kind, AiAgentStepKind::ToolProgress);
+        assert_eq!(
+            AiCommandPhase::from_step(step),
+            if automatic {
+                AiCommandPhase::Preparing
+            } else {
+                AiCommandPhase::NeedsApproval
+            }
+        );
+        assert!(
+            state.chat_messages()[1].content.is_empty(),
+            "protocol text must not duplicate the execution block"
+        );
+        assert_eq!(state.response_phase(), AiResponsePhase::Ended);
+        assert!(!state.apply_chat_delta(launch.job_id, "late", None));
+        assert!(!state.apply_agent_tool_delta(launch.job_id, None, 8));
+    }
+}
+
+#[test]
+fn final_answers_are_not_classified_as_thoughts_commands_or_output() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+    let id = state.chat_streaming_assistant_id().unwrap().to_string();
+    state
+        .finish_chat_job(
+            launch.job_id,
+            launch.session_id,
+            Ok(AiChatJobOutput {
+                native_call: None,
+                mode: AiMode::Agent,
+                text: "## Result\nAll good".into(),
+                reasoning: None,
+                command_cards: Vec::new(),
+                auto_execute_first: false,
+                approval_note: None,
+            }),
+        )
+        .unwrap();
+    let step = &state.agent_steps()[0];
+    assert_eq!(step.kind, AiAgentStepKind::FinalAnswer);
+    assert_eq!(step.source_message_id.as_deref(), Some(id.as_str()));
+    assert!(step.thought.is_none() && step.command.is_none() && step.observation.is_none());
+    assert_eq!(state.chat_messages()[1].content, "## Result\nAll good");
+}
+
+#[test]
+fn consecutive_agent_commands_and_full_final_answer_own_distinct_assistant_messages() {
+    use crate::features::ai::presentation::{AiAgentStepKind, AiResponsePhase};
+    let cx = TestAppContext::single();
+    for automatic in [false, true] {
+        let mut state = state(&cx);
+        let mut launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+        let mut message_ids = Vec::new();
+        for index in 0..2 {
+            let id = state.chat_streaming_assistant_id().unwrap().to_string();
+            message_ids.push(id.clone());
+            let card_id = format!("agent-command-{index}");
+            state
+                .finish_chat_job(
+                    launch.job_id,
+                    launch.session_id.clone(),
+                    Ok(AiChatJobOutput {
+                        native_call: None,
+                        mode: AiMode::Agent,
+                        text: String::new(),
+                        reasoning: Some("Inspect safely".into()),
+                        command_cards: vec![presentation_command(&card_id)],
+                        auto_execute_first: automatic,
+                        approval_note: None,
+                    }),
+                )
+                .unwrap();
+            let (_, step_index) = state.begin_agent_step(4).unwrap();
+            let now = Instant::now();
+            let execution = AiAgentLoopState {
+                command_card_id: Some(card_id.clone()),
+                ai_session_id: launch.session_id.clone(),
+                terminal_session_id: "terminal-a".into(),
+                available_targets: Vec::new(),
+                default_target_session_id: None,
+                command: "echo fixture".into(),
+                marker_id: None,
+                background_job_id: None,
+                step_index,
+                max_steps: 4,
+                output_start_len: 0,
+                started_at: now,
+                min_wait_until: now,
+                timeout_at: now,
+                last_seen_len: 0,
+                stable_since: now,
+            };
+            state.set_agent_loop(execution.clone());
+            state.record_agent_observation(
+                step_index,
+                &zzclawterm_core::CommandObservation {
+                    output: "fixture output".into(),
+                    exit_code: Some(0),
+                    duration_ms: 1,
+                },
+                "Observation".into(),
+            );
+            let step = &state.agent_steps()[usize::from(step_index)];
+            assert_eq!(step.command_card_id.as_deref(), Some(card_id.as_str()));
+            assert_eq!(step.source_message_id.as_deref(), Some(id.as_str()));
+            launch = state
+                .begin_agent_continuation(&execution, "fixture output")
+                .unwrap();
+            assert_eq!(state.response_phase(), AiResponsePhase::Waiting);
+            assert!(state.apply_chat_delta(launch.job_id, "", Some("Next step")));
+            assert_eq!(state.response_phase(), AiResponsePhase::Thinking);
+        }
+        let final_id = state.chat_streaming_assistant_id().unwrap().to_string();
+        assert!(!message_ids.contains(&final_id));
+        let answer = format!(
+            "## Result\n{}\nFull answer ending.",
+            "Detailed finding. ".repeat(30)
+        );
+        assert!(state.apply_chat_delta(launch.job_id, "## Result", None));
+        assert_eq!(state.response_phase(), AiResponsePhase::Responding);
+        state
+            .finish_chat_job(
+                launch.job_id,
+                launch.session_id,
+                Ok(AiChatJobOutput {
+                    native_call: None,
+                    mode: AiMode::Agent,
+                    text: answer.clone(),
+                    reasoning: None,
+                    command_cards: Vec::new(),
+                    auto_execute_first: false,
+                    approval_note: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(state.response_phase(), AiResponsePhase::Ended);
+        assert_eq!(state.chat_messages().len(), 4);
+        assert_eq!(state.chat_messages()[3].id, final_id);
+        assert_eq!(state.chat_messages()[3].content, answer);
+        let final_step = state.agent_steps().last().unwrap();
+        assert_eq!(final_step.kind, AiAgentStepKind::FinalAnswer);
+        assert_eq!(
+            final_step.source_message_id.as_deref(),
+            Some(final_id.as_str())
+        );
+        assert!(final_step.thought.is_none() && final_step.observation.is_none());
+        assert!(!state.apply_chat_delta(launch.job_id, "late", None));
+    }
+}
+
+#[test]
+fn foreign_agent_continuation_cannot_claim_the_active_response() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+    let assistant_id = state.chat_streaming_assistant_id().unwrap().to_string();
+    let now = Instant::now();
+    let execution = AiAgentLoopState {
+        command_card_id: None,
+        ai_session_id: "another-session".into(),
+        terminal_session_id: "terminal-a".into(),
+        available_targets: Vec::new(),
+        default_target_session_id: None,
+        command: "echo fixture".into(),
+        marker_id: None,
+        background_job_id: None,
+        step_index: 0,
+        max_steps: 4,
+        output_start_len: 0,
+        started_at: now,
+        min_wait_until: now,
+        timeout_at: now,
+        last_seen_len: 0,
+        stable_since: now,
+    };
+    assert!(
+        state
+            .begin_agent_continuation(&execution, "foreign output")
+            .is_none()
+    );
+    assert_eq!(
+        state.chat_streaming_assistant_id(),
+        Some(assistant_id.as_str())
+    );
+    assert_eq!(state.chat_messages().len(), 2);
+    assert!(state.apply_chat_delta(launch.job_id, "active answer", None));
+}
+
+#[test]
+fn command_results_distinguish_success_failure_and_unknown_exit_codes() {
+    use crate::features::ai::presentation::{AiAgentStepKind, AiCommandPhase};
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    for (index, code, phase) in [
+        (0, Some(0), AiCommandPhase::Completed),
+        (1, Some(7), AiCommandPhase::Failed),
+        (2, None, AiCommandPhase::Observed),
+    ] {
+        state.upsert_agent_step(
+            index,
+            AiAgentStepStatus::Running,
+            AiAgentStepKind::Command,
+            "Running",
+            "echo fixture",
+        );
+        state.record_agent_observation(
+            index,
+            &zzclawterm_core::CommandObservation {
+                output: "line one\nline two".into(),
+                exit_code: code,
+                duration_ms: 20,
+            },
+            "summary".into(),
+        );
+        let step = state
+            .agent_steps()
+            .iter()
+            .find(|step| step.step_index == index)
+            .unwrap();
+        assert_eq!(AiCommandPhase::from_step(step), phase);
+        assert_eq!(step.command.as_deref(), Some("echo fixture"));
+        assert_eq!(step.observation.as_deref(), Some("line one\nline two"));
+        assert!(!phase.offers_approval() && !phase.offers_run());
+        assert!(phase.offers_reuse());
+    }
+}
+
+#[test]
+fn payload_categories_do_not_depend_on_english_titles() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.upsert_agent_step(
+        0,
+        AiAgentStepStatus::Completed,
+        AiAgentStepKind::Diagnostic,
+        "Final Answer shell running",
+        "diagnostic",
+    );
+    assert!(state.agent_steps()[0].thought.is_none());
+    assert!(state.agent_steps()[0].command.is_none());
+    assert_eq!(
+        state.agent_steps()[0].observation.as_deref(),
+        Some("diagnostic")
+    );
+}
+
+#[test]
+fn message_disclosure_choices_follow_their_conversation_scope() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    state.switch_scope("terminal:a");
+    state.toggle_message_thought("assistant-a".into());
+    state.toggle_command_details("agent-a".into());
+    state.toggle_command_script("agent-a".into());
+    state.toggle_agent_history();
+    state.toggle_execution_group("user-a".into());
+    state.switch_scope("terminal:b");
+    assert!(state.expanded_message_thoughts().is_empty());
+    assert!(state.expanded_command_details().is_empty());
+    assert!(state.expanded_command_scripts().is_empty());
+    assert!(!state.agent_history_expanded());
+    assert!(state.expanded_execution_groups().is_empty());
+    state.toggle_message_thought("assistant-b".into());
+    state.switch_scope("terminal:a");
+    assert!(state.expanded_message_thoughts().contains("assistant-a"));
+    assert!(!state.expanded_message_thoughts().contains("assistant-b"));
+    assert!(state.expanded_command_scripts().contains("agent-a"));
+    assert!(state.agent_history_expanded());
+    assert!(state.expanded_execution_groups().contains("user-a"));
+    state.start_new_chat();
+    assert!(state.expanded_message_thoughts().is_empty());
+    assert!(state.expanded_command_details().is_empty());
+    assert!(state.expanded_command_scripts().is_empty());
+    assert!(!state.agent_history_expanded());
+    assert!(state.expanded_execution_groups().is_empty());
+}
+
+#[test]
+fn settled_agent_cards_cannot_be_approved_again_and_keep_their_identity() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_request("inspect".into(), AiMode::Agent, None);
+    state
+        .finish_chat_job(
+            launch.job_id,
+            launch.session_id,
+            Ok(AiChatJobOutput {
+                native_call: None,
+                mode: AiMode::Agent,
+                text: String::new(),
+                reasoning: None,
+                command_cards: vec![presentation_command("agent-fixture")],
+                auto_execute_first: false,
+                approval_note: None,
+            }),
+        )
+        .unwrap();
+    assert!(state.current_agent_command_card("agent-fixture"));
+    for status in [
+        AiAgentStepStatus::Running,
+        AiAgentStepStatus::Completed,
+        AiAgentStepStatus::Failed,
+        AiAgentStepStatus::Rejected,
+        AiAgentStepStatus::Cancelled,
+    ] {
+        state.upsert_agent_step(
+            0,
+            status,
+            AiAgentStepKind::Command,
+            "Fixture",
+            "command preview",
+        );
+        assert!(!state.current_agent_command_card("agent-fixture"));
+        assert_eq!(
+            state.agent_steps()[0].command.as_deref(),
+            Some("echo fixture")
+        );
+        assert_eq!(
+            state.agent_steps()[0].command_card_id.as_deref(),
+            Some("agent-fixture")
+        );
+    }
+    state.cancel_chat_and_agent();
+    assert_eq!(
+        AiCommandPhase::from_step(&state.agent_steps()[0]),
+        AiCommandPhase::Cancelled
+    );
+}
+
+#[test]
+fn mismatched_background_card_does_not_clear_current_cancellation_or_update_output() {
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let launch = state.begin_chat_job();
+    let now = Instant::now();
+    let active = AiAgentLoopState {
+        command_card_id: Some("agent-current".into()),
+        ai_session_id: "session-a".into(),
+        terminal_session_id: "terminal-a".into(),
+        available_targets: Vec::new(),
+        default_target_session_id: None,
+        command: "echo fixture".into(),
+        marker_id: None,
+        background_job_id: Some(launch.job_id),
+        step_index: 0,
+        max_steps: 3,
+        output_start_len: 0,
+        started_at: now,
+        min_wait_until: now,
+        timeout_at: now,
+        last_seen_len: 0,
+        stable_since: now,
+    };
+    state.set_agent_loop(active.clone());
+    let mut foreign = active;
+    foreign.command_card_id = Some("agent-foreign".into());
+    assert!(matches!(
+        state.finish_agent_background(
+            launch.job_id,
+            foreign,
+            Ok(zzclawterm_core::CommandObservation {
+                output: "foreign output".into(),
+                exit_code: Some(0),
+                duration_ms: 1,
+            }),
+            |_| String::new()
+        ),
+        super::AiAgentBackgroundEffect::MatchedStale
+    ));
+    assert!(state.chat.cancel.is_some());
+    assert_eq!(
+        state
+            .agent_loop_snapshot()
+            .unwrap()
+            .command_card_id
+            .as_deref(),
+        Some("agent-current")
+    );
+    assert!(state.agent_steps().is_empty());
+}
+
+#[test]
+fn native_run_freezes_only_its_session_history_before_the_current_task() {
+    use zzclawterm_core::ai::{AiChatRequest, AiMessage, AiMessageRole};
+    let cx = TestAppContext::single();
+    let mut state = state(&cx);
+    let session = state.chat.session_id.clone();
+    let message = |owner: &str, role, content: &str| {
+        Arc::new(AiMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: owner.into(),
+            role,
+            content: content.into(),
+            created_at: String::new(),
+            reasoning_content: None,
+            command_cards: vec![],
+        })
+    };
+    state.chat.messages = vec![
+        message(&session, AiMessageRole::User, "old"),
+        message("other-session", AiMessageRole::User, "unrelated"),
+        message(&session, AiMessageRole::Assistant, "previous answer"),
+        message(&session, AiMessageRole::User, "follow up"),
+        message(&session, AiMessageRole::Assistant, ""),
+    ];
+    let request: AiChatRequest = serde_json::from_value(serde_json::json!({
+        "mode":"agent", "action":"generate_command", "sessionId":session,
+        "userInput":"follow up", "options":{"historyTurns":1}
+    }))
+    .unwrap();
+    state.begin_native_run(request);
+    let initial = state.native_initial_history().unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0].content, "previous answer");
+    state.chat.messages.clear();
+    assert_eq!(state.native_initial_history().unwrap(), initial);
+    state.switch_scope("terminal:other");
+    assert!(state.native_initial_history().is_none());
 }

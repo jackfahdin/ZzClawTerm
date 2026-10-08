@@ -215,6 +215,91 @@ pub fn command_starts_suggestion_suppressing_program(command: &str) -> bool {
         .any(|segment| command_segment_starts_interactive_program(&segment))
 }
 
+/// Conservative submission fallback for command anchors when OSC marks are absent.
+/// Script runners with an explicit script or `-c` task are not interactive.
+pub fn command_starts_interactive_input(command: &str) -> bool {
+    if command_starts_suggestion_suppressing_program(command) {
+        return true;
+    }
+    split_command_segments(&sanitize_terminal_command(command))
+        .into_iter()
+        .any(|segment| {
+            let tokens = unwrap_command(&tokenize_shell_like(&segment));
+            let Some(first) = tokens.first() else {
+                return false;
+            };
+            let name = command_name(first);
+            match name.as_str() {
+                "cmd" | "powershell" | "pwsh" | "bash" | "zsh" | "fish" | "sh" | "wsl" => {
+                    tokens.len() == 1
+                        || tokens
+                            .iter()
+                            .skip(1)
+                            .all(|token| matches!(token.to_ascii_lowercase().as_str(), "-i" | "/k"))
+                }
+                "python" | "python3" | "python2" | "node" | "ruby" | "php" => {
+                    tokens.len() == 1
+                        || tokens
+                            .iter()
+                            .any(|token| matches!(token.as_str(), "-i" | "--interactive" | "-a"))
+                }
+                "mysql" | "mariadb" | "psql" | "sqlite3" | "redis-cli" | "irb" | "ipython"
+                | "R" | "julia" | "lua" | "telnet" | "ftp" | "sftp" => true,
+                _ => false,
+            }
+        })
+}
+
+/// Free Type needs a line editor, unlike command navigation which also handles
+/// pagers and TUIs. Compound commands cannot establish a single editor context.
+pub fn command_starts_line_editor(command: &str) -> bool {
+    let segments = split_command_segments(&sanitize_terminal_command(command));
+    if segments.len() != 1 || command_starts_suggestion_suppressing_program(command) {
+        return false;
+    }
+    let tokens = unwrap_command(&tokenize_shell_like(&segments[0]));
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    match command_name(first).as_str() {
+        "docker" | "podman" => {
+            if !tokens
+                .get(1)
+                .is_some_and(|token| token == "exec" || token == "run")
+                || !has_option(&tokens, "--interactive", Some('i'))
+                || !has_option(&tokens, "--tty", Some('t'))
+            {
+                return false;
+            }
+            let mut index = 2;
+            while let Some(option) = tokens.get(index).filter(|token| token.starts_with('-')) {
+                match option.as_str() {
+                    "-i" | "-t" | "-it" | "-ti" | "--interactive" | "--tty" | "--rm" => index += 1,
+                    "-u" | "--user" | "-w" | "--workdir" | "-e" | "--env" => index += 2,
+                    _ => return false,
+                }
+            }
+            // Skip the container/image; do not mistake cat's arguments for a shell.
+            let child = &tokens[index.saturating_add(1).min(tokens.len())..];
+            child.first().is_some_and(|token| {
+                matches!(command_name(token).as_str(), "bash" | "zsh" | "fish" | "sh")
+            }) && command_starts_line_editor(&child.join(" "))
+        }
+        // A remote command may be cat, even with -t. Require its prompt rather
+        // than treating all ssh invocations as a line editor.
+        "ssh" | "telnet" | "ftp" | "sftp" => false,
+        _ => {
+            !tokens.iter().any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "-c" | "-e" | "--execute" | "--command" | "-command" | "-file" | "/c"
+                ) || token.starts_with("--execute=")
+                    || token.starts_with("--command=")
+            }) && command_starts_interactive_input(command)
+        }
+    }
+}
+
 pub fn is_pager_search_or_command_input(value: &str) -> bool {
     value.trim_start().starts_with(['/', '?', ':'])
 }
@@ -250,5 +335,62 @@ mod tests {
         assert!(is_pager_search_or_command_input("/error"));
         assert!(is_pager_single_key_input("q"));
         assert!(!is_pager_single_key_input("x"));
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    #[test]
+    fn free_type_context_excludes_foreground_programs_and_noninteractive_tasks() {
+        use super::command_starts_line_editor;
+        for command in [
+            "bash",
+            "sudo zsh -i",
+            "python3 -i",
+            "mysql -u root",
+            "docker exec -it box sh",
+            "podman run -it --rm alpine /bin/sh",
+        ] {
+            assert!(command_starts_line_editor(command), "{command}");
+        }
+        for command in [
+            "cat",
+            "tee log",
+            "less file",
+            "vim",
+            "telnet host",
+            "ssh host cat",
+            "docker exec -it box cat sh",
+            "docker exec -it box sh -c cat",
+            "python3 task.py",
+            "mysql -e select",
+            "bash; cat",
+            "bash | cat",
+        ] {
+            assert!(!command_starts_line_editor(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn interpreter_detection_distinguishes_scripts_from_interactive_input() {
+        use super::command_starts_interactive_input;
+        for command in [
+            "python3",
+            "sudo python -i",
+            "mysql -u root",
+            "node",
+            "env A=1 psql",
+            "less file",
+        ] {
+            assert!(command_starts_interactive_input(command), "{command}");
+        }
+        for command in [
+            "python3 script.py",
+            "node task.js",
+            "python -c 'print(1)'",
+            "ls",
+        ] {
+            assert!(!command_starts_interactive_input(command), "{command}");
+        }
     }
 }

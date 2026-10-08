@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use russh_sftp::client::SftpSession;
 
+use crate::download_path::{DownloadTargetAccess, root_for_target};
 use crate::sftp_transfer_types::SftpDuplicateCacheKey;
 
 use super::{
@@ -46,13 +47,46 @@ pub(super) fn resolve_local_download_target(
         local_path: context.local_path.to_path_buf(),
         is_directory: context.is_directory,
     };
+    let selected = context.path_options.download_runtime()?.selected(&key);
+    if let Some(selected) = selected
+        && (context.path_options.is_promised_download()
+            || context
+                .path_options
+                .download_runtime()?
+                .owns(&selected, context.is_directory)?)
+    {
+        return Ok(Some(selected));
+    }
+    let remember =
+        |path: PathBuf, access: Option<DownloadTargetAccess>| -> anyhow::Result<Option<PathBuf>> {
+            context
+                .path_options
+                .download_runtime()?
+                .select(key.clone(), &path, access);
+            Ok(Some(path))
+        };
     if !crate::download_path::target_exists(context.local_path)?
         && context
             .path_options
             .reserve_download_target(context.local_path, &key)?
     {
-        return Ok(Some(context.local_path.to_path_buf()));
+        return remember(
+            context.local_path.to_path_buf(),
+            (!context.is_directory).then_some(DownloadTargetAccess::CreateNew),
+        );
     }
+
+    if context
+        .path_options
+        .download_runtime()?
+        .owns(context.local_path, context.is_directory)?
+    {
+        return remember(context.local_path.to_path_buf(), None);
+    }
+    anyhow::ensure!(
+        !context.path_options.is_promised_download(),
+        "promised destination already exists"
+    );
 
     let decision = resolve_duplicate_decision_for_path(
         context.path_options,
@@ -70,11 +104,24 @@ pub(super) fn resolve_local_download_target(
                     .reserve_download_target(context.local_path, &key)?,
                 "download target is reserved by another item in this batch"
             );
-            Ok(Some(context.local_path.to_path_buf()))
+            let access = if context.is_directory {
+                None
+            } else {
+                Some(DownloadTargetAccess::capture(
+                    root_for_target(context.local_path),
+                    context.local_path,
+                )?)
+            };
+            remember(context.local_path.to_path_buf(), access)
         }
         SftpDuplicateDecision::Skip => Ok(None),
         SftpDuplicateDecision::Rename => {
-            resolve_renamed_local_target(context.local_path, context.path_options, &key).map(Some)
+            let target =
+                resolve_renamed_local_target(context.local_path, context.path_options, &key)?;
+            remember(
+                target,
+                (!context.is_directory).then_some(DownloadTargetAccess::CreateNew),
+            )
         }
     }
 }

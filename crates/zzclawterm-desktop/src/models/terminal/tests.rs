@@ -87,6 +87,7 @@ fn selected_occurrence_test_session(cols: u16, lines: usize, text: &str) -> Term
 fn terminal_frame_output_submission_is_a_single_command() {
     let data = vec![b'x'; TERMINAL_FRAME_OUTPUT_CHUNK_SIZE * 2 + 5];
     let command = terminal_frame_output_commands(TerminalFrameOutputSubmission {
+        raw_already_captured: true,
         session_id: "s1".to_string(),
         data: data.clone(),
         encoding: "UTF-8".to_string(),
@@ -104,6 +105,7 @@ fn terminal_frame_output_submission_is_a_single_command() {
 #[test]
 fn terminal_frame_empty_output_submission_produces_no_command() {
     let command = terminal_frame_output_commands(TerminalFrameOutputSubmission {
+        raw_already_captured: true,
         session_id: "s1".to_string(),
         data: Vec::new(),
         encoding: "UTF-8".to_string(),
@@ -814,7 +816,7 @@ fn terminal_view_seed_output_applies_session_encoding() {
     assert_eq!(view.output_decoder.encoding_label(), "GBK");
     assert_eq!(view.recording_decoder.encoding_label(), "GBK");
     assert_eq!(
-        view.screen.encode_outgoing("测试".as_bytes()),
+        view.screen.encode_outgoing("测试".as_bytes()).unwrap(),
         [0xb2, 0xe2, 0xca, 0xd4]
     );
 }
@@ -859,8 +861,8 @@ fn terminal_view_output_burst_drop_resets_stream_decoders() {
 fn terminal_output_burst_helper_resets_screen_and_decoder() {
     let mut screen = TerminalScreen::default();
     let mut decoder = TerminalOutputDecoder::default();
-    screen.set_encoding("GBK");
-    decoder.set_encoding("GBK");
+    screen.set_encoding("GBK").unwrap();
+    decoder.set_encoding("GBK").unwrap();
 
     // First byte of "测" in GBK, intentionally left incomplete in both
     // streaming consumers.
@@ -1014,7 +1016,8 @@ fn terminal_frame_pipeline_background_chunks_are_deterministic_after_priority_sn
             TerminalFrameEvent::Output(_)
             | TerminalFrameEvent::ClearExceptInput(_)
             | TerminalFrameEvent::Search(_)
-            | TerminalFrameEvent::Rekeyed { .. } => None,
+            | TerminalFrameEvent::Rekeyed { .. }
+            | TerminalFrameEvent::CommandNavigation { .. } => None,
         })
         .expect("visible priority request should emit a snapshot");
     let expected = terminal_frame_snapshot_with_scroll_window(&reference, 0, true);
@@ -1314,7 +1317,7 @@ fn terminal_view_output_skips_graphics_payload() {
 fn terminal_view_filtered_visible_text_can_reenter_byte_parser() {
     let mut view = TerminalViewState::new();
     let visible_text = "plain \x1b[31mred\x1b[0m";
-    let visible_bytes = view.screen.encode_outgoing_str(visible_text);
+    let visible_bytes = view.screen.encode_outgoing_str(visible_text).unwrap();
 
     view.append_bytes_unprotected(&visible_bytes);
 
@@ -3579,4 +3582,100 @@ fn the_recovered_notice_dismisses_on_a_deadline_not_a_tick_count() {
 
     assert_eq!(view.performance_overlay, None);
     assert_eq!(view.performance_overlay_until, None);
+}
+
+#[test]
+fn decoded_output_is_an_ordering_barrier_and_uses_utf8_in_a_gbk_session() {
+    let (tx, rx) = terminal_frame_command_channel();
+    tx.send(TerminalFrameCommand::Output {
+        session_id: "s1".into(),
+        data: vec![0xb2],
+        encoding: "GBK".into(),
+        scrollback_limit: 1000,
+    });
+    tx.send(TerminalFrameCommand::DecodedOutput {
+        session_id: "s1".into(),
+        text: "😀".into(),
+    });
+    tx.send(TerminalFrameCommand::Output {
+        session_id: "s1".into(),
+        data: vec![0xe2],
+        encoding: "GBK".into(),
+        scrollback_limit: 1000,
+    });
+    assert_eq!(tx.queued_output_bytes(), 6);
+    assert!(
+        matches!(rx.try_recv(), Some(TerminalFrameCommand::Output { data, .. }) if data == [0xb2])
+    );
+    assert!(
+        matches!(rx.try_recv(), Some(TerminalFrameCommand::DecodedOutput { text, .. }) if text == "😀")
+    );
+    assert!(
+        matches!(rx.try_recv(), Some(TerminalFrameCommand::Output { data, .. }) if data == [0xe2])
+    );
+    assert_eq!(tx.queued_output_bytes(), 0);
+    let recording = super::super::RecordingWritePipeline::spawn(1024 * 1024);
+    let mut session = TerminalFrameSession::new("GBK", 1000);
+    session.process_output(
+        "s1".into(),
+        vec![0xb2],
+        "GBK".into(),
+        1000,
+        &recording.writer(),
+    );
+    let decoded = super::terminal_advance_decoded_result(
+        &mut session.screen,
+        "s1",
+        "\x1b[31m😀\x1b[0m",
+        &recording.writer(),
+    );
+    assert_eq!(decoded.visible_text, "\x1b[31m😀\x1b[0m");
+    let result = session.process_output(
+        "s1".into(),
+        vec![0xe2],
+        "GBK".into(),
+        1000,
+        &recording.writer(),
+    );
+    let text = result
+        .snapshot
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<String>();
+    assert!(text.contains("😀测"), "{text}");
+    assert_eq!(session.screen.encoding_label(), "GBK");
+}
+
+#[test]
+fn interleaved_frame_sessions_keep_their_own_output_and_recording_charsets() {
+    let recording = super::super::RecordingWritePipeline::spawn(1024 * 1024);
+    let mut gbk = TerminalFrameSession::new("GBK", 1000);
+    let mut utf8 = TerminalFrameSession::new("UTF-8", 1000);
+    gbk.process_output(
+        "gbk".into(),
+        vec![0xb2],
+        "GBK".into(),
+        1000,
+        &recording.writer(),
+    );
+    let utf8_frame = utf8.process_output(
+        "utf8".into(),
+        "中文😀".as_bytes().to_vec(),
+        "UTF-8".into(),
+        1000,
+        &recording.writer(),
+    );
+    let gbk_frame = gbk.process_output(
+        "gbk".into(),
+        vec![0xe2],
+        "GBK".into(),
+        1000,
+        &recording.writer(),
+    );
+    assert_eq!(gbk_frame.visible_text, "测");
+    assert_eq!(gbk_frame.recording_text_bytes, "测".len());
+    assert_eq!(utf8_frame.visible_text, "中文😀");
+    assert_eq!(utf8_frame.recording_text_bytes, "中文😀".len());
 }

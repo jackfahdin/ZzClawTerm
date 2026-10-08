@@ -20,12 +20,13 @@ use super::{
     PASSWORD_PREFIX, PORTABLE_OPAQUE_ENTITIES_TABLE, PROXIES_TABLE, PROXY_PREFIX, SETTINGS_DEFAULT,
     SETTINGS_PROXY_GROUPS, SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SETTINGS_TUNNEL_GROUPS,
     SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE, TUNNEL_PREFIX, TUNNELS_TABLE,
-    clear_prefix_in_txn, connection_inline_password_requires_encryption, copy_config_database,
-    current_time_ms, encrypt_ai_settings_secrets, ensure_not_same_existing_file, ensure_parent_dir,
-    entity_key, merge_unknown_json, prepare_connections_for_storage,
-    replace_command_history_in_txn, replace_known_hosts_text_in_txn, replace_sessions_in_txn,
-    set_nested_json_value, validate_config_backup_file, validate_config_backup_source,
-    write_json_in_txn, write_portable_snapshot_file,
+    VNC_KNOWN_HOSTS_TABLE, clear_prefix_in_txn, connection_inline_password_requires_encryption,
+    copy_config_database, current_time_ms, encrypt_ai_settings_secrets,
+    ensure_not_same_existing_file, ensure_parent_dir, entity_key, merge_unknown_json,
+    prepare_connections_for_storage, replace_command_history_in_txn,
+    replace_known_hosts_text_in_txn, replace_sessions_in_txn, set_nested_json_value,
+    validate_config_backup_file, validate_config_backup_source, write_json_in_txn,
+    write_portable_snapshot_file,
 };
 use crate::{
     decode_encrypted_raw_portable_snapshot, decode_raw_portable_snapshot,
@@ -443,6 +444,12 @@ impl ConnectionStore {
             serde_json::to_string(&self.load_master_key_token()?)?,
         );
         snapshot.entities.insert(
+            "vnc_known_hosts".to_string(),
+            serde_json::to_string(
+                &self.list_raw_json_values_by_prefix(VNC_KNOWN_HOSTS_TABLE, "vnc_known_hosts/")?,
+            )?,
+        );
+        snapshot.entities.insert(
             "known_hosts".to_string(),
             serde_json::to_string(&self.render_known_hosts_export()?)?,
         );
@@ -498,6 +505,20 @@ impl ConnectionStore {
         let mut sessions: SessionsConfig = read_snapshot_entity(snapshot, "sessions")?;
         let mut settings: serde_json::Value = read_snapshot_entity(snapshot, "settings")?;
         let known_hosts: String = read_snapshot_entity(snapshot, "known_hosts")?;
+        let vnc_known_hosts = snapshot
+            .entities
+            .get("vnc_known_hosts")
+            .map(|raw| {
+                serde_json::from_str::<Vec<zzclawterm_core::vnc_known_hosts::VncKnownHostRecord>>(
+                    raw,
+                )
+            })
+            .transpose()?;
+        if let Some(records) = &vnc_known_hosts {
+            for record in records {
+                super::vnc_known_hosts::validate_record(record)?;
+            }
+        }
         let mut master_key_token: Option<String> =
             read_snapshot_entity(snapshot, "master_key_token")?;
         let tunnel_groups: Vec<TunnelGroup> = read_snapshot_entity(snapshot, "tunnel_groups")?;
@@ -661,6 +682,14 @@ impl ConnectionStore {
         if !known_hosts.is_empty() {
             replace_known_hosts_text_in_txn(&txn, &known_hosts)?;
         }
+        // Missing in older snapshots: retain the device's existing trust records.
+        if let Some(records) = vnc_known_hosts {
+            clear_prefix_in_txn(&txn, VNC_KNOWN_HOSTS_TABLE, "vnc_known_hosts/")?;
+            for record in records {
+                let key = super::vnc_known_hosts::key(&record.host, record.port);
+                write_json_in_txn(&txn, VNC_KNOWN_HOSTS_TABLE, &key, &record)?;
+            }
+        }
         txn.commit()?;
         bump_ssh_key_revision();
         Ok(())
@@ -752,6 +781,7 @@ fn is_known_portable_entity(entity: &str) -> bool {
             | "history"
             | "master_key_token"
             | "known_hosts"
+            | "vnc_known_hosts"
             | "notes"
     )
 }

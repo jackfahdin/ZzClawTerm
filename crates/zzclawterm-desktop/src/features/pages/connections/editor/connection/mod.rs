@@ -625,8 +625,12 @@ impl ZzClawTermApp {
             )
         }))
         .collect::<Vec<_>>();
-        let encoding_options = ["global", "UTF-8", "GBK", "GB2312", "GB18030"]
-            .into_iter()
+        let encoding_options = std::iter::once("global")
+            .chain(
+                zzclawterm_core::character_encoding::CharacterEncoding::ALL
+                    .into_iter()
+                    .map(|encoding| encoding.label()),
+            )
             .map(|value| {
                 let label = if value == "global" {
                     t!("connection.encodingFollowGlobal").to_string()
@@ -636,7 +640,14 @@ impl ZzClawTermApp {
                 ConnectionEditorChoice::new(
                     Some(value.to_string()),
                     label,
-                    editor.encoding == value,
+                    (value == "global"
+                        && (editor.encoding.trim().is_empty()
+                            || editor.encoding.trim().eq_ignore_ascii_case("global")))
+                        || editor.encoding == value
+                        || zzclawterm_core::character_encoding::CharacterEncoding::parse(
+                            &editor.encoding,
+                        )
+                        .is_ok_and(|encoding| encoding.label() == value),
                 )
             })
             .collect::<Vec<_>>();
@@ -788,8 +799,12 @@ impl ZzClawTermApp {
             )
         })
         .collect::<Vec<_>>();
-        let sftp_filename_encoding_options = ["terminal", "UTF-8", "GBK", "GB2312", "GB18030"]
-            .into_iter()
+        let sftp_filename_encoding_options = std::iter::once("terminal")
+            .chain(
+                zzclawterm_core::character_encoding::CharacterEncoding::ALL
+                    .into_iter()
+                    .map(|encoding| encoding.label()),
+            )
             .map(|value| {
                 let label = if value == "terminal" {
                     t!("dialog.sftpFilenameEncodingFollowTerminal").to_string()
@@ -799,7 +814,19 @@ impl ZzClawTermApp {
                 ConnectionEditorChoice::new(
                     Some(value.to_string()),
                     label,
-                    editor.sftp_filename_encoding == value,
+                    (value == "terminal"
+                        && (editor.sftp_filename_encoding.trim().is_empty()
+                            || ["terminal", "global"].iter().any(|follow| {
+                                editor
+                                    .sftp_filename_encoding
+                                    .trim()
+                                    .eq_ignore_ascii_case(follow)
+                            })))
+                        || editor.sftp_filename_encoding == value
+                        || zzclawterm_core::character_encoding::CharacterEncoding::parse(
+                            &editor.sftp_filename_encoding,
+                        )
+                        .is_ok_and(|encoding| encoding.label() == value),
                 )
             })
             .collect::<Vec<_>>();
@@ -869,6 +896,20 @@ impl ZzClawTermApp {
         .into_iter()
         .map(|(value, label)| {
             ConnectionEditorChoice::new(Some(value.to_string()), label, editor.parity == value)
+        })
+        .collect::<Vec<_>>();
+        let flow_control_options = [
+            ("none", t!("dialog.serialFlowControlNone")),
+            ("software", t!("dialog.serialFlowControlSoftware")),
+            ("hardware", t!("dialog.serialFlowControlHardware")),
+        ]
+        .into_iter()
+        .map(|(value, label)| {
+            ConnectionEditorChoice::new(
+                Some(value.to_string()),
+                label,
+                editor.flow_control.as_str() == value,
+            )
         })
         .collect::<Vec<_>>();
         let stop_bits_options = ["1", "1.5", "2"]
@@ -1069,6 +1110,11 @@ impl ZzClawTermApp {
             (
                 ConnectionEditorSelect::Parity,
                 parity_options.as_slice(),
+                String::new(),
+            ),
+            (
+                ConnectionEditorSelect::FlowControl,
+                flow_control_options.as_slice(),
                 String::new(),
             ),
             (
@@ -1545,13 +1591,13 @@ impl ZzClawTermApp {
                     .when(editor.kind == ConnectionKindTab::Vnc, |this| {
                         this.child(connection_editor_vnc_section(section_context, cx))
                     })
+                    .child(tags::connection_tags_field(palette, &editor, &fields, cx))
                     .child(connection_description_field(
                         palette,
                         description_label,
                         &fields,
                         cx,
                     ))
-                    .child(tags::connection_tags_field(palette, &editor, &fields, cx))
                     .when_some(editor.error.clone(), |this, error| {
                         this.child(
                             div()
@@ -2158,7 +2204,7 @@ fn connection_editor_agent_identity_picker(
     .into_any_element()
 }
 
-fn connection_editor_select_keys() -> [ConnectionEditorSelect; 30] {
+fn connection_editor_select_keys() -> [ConnectionEditorSelect; 31] {
     [
         ConnectionEditorSelect::Group,
         ConnectionEditorSelect::SavedPassword,
@@ -2190,6 +2236,7 @@ fn connection_editor_select_keys() -> [ConnectionEditorSelect; 30] {
         ConnectionEditorSelect::DataBits,
         ConnectionEditorSelect::Parity,
         ConnectionEditorSelect::StopBits,
+        ConnectionEditorSelect::FlowControl,
     ]
 }
 
@@ -2228,6 +2275,7 @@ fn connection_editor_select_id(select: ConnectionEditorSelect) -> &'static str {
         ConnectionEditorSelect::DataBits => "connection-editor-data-bits",
         ConnectionEditorSelect::Parity => "connection-editor-parity",
         ConnectionEditorSelect::StopBits => "connection-editor-stop-bits",
+        ConnectionEditorSelect::FlowControl => "connection-editor-flow-control",
     }
 }
 
@@ -2748,6 +2796,7 @@ fn connection_description_field(
         .child(
             div()
                 .id("connection-editor-description")
+                .debug_selector(|| "connection-editor-description".to_string())
                 // Fixed: in a flex column the box would otherwise shrink to
                 // whatever space the form had left, cutting a row in half.
                 .h(px(56.))
@@ -2762,7 +2811,8 @@ fn connection_description_field(
                 })
                 .bg(rgb(palette.input))
                 .px(px(ORDINARY_INPUT_SHELL_PADDING_X_PX))
-                .py_2()
+                // Textarea supplies its own top padding; adding shell padding
+                // here pushes the first line toward the center of this short box.
                 .cursor_text()
                 .when_some(handle, |this, handle| {
                     this.on_click(move |_, window, cx| {
@@ -2878,6 +2928,41 @@ mod tests {
         font_size: f32,
     }
 
+    struct AlgorithmListHost {
+        app: Entity<ZzClawTermApp>,
+        tab: crate::models::ConnectionEditorSshAlgorithmTab,
+    }
+
+    impl Render for AlgorithmListHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let tab = self.tab;
+            let list = self.app.update(cx, |app, cx| {
+                let supported = zzclawterm_transport::supported_ssh_algorithms();
+                let (options, selected) = match tab {
+                    crate::models::ConnectionEditorSshAlgorithmTab::KeyExchange => {
+                        (&supported.kex, &supported.compatible.kex)
+                    }
+                    crate::models::ConnectionEditorSshAlgorithmTab::Ciphers => {
+                        (&supported.ciphers, &supported.compatible.ciphers)
+                    }
+                    crate::models::ConnectionEditorSshAlgorithmTab::Macs => {
+                        (&supported.macs, &supported.compatible.macs)
+                    }
+                    crate::models::ConnectionEditorSshAlgorithmTab::HostKeys => {
+                        (&supported.host_keys, &supported.compatible.host_keys)
+                    }
+                };
+                super::ssh::ssh_algorithm_list(app.theme_palette(), tab, options, selected, cx)
+                    .into_any_element()
+            });
+            div().w(px(340.)).text_size(px(12.)).child(list)
+        }
+    }
+
     impl Render for EditorHost {
         fn render(
             &mut self,
@@ -2953,6 +3038,57 @@ mod tests {
             _ = window.draw(cx);
         });
         vcx.run_until_parked();
+    }
+
+    #[test]
+    fn ssh_algorithm_lists_keep_rows_full_height_and_scroll_inside_the_viewport() {
+        use crate::models::ConnectionEditorSshAlgorithmTab;
+
+        for tab in [
+            ConnectionEditorSshAlgorithmTab::KeyExchange,
+            ConnectionEditorSshAlgorithmTab::Ciphers,
+            ConnectionEditorSshAlgorithmTab::Macs,
+            ConnectionEditorSshAlgorithmTab::HostKeys,
+        ] {
+            let test_dir = TestConfigDir::new("zzclawterm-ssh-algorithm-list-scroll");
+            let mut cx = TestAppContext::single();
+            let app = test_app(&mut cx, test_dir.path());
+            cx.update_entity(&app, |app, cx| app.sync_component_theme(cx));
+            let host_app = app.clone();
+            let (_, vcx) = cx.add_window_view(move |_, _| AlgorithmListHost { app: host_app, tab });
+            let vcx: &mut VisualTestContext = vcx;
+            draw_editor(&app, vcx);
+
+            let viewport = vcx
+                .debug_bounds("connection-ssh-algorithm-viewport")
+                .unwrap();
+            let first = vcx.debug_bounds("connection-ssh-algorithm-row-0").unwrap();
+            let second = vcx.debug_bounds("connection-ssh-algorithm-row-1").unwrap();
+            assert_eq!(first.size.height, px(36.));
+            assert_eq!(second.top() - first.top(), px(36.));
+            assert!(viewport.size.height <= px(226.));
+            let overlay = vcx.debug_bounds("scrollbar-overlay").unwrap();
+            assert!(overlay.size.height >= viewport.size.height - px(2.));
+
+            vcx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-108.))),
+                ..Default::default()
+            });
+            draw_editor(&app, vcx);
+            let after = vcx.debug_bounds("connection-ssh-algorithm-row-0").unwrap();
+            if tab == ConnectionEditorSshAlgorithmTab::Macs {
+                assert_eq!(after.top(), first.top(), "short lists should not scroll");
+            } else {
+                assert!(after.top() < first.top(), "{tab:?} must scroll its content");
+            }
+            assert_eq!(
+                vcx.debug_bounds("connection-ssh-algorithm-viewport")
+                    .unwrap(),
+                viewport
+            );
+            assert_eq!(vcx.debug_bounds("scrollbar-overlay").unwrap(), overlay);
+        }
     }
 
     fn protocol_selectors(kind: ConnectionKindTab) -> (&'static str, &'static str) {
@@ -3047,7 +3183,7 @@ mod tests {
             agent_preview: None,
             agent_preview_loading: false,
             backspace_mode: "del".to_string(),
-            encoding: "global".to_string(),
+            encoding: String::new(),
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp_enabled: true,
@@ -3056,7 +3192,7 @@ mod tests {
             sftp_shell_detection_timeout_ms: "3000".to_string(),
             sftp_pipeline_depth: None,
             sftp_extra: Default::default(),
-            sftp_filename_encoding: "terminal".to_string(),
+            sftp_filename_encoding: String::new(),
             ssh_algorithm_mode: "compatible".to_string(),
             ssh_algorithm_kex: Vec::new(),
             ssh_algorithm_ciphers: Vec::new(),
@@ -3070,6 +3206,7 @@ mod tests {
             baud_rate: "115200".to_string(),
             data_bits: "8".to_string(),
             parity: "none".to_string(),
+            flow_control: Default::default(),
             stop_bits: "1".to_string(),
             raw_tcp_cli: false,
             telnet_enter_mode: "cr".to_string(),
@@ -3178,6 +3315,132 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(selected, vec![Some("child".to_string())]);
+    }
+
+    #[gpui::test]
+    fn connection_editor_enter_creates_inline_tags_and_keeps_input_focus(cx: &mut TestAppContext) {
+        let test_dir = TestConfigDir::new("zzclawterm-connection-inline-tags");
+        let (app, vcx) = hosted_editor(cx, test_dir.path(), 640., 720., 12.);
+
+        for id in [None, Some("saved-local")] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    let mut draft = editor(None, None);
+                    draft.id = id.map(ToOwned::to_owned);
+                    draft.kind = ConnectionKindTab::Local;
+                    app.connection_state.begin_editor(draft);
+                    app.connection_state.build_editor_fields(cx);
+                    cx.notify();
+                });
+            });
+            draw_editor(&app, vcx);
+            let tags = vcx
+                .debug_bounds("connection-editor-tags")
+                .expect("tag field");
+            let description = vcx
+                .debug_bounds("connection-editor-description")
+                .expect("description field");
+            assert!(tags.bottom() < description.top());
+            vcx.update(|window, cx| {
+                let input =
+                    &app.read(cx).connection_state.editor_fields()[&ConnectionEditorField::NewTag];
+                window.focus(&input.read(cx).component_focus_handle(cx), cx);
+            });
+            draw_editor(&app, vcx);
+            vcx.simulate_keystrokes("d o c k e r enter");
+            draw_editor(&app, vcx);
+            vcx.update(|window, cx| {
+                let state = &app.read(cx).connection_state;
+                let draft = state
+                    .active_editor_draft()
+                    .expect("Enter keeps the editor open");
+                assert_eq!(draft.tags, ["docker"]);
+                assert!(draft.new_tag.is_empty());
+                let input = &state.editor_fields()[&ConnectionEditorField::NewTag];
+                assert_eq!(input.read(cx).value(cx), "");
+                assert!(input.read(cx).component_focus_handle(cx).is_focused(window));
+            });
+            vcx.simulate_keystrokes("g p u enter");
+            draw_editor(&app, vcx);
+            let tags_after = vcx
+                .debug_bounds("connection-editor-tags")
+                .expect("inline tags");
+            assert_eq!(tags.size.height, tags_after.size.height);
+            vcx.update(|_, cx| {
+                assert_eq!(
+                    app.read(cx)
+                        .connection_state
+                        .active_editor_draft()
+                        .unwrap()
+                        .tags,
+                    ["docker", "gpu"]
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn serial_custom_baud_accepts_pointer_focus_and_keyboard_edits(cx: &mut TestAppContext) {
+        let test_dir = TestConfigDir::new("zzclawterm-serial-custom-baud-input");
+        let (app, vcx) = hosted_editor(cx, test_dir.path(), 640., 720., 12.);
+
+        for (id, seed) in [(None, "115200"), (Some("saved-serial"), "76800")] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    let mut draft = editor(None, None);
+                    draft.id = id.map(ToOwned::to_owned);
+                    draft.kind = ConnectionKindTab::Serial;
+                    draft.baud_rate = seed.to_string();
+                    app.connection_state.begin_editor(draft);
+                    app.connection_state.build_editor_fields(cx);
+                    app.set_connection_editor_baud_popover_open(true, cx);
+                    cx.notify();
+                });
+            });
+            for _ in 0..3 {
+                draw_editor(&app, vcx);
+            }
+            let bounds = vcx
+                .debug_bounds("connection-editor-custom-baud")
+                .expect("custom baud input should render");
+
+            let input = vcx.update(|_, cx| {
+                app.read(cx).connection_state.editor_number_fields()
+                    [&ConnectionEditorField::BaudRate]
+                    .clone()
+            });
+            assert!(
+                input.read_with(vcx, |input, _| input.component_state().is_some()),
+                "the popup must render the numeric input entity"
+            );
+            assert_eq!(input.read_with(vcx, |input, cx| input.value(cx)), seed);
+            assert!(bounds.size.width > px(0.));
+            assert!(bounds.size.height >= px(32.));
+            vcx.simulate_click(bounds.center(), Modifiers::default());
+            draw_editor(&app, vcx);
+            assert!(vcx.update(|window, cx| {
+                input.read(cx).component_focus_handle(cx).is_focused(window)
+            }));
+            vcx.simulate_keystrokes("secondary-a 2 5 0 0 0 0");
+            draw_editor(&app, vcx);
+            assert_eq!(input.read_with(vcx, |input, cx| input.value(cx)), "250000");
+            assert!(vcx.update(|_, cx| {
+                let state = &app.read(cx).connection_state;
+                assert_eq!(state.active_editor_draft().unwrap().baud_rate, "250000");
+                state.editor_baud_popover_is_open()
+            }));
+
+            let apply = vcx
+                .debug_bounds("connection-editor-apply-custom-baud")
+                .expect("apply custom baud button should render");
+            vcx.simulate_click(apply.center(), Modifiers::default());
+            draw_editor(&app, vcx);
+            assert!(vcx.update(|_, cx| {
+                let state = &app.read(cx).connection_state;
+                assert_eq!(state.active_editor_draft().unwrap().baud_rate, "250000");
+                !state.editor_baud_popover_is_open()
+            }));
+        }
     }
 
     #[gpui::test]

@@ -10,7 +10,7 @@ use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
 use super::ZzClawTermApp;
 
 /// Build a visible local terminal session for GPUI tests.
-pub(in crate::features) fn app_with_visible_local_session(
+pub(crate) fn app_with_visible_local_session(
     cx: &mut gpui::TestAppContext,
     root: &Path,
     session_id: &str,

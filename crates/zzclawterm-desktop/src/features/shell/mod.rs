@@ -19,6 +19,7 @@ mod runtime_state;
 mod shortcut_action_runtime;
 mod state;
 mod status_clocks;
+mod tab_drag;
 mod tab_mouse;
 mod tab_windows_runtime;
 mod terminal_recovery;
@@ -39,3 +40,5 @@ pub(in crate::features) use tab_mouse::{
     SessionTabDragPayload, SessionTabDragPreview, SessionTabTooltip, TAB_MOUSE_ACTIONS,
     TabMouseActionTarget,
 };
+
+mod workspace_groups;

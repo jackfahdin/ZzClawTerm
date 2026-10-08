@@ -19,8 +19,11 @@ impl ZzClawTermApp {
         kind: AiAgentKind,
         cx: &mut Context<Self>,
     ) {
-        self.ai.set_chat_run_mode(mode, kind);
-        self.defer_ai_panel_snapshot_flush(cx);
+        let before = self.ai_header_presentation();
+        if self.ai.set_chat_run_mode(mode, kind) {
+            self.persist_ai_settings_now(cx);
+            self.notify_root_if_ai_header_changed(before, cx);
+        }
     }
 
     pub(in crate::features) fn set_ai_reasoning_effort(

@@ -13,7 +13,9 @@ use zzclawterm_store::BootstrapSnapshot;
 #[cfg(test)]
 use zzclawterm_store::{LoadBootstrap, StoreConfig, StoreRuntime};
 use zzclawterm_terminal::TerminalOutputDecoder;
-use zzclawterm_transport::{SessionManager, SftpDuplicatePolicy};
+use zzclawterm_transport::SftpDuplicatePolicy;
+
+use crate::app_shell::session_hub::SessionHub;
 
 use super::{ZzClawTermApp, ZzClawTermProcessEntities, ZzClawTermStoreClients};
 use crate::features::ai::{
@@ -30,7 +32,7 @@ use crate::features::notes::{NotesFeatureState, NotesPanel};
 use crate::features::pages::connections::panel::ConnectionPanel;
 use crate::features::pages::settings::panel::SettingsPanel;
 use crate::features::pages::transfers::panel::TransferPanel;
-use crate::features::panels::{SendCommandFeatureFocus, SendCommandFeatureState};
+use crate::features::panels::SendCommandFeatureState;
 use crate::features::recording::RecordingFeatureState;
 use crate::features::remote::{RemoteOpsFeatureFocus, RemoteOpsFeatureState};
 use crate::features::remote_desktop::RemoteDesktopFeatureState;
@@ -57,13 +59,16 @@ impl ZzClawTermApp {
         process_entities: ZzClawTermProcessEntities,
         workspace_init: crate::app_shell::WorkspaceInitSnapshot,
         store_clients: ZzClawTermStoreClients,
-        session_manager: Arc<SessionManager>,
+        session_hub: SessionHub,
         cx: &mut Context<Self>,
     ) -> Self {
         let ZzClawTermProcessEntities {
             process_state,
             update,
+            plugins,
         } = process_entities;
+        let session_manager = session_hub.manager();
+        let ssh_connections = session_hub.ssh_connections();
         zzclawterm_core::warm_terminal_input_tracker();
         let ZzClawTermStoreClients {
             ui: store_ui,
@@ -140,6 +145,7 @@ impl ZzClawTermApp {
         let transfer_duplicate_policy =
             SftpDuplicatePolicy::from_legacy_value(&settings.transfer_duplicate_strategy);
         let recording = RecordingFeatureState::new(settings.recording_memory_limit_bytes as usize);
+        recording.set_history_include_input(settings.recording_include_input);
         let recording_writer = recording.writer();
         let (ai_model_draft, ai_base_url_draft) = ai_active_profile_drafts(&ai_settings);
         let mcp = McpHostFeatureState::new(&ai_settings.external_mcp);
@@ -148,7 +154,7 @@ impl ZzClawTermApp {
         let transfer_panel_height = settings.ui_transfer_height as f32;
         let quick_cmd_height = settings.ui_quick_cmd_height as f32;
         let serial_send_height = settings.ui_serial_send_height as f32;
-        let activity_bar_layout = ActivityBarLayoutState {
+        let mut activity_bar_layout = ActivityBarLayoutState {
             left_top: settings.ui_activity_bar_left_top.clone(),
             left_bottom: settings.ui_activity_bar_left_bottom.clone(),
             right_top: settings.ui_activity_bar_right_top.clone(),
@@ -156,6 +162,8 @@ impl ZzClawTermApp {
             hidden_items: settings.ui_activity_bar_hidden_items.clone(),
             show_labels: settings.ui_activity_bar_show_labels,
         };
+        activity_bar_layout.ensure_plugin_entry();
+        settings.ui_activity_bar_left_bottom = activity_bar_layout.left_bottom.clone();
         let mut active_left_panel = settings
             .ui_active_left_panel
             .as_deref()
@@ -206,13 +214,20 @@ impl ZzClawTermApp {
             right_inspector_collapsed = true;
         }
         let mut terminal_output_decoder = TerminalOutputDecoder::default();
-        terminal_output_decoder.set_encoding(&settings.interaction_default_encoding);
+        if let Err(error) =
+            terminal_output_decoder.set_encoding(&settings.interaction_default_encoding)
+        {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         let mut terminal_screen = initial_terminal_screen();
-        terminal_screen.set_encoding(&settings.interaction_default_encoding);
-        let terminal_frame_pipeline = TerminalFramePipeline::spawn(recording_writer);
+        if let Err(error) = terminal_screen.set_encoding(&settings.interaction_default_encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
+        let terminal_frame_pipeline = TerminalFramePipeline::spawn(recording_writer.clone());
         let session_event_bridge = SessionEventBridge::spawn(
             Arc::clone(&session_manager),
             terminal_frame_pipeline.clone(),
+            Some(recording_writer),
             settings.interaction_default_encoding.clone(),
             settings.terminal_scrollback_lines.clamp(100, 100_000) as usize,
         );
@@ -231,7 +246,7 @@ impl ZzClawTermApp {
         let settings_panel = cx.new(|cx| SettingsPanel::new(app_entity.downgrade(), cx));
         let transfer_panel = cx.new(|_| TransferPanel::new(app_entity.downgrade()));
         let notes_panel = cx.new(|cx| NotesPanel::new(app_entity.downgrade(), cx));
-        let ai_panel = cx.new(|_| AiPanel::new(app_entity.downgrade()));
+        let ai_panel = cx.new(|cx| AiPanel::new(app_entity.downgrade(), cx));
         let start_workspace = StartWorkspaceFeatureState::new(&connection_groups, &settings, cx);
 
         // Settings are loaded after gpui-kit initialization, so this is the
@@ -239,7 +254,15 @@ impl ZzClawTermApp {
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
 
         let blocking_jobs = crate::blocking_jobs::BlockingJobScheduler::new();
+        let send_command = SendCommandFeatureState::new(cx);
+        cx.observe(&send_command.presentation(cx).hex, |_, _, cx| cx.notify())
+            .detach();
         let mut app = Self {
+            plugins: crate::features::plugins::PluginFeatureState::new(
+                app_entity.downgrade(),
+                plugins,
+                cx,
+            ),
             workspace_id,
             workspace_revision: 0,
             desktop_controller: None,
@@ -281,9 +304,7 @@ impl ZzClawTermApp {
                 store: command_store,
                 scheduler: blocking_jobs,
             }),
-            send_command: SendCommandFeatureState::new(SendCommandFeatureFocus {
-                editor: cx.focus_handle(),
-            }),
+            send_command,
             terminal: TerminalFeatureState::new(
                 terminal_screen,
                 terminal_output_decoder,
@@ -307,9 +328,7 @@ impl ZzClawTermApp {
                 },
                 AiFeatureFocus {
                     chat: cx.focus_handle(),
-                    action: cx.focus_handle(),
                     manual_model: cx.focus_handle(),
-                    credential: cx.focus_handle(),
                 },
             ),
             ai_panel,
@@ -358,6 +377,7 @@ impl ZzClawTermApp {
             ),
             session: SessionFeatureState::new(
                 session_manager,
+                ssh_connections,
                 session_event_bridge,
                 otp_provider,
                 SessionFeatureFocus {
@@ -472,10 +492,14 @@ impl ZzClawTermApp {
         let mut app = Self::from_bootstrap(
             runtime,
             stores,
-            ZzClawTermProcessEntities::new(process_state, update),
+            ZzClawTermProcessEntities::new(
+                process_state,
+                update,
+                cx.new(|_| crate::features::plugins::PluginProcess::empty()),
+            ),
             workspace_init,
             ZzClawTermStoreClients::new(store_ui, store_blocking),
-            Arc::new(SessionManager::new()),
+            SessionHub::new(),
             cx,
         );
         app._test_config_dir = Some(test_config_dir);

@@ -45,6 +45,51 @@ fn transfer_state(cx: &TestAppContext) -> TransferFeatureState {
     )
 }
 
+#[test]
+fn inactive_delete_invalidates_cached_directory_until_its_session_is_restored() {
+    use zzclawterm_transport::{FileBrowserBackendKind, RemoteFilePath};
+
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    transfer.store_browser_session_cache(
+        "inactive".into(),
+        TransferBrowserSessionCacheState {
+            entries: Arc::new(vec![file_entry("/dir/sub/file")]),
+            current_path: "/dir/sub".into(),
+            current_raw_path_token: None,
+            home_dir: "/home/user".into(),
+            history: VecDeque::from(["/dir/sub".into()]),
+            history_index: 0,
+            visited_history: VecDeque::new(),
+        },
+    );
+    transfer.begin_delete_batch(
+        "batch".into(),
+        FileBrowserBackendKind::Remote,
+        vec![("delete".into(), RemoteFilePath::new("/dir/sub"))],
+    );
+    let outcome = transfer
+        .settle_delete_job("batch", "delete", Ok(()))
+        .unwrap();
+    transfer.invalidate_delete_batch("inactive", &outcome);
+    assert_eq!(transfer.browser.path, ".");
+    assert_eq!(
+        transfer
+            .browser_session_cache("inactive")
+            .unwrap()
+            .current_path,
+        "/dir"
+    );
+    assert!(transfer.replace_session_id("inactive", "reconnected"));
+    assert!(transfer.take_delete_refresh_pending("reconnected"));
+    assert!(!transfer.take_delete_refresh_pending("reconnected"));
+    assert!(
+        transfer
+            .settle_delete_job("batch", "delete", Ok(()))
+            .is_none()
+    );
+}
+
 /// Every real input to the derived listing must invalidate the memo, and nothing
 /// else may.
 ///
@@ -1813,7 +1858,6 @@ fn preview_zoom_clamps_and_reset_restores_defaults() {
 
 #[test]
 fn preview_pdf_navigation_requests_pages_and_applies_under_generation() {
-    use std::sync::Arc;
     let cx = TestAppContext::single();
     let mut transfer = transfer_state(&cx);
     let mut tab = preview_tab("session", "/doc.pdf");
@@ -1854,7 +1898,6 @@ fn preview_pdf_navigation_requests_pages_and_applies_under_generation() {
 
 fn dummy_pdf_page() -> crate::models::PreviewPdfPage {
     use gpui::RenderImage;
-    use std::sync::Arc;
     let bytes = vec![0u8, 0, 0, 255];
     let buffer = image::RgbaImage::from_raw(1, 1, bytes.clone()).unwrap();
     crate::models::PreviewPdfPage {
@@ -1865,4 +1908,47 @@ fn dummy_pdf_page() -> crate::models::PreviewPdfPage {
         width: 1,
         height: 1,
     }
+}
+
+#[test]
+fn promised_retry_keeps_original_source_and_execution_contract_until_released() {
+    let cx = TestAppContext::single();
+    let mut transfer = transfer_state(&cx);
+    let source = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
+        zzclawterm_transport::SshSessionConfig::default(),
+    ));
+    transfer.bind_promised_download(
+        "promise",
+        SftpPathTransferOptions::for_promised_download(
+            SftpTransferOptions::default().with_max_retries(2),
+            zzclawterm_transport::SftpFileType::Directory,
+        ),
+        std::sync::Arc::downgrade(&source),
+    );
+    let retry = transfer.transfer_job_retry_path_options(
+        "promise",
+        SftpPathTransferOptions::new(
+            SftpDuplicatePolicy::Overwrite,
+            None,
+            SftpTransferOptions::default().with_max_retries(9),
+        ),
+    );
+    assert!(retry.is_promised_download());
+    assert_eq!(retry.duplicate_policy(), SftpDuplicatePolicy::Skip);
+    assert_eq!(retry.transfer_options().max_retries(), 2);
+    let saved = transfer.promised_download_source("promise").unwrap();
+    assert!(std::sync::Weak::ptr_eq(
+        &saved,
+        &std::sync::Arc::downgrade(&source)
+    ));
+    drop(source);
+    assert!(
+        transfer
+            .promised_download_source("promise")
+            .unwrap()
+            .upgrade()
+            .is_none()
+    );
+    transfer.release_transfer_job_path_options("promise");
+    assert!(transfer.promised_download_source("promise").is_none());
 }

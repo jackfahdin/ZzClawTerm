@@ -524,6 +524,40 @@ fn connection_list_model_cache_ignores_unrelated_shell_state() {
 }
 
 #[test]
+fn all_folder_expansion_updates_nested_rows_and_only_invalidates_on_change() {
+    let mut cx = TestAppContext::single();
+    let app = cache_test_app(&mut cx);
+    seed_cached_connections(&mut cx, &app);
+
+    cx.update_entity(&app, |app, _| {
+        app.connection_state
+            .expand_list_group("missing-group".to_string());
+        let _ = app.connection_state.connection_list_model();
+        app.connection_state.set_all_catalog_groups_expanded(false);
+        assert!(app.connection_state.list_expanded_group_ids().is_empty());
+        assert_eq!(app.connection_state.visible_connection_ids(), vec!["root"]);
+        assert!(!app.connection_state.connection_list_model().stats.cache_hit);
+
+        app.connection_state.set_all_catalog_groups_expanded(false);
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
+
+        app.connection_state.set_all_catalog_groups_expanded(true);
+        assert_eq!(
+            app.connection_state.list_expanded_group_ids(),
+            &HashSet::from(["parent-group".to_string(), "child-group".to_string()])
+        );
+        assert_eq!(
+            app.connection_state.visible_connection_ids(),
+            vec!["child", "parent", "root"]
+        );
+        assert!(!app.connection_state.connection_list_model().stats.cache_hit);
+
+        app.connection_state.set_all_catalog_groups_expanded(true);
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
+    });
+}
+
+#[test]
 fn remove_connection_references_clears_invalid_list_state() {
     let mut selected_ids = HashSet::from(["one".to_string(), "two".to_string()]);
     let mut last_selected_id = Some("one".to_string());
@@ -1377,6 +1411,58 @@ fn apply_connection_editor_paths_update_field_and_clear_error() {
 }
 
 #[test]
+fn connection_path_pickers_update_existing_inputs_and_preserve_them_on_cancel() {
+    let mut cx = TestAppContext::single();
+    let app = cache_test_app(&mut cx);
+    cx.update_entity(&app, |app, cx| {
+        app.connection_state
+            .begin_editor(connection_editor_state_with_secret_draft());
+        app.connection_state.build_editor_fields(cx);
+    });
+
+    type PathPicker = fn(&mut ZzClawTermApp, &mut gpui::Context<ZzClawTermApp>);
+    for (field, directories, prompt) in [
+        (
+            ConnectionEditorField::ShellPath,
+            false,
+            ZzClawTermApp::prompt_connection_editor_shell_path as PathPicker,
+        ),
+        (
+            ConnectionEditorField::WorkingDir,
+            true,
+            ZzClawTermApp::prompt_connection_editor_working_dir as PathPicker,
+        ),
+    ] {
+        let input = cx.update_entity(&app, |app, _| {
+            app.connection_state.editor_fields()[&field].clone()
+        });
+        let selected = PathBuf::from("C:\\selected path");
+        for response in [Some(vec![selected.clone()]), None] {
+            cx.update_entity(&app, prompt);
+            cx.simulate_path_prompt_response(|options| {
+                assert_eq!(options.directories, directories);
+                assert_eq!(options.files, !directories);
+                assert!(!options.multiple);
+                response
+            });
+            cx.run_until_parked();
+
+            cx.update_entity(&app, |app, cx| {
+                let draft = app.connection_state.active_editor_draft().unwrap();
+                let value = match field {
+                    ConnectionEditorField::ShellPath => draft.shell_path,
+                    ConnectionEditorField::WorkingDir => draft.working_dir,
+                    _ => unreachable!(),
+                };
+                assert_eq!(value, selected.display().to_string());
+                assert_eq!(app.connection_state.editor_fields()[&field], input);
+                assert_eq!(input.read(cx).value(cx), value);
+            });
+        }
+    }
+}
+
+#[test]
 fn set_connection_group_editor_error_updates_active_draft() {
     let mut draft = Some(ConnectionGroupEditorState {
         mode: ConnectionGroupEditorMode::Create,
@@ -1735,6 +1821,77 @@ fn cache_test_app(cx: &mut TestAppContext) -> gpui::Entity<ZzClawTermApp> {
     cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx))
 }
 
+#[test]
+fn asset_snapshots_reuse_records_and_invalidate_for_catalog_and_view_changes() {
+    use std::sync::Arc;
+    use zzclawterm_core::assets::{AssetDisplayLabels, AssetFilterKey, AssetRecord, AssetSortKey};
+
+    fn records(
+        app: &mut ZzClawTermApp,
+        labels: &AssetDisplayLabels,
+        root: &str,
+    ) -> Arc<[AssetRecord]> {
+        app.start_workspace.records(
+            app.connection_state.catalog_revisions(),
+            app.connection_state.connections(),
+            app.connection_state.groups(),
+            labels,
+            root,
+        )
+    }
+
+    let mut cx = TestAppContext::single();
+    let app = cache_test_app(&mut cx);
+    seed_cached_connections(&mut cx, &app);
+    cx.update_entity(&app, |app, cx| {
+        let labels = AssetDisplayLabels::default();
+        let first = records(app, &labels, "Assets");
+        assert_eq!(first.len(), 3);
+        assert!(Arc::ptr_eq(&first, &records(app, &labels, "Assets")));
+        app.start_workspace.cycle_sort(AssetSortKey::Name);
+        let sorted = records(app, &labels, "Assets");
+        assert!(!Arc::ptr_eq(&first, &sorted));
+        assert_eq!(sorted[0].connection.name, "Child");
+        app.start_workspace.search_field().update(cx, |_, cx| {
+            cx.emit(zzclawterm_ui::ZzClawInputEvent::Changed(
+                "Child".to_string(),
+            ));
+        });
+    });
+    cx.update_entity(&app, |app, _| {
+        let labels = AssetDisplayLabels::default();
+        let searched = records(app, &labels, "Assets");
+        assert_eq!(searched.len(), 1);
+        assert_eq!(searched[0].connection.id, "child");
+        app.start_workspace
+            .toggle_filter(AssetFilterKey::Tag("missing".to_string()));
+        assert!(records(app, &labels, "Assets").is_empty());
+        app.start_workspace.clear_filters();
+        let before = records(app, &labels, "Assets");
+        let mut connections = app.connection_state.connections().to_vec();
+        connections
+            .iter_mut()
+            .find(|connection| connection.id == "child")
+            .unwrap()
+            .name = "Child updated".to_string();
+        let mut groups = app.connection_state.groups().to_vec();
+        groups[0].name = "Renamed".to_string();
+        app.connection_state.replace_loaded(connections, groups);
+        let after = records(app, &labels, "Assets");
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(after[0].connection.name, "Child updated");
+        assert!(after[0].group_path.contains("Renamed"));
+        let localized = records(app, &labels, "Localized root");
+        assert!(localized[0].group_path.starts_with("Localized root"));
+        let mut translated = labels.clone();
+        translated.none = "Nothing".to_string();
+        assert!(!Arc::ptr_eq(
+            &localized,
+            &records(app, &translated, "Localized root")
+        ));
+    });
+}
+
 fn seed_cached_connections(cx: &mut TestAppContext, app: &gpui::Entity<ZzClawTermApp>) {
     let connections = vec![
         saved_connection("root", "Root", None, 0),
@@ -1889,6 +2046,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         baud_rate: "115200".to_string(),
         data_bits: "8".to_string(),
         parity: "none".to_string(),
+        flow_control: Default::default(),
         stop_bits: "1".to_string(),
         raw_tcp_cli: false,
         telnet_enter_mode: "cr".to_string(),

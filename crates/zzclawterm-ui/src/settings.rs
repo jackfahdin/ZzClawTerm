@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, FontWeight, IntoElement, RenderOnce, SharedString, Window, div,
-    prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, ClickEvent, FontWeight, IntoElement, RenderOnce, ScrollHandle, SharedString,
+    Window, div, prelude::*, px, rgb, rgba, svg,
 };
 
 use gpui_kit::component::scroll::ScrollableElement;
@@ -108,6 +108,7 @@ pub struct ZzClawSettingsLayout {
     content: AnyElement,
     palette: ThemePalette,
     viewport_width: Option<f32>,
+    content_scroll_handle: Option<ScrollHandle>,
     compact_breakpoint: f32,
     wide_breakpoint: f32,
     on_select: Option<ZzClawSettingsSelectHandler>,
@@ -140,6 +141,7 @@ impl ZzClawSettingsLayout {
             content: content.into_any_element(),
             palette: theme_palette("github-dark"),
             viewport_width: None,
+            content_scroll_handle: None,
             compact_breakpoint: DEFAULT_COMPACT_BREAKPOINT,
             wide_breakpoint: DEFAULT_WIDE_BREAKPOINT,
             on_select: None,
@@ -164,6 +166,11 @@ impl ZzClawSettingsLayout {
 
     pub fn viewport_width(mut self, width: f32) -> Self {
         self.viewport_width = Some(width);
+        self
+    }
+
+    pub fn content_scroll_handle(mut self, handle: ScrollHandle) -> Self {
+        self.content_scroll_handle = Some(handle);
         self
     }
 
@@ -235,6 +242,7 @@ impl RenderOnce for ZzClawSettingsLayout {
                 wide,
                 self.active_title,
                 self.content,
+                self.content_scroll_handle,
             ))
     }
 }
@@ -542,7 +550,9 @@ fn settings_content_panel(
     wide: bool,
     active_title: SharedString,
     content: AnyElement,
+    scroll_handle: Option<ScrollHandle>,
 ) -> impl IntoElement {
+    let handle = scroll_handle.unwrap_or_default();
     div()
         .flex_1()
         .min_w_0()
@@ -578,22 +588,33 @@ fn settings_content_panel(
                 )
                 .child(
                     div()
-                        .id(SharedString::from("settings-content-scroll"))
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scrollbar()
-                        .when(compact, |this| this.px_4().py_4())
-                        .when(!compact && !wide, |this| this.px_6().py_6())
-                        .when(wide, |this| this.px_8().py_8())
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .vertical_scrollbar(&handle)
                         .child(
                             div()
-                                .w_full()
-                                .max_w(px(1024.))
-                                .mx_auto()
-                                .flex()
-                                .flex_col()
-                                .gap(if compact { px(20.) } else { px(24.) })
-                                .child(content),
+                                .id(SharedString::from("settings-content-scroll"))
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&handle)
+                                .when(compact, |this| this.px_4().py_4())
+                                .when(!compact && !wide, |this| this.px_6().py_6())
+                                .when(wide, |this| this.px_8().py_8())
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(1024.))
+                                        .mx_auto()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(if compact { px(20.) } else { px(24.) })
+                                        .child(content),
+                                ),
                         ),
                 ),
         )

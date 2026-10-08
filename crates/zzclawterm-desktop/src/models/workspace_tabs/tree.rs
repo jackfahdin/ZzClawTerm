@@ -1,4 +1,6 @@
-use super::{SmartSplitMode, TerminalWindowNode, WorkspacePaneNode, WorkspaceSplitDirection};
+use super::TerminalWindowNode;
+#[cfg(test)]
+use super::{SmartSplitMode, WorkspacePaneNode, WorkspaceSplitDirection};
 use crate::models::uuid_v4_like;
 
 impl TerminalWindowNode {
@@ -15,6 +17,7 @@ impl TerminalWindowNode {
     }
 
     /// Build a balanced multi-leaf tree tiling every tab into its own leaf (Tauri smartSplit).
+    #[cfg(test)]
     pub(crate) fn build_smart_split_layout(
         tab_ids: &[String],
         mode: SmartSplitMode,
@@ -34,6 +37,7 @@ impl TerminalWindowNode {
         Some(Self::build_balanced_tree(&tab_ids, direction, alternate))
     }
 
+    #[cfg(test)]
     pub(super) fn build_balanced_tree(
         tab_ids: &[String],
         direction: WorkspaceSplitDirection,

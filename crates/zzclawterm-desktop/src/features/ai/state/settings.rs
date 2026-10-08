@@ -30,7 +30,10 @@ fn is_builtin_ai_provider_id(id: &str) -> bool {
     )
 }
 
-fn seed_builtin_ai_models_for_provider(settings: &mut AiSettings, provider_kind: &AiProviderKind) {
+pub(super) fn seed_builtin_ai_models_for_provider(
+    settings: &mut AiSettings,
+    provider_kind: &AiProviderKind,
+) {
     let names: &[&str] = match provider_kind {
         AiProviderKind::Openai => &[
             "gpt-4o-mini",
@@ -66,6 +69,7 @@ fn seed_builtin_ai_models_for_provider(settings: &mut AiSettings, provider_kind:
             continue;
         }
         settings.models.push(AiModelConfigItem {
+            supported_reasoning_efforts: None,
             backend: Default::default(),
             id: model_id,
             name: (*name).to_string(),
@@ -79,6 +83,27 @@ fn seed_builtin_ai_models_for_provider(settings: &mut AiSettings, provider_kind:
 }
 
 impl AiFeatureState {
+    pub(in crate::features) fn set_proxy_selection(&mut self, id: &str, value: &str) {
+        use zzclawterm_core::ai::proxy::{AiProxyMode, AiProxyProtocol};
+        match id {
+            "ai-proxy-mode" => {
+                self.settings.config.proxy.mode = match value {
+                    "direct" => AiProxyMode::Direct,
+                    "custom" => AiProxyMode::Custom,
+                    _ => AiProxyMode::System,
+                }
+            }
+            "ai-proxy-protocol" => {
+                self.settings.config.proxy.protocol = if value == "socks5" {
+                    AiProxyProtocol::Socks5
+                } else {
+                    AiProxyProtocol::Http
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(in crate::features) fn settings_config(&self) -> &AiSettings {
         &self.settings.config
     }
@@ -192,6 +217,27 @@ impl AiFeatureState {
 
     pub(in crate::features) fn pending_settings(&self) -> AiSettings {
         let mut next = self.settings.config.clone();
+        for credential in &mut next.provider_credentials {
+            if let Some(secret) = self
+                .settings
+                .credential_secret_drafts
+                .get(&credential.id)
+                .filter(|secret| !secret.is_empty())
+            {
+                credential.api_key = Some(secret.clone().into());
+            }
+        }
+        // Legacy profile fields only participate when that legacy editor changed.
+        if self.settings.secret_draft.is_empty()
+            && next.provider_profiles.iter().any(|profile| {
+                profile.id == next.active_profile_id
+                    && profile.model == self.settings.model_draft
+                    && profile.base_url.as_deref().unwrap_or_default()
+                        == self.settings.base_url_draft
+            })
+        {
+            return next;
+        }
         let active_id = next.active_profile_id.clone();
         let mut active_kind = None;
         let mut active_name = active_id.clone();
@@ -219,6 +265,8 @@ impl AiFeatureState {
 
         if let Some(kind) = active_kind.clone() {
             let credential = AiProviderCredential {
+                icon_data_url: None,
+                api_protocol: None,
                 api_format: Default::default(),
                 id: active_id.clone(),
                 name: active_name,
@@ -239,6 +287,10 @@ impl AiFeatureState {
                 .iter_mut()
                 .find(|credential| credential.id == active_id)
             {
+                let mut credential = credential;
+                credential.icon_data_url = existing.icon_data_url.clone();
+                credential.api_protocol = existing.api_protocol;
+                credential.api_format = existing.api_format.clone();
                 *existing = credential;
             } else {
                 next.provider_credentials.push(credential);
@@ -271,6 +323,7 @@ impl AiFeatureState {
                     model.enabled = true;
                 } else {
                     next.models.push(AiModelConfigItem {
+                        supported_reasoning_efforts: None,
                         backend: Default::default(),
                         id: model_id.clone(),
                         name: active_model,
@@ -294,7 +347,7 @@ impl AiFeatureState {
         &self,
     ) -> (AiSettings, String, String, zzclawterm_core::SecretString) {
         (
-            self.settings.config.clone(),
+            self.pending_settings(),
             self.settings.model_draft.clone(),
             self.settings.base_url_draft.clone(),
             self.settings.secret_draft.clone(),
@@ -308,7 +361,7 @@ impl AiFeatureState {
         base_url: &str,
         secret: &zzclawterm_core::SecretString,
     ) -> bool {
-        &self.settings.config == config
+        &self.pending_settings() == config
             && self.settings.model_draft == model
             && self.settings.base_url_draft == base_url
             && self.settings.secret_draft == *secret
@@ -319,8 +372,11 @@ impl AiFeatureState {
         config: AiSettings,
         clear_secret_draft: bool,
     ) {
+        self.invalidate_provider_jobs();
+        self.agent_management.invalidate();
         self.settings.config = config;
         if clear_secret_draft {
+            self.settings.credential_secret_drafts.clear();
             self.settings.secret_draft.expose_secret_mut().clear();
         }
     }
@@ -332,6 +388,9 @@ impl AiFeatureState {
         base_url: String,
         secret: zzclawterm_core::SecretString,
     ) {
+        self.invalidate_provider_jobs();
+        self.agent_management.invalidate();
+        self.settings.credential_secret_drafts.clear();
         self.settings.config = config;
         self.settings.model_draft = model;
         self.settings.base_url_draft = base_url;
@@ -339,20 +398,11 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn close_settings_editors(&mut self) {
+        self.invalidate_provider_jobs();
+        self.agent_management.invalidate();
+        self.provider_view_mut().revealed_id = None;
         self.settings.action_edit = None;
         self.settings.manual_model_edit_group = None;
-    }
-
-    pub(in crate::features) fn settings_model_query(&self) -> &str {
-        &self.settings.model_query
-    }
-
-    pub(in crate::features) fn clear_settings_model_query(&mut self) {
-        self.settings.model_query.clear();
-    }
-
-    pub(in crate::features) fn settings_model_collapsed_groups(&self) -> &HashSet<String> {
-        &self.settings.model_collapsed_groups
     }
 
     pub(in crate::features) fn settings_manual_model_drafts(&self) -> &HashMap<String, String> {
@@ -363,10 +413,6 @@ impl AiFeatureState {
         &self,
     ) -> &HashMap<String, String> {
         &self.settings.credential_secret_drafts
-    }
-
-    pub(in crate::features) fn settings_action_focus(&self) -> &FocusHandle {
-        &self.settings.action_focus
     }
 
     pub(in crate::features) fn accept_saved_settings(&mut self, saved: AiSettings) {
@@ -424,6 +470,7 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn toggle_settings_enabled(&mut self) {
+        self.invalidate_provider_jobs();
         self.settings.config.enabled = !self.settings.config.enabled;
         self.panel.status = if self.settings.config.enabled {
             "AI enabled"
@@ -447,6 +494,7 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn toggle_settings_background_execution(&mut self) {
+        self.invalidate_provider_jobs();
         self.settings.config.agent_background_execution_enabled =
             !self.settings.config.agent_background_execution_enabled;
         self.panel.status = if self.settings.config.agent_background_execution_enabled {
@@ -473,16 +521,19 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn set_settings_context_line_limit(&mut self, value: u32) {
+        self.invalidate_provider_jobs();
         self.settings.config.context_line_limit = value.clamp(50, 500);
         self.panel.status = "AI context line limit updated".to_string();
     }
 
     pub(in crate::features) fn set_settings_timeout_ms(&mut self, value: u64) {
+        self.invalidate_provider_jobs();
         self.settings.config.timeout_ms = value.clamp(5_000, 300_000);
         self.panel.status = "AI timeout updated".to_string();
     }
 
     pub(in crate::features) fn set_settings_agent_steps(&mut self, value: u16) {
+        self.invalidate_provider_jobs();
         self.settings.config.max_agent_steps = Some(value.clamp(1, 50));
         self.panel.status = "AI Agent max steps updated".to_string();
     }
@@ -493,6 +544,7 @@ impl AiFeatureState {
     }
 
     pub(in crate::features) fn set_settings_terminal_output_lines(&mut self, value: u16) {
+        self.invalidate_provider_jobs();
         self.settings.config.terminal_output_lines = value.clamp(0, 100);
         self.panel.status = "AI terminal output lines updated".to_string();
     }
@@ -511,7 +563,7 @@ impl AiFeatureState {
         self.panel.status = "AI smart auto-execute risk updated".to_string();
     }
 
-    fn select_first_enabled_model(&mut self) {
+    pub(super) fn select_first_enabled_model(&mut self) {
         self.settings.config.default_model_id = self
             .settings
             .config
@@ -519,6 +571,7 @@ impl AiFeatureState {
             .iter()
             .find(|model| model.enabled)
             .map(|model| model.id.clone());
+        self.reconcile_selected_reasoning();
     }
 
     pub(super) fn default_model_is_enabled(&self) -> bool {
@@ -535,11 +588,12 @@ impl AiFeatureState {
             })
     }
 
-    fn configured_default_model_is_disabled(&self) -> bool {
+    pub(super) fn configured_default_model_is_disabled(&self) -> bool {
         self.settings.config.default_model_id.is_some() && !self.default_model_is_enabled()
     }
 
     pub(in crate::features) fn toggle_settings_model_enabled(&mut self, model_id: &str) {
+        self.invalidate_provider_jobs();
         if let Some(model) = self
             .settings
             .config
@@ -555,11 +609,8 @@ impl AiFeatureState {
         }
     }
 
-    pub(in crate::features) fn set_settings_model_query(&mut self, text: String) {
-        self.settings.model_query = text;
-    }
-
     pub(in crate::features) fn set_settings_default_model(&mut self, model_id: &str) {
+        self.invalidate_provider_jobs();
         if let Some(model) = self
             .settings
             .config
@@ -571,8 +622,10 @@ impl AiFeatureState {
             self.settings.config.default_model_id = Some(model.id.clone());
             self.panel.status = "AI default model updated".to_string();
         }
+        self.reconcile_selected_reasoning();
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn remove_settings_manual_model(
         &mut self,
         model_id: &str,
@@ -607,6 +660,7 @@ impl AiFeatureState {
         credential_id: &str,
         name: &str,
     ) -> AiSettingsMutation {
+        self.invalidate_provider_jobs();
         let name = name.trim().to_string();
         if name.is_empty() {
             self.panel.status = "Manual model name is required".to_string();
@@ -636,17 +690,25 @@ impl AiFeatureState {
             .iter_mut()
             .find(|model| model.id == model_id)
         {
+            if existing.enabled {
+                self.panel.status = format!("Model {name} is already enabled");
+                return AiSettingsMutation::Notify;
+            }
             existing.enabled = true;
             existing.name = name.clone();
             existing.provider_kind = Some(credential.provider_kind.clone());
             existing.credential_id = (!builtin).then(|| credential.id.clone());
-            self.settings.config.default_model_id = Some(model_id);
+            if !self.default_model_is_enabled() {
+                self.settings.config.default_model_id = Some(model_id);
+            }
+            self.refresh_provider_model_order();
             self.panel.status = format!("Enabled model {name}");
             return AiSettingsMutation::Persist;
         }
         self.settings.config.models.insert(
             0,
             AiModelConfigItem {
+                supported_reasoning_efforts: None,
                 backend: Default::default(),
                 id: model_id.clone(),
                 name: name.clone(),
@@ -661,13 +723,8 @@ impl AiFeatureState {
             self.settings.config.default_model_id = Some(model_id);
         }
         self.panel.status = format!("Added manual model {name}");
+        self.refresh_provider_model_order();
         AiSettingsMutation::Persist
-    }
-
-    pub(in crate::features) fn toggle_settings_model_group(&mut self, group_key: String) {
-        if !self.settings.model_collapsed_groups.remove(&group_key) {
-            self.settings.model_collapsed_groups.insert(group_key);
-        }
     }
 
     pub(in crate::features) fn begin_settings_manual_model_edit(&mut self, group_key: &str) {
@@ -729,10 +786,6 @@ impl AiFeatureState {
             .unwrap_or_default()
     }
 
-    pub(in crate::features) fn focus_settings_manual_model_edit(&mut self, group_key: String) {
-        self.settings.manual_model_edit_group = Some(group_key);
-    }
-
     pub(in crate::features) fn clear_settings_manual_model_draft(&mut self, group_key: &str) {
         self.settings
             .manual_model_drafts
@@ -743,6 +796,7 @@ impl AiFeatureState {
         &mut self,
         credential_id: &str,
     ) -> AiSettingsMutation {
+        self.invalidate_provider_jobs();
         let Some(index) = self
             .settings
             .config
@@ -794,6 +848,7 @@ impl AiFeatureState {
         rest: &str,
         text: String,
     ) -> bool {
+        self.invalidate_provider_jobs();
         let Some((credential_id, field)) = rest.rsplit_once('.') else {
             return false;
         };
@@ -825,6 +880,7 @@ impl AiFeatureState {
         true
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn commit_settings_credential_edits(&mut self, credential_id: &str) {
         let secret_draft = self
             .settings
@@ -867,27 +923,11 @@ impl AiFeatureState {
         self.panel.status = "AI credential saved".to_string();
     }
 
-    pub(in crate::features) fn add_settings_credential(&mut self, id: String) -> FocusHandle {
-        self.settings.config.provider_credentials.insert(
-            0,
-            AiProviderCredential {
-                api_format: Default::default(),
-                id: id.clone(),
-                name: String::new(),
-                provider_kind: AiProviderKind::OpenaiCompatible,
-                base_url: Some(String::new()),
-                api_key: None,
-                enabled: true,
-            },
-        );
-        self.panel.status = "AI credential added".to_string();
-        self.settings.credential_focus.clone()
-    }
-
     pub(in crate::features) fn remove_settings_credential(
         &mut self,
         credential_id: &str,
     ) -> AiSettingsMutation {
+        self.invalidate_provider_jobs();
         if is_builtin_ai_provider_id(credential_id) {
             self.panel.status = "Built-in AI credentials cannot be deleted".to_string();
             return AiSettingsMutation::Notify;
@@ -908,6 +948,7 @@ impl AiFeatureState {
         AiSettingsMutation::Persist
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn settings_action_value(
         &self,
         kind: AiActionListKind,
@@ -921,15 +962,6 @@ impl AiFeatureState {
                 AiActionEditorField::Prompt => action.prompt.clone(),
             })
             .unwrap_or_default()
-    }
-
-    pub(in crate::features) fn focus_settings_action(
-        &mut self,
-        kind: AiActionListKind,
-        action_id: String,
-        field: AiActionEditorField,
-    ) {
-        self.settings.action_edit = Some((kind, action_id, field));
     }
 
     pub(in crate::features) fn toggle_settings_action_enabled(
@@ -975,17 +1007,6 @@ impl AiFeatureState {
         self.panel.status = "AI action removed".to_string();
     }
 
-    pub(in crate::features) fn settings_action_edit(
-        &self,
-    ) -> Option<(AiActionListKind, String, AiActionEditorField)> {
-        self.settings.action_edit.clone()
-    }
-
-    pub(in crate::features) fn cancel_settings_action_edit(&mut self) -> FocusHandle {
-        self.settings.action_edit = None;
-        self.settings.action_focus.clone()
-    }
-
     pub(in crate::features) fn apply_settings_action_input(
         &mut self,
         kind: AiActionListKind,
@@ -1002,27 +1023,6 @@ impl AiFeatureState {
         }
         self.settings.action_edit = Some((kind, action_id.to_string(), field));
         true
-    }
-
-    pub(in crate::features) fn discovery_settings(
-        &self,
-    ) -> (AiSettings, Vec<AiProviderCredential>) {
-        let credentials = self
-            .settings
-            .config
-            .provider_credentials
-            .iter()
-            .filter(|credential| {
-                credential.enabled
-                    && credential.provider_kind == AiProviderKind::OpenaiCompatible
-                    && credential
-                        .base_url
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-            })
-            .cloned()
-            .collect();
-        (self.settings.config.clone(), credentials)
     }
 
     pub(in crate::features) fn apply_settings_model_discoveries(
@@ -1046,6 +1046,7 @@ impl AiFeatureState {
                 model.last_seen_at = last_seen_at.clone();
             } else {
                 self.settings.config.models.push(AiModelConfigItem {
+                    supported_reasoning_efforts: None,
                     backend: Default::default(),
                     id: discovery.id.clone(),
                     name: discovery.name.clone(),
@@ -1070,6 +1071,7 @@ fn toggle_mcp_integration(mode: &mut Option<String>) {
 }
 
 impl AiSettingsState {
+    #[cfg(test)]
     fn actions(&self, kind: AiActionListKind) -> &[AiCustomActionConfig] {
         match kind {
             AiActionListKind::Terminal => &self.config.terminal_ai_actions,
@@ -1084,6 +1086,7 @@ impl AiSettingsState {
         }
     }
 
+    #[cfg(test)]
     fn action(&self, kind: AiActionListKind, action_id: &str) -> Option<&AiCustomActionConfig> {
         self.actions(kind)
             .iter()

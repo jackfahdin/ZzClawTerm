@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, App, ClickEvent, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
-    SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, ClickEvent, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm};
@@ -485,12 +485,11 @@ impl ZzClawMenuItem {
     }
 
     fn component_icon(&self, cx: &App) -> Option<Icon> {
-        let icon = if let Some(path) = self.icon_path.clone() {
-            Icon::default().path(path)
-        } else if self.checked {
+        // Checked state must remain visible even when the action has an icon.
+        let icon = if self.checked {
             Icon::new(IconName::Check)
         } else {
-            return None;
+            Icon::default().path(self.icon_path.clone()?)
         };
 
         let icon = if self.danger {
@@ -512,6 +511,7 @@ impl ZzClawMenuItem {
 pub struct ZzClawDropdownMenu {
     id: SharedString,
     label: Option<SharedString>,
+    content: Option<AnyElement>,
     icon_path: Option<SharedString>,
     icon_size: Option<Pixels>,
     tooltip: Option<SharedString>,
@@ -538,6 +538,7 @@ impl ZzClawDropdownMenu {
         Self {
             id: id.into(),
             label: None,
+            content: None,
             icon_path: None,
             icon_size: None,
             tooltip: None,
@@ -555,6 +556,12 @@ impl ZzClawDropdownMenu {
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// A full-width trigger with caller-owned, truncatable content.
+    pub fn content(mut self, content: impl IntoElement) -> Self {
+        self.content = Some(content.into_any_element());
         self
     }
 
@@ -641,6 +648,9 @@ impl RenderOnce for ZzClawDropdownMenu {
         let mut trigger = Button::new(self.id).ghost().small();
         if let Some(label) = self.label {
             trigger = trigger.label(label);
+        }
+        if let Some(content) = self.content {
+            trigger = trigger.w_full().child(content);
         }
         if let Some(icon_path) = self.icon_path {
             let icon = Icon::default()

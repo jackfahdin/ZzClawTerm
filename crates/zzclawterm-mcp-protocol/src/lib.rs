@@ -693,6 +693,28 @@ pub fn validate_tool_arguments(name: &str, value: &Value) -> Result<(), ToolCont
     Ok(())
 }
 
+/// Canonical schemas shared by the MCP sidecar and the native agent providers.
+pub fn tool_input_schema(name: &str) -> Result<Value, ToolContractError> {
+    fn schema<T: JsonSchema>() -> Value {
+        serde_json::to_value(schemars::schema_for!(T)).expect("serializable tool schema")
+    }
+    Ok(match name {
+        tool::GET_ENVIRONMENT | tool::CONNECTION_LIST => schema::<EmptyArgs>(),
+        tool::SESSION_OPEN => schema::<SessionOpenArgs>(),
+        tool::SESSION_GET | tool::SFTP_HOME => schema::<SessionArgs>(),
+        tool::TERMINAL_EXECUTE => schema::<TerminalExecuteArgs>(),
+        tool::TERMINAL_RECENT_OUTPUT => schema::<TerminalRecentOutputArgs>(),
+        tool::SFTP_LIST | tool::SFTP_STAT | tool::SFTP_DELETE => schema::<PathArgs>(),
+        tool::SFTP_READ_TEXT => schema::<SftpReadTextArgs>(),
+        tool::SFTP_WRITE_TEXT => schema::<SftpWriteTextArgs>(),
+        tool::SFTP_MKDIR => schema::<SftpMkdirArgs>(),
+        tool::SFTP_RENAME => schema::<SftpRenameArgs>(),
+        tool::SFTP_CHMOD => schema::<SftpChmodArgs>(),
+        tool::OUTPUT_READ => schema::<OutputReadArgs>(),
+        _ => return contract_error(name, "unknown ZzClawTerm MCP tool"),
+    })
+}
+
 pub fn validate_tool_result(name: &str, value: &Value) -> Result<(), ToolContractError> {
     if name != tool::OUTPUT_READ
         && value.get("preview").is_some()

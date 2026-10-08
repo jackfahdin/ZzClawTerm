@@ -350,9 +350,10 @@ pub(crate) async fn exec_ssh_command(
     timeout: Duration,
 ) -> anyhow::Result<RemoteCommandOutput> {
     tokio::time::timeout(timeout, async move {
+        config.attempt.ensure_shell_available()?;
         let (handle, jump_handles) = open_authenticated_ssh_handle(&config).await?;
         let channel = open_exec_channel_on_handle(&handle, command).await?;
-        let output = collect_exec_channel(channel).await?;
+        let output = collect_exec_channel(channel, &config.attempt).await?;
         let _ = handle
             .disconnect(Disconnect::ByApplication, "ssh exec completed", "en")
             .await;
@@ -393,6 +394,12 @@ pub(crate) fn run_ssh_command_with_input(
     input: Option<zzclawterm_core::SecretString>,
     timeout: Duration,
 ) -> anyhow::Result<RemoteCommandOutput> {
+    let attempt = multiplex
+        .as_ref()
+        .map(|m| &m.inner.attempt)
+        .unwrap_or(&config.attempt)
+        .clone();
+    attempt.ensure_shell_available()?;
     let runtime_owner = multiplex.clone();
     let operation = async move {
         config
@@ -418,7 +425,7 @@ pub(crate) fn run_ssh_command_with_input(
                     channel.data(&bytes[..]).await?;
                 }
                 channel.eof().await?;
-                let output = collect_exec_channel(channel).await;
+                let output = collect_exec_channel(channel, &attempt).await;
                 if let Some((handle, jumps)) = owned {
                     let _ = handle
                         .disconnect(Disconnect::ByApplication, "command completed", "en")
@@ -448,12 +455,13 @@ pub(crate) async fn exec_ssh_command_with_multiplex(
     timeout: Duration,
 ) -> anyhow::Result<RemoteCommandOutput> {
     tokio::time::timeout(timeout, async move {
+        multiplex.inner.attempt.ensure_shell_available()?;
         let handle = multiplex.exec_target_handle().await;
         let channel = {
             let handle = handle.lock().await;
             open_exec_channel_on_handle(&handle, command).await?
         };
-        collect_exec_channel(channel).await
+        collect_exec_channel(channel, &multiplex.inner.attempt).await
     })
     .await
     .map_err(|_| anyhow::anyhow!("remote command timed out"))?
@@ -476,12 +484,19 @@ async fn open_exec_channel_on_handle(
 
 async fn collect_exec_channel(
     mut channel: russh::Channel<client::Msg>,
+    attempt: &crate::connection_attempt::ConnectionAttempt,
 ) -> anyhow::Result<RemoteCommandOutput> {
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_status = None;
     loop {
         match channel.wait().await {
+            Some(ChannelMsg::Success) => attempt.record_shell_reply(true),
+            Some(ChannelMsg::Failure) => {
+                attempt.record_shell_reply(false);
+                let _ = channel.close().await;
+                return Err(crate::connection_attempt::ShellUnavailable.into());
+            }
             Some(ChannelMsg::Data { data }) => {
                 stdout.push_str(&String::from_utf8_lossy(&data));
             }

@@ -17,6 +17,58 @@ fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
         .collect()
 }
 
+#[test]
+fn osc133_input_columns_rebuild_snapshot_without_changing_text_revision() {
+    let mut screen = TerminalScreen::new(40, 2);
+    screen.advance(b"prompt> input");
+    let before = screen.snapshot();
+    screen.advance(b"\r\x1b[8C\x1b]133;B\x07");
+    let active = screen.snapshot();
+    let row = active.row(0).unwrap();
+    assert_eq!(row.shell_input_columns, Some((8, 40)));
+    assert_eq!(row.revision, before.row(0).unwrap().revision);
+    assert_eq!(row.signature, before.row(0).unwrap().signature);
+    assert!(!Arc::ptr_eq(&before.rows()[0], &active.rows()[0]));
+    screen.advance(b"\x1b[5C\x1b]133;C\x07");
+    let submitted = screen.snapshot();
+    let row = submitted.row(0).unwrap();
+    assert_eq!(row.shell_input_columns, Some((8, 13)));
+    assert_eq!(row.shell_input, Some(ShellInputLineKind::Submitted));
+    assert!(submitted.shell_input_anchor.is_none());
+    assert_eq!(row.revision, before.row(0).unwrap().revision);
+    assert!(submitted.rows().iter().all(|row| row.shell_integration));
+    screen.advance(b"\r\n\x1b]133;A\x07new> \x1b]133;B\x07next");
+    let next = screen.snapshot();
+    assert_eq!(next.row(0).unwrap().shell_input_columns, Some((8, 13)));
+    assert_eq!(next.row(1).unwrap().shell_input_columns, Some((5, 40)));
+}
+
+#[test]
+fn active_input_highlight_columns_exclude_hard_line_completion_output() {
+    let mut screen = TerminalScreen::new(12, 3);
+    screen.advance(b"$ \x1b]133;B\x07abcdefghijklmn");
+    let wrapped = screen.snapshot();
+    assert_eq!(wrapped.row(0).unwrap().shell_input_columns, Some((2, 12)));
+    assert_eq!(wrapped.row(1).unwrap().shell_input_columns, Some((0, 12)));
+    assert!(wrapped.row(1).unwrap().wrapped);
+    screen.advance(b"\r\nAGENTS.md\r\n.bashrc\r\n--More--");
+    let page = screen.snapshot();
+    for row in page.rows() {
+        // The legacy editing-phase marker stays separate from the proven
+        // region used for semantic highlighting.
+        assert_eq!(row.shell_input, Some(ShellInputLineKind::Active));
+        assert!(row.shell_input_columns.is_none());
+    }
+    screen.advance(b"\r\x1b[2K$ \x1b]133;B\x07ls ");
+    let restored = screen.snapshot();
+    assert_eq!(restored.row(2).unwrap().shell_input_columns, Some((2, 12)));
+    assert!(
+        restored.rows()[..2]
+            .iter()
+            .all(|row| row.shell_input_columns.is_none())
+    );
+}
+
 fn search_query(pattern: &str) -> TerminalSearchQuery {
     TerminalSearchQuery {
         pattern: pattern.to_string(),
@@ -680,6 +732,19 @@ fn all_text_rows_preserve_wraps_across_scrollback_boundary() {
 }
 
 #[test]
+fn all_text_joins_soft_wraps_across_scrollback_and_keeps_hard_breaks() {
+    let mut screen = TerminalScreen::new(5, 2);
+    screen.advance("ab好ef\r\nghij\r\n\r\n".as_bytes());
+    assert_eq!(screen.all_text().as_deref(), Some("ab好ef\nghij"));
+}
+
+#[test]
+fn all_text_is_absent_for_a_blank_buffer() {
+    let screen = TerminalScreen::new(5, 2);
+    assert_eq!(screen.all_text(), None);
+}
+
+#[test]
 fn all_text_rows_match_snapshot_text_for_wide_and_combining_cells() {
     let mut screen = TerminalScreen::new(5, 2);
     screen.advance("ab好e\u{301}f\r\ng".as_bytes());
@@ -810,6 +875,8 @@ fn snapshot_row_cache_uses_revision_as_authoritative_invalidation() {
         command_mark: original.command_mark,
         line_id: original.line_id,
         shell_input: original.shell_input,
+        shell_input_columns: original.shell_input_columns,
+        shell_integration: original.shell_integration,
     };
     screen.snapshot_row_cache.lock().unwrap().entries.insert(
         key,
@@ -842,6 +909,8 @@ fn snapshot_row_cache_prunes_to_limit() {
                 command_mark: None,
                 line_id: None,
                 shell_input: None,
+                shell_input_columns: None,
+                shell_integration: false,
             },
             TerminalSnapshotRowCacheEntry {
                 row: Weak::new(),
@@ -1176,33 +1245,41 @@ fn clear_except_input_preserves_prompt_edit_and_cursor_but_removes_history() {
     let after = screen.snapshot();
     assert_eq!(screen.scrollback_len(), 0);
     assert!(before.cursor.row > 0);
-    assert_eq!(after.cursor.row, 0);
+    assert_eq!(after.cursor.row, before.cursor.row);
     assert_eq!(after.cursor.col, before.cursor.col);
-    assert!(after.rows()[0].text.contains("prompt> draft"));
+    assert!(
+        after.rows()[before.cursor.row]
+            .text
+            .contains("prompt> draft")
+    );
     assert!(!screen.all_lines().join("\n").contains("old"));
     assert!(!screen.all_lines().join("\n").contains("below"));
     screen.advance(b"!\r\nnext");
-    assert!(screen.snapshot().rows()[0].text.contains("draft!"));
+    assert!(
+        screen.snapshot().rows()[before.cursor.row]
+            .text
+            .contains("draft!")
+    );
 }
 
 #[test]
-fn clear_except_input_moves_bottom_prompt_to_first_row() {
+fn clear_except_input_keeps_bottom_prompt_at_host_cursor_coordinates() {
     let mut screen = TerminalScreen::new(20, 12);
     screen.advance(b"\x1b[12;1Hroot# draft");
     screen.clear_except_input();
 
     let snapshot = screen.snapshot();
-    assert_eq!(snapshot.cursor.row, 0);
-    assert_eq!(snapshot.rows()[0].text, "root# draft");
+    assert_eq!(snapshot.cursor.row, 11);
+    assert_eq!(snapshot.rows()[11].text, "root# draft");
     assert!(
         snapshot
             .rows()
             .iter()
-            .skip(1)
+            .take(11)
             .all(|row| row.text.is_empty())
     );
     screen.advance(b"!");
-    assert_eq!(screen.snapshot().rows()[0].text, "root# draft!");
+    assert_eq!(screen.snapshot().rows()[11].text, "root# draft!");
 }
 
 #[test]
@@ -1217,9 +1294,9 @@ fn clear_except_input_retains_wrapped_edit_rows() {
         .expect("input start");
     screen.clear_except_input();
     let after = screen.snapshot();
-    assert_eq!(after.cursor.row, before.cursor.row - start_row);
+    assert_eq!(after.cursor.row, before.cursor.row);
     assert_eq!(after.cursor.col, before.cursor.col);
-    assert!(after.rows()[0].text.starts_with("input>"));
+    assert!(after.rows()[start_row].text.starts_with("input>"));
     assert!(screen.all_lines().join("\n").contains("input>"));
     assert!(screen.all_lines().join("").contains("abcdefghij"));
     assert!(!screen.all_lines().join("\n").contains("obsolete"));
@@ -1234,7 +1311,7 @@ fn clear_except_input_preserves_remote_saved_cursor_and_terminal_modes() {
     screen.advance(b"\x1b8X");
     let snapshot = screen.snapshot();
     assert!(snapshot.rows()[3].text.starts_with('X'));
-    assert!(snapshot.rows()[0].text.contains("prompt> draft"));
+    assert!(snapshot.rows()[2].text.contains("prompt> draft"));
 }
 
 #[test]
@@ -1243,7 +1320,7 @@ fn clear_except_input_keeps_wrapped_cursor_line_without_shell_markers() {
     screen.advance(b"obsolete\r\nlong-prompt> edit");
     screen.clear_except_input();
     assert!(
-        screen.snapshot().rows()[0].text.starts_with("long-pro"),
+        screen.snapshot().rows()[1].text.starts_with("long-pro"),
         "{:?}",
         screen.all_lines()
     );
@@ -1678,7 +1755,7 @@ fn graphics_kitty_query_via_advance() {
 #[test]
 fn encoding_gbk_output_decodes_to_grid() {
     let mut screen = TerminalScreen::new(40, 8);
-    screen.set_encoding("GBK");
+    screen.set_encoding("GBK").unwrap();
     // GBK "测"
     screen.advance(&[0xb2, 0xe2]);
     let snap = screen.snapshot();
@@ -1689,7 +1766,7 @@ fn encoding_gbk_output_decodes_to_grid() {
 #[test]
 fn decoded_local_text_bypasses_session_charset() {
     let mut screen = TerminalScreen::new(40, 8);
-    screen.set_encoding("GBK");
+    screen.set_encoding("GBK").unwrap();
 
     screen.advance_decoded_text("本地提示");
 
@@ -1702,7 +1779,7 @@ fn decoded_local_text_bypasses_session_charset() {
 #[test]
 fn encoding_gbk_output_decodes_split_multibyte_to_grid() {
     let mut screen = TerminalScreen::new(40, 8);
-    screen.set_encoding("GBK");
+    screen.set_encoding("GBK").unwrap();
     // GBK "测试" split in the middle of the first character.
     screen.advance(&[0xb2]);
     assert!(
@@ -1720,7 +1797,7 @@ fn encoding_gbk_output_decodes_split_multibyte_to_grid() {
 #[test]
 fn output_decoder_gbk_decodes_split_multibyte_text() {
     let mut decoder = TerminalOutputDecoder::new();
-    decoder.set_encoding("GBK");
+    decoder.set_encoding("GBK").unwrap();
     assert!(decoder.decode_output_text(&[0xb2]).is_empty());
     let text = decoder.decode_output_text(&[0xe2, 0xca, 0xd4]);
     assert_eq!(text, "测试");
@@ -1779,7 +1856,7 @@ fn output_decoder_tail_skips_graphics_payload() {
 #[test]
 fn output_decoder_skips_graphics_payload() {
     let mut decoder = TerminalOutputDecoder::new();
-    decoder.set_encoding("GBK");
+    decoder.set_encoding("GBK").unwrap();
     let text = decoder.decode_output_text(b"pre\x1b_Ga=T,i=1,c=1,r=1;QUI=\x1b\\post");
     assert_eq!(text, "prepost");
 }
@@ -1802,10 +1879,10 @@ fn output_decoder_skips_sixel_graphics_payload() {
 #[test]
 fn output_decoder_encoding_change_drops_pending_multibyte_state() {
     let mut decoder = TerminalOutputDecoder::new();
-    decoder.set_encoding("GBK");
+    decoder.set_encoding("GBK").unwrap();
 
     assert!(decoder.decode_output_text(&[0xb2]).is_empty());
-    decoder.set_encoding("UTF-8");
+    decoder.set_encoding("UTF-8").unwrap();
 
     assert_eq!(decoder.decode_output_text(b"ok"), "ok");
 }
@@ -1815,7 +1892,7 @@ fn terminal_screen_encoding_change_drops_pending_graphics_state() {
     let mut screen = TerminalScreen::new(40, 8);
 
     screen.advance(b"\x1b_Ga=T,i=1,c=1,r=1;QUI=");
-    screen.set_encoding("GBK");
+    screen.set_encoding("GBK").unwrap();
     screen.advance(b"\x1b\\");
 
     assert!(
@@ -1827,7 +1904,146 @@ fn terminal_screen_encoding_change_drops_pending_graphics_state() {
 #[test]
 fn encoding_outgoing_reencodes_utf8_text() {
     let mut screen = TerminalScreen::new(40, 8);
-    screen.set_encoding("GBK");
-    assert_eq!(screen.encode_outgoing_str("测试"), [0xb2, 0xe2, 0xca, 0xd4]);
-    assert_eq!(screen.encode_outgoing(b"\x1b[A"), b"\x1b[A");
+    screen.set_encoding("GBK").unwrap();
+    assert_eq!(
+        screen.encode_outgoing_str("测试").unwrap(),
+        [0xb2, 0xe2, 0xca, 0xd4]
+    );
+    assert_eq!(screen.encode_outgoing(b"\x1b[A").unwrap(), b"\x1b[A");
+}
+
+#[test]
+fn charset_controls_graphics_and_replies_are_independent_of_chunk_boundaries() {
+    use zzclawterm_core::character_encoding::CharacterEncoding;
+    for (encoding, text) in [
+        (CharacterEncoding::Utf8, "测试"),
+        (CharacterEncoding::Gbk, "测试"),
+        (CharacterEncoding::Gb18030, "测试😀"),
+        (CharacterEncoding::Big5, "測試"),
+        (CharacterEncoding::ShiftJis, "日本語"),
+        (CharacterEncoding::EucKr, "한국어"),
+    ] {
+        let mut wire = b"\x1b[31m".to_vec();
+        wire.extend(encoding.encode(text).unwrap());
+        wire.extend_from_slice(b"\x1b[0m\x1b[2;3H\x1b]2;");
+        wire.extend(encoding.encode(text).unwrap());
+        wire.extend_from_slice(b"\x07\x1b_Ga=T,f=32,s=1,v=1,i=9;/wAA/w==\x1b\\");
+        wire.extend_from_slice(b"\x1b_Ga=q,i=7;\x1b\\\x1b[6n");
+        let mut baseline = TerminalScreen::new(30, 5);
+        baseline.set_encoding(encoding.label()).unwrap();
+        baseline.advance(&wire);
+        let expected = baseline.snapshot();
+        let expected_effects = baseline.take_effects();
+        assert!(snapshot_text(&expected).contains(text));
+        assert_eq!(expected.images.len(), 1);
+        assert!(!expected_effects.pty_write.is_empty());
+        for split in 0..=wire.len() {
+            let mut screen = TerminalScreen::new(30, 5);
+            screen.set_encoding(encoding.label()).unwrap();
+            screen.advance(&wire[..split]);
+            screen.advance(&wire[split..]);
+            let snapshot = screen.snapshot();
+            assert_eq!(snapshot.cursor, expected.cursor, "{encoding} split {split}");
+            assert_eq!(
+                snapshot.images.len(),
+                expected.images.len(),
+                "{encoding} split {split}"
+            );
+            for (actual, expected) in snapshot.images.iter().zip(&expected.images) {
+                assert_eq!(actual.data, expected.data, "{encoding} split {split}");
+                assert_eq!(
+                    (
+                        actual.row,
+                        actual.col,
+                        actual.width_cells,
+                        actual.height_cells
+                    ),
+                    (
+                        expected.row,
+                        expected.col,
+                        expected.width_cells,
+                        expected.height_cells
+                    ),
+                    "{encoding} split {split}"
+                );
+            }
+            for (actual, expected) in snapshot.rows().iter().zip(expected.rows()) {
+                assert_eq!(actual.cells, expected.cells, "{encoding} split {split}");
+                assert_eq!(
+                    actual.styled_spans, expected.styled_spans,
+                    "{encoding} split {split}"
+                );
+            }
+            let effects = screen.take_effects();
+            assert_eq!(
+                effects.pty_write, expected_effects.pty_write,
+                "{encoding} split {split}"
+            );
+            assert_eq!(
+                effects.title, expected_effects.title,
+                "{encoding} split {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejected_encoding_and_alias_switch_preserve_pending_characters() {
+    let mut screen = TerminalScreen::new(20, 3);
+    screen.set_encoding("GBK").unwrap();
+    screen.advance(&[0xb2]);
+    assert!(screen.set_encoding("KOI8-R").is_err());
+    screen.set_encoding("CP936").unwrap();
+    screen.advance(&[0xe2]);
+    assert!(snapshot_text(&screen.snapshot()).contains('测'));
+    let mut decoder = TerminalOutputDecoder::new();
+    decoder.set_encoding("GBK").unwrap();
+    assert!(decoder.decode_output_text(&[0xb2]).is_empty());
+    assert!(decoder.set_encoding("UTF-16").is_err());
+    decoder.set_encoding("GB2312").unwrap();
+    assert_eq!(decoder.decode_output_text(&[0xe2]), "测");
+}
+
+#[test]
+fn logical_input_rejects_unmappable_and_non_utf8_bytes() {
+    use zzclawterm_core::character_encoding::{CharacterEncoding, EncodingError};
+    let mut screen = TerminalScreen::default();
+    screen.set_encoding("GBK").unwrap();
+    assert_eq!(
+        screen.encode_outgoing_str("secret😀"),
+        Err(EncodingError::UnrepresentableText(CharacterEncoding::Gbk))
+    );
+    assert_eq!(
+        screen.encode_outgoing(&[0xff]),
+        Err(EncodingError::InvalidUtf8Input)
+    );
+    screen.set_encoding("UTF-8").unwrap();
+    assert_eq!(
+        screen.encode_outgoing(&[0xff]),
+        Err(EncodingError::InvalidUtf8Input)
+    );
+    screen.set_encoding("GB18030").unwrap();
+    let encoded = screen.encode_outgoing_str("😀").unwrap();
+    screen.advance(&encoded);
+    assert!(snapshot_text(&screen.snapshot()).contains('😀'));
+}
+
+#[test]
+fn utf8_mouse_coordinates_are_protocol_bytes_in_legacy_charset_sessions() {
+    for label in ["UTF-8", "GBK", "GB18030", "Big5", "Shift_JIS", "EUC-KR"] {
+        let mut screen = TerminalScreen::new(120, 120);
+        screen.set_encoding(label).unwrap();
+        screen.advance(b"\x1b[?1000h\x1b[?1005h");
+        assert!(screen.mouse_utf8());
+        assert_eq!(
+            crate::encode_mouse_report(&screen, 0, 100, 110, true),
+            b"\x1b[M \xc2\x85\xc2\x8f"
+        );
+        assert!(crate::encode_mouse_report(&screen, 0, 2015, 0, true).is_empty());
+        screen.advance(b"\x1b[?1006h");
+        assert_eq!(
+            crate::encode_mouse_report(&screen, 0, 100, 110, true),
+            b"\x1b[<0;101;111M"
+        );
+    }
 }

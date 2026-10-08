@@ -25,7 +25,7 @@ use crate::models::{
 use super::super::super::list::{
     ConnectionEditorChoice, ConnectionEditorRenderContext, EDITOR_CONTROL_HEIGHT_PX,
     EditorSecretFieldOptions, connection_editor_select, editor_field, editor_secret_field,
-    editor_stepper_field, forwarding_endpoint_editor_field, required, toggle_chip,
+    editor_stepper_field, editor_switch_row, forwarding_endpoint_editor_field, required,
 };
 
 use super::{ConnectionEditorSectionContext, recording::connection_editor_recording_section};
@@ -113,7 +113,7 @@ fn ssh_algorithm_move_button(
     button
 }
 
-fn ssh_algorithm_list(
+pub(super) fn ssh_algorithm_list(
     palette: crate::theme::ThemePalette,
     tab: ConnectionEditorSshAlgorithmTab,
     options: &[SshAlgorithmOption],
@@ -136,15 +136,19 @@ fn ssh_algorithm_list(
             .map(|option| (option.id.clone(), Some(option.risk), false)),
     );
 
+    let list_id = format!("connection-ssh-algorithm-list-{tab:?}");
+    let row_count = rows.len();
+    // A max-height on the scroll wrapper also constrains its content. Give the
+    // viewport a definite height and keep rows from shrinking so it can scroll.
     let mut list = div()
-        .id(SharedString::from(format!(
-            "connection-ssh-algorithm-list-{tab:?}"
-        )))
-        .max_h(px(224.))
-        .overflow_y_scrollbar()
+        .w_full()
+        .h(px((row_count as f32 * 36.).min(224.)))
+        .flex_none()
         .flex()
         .flex_col()
-        .gap_1();
+        .pr(px(10.))
+        .overflow_y_scrollbar()
+        .id(SharedString::from(list_id.clone()));
     for (row_index, (id, risk, enabled)) in rows.into_iter().enumerate() {
         let risk_label = match risk {
             Some(SshAlgorithmRisk::Modern) => t!("dialog.algorithmRiskModern"),
@@ -153,7 +157,7 @@ fn ssh_algorithm_list(
             None => t!("dialog.algorithmUnsupported"),
         };
         let risk_color = match risk {
-            Some(SshAlgorithmRisk::Modern) => palette.success,
+            Some(SshAlgorithmRisk::Modern) => palette.text_muted,
             Some(SshAlgorithmRisk::Legacy) => palette.warning,
             Some(SshAlgorithmRisk::Insecure) | None => palette.danger,
         };
@@ -179,51 +183,47 @@ fn ssh_algorithm_list(
             });
         let move_up_id = id.clone();
         let move_down_id = id.clone();
+        let algorithm_tooltip = id.clone();
+        let row_selector = format!("connection-ssh-algorithm-row-{row_index}");
         list = list.child(
             div()
-                .min_h(px(38.))
-                .rounded_sm()
-                .border_1()
+                .id(SharedString::from(format!("{list_id}/item-{id}")))
+                .debug_selector(move || row_selector.clone())
+                .h(px(36.))
+                .flex_none()
+                .when(row_index + 1 < row_count, |this| this.border_b_1())
                 .border_color(rgb(palette.border))
-                .bg(if enabled {
-                    rgba((palette.accent << 8) | 0x18)
-                } else {
-                    rgba((palette.surface << 8) | 0x18)
-                })
                 .px_2()
-                .py_1()
                 .flex()
                 .items_center()
                 .gap_2()
-                .opacity(if enabled { 1.0 } else { 0.65 })
+                .hover(move |this| this.bg(rgb(palette.hover)))
                 .child(div().flex_none().child(checkbox))
                 .child(
                     div()
+                        .id(SharedString::from(format!("{list_id}/label-{id}")))
                         .min_w_0()
                         .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(10.))
-                                .font_family(crate::features::shell::gpui_code_font_family())
-                                .text_color(rgb(palette.text))
-                                .child(id),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgba((risk_color << 8) | 0x66))
-                                .bg(rgba((risk_color << 8) | 0x18))
-                                .px_1()
-                                .text_size(px(9.))
-                                .text_color(rgb(risk_color))
-                                .child(risk_label),
-                        ),
+                        .truncate()
+                        .text_size(px(11.))
+                        .font_family(crate::features::shell::gpui_code_font_family())
+                        .text_color(rgb(if enabled {
+                            palette.text
+                        } else {
+                            palette.text_muted
+                        }))
+                        .tooltip(move |window, cx| {
+                            ZzClawTooltip::new(algorithm_tooltip.clone()).build(window, cx)
+                        })
+                        .child(id),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(px(10.))
+                        .text_color(rgb(risk_color))
+                        .child(risk_label),
                 )
                 .child(
                     div()
@@ -259,7 +259,16 @@ fn ssh_algorithm_list(
                 ),
         );
     }
-    list
+    div()
+        .w_full()
+        .flex_none()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.bg))
+        .overflow_hidden()
+        .debug_selector(|| "connection-ssh-algorithm-viewport".to_string())
+        .child(list)
 }
 
 pub(super) fn connection_editor_ssh_section(
@@ -747,8 +756,9 @@ pub(super) fn connection_editor_ssh_section(
                                         t!("dialog.selectOtp"),
                                         ConnectionEditorSelect::Otp,
                                     ))
-                                    .child(toggle_chip(
+                                    .child(editor_switch_row(
                                         palette,
+                                        "connection-editor-otp-auto-fill",
                                         t!("dialog.autoFillOtp"),
                                         editor.auto_fill_otp,
                                         cx.listener(|this, _, _, cx| {
@@ -1192,8 +1202,9 @@ pub(super) fn connection_editor_ssh_section(
                                     .flex()
                                     .flex_col()
                                     .gap_2()
-                                    .child(toggle_chip(
+                                    .child(editor_switch_row(
                                         palette,
+                                        "connection-editor-post-login",
                                         t!("dialog.enabled"),
                                         editor.post_login_enabled,
                                         cx.listener(|this, _, _, cx| {
@@ -1294,8 +1305,9 @@ pub(super) fn connection_editor_ssh_section(
                                             )
                                         },
                                     )
-                                    .child(toggle_chip(
+                                    .child(editor_switch_row(
                                         palette,
+                                        "connection-editor-dynamic-tab-title",
                                         t!("dialog.dynamicTabTitle"),
                                         editor.dynamic_tab_title,
                                         cx.listener(|this, _, _, cx| {
@@ -1320,8 +1332,9 @@ pub(super) fn connection_editor_ssh_section(
                                     .flex()
                                     .flex_col()
                                     .gap_2()
-                                    .child(toggle_chip(
+                                    .child(editor_switch_row(
                                         palette,
+                                        "connection-editor-sftp-enabled",
                                         t!("dialog.enabled"),
                                         editor.sftp_enabled,
                                         cx.listener(|this, _, _, cx| {
@@ -1331,8 +1344,9 @@ pub(super) fn connection_editor_ssh_section(
                                             );
                                         }),
                                     ))
-                                    .child(toggle_chip(
+                                    .child(editor_switch_row(
                                         palette,
+                                        "connection-editor-sftp-compatibility",
                                         t!("dialog.sftpCompatibilityMode"),
                                         editor.sftp_compatibility_mode,
                                         cx.listener(|this, _, _, cx| {
@@ -1385,8 +1399,9 @@ pub(super) fn connection_editor_ssh_section(
                                 palette,
                                 t!("dialog.x11Forwarding"),
                                 t!("dialog.x11ForwardingDesc"),
-                                toggle_chip(
+                                editor_switch_row(
                                     palette,
+                                    "connection-editor-x11-forwarding",
                                     t!("dialog.enabled"),
                                     editor.x11_forwarding,
                                     cx.listener(|this, _, _, cx| {

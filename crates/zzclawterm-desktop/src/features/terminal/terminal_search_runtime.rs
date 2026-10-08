@@ -590,17 +590,25 @@ impl ZzClawTermApp {
         match event {
             RecordingWriteEvent::Status(status) => {
                 let state = status.state;
+                let previous_state = self
+                    .recording
+                    .status(&status.session_id)
+                    .map(|status| status.state);
                 let last_error = status.last_error.clone();
                 self.recording.apply_status(status);
                 match state {
-                    zzclawterm_transport::RecordingStatusState::Degraded => {
+                    zzclawterm_transport::RecordingStatusState::Degraded
+                        if previous_state != Some(state) =>
+                    {
                         self.shell.set_status(format!(
                             "recording degraded: {}",
                             last_error
                                 .unwrap_or_else(|| "some recording data was lost".to_string())
                         ));
                     }
-                    zzclawterm_transport::RecordingStatusState::Failed => {
+                    zzclawterm_transport::RecordingStatusState::Failed
+                        if previous_state != Some(state) =>
+                    {
                         self.shell.set_status(format!(
                             "recording failed: {}",
                             last_error.unwrap_or_else(|| "writer failed".to_string())
@@ -608,8 +616,16 @@ impl ZzClawTermApp {
                     }
                     zzclawterm_transport::RecordingStatusState::Starting
                     | zzclawterm_transport::RecordingStatusState::Recording
-                    | zzclawterm_transport::RecordingStatusState::Stopping => {}
+                    | zzclawterm_transport::RecordingStatusState::Stopping
+                    | zzclawterm_transport::RecordingStatusState::Degraded
+                    | zzclawterm_transport::RecordingStatusState::Failed => {}
                 }
+                true
+            }
+            RecordingWriteEvent::PendingStatus { .. }
+            | RecordingWriteEvent::PendingHistorySearch { .. } => false,
+            RecordingWriteEvent::ShutdownError(error) => {
+                self.shell.set_status(format!("recording failed: {error}"));
                 true
             }
             RecordingWriteEvent::StatusRemoved { session_id } => {
@@ -843,6 +859,7 @@ fn current_selected_occurrence_matches(
 
 #[cfg(test)]
 mod tests {
+    use crate::terminal::TerminalBufferMatch;
     use std::collections::HashMap;
 
     use super::{
@@ -858,7 +875,6 @@ mod tests {
         TerminalBufferCellPos, TerminalFrameSearchKey, TerminalFrameSearchResult,
         TerminalSelection, TerminalViewState,
     };
-    use crate::terminal::TerminalBufferMatch;
 
     #[test]
     fn search_navigation_wraps_by_default_and_stops_when_disabled() {

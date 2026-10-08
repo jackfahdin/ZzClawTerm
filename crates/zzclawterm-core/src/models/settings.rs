@@ -319,6 +319,8 @@ pub struct AppSettingsSummary {
     pub ui_quick_cmd_visible: bool,
     #[serde(default = "default_serial_send_height")]
     pub ui_serial_send_height: u32,
+    #[serde(default)]
+    pub ui_serial_send_clear_after_send: bool,
     /// Whether the Tauri-compatible Command Send bottom panel is visible.
     #[serde(default)]
     pub ui_serial_send_visible: bool,
@@ -404,6 +406,8 @@ pub struct AppSettingsSummary {
     #[serde(default = "default_recording_path_template")]
     pub recording_path_template: String,
     pub recording_include_io_labels: bool,
+    #[serde(default)]
+    pub recording_include_input: bool,
     pub recording_include_timestamps: bool,
     #[serde(default = "default_true")]
     pub recording_include_session_metadata: bool,
@@ -555,6 +559,7 @@ impl Default for AppSettingsSummary {
             ui_quick_cmd_height: 180,
             ui_quick_cmd_visible: true,
             ui_serial_send_height: 180,
+            ui_serial_send_clear_after_send: false,
             ui_serial_send_visible: false,
             ui_active_left_panel: Some("fileExplorer".to_string()),
             ui_active_right_panel: Some("savedConnections".to_string()),
@@ -608,6 +613,7 @@ impl Default for AppSettingsSummary {
             recording_default_mode: RecordingMode::Transcript,
             recording_path_template: default_recording_path_template(),
             recording_include_io_labels: true,
+            recording_include_input: false,
             recording_include_timestamps: true,
             recording_include_session_metadata: true,
             recording_rotation: RecordingRotationPolicy::Session,
@@ -640,7 +646,11 @@ fn default_activity_left_top() -> Vec<String> {
 }
 
 fn default_activity_left_bottom() -> Vec<String> {
-    vec!["syncBackupHistory".to_string(), "settings".to_string()]
+    vec![
+        "syncBackupHistory".to_string(),
+        "plugins".to_string(),
+        "settings".to_string(),
+    ]
 }
 
 fn default_activity_right_top() -> Vec<String> {
@@ -800,6 +810,19 @@ fn default_highlight_color_light() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_and_unknown_encoding_labels_round_trip_unchanged() {
+        for label in ["UTF8", " CP936 ", "shift-jis", "euckr", "unknown", ""] {
+            let mut document = serde_json::to_value(super::AppSettingsSummary::default()).unwrap();
+            document["interaction_default_encoding"] = serde_json::json!(label);
+            let settings: super::AppSettingsSummary = serde_json::from_value(document).unwrap();
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["interaction_default_encoding"],
+                label
+            );
+        }
+    }
+
     use super::{
         AppSettingsSummary, TransferBrowserViewMode, default_panel_open_mode,
         normalize_panel_open_mode,
@@ -959,6 +982,36 @@ mod tests {
         assert_eq!(summary.ui_start_workspace_mode, "workbench");
         assert!(summary.ui_asset_sort_key.is_none());
         assert!(summary.ui_asset_sort_direction.is_none());
+    }
+
+    #[test]
+    fn missing_activity_layout_defaults_to_plugins_before_settings() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).expect("serializes");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("ui_activity_bar_left_bottom");
+        let summary: AppSettingsSummary = serde_json::from_value(value).expect("legacy settings");
+        assert_eq!(
+            summary.ui_activity_bar_left_bottom,
+            ["syncBackupHistory", "plugins", "settings"]
+        );
+    }
+
+    #[test]
+    fn recording_input_is_explicit_opt_in_for_current_and_legacy_settings() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        assert_eq!(value["recording_include_input"], false);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("recording_include_input");
+        let mut decoded: AppSettingsSummary = serde_json::from_value(value).unwrap();
+        assert!(!decoded.recording_include_input);
+        decoded.recording_include_input = true;
+        let roundtrip: AppSettingsSummary =
+            serde_json::from_str(&serde_json::to_string(&decoded).unwrap()).unwrap();
+        assert!(roundtrip.recording_include_input);
     }
 
     #[test]

@@ -182,10 +182,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.session.session_order_len() > 0
-            || self.remote_desktop.has_active_sessions()
-            || self.session.start_has_pending()
-        {
+        if self.cloud_sync_restore_blocked(cx) {
             self.cloud_sync
                 .set_status(t!("settings.syncCloseActiveSessionBeforePull"));
             cx.notify();
@@ -399,10 +396,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.session.session_order_len() > 0
-            || self.remote_desktop.has_active_sessions()
-            || self.session.start_has_pending()
-        {
+        if self.cloud_sync_restore_blocked(cx) {
             self.cloud_sync
                 .set_status(t!("settings.syncCloseActiveSessionBeforePull"));
             cx.notify();
@@ -531,10 +525,7 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.session.session_order_len() > 0
-            || self.remote_desktop.has_active_sessions()
-            || self.session.start_has_pending()
-        {
+        if self.cloud_sync_restore_blocked(cx) {
             self.cloud_sync
                 .set_status(t!("settings.syncCloseActiveSessionBeforeRecovery"));
             cx.notify();
@@ -632,7 +623,16 @@ impl ZzClawTermApp {
     }
 
     fn begin_cloud_sync_job(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.cloud_sync.begin_job() {
+        let other_job_running = self
+            .desktop_controller
+            .as_ref()
+            .and_then(gpui::WeakEntity::upgrade)
+            .is_some_and(|controller| {
+                controller
+                    .read(cx)
+                    .cloud_sync_job_running_excluding(self.workspace_id, cx)
+            });
+        if other_job_running || !self.cloud_sync.begin_job() {
             self.shell
                 .set_status(t!("settings.syncOperationInProgress"));
             cx.notify();

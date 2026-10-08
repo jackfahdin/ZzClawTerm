@@ -33,7 +33,6 @@ impl ZzClawTermApp {
             .flex()
             .items_center()
             .justify_center()
-            .bg(self.shell_surface_color(terminal_palette.terminal_bg))
             .px_6()
             .child(
                 div()
@@ -122,7 +121,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_surface_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
             .child(connection_spinner(
                 SharedString::from("pending-workspace-spinner"),
                 rgb(palette.primary).into(),
@@ -156,7 +155,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_surface_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
             .child(
                 svg()
                     .size(px(32.))

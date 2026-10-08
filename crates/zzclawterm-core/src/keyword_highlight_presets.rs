@@ -1,4 +1,4 @@
-//! Built-in keyword highlight presets (Tauri `keywordHighlightPresets.ts`).
+//! Theme-aware terminal semantic presets; persisted user rules retain their legacy format.
 //! Patterns are adapted for the Rust `regex` crate (no look-around).
 
 use crate::models::KeywordHighlightRule;
@@ -14,15 +14,34 @@ pub struct ResolvedKeywordHighlightRule {
     pub enabled: bool,
 }
 
-fn token_boundary(alts: &[&str]) -> String {
-    // Approximate JS requireTokenBoundary without look-around: word-ish boundaries.
-    let inner = alts.join("|");
-    format!(r"(?i)(?:^|[^\w-])(?:{inner})(?:$|[^\w-])")
+/// Built-ins declare their matcher instead of guessing from regex punctuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinKeywordMatcher {
+    LiteralWords,
+    Regex,
+    Structured,
 }
 
-/// Built-in rule ids in paint priority order (user rules still take precedence when merged first).
+pub fn builtin_keyword_matcher(id: &str) -> Option<BuiltinKeywordMatcher> {
+    if !builtin_keyword_rule_ids().contains(&id) {
+        return None;
+    }
+    Some(match id {
+        "builtin-error" | "builtin-warn" | "builtin-success" | "builtin-info" | "builtin-debug"
+        | "builtin-constant" => BuiltinKeywordMatcher::LiteralWords,
+        "builtin-command" | "builtin-path" | "builtin-permissions" | "builtin-prompt" => {
+            BuiltinKeywordMatcher::Structured
+        }
+        _ => BuiltinKeywordMatcher::Regex,
+    })
+}
+
+/// Stable settings catalog. The semantic matcher assigns explicit overlap priorities.
 pub fn builtin_keyword_rule_ids() -> &'static [&'static str] {
     &[
+        "builtin-command",
+        "builtin-path",
+        "builtin-permissions",
         "builtin-url",
         "builtin-version",
         "builtin-address",
@@ -46,6 +65,9 @@ pub fn builtin_keyword_rule_ids() -> &'static [&'static str] {
 
 pub fn builtin_keyword_rule_label(id: &str) -> &'static str {
     match id {
+        "builtin-command" => "Command",
+        "builtin-path" => "Path",
+        "builtin-permissions" => "Permissions",
         "builtin-url" => "URL",
         "builtin-version" => "Version",
         "builtin-address" => "Address",
@@ -73,56 +95,77 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
     match id {
         "builtin-error" => {
             if dark {
-                "#ff7b72"
+                "#f44747"
             } else {
                 "#cf222e"
             }
         }
         "builtin-warn" => {
             if dark {
-                "#e3b341"
+                "#cd9731"
             } else {
                 "#9a6700"
             }
         }
         "builtin-success" => {
             if dark {
-                "#3fb950"
+                "#32cd32"
             } else {
                 "#116329"
             }
         }
         "builtin-info" => {
             if dark {
-                "#79c0ff"
+                "#6796e6"
             } else {
                 "#0969da"
             }
         }
         "builtin-debug" => {
             if dark {
-                "#d2a8ff"
+                "#b267e6"
             } else {
                 "#8250df"
             }
         }
         "builtin-option" => {
             if dark {
-                "#ff9e64"
+                "#FD971F"
             } else {
                 "#b04a00"
             }
         }
+        "builtin-command" => {
+            if dark {
+                "#66D9EF"
+            } else {
+                "#007197"
+            }
+        }
+        "builtin-path" => {
+            if dark {
+                "#E6DB74"
+            } else {
+                "#8a6700"
+            }
+        }
+        "builtin-permissions" => {
+            if dark {
+                "#b267e6"
+            } else {
+                "#8250df"
+            }
+        }
         "builtin-datetime" => {
             if dark {
-                "#f1fa8c"
+                "#A6E22E"
             } else {
                 "#a58900"
             }
         }
         "builtin-number" => {
             if dark {
-                "#bd93f9"
+                "#AE81FF"
             } else {
                 "#6f42c1"
             }
@@ -136,7 +179,7 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
         }
         "builtin-address" => {
             if dark {
-                "#56d364"
+                "#A6E22E"
             } else {
                 "#1a7f37"
             }
@@ -157,14 +200,14 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
         }
         "builtin-string" => {
             if dark {
-                "#f1fa8c"
+                "#E6DB74"
             } else {
                 "#1a8c8c"
             }
         }
         "builtin-operator" => {
             if dark {
-                "#7ee787"
+                "#A6E22E"
             } else {
                 "#008573"
             }
@@ -185,7 +228,7 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
         }
         "builtin-duration" => {
             if dark {
-                "#f1fa8c"
+                "#E6DB74"
             } else {
                 "#859900"
             }
@@ -199,12 +242,16 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
         }
         _ => {
             if dark {
-                "#79c0ff"
+                "#6796e6"
             } else {
                 "#0969da"
             }
         }
     }
+}
+
+fn word_patterns(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| (*word).to_string()).collect()
 }
 
 fn builtin_patterns(id: &str) -> Vec<String> {
@@ -226,18 +273,18 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             r#""(?:[^"\\]|\\.)*""#.into(),
             r"'(?:[^'\\]|\\.)*'".into(),
         ],
-        "builtin-option" => vec![
-            r"(?i)--[a-zA-Z][\w-]*".into(),
-            r"(?i)-[a-zA-Z][a-zA-Z0-9]*".into(),
-        ],
+        "builtin-option" => vec![r"(?i)--?[a-zA-Z][\w-]*".into()],
         "builtin-uuid" => {
             vec![r"(?i)\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b".into()]
         }
         "builtin-datetime" => vec![
-            r"\b\d{4}[-/]\d{2}[-/]\d{2}(?:T(?:[01]\d|2[0-3])[-:][0-5]\d[-:][0-5]\d(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?)?\b".into(),
+            r"\b\d{4}[-/](?:0[1-9]|1[0-2])[-/](?:0[1-9]|[12]\d|3[01])(?:T(?:[01]\d|2[0-3])[-:][0-5]\d[-:][0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?)?\b".into(),
             r"\b(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:\.\d{1,9})?\b".into(),
+            r"(?i)\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|Mon|Tues?|Wed|Thu|Thur|Fri|Sat|Sun)\b".into(),
+            r"\b(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])[-/](?:\d{4}|\d{2})\b".into(),
+            r"\b\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3])[0-5]\d[0-5]\dZ?\b".into(),
         ],
-        "builtin-error" => vec![token_boundary(&[
+        "builtin-error" => word_patterns(&[
             "access denied",
             "address already in use",
             "authentication failed",
@@ -248,7 +295,7 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "connection reset by peer",
             "connection timed out",
             "error",
-            "fail(?:ed|ure)?",
+            "fail", "failed", "failure",
             "fatal",
             "exception",
             "host key verification failed",
@@ -265,9 +312,11 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "critical",
             "traceback",
             "unable to connect",
-        ])],
-        "builtin-warn" => vec![token_boundary(&["warn(?:ing)?", "deprecated", "caution"])],
-        "builtin-success" => vec![token_boundary(&[
+            "bad", "denied", "disabled", "incorrect", "invalid",
+            "refused", "unknown", "unsupported", "wrong",
+        ]),
+        "builtin-warn" => word_patterns(&["warn", "warning", "deprecated", "caution"]),
+        "builtin-success" => word_patterns(&[
             "accepted",
             "active",
             "already up to date",
@@ -291,11 +340,11 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "upgraded",
             "validated",
             "verified",
-            "success(?:ful(?:ly)?)?",
+            "success", "successful", "successfully",
             "ok",
             "done",
-            "pass(?:ed)?",
-            "complet(?:e|ed)",
+            "pass", "passed",
+            "complete", "completed",
             "ready",
             "healthy",
             "running",
@@ -306,13 +355,13 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "created",
             "saved",
             "finished",
-        ])],
-        "builtin-info" => vec![token_boundary(&["info(?:rmation)?", "notice"])],
-        "builtin-debug" => vec![token_boundary(&["debug", "trace", "verbose"])],
+        ]),
+        "builtin-info" => word_patterns(&["info", "information", "notice"]),
+        "builtin-debug" => word_patterns(&["debug", "trace", "verbose"]),
         "builtin-duration" => vec![
             r"(?i)\b[-+]?\d+(?:\.\d+)?\s*(?:ns|us|µs|ms|sec|mins?|minutes|hrs?|hours|days|weeks|months|years)\b".into(),
         ],
-        "builtin-constant" => vec![token_boundary(&[
+        "builtin-constant" => word_patterns(&[
             "true",
             "false",
             "null",
@@ -323,21 +372,21 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "Infinity",
             "nullptr",
             "EOF",
-            "stop(?:ped)?",
-            "exit(?:ed|ing)?",
-            "quit(?:ed|ing)?",
-            "abort(?:ed|ing)?",
-            "cancel(?:ed|ing)?",
-            "interrupt(?:ed|ing)?",
-            "pause(?:ed|ing)?",
-            "resume(?:ed|ing)?",
-        ])],
+            "stop", "stopped",
+            "exit", "exited", "exiting",
+            "quit", "quited", "quiting",
+            "abort", "aborted", "aborting",
+            "cancel", "canceled", "canceling",
+            "interrupt", "interrupted", "interrupting",
+            "pause", "pauseed", "pauseing",
+            "resume", "resumeed", "resumeing",
+        ]),
         "builtin-number" => vec![
             r"(?i)\b[-+]?0x[0-9a-f]+\b".into(),
             r"(?i)\b[-+]?(?:\.\d+|\d+\.\d*|\d+[eE][-+]?\d+|\d{2,})(?:[eE][-+]?\d+)?(?:\s*%)?\b".into(),
         ],
-        "builtin-prompt" => vec![r"[$#](?=\s)".into()],
-        "builtin-operator" => vec![r"[-:=+&*()$\[\]<>?|{}]+".into()],
+        "builtin-prompt" => Vec::new(),
+        "builtin-operator" => vec![r"[-:;=+&*()$\[\]<>?|{}]+".into()],
         _ => Vec::new(),
     }
 }
@@ -387,8 +436,8 @@ pub fn merge_keyword_highlight_rules_for_paint(
 pub fn keyword_highlight_color_palette(is_dark: bool) -> &'static [&'static str] {
     if is_dark {
         &[
-            "#ff7b72", "#e3b341", "#3fb950", "#79c0ff", "#d2a8ff", "#ff9e64", "#f1fa8c", "#bd93f9",
-            "#ffb86c", "#56d364", "#8be9fd", "#7ee787",
+            "#f44747", "#cd9731", "#32cd32", "#6796e6", "#b267e6", "#FD971F", "#E6DB74", "#AE81FF",
+            "#ffb86c", "#A6E22E", "#8be9fd", "#A6E22E",
         ]
     } else {
         &[
@@ -408,9 +457,14 @@ mod tests {
     #[test]
     fn builtin_catalog_is_stable() {
         let rules = get_builtin_keyword_rules(true);
-        assert_eq!(rules.len(), 18);
+        assert_eq!(rules.len(), 21);
         assert!(rules.iter().all(|rule| rule.id.starts_with("builtin-")));
-        assert!(!rules[0].patterns.is_empty());
+        assert!(
+            rules
+                .iter()
+                .find(|r| r.id == "builtin-url")
+                .is_some_and(|r| !r.patterns.is_empty())
+        );
     }
 
     #[test]
@@ -430,5 +484,52 @@ mod tests {
         assert_eq!(merged[0].color, "#ff0000");
         let error = merged.iter().find(|r| r.id == "builtin-error").unwrap();
         assert!(!error.enabled);
+    }
+
+    #[test]
+    fn legacy_keyword_configuration_round_trips_without_schema_changes() {
+        use crate::models::settings::KeywordHighlightConfig;
+        let old = serde_json::json!({
+            "enabled": true,
+            "across_wrapped_lines": false,
+            "builtin_rules": {"builtin-error": false, "future-category": false},
+            "rules": [{"id": "kh-old", "name": "Legacy", "patterns": ["panic", "err.*"],
+                "color_dark": "#123456", "color_light": "#654321", "enabled": true}]
+        });
+        let config: KeywordHighlightConfig = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&config).unwrap(), old);
+        let merged =
+            merge_keyword_highlight_rules_for_paint(&config.rules, &config.builtin_rules, true);
+        assert_eq!(merged[0].patterns, vec!["panic", "err.*"]);
+        assert!(
+            !merged
+                .iter()
+                .find(|r| r.id == "builtin-error")
+                .unwrap()
+                .enabled
+        );
+        for id in ["builtin-command", "builtin-path", "builtin-permissions"] {
+            assert!(merged.iter().find(|r| r.id == id).unwrap().enabled);
+        }
+    }
+
+    #[test]
+    fn status_presets_use_explicit_literals_without_consuming_boundaries() {
+        use super::{BuiltinKeywordMatcher, builtin_keyword_matcher};
+        let rules = get_builtin_keyword_rules(true);
+        for id in [
+            "builtin-error",
+            "builtin-warn",
+            "builtin-info",
+            "builtin-debug",
+            "builtin-success",
+        ] {
+            assert_eq!(
+                builtin_keyword_matcher(id),
+                Some(BuiltinKeywordMatcher::LiteralWords)
+            );
+            let rule = rules.iter().find(|r| r.id == id).unwrap();
+            assert!(rule.patterns.iter().all(|p| !p.contains(['(', '[', '\\'])));
+        }
     }
 }

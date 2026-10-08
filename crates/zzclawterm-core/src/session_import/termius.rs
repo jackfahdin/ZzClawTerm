@@ -921,6 +921,7 @@ fn prepare_termius_keys(keys: &[TermiusRawSshKey]) -> AppResult<PreparedTermiusK
         }
         ids.insert(termius_ssh_key_key(key), id.clone());
         prepared.push(SshKey {
+            sort_order: 0,
             id,
             name: normalize_optional_string(key.label.clone())
                 .unwrap_or_else(|| "Termius SSH Key".to_string()),
@@ -960,6 +961,7 @@ fn prepare_termius_passwords(
                 ids.insert(format!("host:{alias}"), id.clone());
             }
             passwords.push(SavedPassword {
+                sort_order: 0,
                 id,
                 username: String::new(),
                 name: format!(
@@ -985,6 +987,7 @@ fn prepare_termius_passwords(
                 ids.insert(format!("identity:{alias}"), id.clone());
             }
             passwords.push(SavedPassword {
+                sort_order: 0,
                 id,
                 username: identity.username.clone().unwrap_or_default(),
                 name: format!(

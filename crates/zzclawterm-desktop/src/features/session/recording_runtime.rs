@@ -1,5 +1,7 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use gpui::Context;
 use time::OffsetDateTime;
@@ -127,7 +129,12 @@ impl ZzClawTermApp {
                     self.start_recording_to_path(&session_id, path.display().to_string(), cx);
                 }
                 RecordingPathPromptKind::SaveTranscript => {
-                    self.save_transcript_to_path(&session_id, path.display().to_string(), cx);
+                    self.save_transcript_to_path(
+                        &session_id,
+                        path.display().to_string(),
+                        false,
+                        cx,
+                    );
                 }
             },
             RecordingPathPromptResult::Cancelled => {
@@ -189,18 +196,20 @@ impl ZzClawTermApp {
         let writer = self.recording.writer();
         let job_session_id = session_id.to_string();
         let memory_limit = self.settings.summary().recording_memory_limit_bytes as usize;
-        let task = self.blocking_jobs.submit_task("recording-start", move |_| {
-            writer.start(
-                job_session_id,
-                context,
-                profile,
-                explicit_path,
-                memory_limit,
-            )
-        });
+        let task = writer.start_async(
+            job_session_id,
+            context,
+            profile,
+            explicit_path,
+            memory_limit,
+            false,
+        );
         let result_session_id = session_id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = await_blocking_job(task).await.and_then(|result| result);
+            let result = task
+                .await
+                .map_err(|_| "recording writer stopped".to_string())
+                .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 let current_id = this.recording.current_session_id(&result_session_id);
                 this.recording.finish_action(&result_session_id);
@@ -241,18 +250,29 @@ impl ZzClawTermApp {
         self.shell.set_status("stopping recording".to_string());
         let writer = self.recording.writer();
         let job_session_id = session_id.to_string();
-        let task = self
-            .blocking_jobs
-            .submit_task("recording-stop", move |_| writer.stop(job_session_id));
+        let finish_output = self.terminal.recording_output_fence();
+        let task = self.blocking_jobs.submit_task("recording-stop", move |_| {
+            let fence_error = finish_output().err();
+            let mut completion = writer.stop_complete(job_session_id)?;
+            if completion.error.is_none() {
+                completion.error = fence_error;
+            }
+            Ok::<_, String>(completion)
+        });
         let result_session_id = session_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = await_blocking_job(task).await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.recording.finish_action(&result_session_id);
                 match result {
-                    Ok(path) => {
-                        this.shell.set_status(format!("recording saved: {path}"));
-                        this.append_terminal_log(format!("\n# recording saved: {path}\n"));
+                    Ok(completion) => {
+                        let path = completion.file_path.display();
+                        let message = match completion.error {
+                            Some(error) => format!("recording stopped at {path}: {error}"),
+                            None => format!("recording saved: {path}"),
+                        };
+                        this.shell.set_status(message.clone());
+                        this.append_terminal_log(format!("\n# {message}\n"));
                     }
                     Err(error) => {
                         this.shell
@@ -266,7 +286,13 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    fn save_transcript_to_path(&mut self, session_id: &str, path: String, cx: &mut Context<Self>) {
+    fn save_transcript_to_path(
+        &mut self,
+        session_id: &str,
+        path: String,
+        unique: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self.recording.begin_action(session_id, "save") {
             self.shell
                 .set_status("recording operation already in progress".to_string());
@@ -279,15 +305,18 @@ impl ZzClawTermApp {
         let memory_limit = self.settings.summary().recording_memory_limit_bytes as usize;
         let include_io_labels = self.settings.summary().recording_include_io_labels;
         let include_timestamps = self.settings.summary().recording_include_timestamps;
+        let finish_output = self.terminal.recording_output_fence();
         let task = self
             .blocking_jobs
             .submit_task("recording-transcript", move |_| {
-                writer.save_transcript(
+                finish_output()?;
+                writer.save_transcript_with_policy(
                     job_session_id,
                     path,
                     include_io_labels,
                     include_timestamps,
                     memory_limit,
+                    unique,
                 )
             });
         let result_session_id = session_id.to_string();
@@ -336,20 +365,25 @@ impl ZzClawTermApp {
                 return;
             }
         };
-        self.save_transcript_to_path(session_id, path.display().to_string(), cx);
+        self.save_transcript_to_path(session_id, path.display().to_string(), true, cx);
     }
 
-    pub(in crate::features) fn maybe_auto_start_recording(
-        &mut self,
-        session_id: &str,
-        session_name: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub(in crate::features) fn queue_auto_recording(&self, session_id: &str) {
         if !self.effective_recording_auto_start(session_id) {
             return;
         }
-        let _ = session_name;
-        self.start_recording_with_profile(session_id, None, None, cx);
+        let Some((context, profile)) = self.recording_profile_for_session(session_id) else {
+            return;
+        };
+        // Enqueue before event ownership is handed to the bridge. File I/O stays on the writer.
+        drop(self.recording.writer().start_async(
+            session_id.into(),
+            context,
+            profile,
+            None,
+            self.settings.summary().recording_memory_limit_bytes as usize,
+            true,
+        ));
     }
 
     pub(in crate::features) fn cleanup_recording_for_session(&mut self, session_id: &str) {
@@ -377,6 +411,7 @@ impl ZzClawTermApp {
         session_id: &str,
     ) -> Option<(RecordingContext, RecordingProfile)> {
         let metadata = self.session.metadata(session_id)?;
+        metadata.launch_config.encoding()?;
         if metadata.disconnected {
             return None;
         }
@@ -440,6 +475,7 @@ impl ZzClawTermApp {
                 summary.recording_existing_file_behavior,
             ),
             include_binary_transfer_payloads: summary.recording_include_binary_transfer_payloads,
+            include_input: summary.recording_include_input,
         };
         Some((context, profile))
     }
@@ -495,9 +531,10 @@ fn session_transcript_file_path(
         "session-{}-{timestamp}.log",
         zzclawterm_transport::safe_recording_name(session_name)
     );
-    Ok(first_available_path(&directory.join(file_name)))
+    Ok(directory.join(file_name))
 }
 
+#[cfg(test)]
 fn first_available_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -706,5 +743,82 @@ mod tests {
                 .count(),
             32
         );
+    }
+    #[test]
+    fn recording_auto_start_honors_connection_overrides_batches_and_reconnects() {
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::models::SessionLaunchConfig;
+        use gpui::{AppContext as _, TestAppContext};
+        use zzclawterm_core::{ConnectionRecordingSettings, SavedConnection};
+
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-auto-recording-app");
+        let mut cx = TestAppContext::single();
+        let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+        cx.update_entity(&app, |app, _| {
+            let mut summary = app.settings.summary().clone();
+            summary.recording_auto_start = false;
+            summary.recording_path = root.join("logs").to_string_lossy().into_owned();
+            summary.recording_path_template = "{session}.log".into();
+            summary.recording_existing_file_behavior =
+                zzclawterm_core::ExistingFileBehavior::Unique;
+            app.settings.replace_summary(summary);
+            let mut connection: SavedConnection = serde_json::from_value(serde_json::json!({
+                "id": "enabled", "name": "synthetic", "type": "ssh", "host": "example.test"
+            }))
+            .unwrap();
+            connection.recording = Some(ConnectionRecordingSettings {
+                auto_start: Some(true),
+                ..Default::default()
+            });
+            let mut disabled = connection.clone();
+            disabled.id = "disabled".into();
+            disabled.recording.as_mut().unwrap().auto_start = Some(false);
+            app.connection_state
+                .replace_loaded(vec![connection, disabled], vec![]);
+            let base = app.session.metadata("fixture").unwrap().clone();
+            for id in ["first", "second"] {
+                let mut metadata = base.clone();
+                metadata.source_connection_id = Some("enabled".into());
+                if let SessionLaunchConfig::Local(config) = &mut metadata.launch_config {
+                    config.name = id.into();
+                }
+                app.register_session_for_start(id, metadata, None, None);
+                app.recording
+                    .writer()
+                    .write_output(id, format!("{id} output\n"));
+            }
+            let mut metadata = base;
+            metadata.source_connection_id = Some("disabled".into());
+            let mut summary = app.settings.summary().clone();
+            summary.recording_auto_start = true;
+            app.settings.replace_summary(summary);
+            app.register_session_for_start("disabled", metadata, None, None);
+            assert!(!app.effective_recording_auto_start("disabled"));
+            let metadata = app.session.metadata("first").unwrap().clone();
+            app.recording.rekey_session("first", "reconnected");
+            app.register_session_for_reconnect("reconnected", metadata);
+            let completion = app
+                .recording
+                .writer()
+                .stop_complete("reconnected".into())
+                .unwrap();
+            assert!(completion.error.is_none());
+            assert!(
+                fs::read_to_string(&completion.file_path)
+                    .unwrap()
+                    .contains("first output")
+            );
+            app.recording
+                .writer()
+                .stop_complete("second".into())
+                .unwrap();
+            assert!(
+                app.recording
+                    .writer()
+                    .stop_complete("disabled".into())
+                    .is_err()
+            );
+            assert_eq!(fs::read_dir(root.join("logs")).unwrap().count(), 2);
+        });
     }
 }

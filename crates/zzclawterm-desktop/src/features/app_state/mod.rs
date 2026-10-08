@@ -42,16 +42,19 @@ pub(crate) struct ZzClawTermStoreClients {
 pub(crate) struct ZzClawTermProcessEntities {
     pub(crate) process_state: gpui::Entity<crate::app_shell::ProcessStateStore>,
     pub(crate) update: gpui::Entity<super::update::UpdateStore>,
+    pub(crate) plugins: gpui::Entity<super::plugins::PluginProcess>,
 }
 
 impl ZzClawTermProcessEntities {
     pub(crate) fn new(
         process_state: gpui::Entity<crate::app_shell::ProcessStateStore>,
         update: gpui::Entity<super::update::UpdateStore>,
+        plugins: gpui::Entity<super::plugins::PluginProcess>,
     ) -> Self {
         Self {
             process_state,
             update,
+            plugins,
         }
     }
 }
@@ -87,6 +90,7 @@ pub struct ZzClawTermApp {
     /// Component-backed selects keyed by stable feature ids.
     pub(in crate::features) selects: SelectRegistry,
     pub(in crate::features) commands: CommandFeatureState,
+    pub(in crate::features) plugins: super::plugins::PluginFeatureState,
     pub(in crate::features) remote_ops: RemoteOpsFeatureState,
     /// The five polling panels. They own their refresh schedules; `remote_ops` stays
     /// the authoritative owner of the data those schedules fetch.

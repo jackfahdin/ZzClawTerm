@@ -225,6 +225,7 @@ fn terminal_snapshot_with_newer_edge_row(
     rows.push(newer.rows().last().unwrap().clone());
     std::sync::Arc::new(TerminalSnapshot::from_rows(
         zzclawterm_terminal::TerminalSnapshotMeta {
+            shell_input_anchor: base.shell_input_anchor,
             cols: base.cols,
             viewport_rows: base.viewport_rows,
             cursor: base.cursor,
@@ -284,6 +285,7 @@ fn terminal_snapshot_with_retained_scroll_window(
         .collect();
     std::sync::Arc::new(TerminalSnapshot::from_rows(
         zzclawterm_terminal::TerminalSnapshotMeta {
+            shell_input_anchor: base.shell_input_anchor,
             cols: base.cols,
             viewport_rows: base.viewport_rows,
             cursor: base.cursor,

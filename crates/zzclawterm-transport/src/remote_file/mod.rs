@@ -283,6 +283,18 @@ impl RemoteFileService {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_export_service(sftp_service: SftpService) -> Self {
+        let mut service = Self::new(SshSessionConfig::default());
+        service.sftp_service = sftp_service;
+        *service.selected.lock().unwrap() = Some(RemoteFileBackendKind::Sftp);
+        service
+    }
+
+    pub(crate) fn export_sftp_service(&self) -> SftpService {
+        self.sftp_service.clone()
+    }
+
     fn sftp(&self) -> anyhow::Result<SftpService> {
         Ok(self.sftp_service.clone())
     }

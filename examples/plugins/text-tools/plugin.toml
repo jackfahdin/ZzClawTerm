@@ -1,0 +1,20 @@
+schema_version = 1
+id = "text-tools"
+name = "Text tools"
+version = "1.0.0"
+authors = ["ZzClawTerm"]
+description = "Transform explicitly provided text"
+host_version = ">=0.1.0"
+api_version = "1.0.0"
+component = "plugin.wasm"
+
+[[actions]]
+id = "sort"
+name = "Sort lines"
+description = "Sort lines lexicographically"
+result = "text"
+[[actions]]
+id = "json"
+name = "Format JSON"
+description = "Pretty-print a JSON value"
+result = "text"

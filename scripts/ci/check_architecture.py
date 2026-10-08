@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -80,6 +81,8 @@ def dependency_errors() -> list[str]:
         "zzclawterm-terminal",
         "zzclawterm-store",
         "zzclawterm-remote-desktop",
+        "zzclawterm-plugin-api",
+        "zzclawterm-plugin-host",
     )
     for crate in low_level:
         manifest = ROOT / "crates" / crate / "Cargo.toml"
@@ -90,7 +93,33 @@ def dependency_errors() -> list[str]:
     )
     if re.search(r"(?m)^\s*(gpui-kit|gpui_component)\s*=", desktop_manifest):
         errors.append("crate_boundary: zzclawterm-desktop must use zzclawterm-ui wrappers")
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    workspace_dependencies = workspace["workspace"]["dependencies"]
+    for crate, forbidden in (
+        ("zzclawterm-plugin-api", {
+            "zzclawterm-core", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-transport",
+            "zzclawterm-plugin-host", "zzclawterm-ui", "zzclawterm-terminal-gpui",
+        }),
+        ("zzclawterm-plugin-host", {"zzclawterm-desktop", "zzclawterm-transport", "zzclawterm-ui", "zzclawterm-terminal-gpui"}),
+    ):
+        document = tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8"))
+        for package in dependency_packages(document, workspace_dependencies):
+            if package in forbidden or package == "gpui" or package.startswith("gpui-"):
+                errors.append(f"crate_boundary: {crate} must not depend on {package}")
     return errors
+
+
+def dependency_packages(document: dict, workspace_dependencies: dict):
+    """Resolve aliases in ordinary, build, dev and target-specific dependencies."""
+    for name, value in document.items():
+        if name in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for alias, specification in value.items():
+                if isinstance(specification, dict) and specification.get("workspace"):
+                    specification = workspace_dependencies.get(alias, specification)
+                package = specification.get("package", alias) if isinstance(specification, dict) else alias
+                yield package.replace("_", "-")
+        elif isinstance(value, dict):
+            yield from dependency_packages(value, workspace_dependencies)
 
 
 def main() -> int:

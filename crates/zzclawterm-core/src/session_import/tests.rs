@@ -454,3 +454,16 @@ fn zzclawterm_json_retains_pipeline_shared_icons_and_future_connection_fields() 
         true
     );
 }
+
+#[test]
+fn nyaterm_json_import_preserves_account_and_key_sort_order() {
+    let prepared = parse_zzclawterm_json_content(
+        r#"{
+        "passwords":[{"ref":"account", "name":"Account", "password":"synthetic", "sort_order":9}],
+        "ssh_keys":[{"ref":"key", "name":"Key", "private_key":"synthetic", "sort_order":4}]
+    }"#,
+    )
+    .unwrap();
+    assert_eq!(prepared.passwords[0].sort_order, 9);
+    assert_eq!(prepared.ssh_keys[0].sort_order, 4);
+}

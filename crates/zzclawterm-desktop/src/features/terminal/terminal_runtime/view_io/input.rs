@@ -110,7 +110,10 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let input_started_at = Instant::now();
-        if bytes.is_empty() {
+        if bytes.is_empty()
+            || self.session.start_has_active_pending()
+            || self.session.start_has_active_failed()
+        {
             return false;
         }
         // Tauri/xterm custom key path: non-smart buffer selections stay painted while
@@ -185,19 +188,16 @@ impl ZzClawTermApp {
         }
         let input_wake_duration = input_wake_started_at.elapsed();
 
+        self.note_shell_editing_input(&bytes, cx);
         let suggestion_started_at = Instant::now();
-        if track_suggestions {
-            if terminal_should_track_command_suggestion_input(
-                track_suggestions,
-                self.settings.summary().terminal_low_latency_mode,
-                self.settings
-                    .summary()
-                    .interaction_command_suggestions_enabled,
-            ) {
-                self.note_command_suggestion_input(&bytes, cx);
-            } else {
-                self.note_command_history_input(&bytes);
-            }
+        if terminal_should_track_command_suggestion_input(
+            track_suggestions,
+            self.settings.summary().terminal_low_latency_mode,
+            self.settings
+                .summary()
+                .interaction_command_suggestions_enabled,
+        ) {
+            self.note_command_suggestion_input(&bytes, cx);
         }
         let suggestion_duration = suggestion_started_at.elapsed();
 
@@ -326,19 +326,16 @@ impl ZzClawTermApp {
         }
         let input_wake_duration = input_wake_started_at.elapsed();
 
+        self.note_shell_editing_input(&primary_bytes, cx);
         let suggestion_started_at = Instant::now();
-        if track_suggestions {
-            if terminal_should_track_command_suggestion_input(
-                track_suggestions,
-                self.settings.summary().terminal_low_latency_mode,
-                self.settings
-                    .summary()
-                    .interaction_command_suggestions_enabled,
-            ) {
-                self.note_command_suggestion_input(&primary_bytes, cx);
-            } else {
-                self.note_command_history_input(&primary_bytes);
-            }
+        if terminal_should_track_command_suggestion_input(
+            track_suggestions,
+            self.settings.summary().terminal_low_latency_mode,
+            self.settings
+                .summary()
+                .interaction_command_suggestions_enabled,
+        ) {
+            self.note_command_suggestion_input(&primary_bytes, cx);
         }
         let suggestion_duration = suggestion_started_at.elapsed();
 
@@ -697,7 +694,7 @@ impl ZzClawTermApp {
         if bytes.is_empty() {
             return MouseReportWriteResult::NotHandled;
         }
-        if let Err(error) = self.write_session_input_recorded(session_id, &bytes) {
+        if let Err(error) = self.write_session_raw_input_recorded(session_id, &bytes) {
             if self.set_terminal_status_if_changed(format!("mouse report failed: {error}")) {
                 cx.notify();
             }
@@ -819,7 +816,7 @@ impl ZzClawTermApp {
             .then(|| self.read_terminal_input_line_for_session(session_id))
             .flatten();
         let encoded = if disposition.encode_session_charset {
-            self.encode_session_outgoing(session_id, bytes)
+            self.encode_session_outgoing(session_id, bytes)?
         } else {
             bytes.to_vec()
         };
@@ -832,7 +829,19 @@ impl ZzClawTermApp {
             self.record_terminal_session_write_failure(session_id, "input", &error);
             return Err(error);
         }
-        if disposition.record_logical_input {
+        if disposition.record_logical_input
+            && self
+                .recording
+                .writer()
+                .capture_policy(session_id)
+                .include_input
+            && !self.recording_input_is_sensitive(session_id)
+        {
+            let policy = self.recording.writer().capture_policy(session_id);
+            if policy.mode == zzclawterm_transport::RecordingMode::Raw {
+                self.recording.write_raw_input(session_id, encoded);
+                return Ok(());
+            }
             if let Some(line) = terminal_line {
                 self.recording
                     .resync_input_line(session_id.to_string(), line);
@@ -858,13 +867,20 @@ impl ZzClawTermApp {
         if let Err(error) = self
             .session
             .manager()
-            .write(session_id, bytes)
+            .write_raw(session_id, bytes)
             .map_err(|error| error.to_string())
         {
             self.record_terminal_session_write_failure(session_id, "raw input", &error);
             return Err(error);
         }
-        if disposition.record_raw_input {
+        if disposition.record_raw_input
+            && self
+                .recording
+                .writer()
+                .capture_policy(session_id)
+                .include_input
+            && !self.recording_input_is_sensitive(session_id)
+        {
             self.recording
                 .write_raw_input(session_id.to_string(), bytes.to_vec());
         }
@@ -886,7 +902,7 @@ impl ZzClawTermApp {
         debug_assert!(!disposition.record_logical_input);
         debug_assert!(!disposition.record_raw_input);
         debug_assert!(!disposition.allow_command_history);
-        let encoded = self.encode_session_outgoing(session_id, bytes);
+        let encoded = self.encode_session_outgoing(session_id, bytes)?;
         self.session
             .manager()
             .write(session_id, &encoded)
@@ -957,9 +973,24 @@ impl ZzClawTermApp {
             self.record_terminal_session_write_failure(session_id, "framed input", &error);
             return Err(error);
         }
-        if disposition.record_logical_input {
-            self.recording
-                .write_input(session_id.to_string(), recording_bytes.to_vec());
+        if disposition.record_logical_input
+            && self
+                .recording
+                .writer()
+                .capture_policy(session_id)
+                .include_input
+            && !self.recording_input_is_sensitive(session_id)
+        {
+            let policy = self.recording.writer().capture_policy(session_id);
+            if policy.include_input {
+                if policy.mode == zzclawterm_transport::RecordingMode::Raw {
+                    self.recording
+                        .write_raw_input(session_id, wire_bytes.to_vec());
+                } else {
+                    self.recording
+                        .write_input(session_id, recording_bytes.to_vec());
+                }
+            }
         }
         Ok(())
     }
@@ -979,7 +1010,7 @@ impl ZzClawTermApp {
         if let Err(error) = self
             .session
             .manager()
-            .write(session_id, bytes)
+            .write_raw(session_id, bytes)
             .map_err(|error| error.to_string())
         {
             self.record_terminal_session_write_failure(session_id, "protocol response", &error);
@@ -1007,7 +1038,7 @@ impl ZzClawTermApp {
         }
         let log = terminal_session_write_failure_log(context, error);
         self.recording
-            .write_output(session_id.to_string(), log.clone());
+            .write_local_message(session_id.to_string(), log.clone());
         self.append_terminal_log_for_session(Some(session_id), &log, true);
     }
 
@@ -1016,18 +1047,45 @@ impl ZzClawTermApp {
         &self,
         session_id: &str,
         bytes: &[u8],
-    ) -> Vec<u8> {
-        if let Some(view) = self.terminal.view.views.get(session_id) {
-            return view.screen.encode_outgoing(bytes);
-        }
-        self.terminal.view.screen.encode_outgoing(bytes)
+    ) -> Result<Vec<u8>, String> {
+        let label = self.effective_session_encoding(session_id);
+        let encoding = zzclawterm_core::character_encoding::CharacterEncoding::parse(&label)
+            .map_err(crate::features::terminal::encoding_error_text)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| {
+            crate::features::terminal::encoding_error_text(
+                zzclawterm_core::character_encoding::EncodingError::InvalidUtf8Input,
+            )
+        })?;
+        encoding
+            .encode(text)
+            .map_err(crate::features::terminal::encoding_error_text)
     }
 
-    /// Keep all live terminal screens on the current interaction encoding.
+    pub(in crate::features) fn effective_session_encoding(&self, session_id: &str) -> String {
+        self.session
+            .metadata_entries()
+            .find(|(id, _)| *id == session_id)
+            .and_then(|(_, metadata)| metadata.launch_config.encoding())
+            .map(ToString::to_string)
+            .or_else(|| {
+                self.terminal
+                    .view
+                    .views
+                    .get(session_id)
+                    .map(|view| view.screen.encoding_label().to_string())
+            })
+            .unwrap_or_else(|| self.settings.summary().interaction_default_encoding.clone())
+    }
+
+    /// Reapply launch encodings; the global default only affects future sessions.
     pub(in crate::features) fn sync_terminal_encodings_from_settings(&mut self) {
         let label = self.settings.summary().interaction_default_encoding.clone();
-        self.terminal.view.screen.set_encoding(&label);
-        self.terminal.view.output_decoder.set_encoding(&label);
+        if let Err(error) = self.terminal.view.screen.set_encoding(&label) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
+        if let Err(error) = self.terminal.view.output_decoder.set_encoding(&label) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         let session_encodings = self
             .session
             .metadata_entries()
@@ -1039,11 +1097,9 @@ impl ZzClawTermApp {
             })
             .collect::<std::collections::HashMap<_, _>>();
         for (session_id, view) in &mut self.terminal.view.views {
-            let encoding = session_encodings
-                .get(session_id)
-                .map(String::as_str)
-                .unwrap_or(label.as_str());
-            view.set_encoding(encoding);
+            if let Some(encoding) = session_encodings.get(session_id) {
+                view.set_encoding(encoding);
+            }
         }
         self.sync_session_event_bridge_config();
     }

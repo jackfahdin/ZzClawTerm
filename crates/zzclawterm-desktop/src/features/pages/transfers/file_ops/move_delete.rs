@@ -386,14 +386,7 @@ impl ZzClawTermApp {
                 t!("fileExplorer.delete").to_string(),
                 true,
                 move |app, window, cx| {
-                    for remote_path in &paths {
-                        app.start_sftp_delete_job(remote_path.clone(), window, cx);
-                    }
-                    app.shell.set_status(
-                        t!("fileTransfer.statusDeleteJobsStarted", count = delete_count)
-                            .to_string(),
-                    );
-                    cx.notify();
+                    app.start_sftp_delete_batch(paths.clone(), window, cx);
                     true
                 },
             ),
@@ -403,9 +396,9 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    pub(in crate::features) fn start_sftp_delete_job(
+    fn start_sftp_delete_batch(
         &mut self,
-        remote_path: RemoteFilePath,
+        paths: Vec<RemoteFilePath>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -418,58 +411,56 @@ impl ZzClawTermApp {
             }
         };
         let backend = service.kind();
-        let remote_display_path = remote_path.display_path.clone();
-        let parent_path = file_browser_parent(backend, &remote_display_path);
-        let id = self.transfer.next_transfer_job_id("sftp-delete");
-        self.transfer.enqueue_transfer_job(TransferJobState {
-            id: id.clone(),
-            session_id: self.session.active_id_owned(),
-            kind: TransferJobKind::Delete {
-                remote_path: remote_display_path.clone(),
-                parent_path: parent_path.clone(),
-            },
-            status: TransferJobStatus::Running,
-            detail: t!(
-                "fileTransfer.detailDeleting",
-                path = remote_display_path.clone()
-            )
-            .to_string(),
-            created_at_ms: TransferJobState::now_ms(),
-            display_name: String::new(),
-            entries: Vec::new(),
-            summary: None,
-            progress: None,
-            control: None,
-            speed: Default::default(),
-        });
-        self.shell.set_status(
-            t!(
-                "fileTransfer.statusDeleteStarted",
-                path = remote_display_path.clone()
-            )
-            .to_string(),
-        );
-        let transfer_tx = self.transfer.transfer_event_sender();
-        self.submit_transfer_blocking_job(
-            "sftp-delete",
-            id.clone(),
-            transfer_tx.clone(),
-            move || {
-                let result = service
-                    .delete_remote_path(&remote_path)
-                    .and_then(|_| service.list_dir(&parent_path))
-                    .map(|entries| TransferJobOutput::Deleted {
-                        remote_path: remote_display_path,
-                        parent_path,
-                        entries,
-                    })
-                    .map_err(|error| error.to_string());
-                let _ = transfer_tx.unbounded_send(TransferJobResult {
-                    id,
-                    event: TransferJobEvent::Finished(result),
-                });
-            },
-        );
+        let batch_id = self.transfer.next_transfer_job_id("sftp-delete-batch");
+        let jobs = paths
+            .into_iter()
+            .map(|path| (self.transfer.next_transfer_job_id("sftp-delete"), path))
+            .collect::<Vec<_>>();
+        self.transfer
+            .begin_delete_batch(batch_id.clone(), backend, jobs.clone());
+        self.shell
+            .set_status(t!("fileTransfer.statusDeleteJobsStarted", count = jobs.len()).to_string());
+        for (id, remote_path) in jobs {
+            let service = service.clone();
+            let remote_display_path = remote_path.display_path.clone();
+            self.transfer.enqueue_transfer_job(TransferJobState {
+                id: id.clone(),
+                session_id: self.session.active_id_owned(),
+                kind: TransferJobKind::Delete {
+                    remote_path: remote_display_path.clone(),
+                    batch_id: batch_id.clone(),
+                },
+                status: TransferJobStatus::Running,
+                detail: t!(
+                    "fileTransfer.detailDeleting",
+                    path = remote_display_path.clone()
+                )
+                .to_string(),
+                created_at_ms: TransferJobState::now_ms(),
+                display_name: String::new(),
+                entries: Vec::new(),
+                summary: None,
+                progress: None,
+                control: None,
+                speed: Default::default(),
+            });
+            let transfer_tx = self.transfer.transfer_event_sender();
+            self.submit_transfer_blocking_job(
+                "sftp-delete",
+                id.clone(),
+                transfer_tx.clone(),
+                move || {
+                    let result = service
+                        .delete_remote_path(&remote_path)
+                        .map(|_| TransferJobOutput::Deleted)
+                        .map_err(|error| error.to_string());
+                    let _ = transfer_tx.unbounded_send(TransferJobResult {
+                        id,
+                        event: TransferJobEvent::Finished(result),
+                    });
+                },
+            );
+        }
         cx.notify();
     }
 }

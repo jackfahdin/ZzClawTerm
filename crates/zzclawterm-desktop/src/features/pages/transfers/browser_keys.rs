@@ -11,10 +11,8 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.mark_user_activity();
-        if self.settings.summary().ui_file_explorer_view_mode
-            == zzclawterm_core::TransferBrowserViewMode::Tree
-        {
-            self.handle_transfer_tree_key_down(event, window, cx);
+        // The path field owns all editing keys, including clipboard shortcuts.
+        if self.transfer.browser_view().path_editing {
             return;
         }
         let keystroke = &event.keystroke;
@@ -24,6 +22,13 @@ impl ZzClawTermApp {
         if modified_for_location && keystroke.key.eq_ignore_ascii_case("l") {
             cx.stop_propagation();
             self.begin_transfer_browser_path_edit(window, cx);
+            return;
+        }
+
+        if self.settings.summary().ui_file_explorer_view_mode
+            == zzclawterm_core::TransferBrowserViewMode::Tree
+        {
+            self.handle_transfer_tree_key_down(event, window, cx);
             return;
         }
 

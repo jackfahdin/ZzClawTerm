@@ -3,28 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::rgb;
 use zzclawterm_core::{
-    AppSettingsSummary, CloudSyncError, CloudSyncHistoryEntry, CloudSyncSettings, RiskLevel,
-    TunnelConfig,
+    AppSettingsSummary, CloudSyncError, CloudSyncHistoryEntry, CloudSyncSettings, TunnelConfig,
 };
 use zzclawterm_transport::{SessionKind, SshTunnelMode, TelnetEnterMode, safe_recording_name};
 
-use crate::features::runtime_jobs::AiAgentStepStatus;
 use crate::theme::ThemePalette;
-
-pub(in crate::features) fn ai_agent_step_status_style(
-    status: AiAgentStepStatus,
-) -> (&'static str, u32, u32) {
-    match status {
-        AiAgentStepStatus::Planning => ("planning", 0x93c5fd, 0x17233a),
-        AiAgentStepStatus::Tool => ("tool", 0xc4b5fd, 0x2b2142),
-        AiAgentStepStatus::NeedsApproval => ("review", 0xfacc15, 0x3a2f14),
-        AiAgentStepStatus::Running => ("running", 0x6ee7b7, 0x12342a),
-        AiAgentStepStatus::Completed => ("done", 0x86efac, 0x12301f),
-        AiAgentStepStatus::Failed => ("failed", 0xfca5a5, 0x3a1717),
-        AiAgentStepStatus::Rejected => ("rejected", 0xfca5a5, 0x3a1717),
-        AiAgentStepStatus::Cancelled => ("cancelled", 0xcbd5e1, 0x273244),
-    }
-}
 
 pub(in crate::features) fn format_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec >= 1024. * 1024. {
@@ -46,16 +29,6 @@ pub(in crate::features) fn format_uptime(seconds: u64) -> String {
         format!("{hours}h {minutes}m")
     } else {
         format!("{minutes}m")
-    }
-}
-
-pub(in crate::features) fn risk_label(risk: Option<&RiskLevel>) -> &'static str {
-    match risk {
-        Some(RiskLevel::Low) => "Low",
-        Some(RiskLevel::Medium) => "Medium",
-        Some(RiskLevel::High) => "High",
-        Some(RiskLevel::Critical) => "Critical",
-        None => "Unrated",
     }
 }
 

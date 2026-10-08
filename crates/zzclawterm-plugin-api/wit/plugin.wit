@@ -1,0 +1,21 @@
+package nyaterm:plugin@1.0.0;
+
+interface types {
+    record version { major: u32, minor: u32, patch: u32 }
+    record identity { id: string, version: string }
+    variant value { text(string), integer(s64), boolean(bool) }
+    record argument { name: string, value: value }
+    record action-input { action: string, arguments: list<argument>, text: option<string> }
+    record command-draft { title: string, command: string }
+    variant action-result { command(command-draft), text(string) }
+    enum error-kind { invalid-input, unsupported-action, failed }
+    record plugin-error { kind: error-kind, message: string }
+}
+
+world plugin {
+    use types.{version, identity, action-input, action-result, plugin-error};
+    export api-version: func() -> version;
+    export initialize: func(plugin: identity) -> result<_, plugin-error>;
+    export invoke: func(input: action-input) -> result<action-result, plugin-error>;
+    export shutdown: func();
+}

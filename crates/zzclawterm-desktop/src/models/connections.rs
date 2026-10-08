@@ -79,6 +79,7 @@ pub(crate) enum ConnectionEditorSelect {
     DataBits,
     Parity,
     StopBits,
+    FlowControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +419,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) baud_rate: String,
     pub(crate) data_bits: String,
     pub(crate) parity: String,
+    pub(crate) flow_control: zzclawterm_core::models::connection::SerialFlowControl,
     pub(crate) stop_bits: String,
     pub(crate) raw_tcp_cli: bool,
     pub(crate) telnet_enter_mode: String,

@@ -26,6 +26,22 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let app = cx.weak_entity();
+        self.remote_desktop
+            .surfaces
+            .entry(session_id.clone())
+            .or_insert_with(|| {
+                cx.new(|cx| super::surface::RemoteDesktopSurface::new(app, session_id, cx))
+            })
+            .clone()
+            .into_any_element()
+    }
+
+    pub(super) fn remote_desktop_view_content(
+        &mut self,
+        session_id: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let palette = self.theme_palette();
         let Some(session) = self.remote_desktop.sessions.get(&session_id) else {
             return self
@@ -35,6 +51,74 @@ impl ZzClawTermApp {
                 )
                 .into_any_element();
         };
+        if let Some((request, previous)) = session.vnc_key_request.clone() {
+            let reject = request.clone();
+            let once = request.clone();
+            let remember = request.clone();
+            let changed = previous.is_some();
+            let detail = format!(
+                "{}:{}\nRSA {} bits\n{}\n{}",
+                request.host,
+                request.port,
+                request.key_bits,
+                request.sha256_fingerprint,
+                previous
+                    .map(|key| format!("{}: {key}", t!("remoteDesktop.previousFingerprint")))
+                    .unwrap_or_default()
+            );
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .px_6()
+                .bg(rgb(palette.surface))
+                .child(div().text_color(rgb(palette.warning)).child(if changed {
+                    t!("remoteDesktop.certificateChangedWarning")
+                } else {
+                    t!("remoteDesktop.vncServerKeyVerify")
+                }))
+                .child(
+                    div()
+                        .max_w(px(620.))
+                        .text_color(rgb(palette.text_dimmed))
+                        .child(detail),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(small_button(
+                            palette,
+                            format!("vnc-key-reject-{session_id}"),
+                            t!("remoteDesktop.reject"),
+                            cx.listener(move |this, _, _, cx| {
+                                this.resolve_vnc_key_request(&reject, false, false, cx)
+                            }),
+                        ))
+                        .when(!changed, |row| {
+                            row.child(small_button(
+                                palette,
+                                format!("vnc-key-once-{session_id}"),
+                                t!("remoteDesktop.trustOnce"),
+                                cx.listener(move |this, _, _, cx| {
+                                    this.resolve_vnc_key_request(&once, true, false, cx)
+                                }),
+                            ))
+                        })
+                        .child(small_button(
+                            palette,
+                            format!("vnc-key-remember-{session_id}"),
+                            t!("remoteDesktop.vncTrustAndRemember"),
+                            cx.listener(move |this, _, _, cx| {
+                                this.resolve_vnc_key_request(&remember, true, true, cx)
+                            }),
+                        )),
+                )
+                .into_any_element();
+        }
         if let Some(request) = session.certificate_request.clone() {
             return self
                 .rdp_certificate_view(session_id, request, cx)

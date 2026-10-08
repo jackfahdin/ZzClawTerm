@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 
@@ -90,6 +91,152 @@ fn holds_split_trigger_prefix_until_complete() {
             passthrough: Vec::new(),
             remaining: Vec::new(),
         }
+    );
+}
+
+#[test]
+fn isolated_colons_are_released_without_another_output_chunk() {
+    for text in [b":".as_slice(), b"::".as_slice(), b"prompt:".as_slice()] {
+        let mut detector = TrzszDetector::new();
+        let now = Instant::now();
+        let TrzszDetectResult::NoMatch { mut passthrough } = detector.feed_at(text, now) else {
+            panic!("ordinary colon text must not trigger a transfer");
+        };
+        assert!(
+            detector
+                .flush_pending_if_idle(now + Duration::from_millis(25))
+                .is_empty()
+        );
+        passthrough.extend(detector.flush_pending_if_idle(now + Duration::from_millis(100)));
+        assert_eq!(passthrough, text);
+        assert!(detector.is_idle());
+        assert!(
+            detector
+                .flush_pending_if_idle(now + Duration::from_secs(2))
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn repeated_colon_echoes_do_not_lag_two_characters_or_pollute_backspace() {
+    let mut detector = TrzszDetector::new();
+    let started_at = Instant::now();
+    let mut displayed = Vec::new();
+    for press in 0..7 {
+        let now = started_at + Duration::from_millis(press * 300);
+        let TrzszDetectResult::NoMatch { passthrough } = detector.feed_at(b":", now) else {
+            panic!("colon echo must not trigger a transfer");
+        };
+        displayed.extend(passthrough);
+        displayed.extend(detector.flush_pending_if_idle(now + Duration::from_millis(100)));
+        assert_eq!(displayed, vec![b':'; press as usize + 1]);
+    }
+    assert_eq!(
+        detector.feed(b"\x08\x1b[K"),
+        TrzszDetectResult::NoMatch {
+            passthrough: b"\x08\x1b[K".to_vec()
+        }
+    );
+}
+
+#[test]
+fn backspace_before_idle_deadline_releases_colons_once_in_wire_order() {
+    let mut detector = TrzszDetector::new();
+    let now = Instant::now();
+    detector.feed_at(b"::", now);
+    assert_eq!(
+        detector.feed_at(b"\x08\x1b[K", now + Duration::from_millis(20)),
+        TrzszDetectResult::NoMatch {
+            passthrough: b"::\x08\x1b[K".to_vec()
+        }
+    );
+    assert!(
+        detector
+            .flush_pending_if_idle(now + Duration::from_secs(2))
+            .is_empty()
+    );
+}
+
+#[test]
+fn idle_flush_preserves_trigger_split_at_every_prefix_boundary() {
+    let marker = b"::TRZSZ:TRANSFER:S:1.2.3:1700000000000";
+    for split in 1..=b"::TRZSZ:TRANSFER:".len() {
+        let mut detector = TrzszDetector::new();
+        let now = Instant::now();
+        assert_eq!(
+            detector.feed_at(&marker[..split], now),
+            TrzszDetectResult::NoMatch {
+                passthrough: Vec::new()
+            }
+        );
+        assert!(
+            detector
+                .flush_pending_if_idle(now + Duration::from_millis(25))
+                .is_empty()
+        );
+        let TrzszDetectResult::Detected {
+            trigger,
+            passthrough,
+            remaining,
+        } = detector.feed_at(&marker[split..], now + Duration::from_millis(30))
+        else {
+            panic!("split marker must still be recognized at boundary {split}");
+        };
+        assert_eq!(trigger.raw, marker);
+        assert!(passthrough.is_empty());
+        assert!(remaining.is_empty());
+        assert!(
+            detector
+                .flush_pending_if_idle(now + Duration::from_secs(2))
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn recognizable_trigger_prefix_gets_more_time_but_eventually_releases() {
+    let mut detector = TrzszDetector::new();
+    let now = Instant::now();
+    detector.feed_at(b"::TRZ", now);
+    assert!(
+        detector
+            .flush_pending_if_idle(now + Duration::from_millis(500))
+            .is_empty()
+    );
+    assert!(matches!(
+        detector.feed_at(b"SZ:TRANSFER:S:1.2.3", now + Duration::from_millis(600)),
+        TrzszDetectResult::Detected { .. }
+    ));
+    detector.feed_at(b"::TRZ", now + Duration::from_secs(1));
+    assert_eq!(
+        detector.flush_pending_if_idle(now + Duration::from_secs(2)),
+        b"::TRZ"
+    );
+    assert!(detector.is_idle());
+}
+
+#[test]
+fn prefix_idle_deadline_tracks_the_latest_chunk_and_reset_discards_it() {
+    let mut detector = TrzszDetector::new();
+    let now = Instant::now();
+    detector.feed_at(b":", now);
+    detector.feed_at(b":", now + Duration::from_millis(40));
+    assert!(
+        detector
+            .flush_pending_if_idle(now + Duration::from_millis(70))
+            .is_empty()
+    );
+    assert_eq!(
+        detector.flush_pending_if_idle(now + Duration::from_millis(100)),
+        b"::"
+    );
+    detector.feed_at(b":", now);
+    detector.reset();
+    assert!(
+        detector
+            .flush_pending_if_idle(now + Duration::from_secs(2))
+            .is_empty()
     );
 }
 

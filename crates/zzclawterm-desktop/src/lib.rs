@@ -16,6 +16,7 @@ pub mod entities;
 pub mod features;
 pub mod http;
 pub mod models;
+pub mod platform;
 pub mod terminal;
 pub mod theme;
 pub mod widgets;

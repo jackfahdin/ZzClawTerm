@@ -12,6 +12,7 @@ mod browser_keys;
 mod browser_navigation;
 mod browser_selection;
 mod context_menu_policy;
+mod drag_preview;
 mod duplicate_banner;
 mod editor;
 mod entry_row;

@@ -1,6 +1,7 @@
 //! Encoding and decoding of raw SFTP path tokens.
 
-use encoding_rs::{Encoding, GB18030, GBK, UTF_8};
+use encoding_rs::{Encoding, UTF_8};
+use zzclawterm_core::character_encoding::CharacterEncoding;
 
 use super::super::SshSessionConfig;
 
@@ -11,42 +12,22 @@ pub struct SftpPathCodec {
 }
 
 impl SftpPathCodec {
+    pub(super) fn is_utf8(&self) -> bool {
+        self.encoding == UTF_8
+    }
+
     pub fn from_ssh_config(config: &SshSessionConfig) -> anyhow::Result<Self> {
-        let requested = config.sftp.filename_encoding.trim();
-        let effective = if requested.is_empty() || requested.eq_ignore_ascii_case("terminal") {
-            config.encoding.trim()
-        } else {
-            requested
-        };
-        Self::from_encoding_name(effective)
+        let charset =
+            CharacterEncoding::resolve_filename(&config.sftp.filename_encoding, &config.encoding)?;
+        Self::from_encoding_name(charset.label())
     }
 
     pub fn from_encoding_name(encoding: &str) -> anyhow::Result<Self> {
-        let normalized = encoding.trim();
-        if normalized.is_empty()
-            || normalized.eq_ignore_ascii_case("global")
-            || normalized.eq_ignore_ascii_case("terminal")
-            || normalized.eq_ignore_ascii_case("utf8")
-            || normalized.eq_ignore_ascii_case("utf-8")
-        {
-            return Ok(Self {
-                encoding_name: "UTF-8",
-                encoding: UTF_8,
-            });
-        }
-        if normalized.eq_ignore_ascii_case("gbk") || normalized.eq_ignore_ascii_case("gb2312") {
-            return Ok(Self {
-                encoding_name: "GBK",
-                encoding: GBK,
-            });
-        }
-        if normalized.eq_ignore_ascii_case("gb18030") {
-            return Ok(Self {
-                encoding_name: "GB18030",
-                encoding: GB18030,
-            });
-        }
-        anyhow::bail!("Unsupported SFTP filename encoding: {normalized}");
+        let charset = CharacterEncoding::parse(encoding)?;
+        Ok(Self {
+            encoding_name: charset.label(),
+            encoding: charset.codec(),
+        })
     }
 
     #[cfg(test)]
@@ -55,19 +36,12 @@ impl SftpPathCodec {
     }
 
     pub fn encode_path(&self, path: &str) -> anyhow::Result<Vec<u8>> {
-        let (encoded, _, had_errors) = self.encoding.encode(path);
-        if had_errors {
-            anyhow::bail!(
-                "SFTP path cannot be encoded as {}: {path}",
-                self.encoding_name
-            );
-        }
-        Ok(encoded.into_owned())
+        Ok(CharacterEncoding::parse(self.encoding_name)?.encode(path)?)
     }
 
     #[cfg(test)]
     pub fn decode_path(&self, path: &[u8]) -> anyhow::Result<String> {
-        let (decoded, _, had_errors) = self.encoding.decode(path);
+        let (decoded, had_errors) = self.encoding.decode_without_bom_handling(path);
         if had_errors {
             anyhow::bail!("SFTP path cannot be decoded as {}", self.encoding_name);
         }
@@ -75,11 +49,70 @@ impl SftpPathCodec {
     }
 
     pub fn decode_path_lossy(&self, path: &[u8]) -> String {
-        let (decoded, _, had_errors) = self.encoding.decode(path);
+        let (decoded, had_errors) = self.encoding.decode_without_bom_handling(path);
         if had_errors {
             String::from_utf8_lossy(path).into_owned()
         } else {
             decoded.into_owned()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SftpPathCodec;
+    use crate::session_config::{SftpSettings, SshSessionConfig};
+    use zzclawterm_core::character_encoding::CharacterEncoding;
+
+    #[test]
+    fn all_filename_codecs_round_trip_and_keep_bom_characters() {
+        for (label, name) in [
+            ("UTF-8", "测试"),
+            ("GBK", "测试"),
+            ("GB18030", "测试😀"),
+            ("Big5", "測試"),
+            ("Shift_JIS", "日本語"),
+            ("EUC-KR", "한국어"),
+        ] {
+            let codec = SftpPathCodec::from_encoding_name(label).unwrap();
+            let path = format!("/tmp/{name}.txt");
+            assert_eq!(
+                codec
+                    .decode_path(&codec.encode_path(&path).unwrap())
+                    .unwrap(),
+                path
+            );
+        }
+        let codec = SftpPathCodec::from_encoding_name("UTF-8").unwrap();
+        assert_eq!(
+            codec.decode_path_lossy("\u{feff}name".as_bytes()),
+            "\u{feff}name"
+        );
+        assert!(
+            SftpPathCodec::from_encoding_name("GBK")
+                .unwrap()
+                .encode_path("secret😀")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn filename_follow_tokens_and_aliases_share_terminal_catalog() {
+        for label in ["", "global", "terminal", " GLOBAL "] {
+            let config = SshSessionConfig {
+                encoding: "cp936".to_string(),
+                sftp: SftpSettings {
+                    filename_encoding: label.to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(
+                SftpPathCodec::from_ssh_config(&config)
+                    .unwrap()
+                    .encoding_name(),
+                CharacterEncoding::Gbk.label()
+            );
         }
     }
 }

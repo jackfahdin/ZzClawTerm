@@ -535,6 +535,9 @@ impl ZzClawTermApp {
                     }
                     cx.notify();
                 }
+                if item == NavItem::Plugins && !self.panel_entry_selected(item) {
+                    self.focus_active_workspace_surface(window, cx);
+                }
             }
             ActivityBarEntry::QuickCommands => {
                 let mode = if self.shell.bottom_panel.mode == BottomPanelMode::QuickCommands {
@@ -718,6 +721,104 @@ mod tests {
             assert_eq!(app.shell.floating_panel(PanelSide::Right), None);
             assert!(app.shell.panel_multi_open());
         });
+    }
+
+    #[test]
+    fn plugin_panel_follows_placement_and_toggles_in_docked_floating_and_multi_open_modes() {
+        let test_dir = TestConfigDir::new("zzclawterm-plugins-panel-navigation");
+        let mut cx = TestAppContext::single();
+        let app = test_app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, cx| {
+            let panel = app.plugins.panel.entity_id();
+            app.open_panel(NavItem::Plugins, cx);
+            assert_eq!(app.current_left_panel(), Some(NavItem::Plugins));
+            assert!(app.panel_entry_selected(NavItem::Plugins));
+            app.open_panel(NavItem::Plugins, cx);
+            assert_eq!(app.current_left_panel(), None);
+
+            app.move_activity_entry("plugins".into(), ActivityBarZone::RightBottom, None, cx);
+            app.open_panel(NavItem::Plugins, cx);
+            assert_eq!(app.current_right_panel(), Some(NavItem::Plugins));
+            assert_eq!(app.plugins.panel.entity_id(), panel);
+            app.hide_activity_entry("plugins".into(), cx);
+            assert_eq!(app.current_right_panel(), None);
+            assert!(app.shell.activity_bar_layout().is_hidden("plugins"));
+            app.show_activity_entry("plugins".into(), cx);
+
+            app.set_panel_open_mode(PanelOpenMode::Floating, cx);
+            for (zone, side) in [
+                (ActivityBarZone::RightBottom, PanelSide::Right),
+                (ActivityBarZone::LeftBottom, PanelSide::Left),
+            ] {
+                app.move_activity_entry("plugins".into(), zone, None, cx);
+                app.open_panel(NavItem::Plugins, cx);
+                assert_eq!(app.shell.floating_panel(side), Some(NavItem::Plugins));
+                app.close_floating_panel(side, cx);
+                assert_eq!(app.shell.floating_panel(side), None);
+            }
+
+            app.set_panel_open_mode(PanelOpenMode::Docked, cx);
+            app.toggle_panel_multi_open(cx);
+            app.open_panel(NavItem::Notes, cx);
+            app.open_panel(NavItem::Plugins, cx);
+            assert!(
+                app.side_open_panel_ids(PanelSide::Left)
+                    .contains(&"plugins".to_string())
+            );
+            assert!(
+                app.side_open_panel_ids(PanelSide::Left)
+                    .contains(&"notes".to_string())
+            );
+            app.open_panel(NavItem::Plugins, cx);
+            assert!(
+                !app.side_open_panel_ids(PanelSide::Left)
+                    .contains(&"plugins".to_string())
+            );
+            assert!(
+                app.side_open_panel_ids(PanelSide::Left)
+                    .contains(&"notes".to_string())
+            );
+            assert_eq!(app.plugins.panel.entity_id(), panel);
+        });
+    }
+
+    #[test]
+    fn startup_completes_legacy_plugin_layout_and_preserves_saved_right_placement() {
+        for moved in [false, true] {
+            let test_dir = TestConfigDir::new("zzclawterm-plugin-startup-layout");
+            {
+                let store = zzclawterm_store::ConnectionStore::open(test_dir.path().join("config"))
+                    .expect("store");
+                let mut settings = store.load_app_settings_summary().expect("settings");
+                settings.ui_activity_bar_left_bottom =
+                    vec!["futureEntry".into(), "settings".into()];
+                if moved {
+                    settings.ui_activity_bar_right_bottom.push("plugins".into());
+                    settings.ui_activity_bar_hidden_items.push("plugins".into());
+                }
+                store
+                    .save_ui_layout_settings(&settings)
+                    .expect("save layout");
+            }
+            let mut cx = TestAppContext::single();
+            let app = test_app(&mut cx, test_dir.path());
+            cx.read(|cx| {
+                let app = app.read(cx);
+                let layout = app.shell.activity_bar_layout();
+                if moved {
+                    assert_eq!(layout.left_bottom, ["futureEntry", "settings"]);
+                    assert_eq!(layout.side_for_entry("plugins"), Some(PanelSide::Right));
+                    assert!(layout.is_hidden("plugins"));
+                } else {
+                    assert_eq!(layout.left_bottom, ["futureEntry", "plugins", "settings"]);
+                    assert_eq!(layout.side_for_entry("plugins"), Some(PanelSide::Left));
+                }
+                assert_eq!(
+                    app.settings.summary().ui_activity_bar_left_bottom,
+                    layout.left_bottom
+                );
+            });
+        }
     }
 
     #[test]

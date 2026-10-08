@@ -51,7 +51,6 @@ impl ZzClawTermApp {
             )
         });
         let draft_dirty = self.settings_draft_dirty();
-        let store_status = self.settings.store_status();
         SettingsSnapshot {
             chrome: SettingsChrome {
                 palette: self.theme_palette(),
@@ -82,21 +81,23 @@ impl ZzClawTermApp {
                 snapshot_password_prompt: self.settings.snapshot_password_prompt(),
                 snapshot_password_prompt_active: self.settings.snapshot_password_prompt_active(),
                 config_path_prompt_active: self.settings.config_path_prompt_active(),
-                local_backup_status: store_status.message.to_string(),
-                local_backup_ready: store_status.ready,
                 terminal_theme_is_dark: self.terminal_theme_is_dark(),
                 panel_multi_open: self.shell.panel_multi_open(),
             },
             ai: AiSettingsPresentation {
-                config: Arc::new(self.ai.settings_config().clone()),
-                model_query: self.ai.settings_model_query().to_string(),
-                model_collapsed_groups: Arc::new(self.ai.settings_model_collapsed_groups().clone()),
+                providers: self.ai.provider_view().clone(),
+                config: Arc::new(zzclawterm_core::mask_ai_settings(
+                    self.ai.settings_config().clone(),
+                )),
                 manual_model_drafts: Arc::new(self.ai.settings_manual_model_drafts().clone()),
-                credential_secret_drafts: Arc::new(
-                    self.ai.settings_credential_secret_drafts().clone(),
+                credential_draft_key_ids: Arc::new(
+                    self.ai
+                        .settings_credential_secret_drafts()
+                        .iter()
+                        .filter(|(_, secret)| !secret.trim().is_empty())
+                        .map(|(id, _)| id.clone())
+                        .collect(),
                 ),
-                action_focus: self.ai.settings_action_focus().clone(),
-                discovery_pending: self.ai.discovery_is_pending(),
                 agent_management: self.ai.agent_management_view().clone(),
             },
             cloud_sync: CloudSyncPresentation {

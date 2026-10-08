@@ -1,5 +1,24 @@
 use crate::{PixelFormat, RdpFrameEvent};
 
+/// Keep delta order while bounding a UI turn. A single oversized full frame
+/// still makes progress; subsequent deltas wait for the next turn.
+pub(crate) fn frame_batch_len(frames: &std::collections::VecDeque<RdpFrameEvent>) -> usize {
+    let mut bytes = 0usize;
+    let mut count = 0;
+    for frame in frames.iter().take(8) {
+        let cost = match frame {
+            RdpFrameEvent::Bitmap { pixels, .. } => pixels.len(),
+            _ => 0,
+        };
+        if count > 0 && bytes.saturating_add(cost) > 8 * 1024 * 1024 {
+            break;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(cost);
+    }
+    count
+}
+
 /// Resource limits applied before allocating a server-controlled framebuffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FramebufferLimits {

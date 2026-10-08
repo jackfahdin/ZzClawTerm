@@ -8,12 +8,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{Entity, FocusHandle, Subscription};
+use gpui::{Entity, FocusHandle, Subscription, Task};
 use zzclawterm_core::ResolvedKeywordHighlightRule;
 use zzclawterm_terminal::{TerminalOutputDecoder, TerminalScreen};
 use zzclawterm_ui::ZzClawDocumentEditorState;
 
 use super::assist_state::TerminalAssistState;
+use super::editing_state::TerminalEditingState;
 use super::terminal_surface::TerminalScrollbarDragState;
 use super::terminal_surface_entity::TerminalSurface;
 use super::window_state::TerminalWindowState;
@@ -31,6 +32,7 @@ pub(in crate::features) struct TerminalFeatureState {
     pub(super) input: TerminalInputState,
     pub(super) paste: TerminalPasteReviewState,
     pub(super) assist: TerminalAssistState,
+    pub(super) editing: TerminalEditingState,
     pub(super) selection: TerminalSelectionState,
     pub(super) layout: TerminalLayoutState,
     pub(super) menus: TerminalMenuState,
@@ -96,6 +98,10 @@ pub(super) struct TerminalPasteReviewState {
 pub(super) struct TerminalSelectionState {
     pub(super) selection: Option<TerminalSelection>,
     pub(super) session_id: Option<String>,
+    /// Derived once from the worker's authoritative buffer for each Select All.
+    pub(super) all_buffer_text: Option<String>,
+    pub(super) all_buffer_text_task: Option<Task<()>>,
+    pub(super) all_buffer_text_generation: u64,
     pub(super) selected_occurrence: TerminalSelectedOccurrenceState,
     pub(super) dragging: bool,
     pub(super) drag_pointer_position: Option<gpui::Point<gpui::Pixels>>,
@@ -188,9 +194,18 @@ pub(in crate::features) struct TerminalOverlayVisibility {
 }
 
 impl TerminalFeatureState {
-    pub(in crate::features) fn shutdown_workers(&mut self) {
+    pub(in crate::features) fn recording_output_fence(
+        &self,
+    ) -> impl FnOnce() -> Result<(), String> + Send + 'static {
+        let pipeline = self.view.frame_pipeline.clone();
+        move || pipeline.finish_pending_output()
+    }
+
+    pub(in crate::features) fn take_frame_shutdown(
+        &mut self,
+    ) -> Option<impl FnOnce() + Send + 'static> {
         self.assist.shutdown_workers();
-        self.view.frame_pipeline.shutdown();
+        self.view.frame_pipeline.take_shutdown()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -239,9 +254,13 @@ impl TerminalFeatureState {
             },
             paste: TerminalPasteReviewState::new(),
             assist: TerminalAssistState::new(),
+            editing: TerminalEditingState::default(),
             selection: TerminalSelectionState {
                 selection: None,
                 session_id: None,
+                all_buffer_text: None,
+                all_buffer_text_task: None,
+                all_buffer_text_generation: 0,
                 selected_occurrence: TerminalSelectedOccurrenceState {
                     session_id: None,
                     query: None,
@@ -284,7 +303,13 @@ impl TerminalFeatureState {
                 tree: None,
                 drop: None,
                 restored: false,
+                restore_in_flight: false,
+                persistence_blocked: false,
                 file_drop_hover: None,
+                group_scrolls: HashMap::new(),
+                start_groups: HashMap::new(),
+                split_bounds: HashMap::new(),
+                workspace_bounds: None,
             },
         }
     }
@@ -395,6 +420,8 @@ impl TerminalFeatureState {
             || self.selection.dragging
             || self.menus.action_link_menu.is_some()
             || self.menus.action_link_tooltip.is_some();
+        self.selection.all_buffer_text = None;
+        self.selection.all_buffer_text_task = None;
         self.selection.dragging = false;
         self.selection.drag_pointer_position = None;
         self.selection.autoscroll = None;
@@ -566,7 +593,6 @@ impl TerminalPasteReviewState {
 #[cfg(test)]
 mod tests {
     use gpui::{Bounds, TestAppContext, point, px, size};
-    use zzclawterm_core::TerminalInputState as CommandInputState;
     use zzclawterm_terminal::{TerminalOutputDecoder, TerminalScreen};
 
     use super::super::window_state::{TerminalWindowDockResult, TerminalWindowReconcileResult};
@@ -842,9 +868,28 @@ mod tests {
     }
 
     #[test]
+    fn single_group_restore_keeps_the_saved_tab_selection_and_order() {
+        let mut state = terminal_state();
+        let ordered = vec!["alpha".to_string(), "beta".to_string()];
+        state.ensure_terminal_windows_root(ordered.clone(), Some("beta".to_string()));
+        let saved = state
+            .serialize_terminal_window_layout(&ordered)
+            .expect("single group layout");
+        let mut restored = terminal_state();
+        let group = restored
+            .restore_terminal_window_layout(&saved, &ordered, Some("alpha"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.terminal_group_tabs(&group),
+            Some((ordered, Some("beta".to_string())))
+        );
+    }
+
+    #[test]
     fn session_switch_reset_clears_terminal_assist_transients() {
         let mut state = terminal_state();
-        state.assist.command_input_tracker.value = "git status".to_string();
+        state.editing.input_mut().value = "git status".to_string();
         state.assist.command_suggestions_suppressed = true;
         state.assist.pending_command_history_entry = Some("git status".to_string());
         state.assist.credential_autofill_buffer = "login:".to_string();
@@ -858,7 +903,7 @@ mod tests {
 
         state.reset_assist_for_session_switch();
 
-        assert_eq!(state.assist.command_input_tracker, CommandInputState::new());
+        assert_eq!(state.editing.predicted_input().value, "git status");
         assert!(!state.assist.command_suggestions_suppressed);
         assert!(state.assist.pending_command_history_entry.is_none());
         assert!(state.assist.credential_autofill_buffer.is_empty());

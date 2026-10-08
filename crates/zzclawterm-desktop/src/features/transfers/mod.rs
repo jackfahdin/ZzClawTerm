@@ -1,6 +1,10 @@
 //! Transfer jobs, transfer options, path prompts and transfer widgets.
 
 mod cwd_sync_clock;
+mod delete_runtime;
+mod drag_aggregate;
+mod drag_download;
+pub(in crate::features) mod drag_export;
 mod editor_window;
 mod external_sync_runtime;
 mod external_sync_window;

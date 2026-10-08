@@ -41,6 +41,13 @@ pub fn build_group_path(
     groups: &[Group],
     selected_group_id: Option<&str>,
 ) -> Vec<AssetGroupPathSegment> {
+    build_group_path_with_index(&build_group_index(groups), selected_group_id)
+}
+
+pub(super) fn build_group_path_with_index(
+    groups_by_id: &HashMap<&str, &Group>,
+    selected_group_id: Option<&str>,
+) -> Vec<AssetGroupPathSegment> {
     let root = AssetGroupPathSegment {
         id: None,
         name: ASSET_ROOT_SEGMENT_KEY.to_string(),
@@ -50,7 +57,6 @@ pub fn build_group_path(
         return vec![root];
     };
 
-    let groups_by_id = build_group_index(groups);
     let mut segments = Vec::new();
     let mut seen = HashSet::new();
     let mut current_id = Some(selected_group_id);
@@ -154,7 +160,15 @@ pub fn connections_for_asset_group<'a>(
 /// Joins a group's breadcrumb into a display string, substituting `root_label`
 /// for the synthetic root segment.
 pub fn group_path_label(groups: &[Group], group_id: Option<&str>, root_label: &str) -> String {
-    build_group_path(groups, group_id)
+    group_path_label_with_index(&build_group_index(groups), group_id, root_label)
+}
+
+pub(super) fn group_path_label_with_index(
+    groups: &HashMap<&str, &Group>,
+    group_id: Option<&str>,
+    root_label: &str,
+) -> String {
+    build_group_path_with_index(groups, group_id)
         .into_iter()
         .map(|segment| match segment.id {
             None => root_label.to_string(),

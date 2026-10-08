@@ -60,6 +60,21 @@ impl ZzClawTermApp {
             self.notify_locked_tab_close_blocked(cx);
             return;
         }
+        let preferred_next = self.terminal.terminal_window_tree().and_then(|mut root| {
+            let group = root.leaf_for_tab(&session_id).map(str::to_string)?;
+            let groups = root.leaf_ids();
+            let index = groups.iter().position(|id| id == &group).unwrap_or(0);
+            let next = root.remove_tab(&session_id)?;
+            let surviving = next.leaf_ids();
+            let group = if next.leaf_tabs(&group).is_some() {
+                group
+            } else {
+                surviving
+                    .get(index.min(surviving.len().saturating_sub(1)))?
+                    .clone()
+            };
+            next.leaf_tabs(&group)?.1.map(str::to_string)
+        });
         // Tauri: closing a strip tab closes the whole tab tree; closing a secondary leaf
         // only removes that pane. Strip close uses the tab-root id.
         let close_ids = if !self.is_secondary_pane_session(&session_id) {
@@ -102,7 +117,10 @@ impl ZzClawTermApp {
         if was_active {
             self.ai.reset_agent_runtime();
             self.sync_session_event_bridge_policy();
-            if let Some(next_session_id) = self.session.next_session_after(&session_id) {
+            if let Some(next_session_id) = preferred_next
+                .filter(|id| self.session.has_session(id))
+                .or_else(|| self.session.next_session_after(&session_id))
+            {
                 self.activate_session_id(&next_session_id, cx);
                 self.shell.set_status(format!(
                     "session closed; active {}",
@@ -114,10 +132,15 @@ impl ZzClawTermApp {
                 self.terminal.view.output = String::from(INITIAL_TERMINAL_BANNER);
                 self.terminal.view.output_decoder.reset_decoder();
                 self.terminal.view.screen = initial_terminal_screen();
-                self.terminal
+                if let Err(error) = self
+                    .terminal
                     .view
                     .screen
-                    .set_encoding(&self.settings.summary().interaction_default_encoding);
+                    .set_encoding(&self.settings.summary().interaction_default_encoding)
+                {
+                    self.shell
+                        .set_status(crate::features::terminal::encoding_error_text(error));
+                }
                 self.shell.set_status("session closed".to_string());
             }
         } else {
@@ -251,10 +274,15 @@ impl ZzClawTermApp {
                 self.terminal.view.output = String::from(INITIAL_TERMINAL_BANNER);
                 self.terminal.view.output_decoder.reset_decoder();
                 self.terminal.view.screen = initial_terminal_screen();
-                self.terminal
+                if let Err(error) = self
+                    .terminal
                     .view
                     .screen
-                    .set_encoding(&self.settings.summary().interaction_default_encoding);
+                    .set_encoding(&self.settings.summary().interaction_default_encoding)
+                {
+                    self.shell
+                        .set_status(crate::features::terminal::encoding_error_text(error));
+                }
             }
         }
 
@@ -474,6 +502,21 @@ impl ZzClawTermApp {
             self.shell
                 .set_status(format!("{} ({skipped})", t!("tabCtx.lockedTabsSkipped")));
         }
+    }
+
+    pub(in crate::features) fn navigate_terminal_command(
+        &mut self,
+        action: zzclawterm_terminal::command_navigation::CommandNavigationAction,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session_id) = self.session.active_id_owned() {
+            self.terminal
+                .view
+                .frame_pipeline
+                .navigate_command(session_id, action);
+            self.terminal.view.frame_pipeline.arm_event_wakes();
+        }
+        cx.notify();
     }
 
     pub(in crate::features) fn clear_terminal(&mut self, cx: &mut Context<Self>) {

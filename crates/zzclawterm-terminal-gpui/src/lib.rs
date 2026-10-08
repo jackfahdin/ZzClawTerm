@@ -12,6 +12,7 @@ mod images;
 mod input;
 mod keywords;
 mod paint;
+mod semantic;
 
 static TERMINAL_FONT_FEATURES: OnceLock<FontFeatures> = OnceLock::new();
 

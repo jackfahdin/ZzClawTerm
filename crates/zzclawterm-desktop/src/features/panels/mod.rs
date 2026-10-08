@@ -36,8 +36,7 @@ pub(in crate::features::panels) use helpers::{
     QuickCommandCategoryOption, QuickCommandEditorFieldSpec, filtered_quick_commands,
     quick_command_category_options, quick_command_color, quick_command_editor_field,
     quick_command_editor_script_field, quick_command_icon_mark, quick_command_pin_mark,
-    quick_command_single_line, send_command_hex_byte_count, send_command_hex_guide_rows,
-    send_command_hex_preview, terminal_action_prompt_text,
+    quick_command_single_line, terminal_action_prompt_text,
 };
 
 mod send_command_helpers;
@@ -46,5 +45,5 @@ use send_command_helpers::send_command_control_group;
 mod send_command_bar;
 mod send_command_state;
 pub(in crate::features) use send_command_state::{
-    SendCommandFeatureFocus, SendCommandFeatureState, SendCommandPresentationState,
+    SendCommandFeatureState, SendCommandPresentationState,
 };

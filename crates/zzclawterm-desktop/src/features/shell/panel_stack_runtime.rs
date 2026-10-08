@@ -11,9 +11,7 @@ use gpui::{
 };
 use zzclawterm_core::{AgentCommandExecutionMode, truncate_preview};
 
-use crate::features::{
-    ZzClawTermApp, text_inputs::TextInputSetup, view_widgets::panel_header_with_actions,
-};
+use crate::features::{ZzClawTermApp, view_widgets::panel_header_with_actions};
 use crate::models::{
     ActivityBarZone, MainMode, NavItem, NetworkTab, PanelOpenMode, PanelSide, RightFocus,
     SecurityAuthTab, SettingsTab,
@@ -791,7 +789,7 @@ impl ZzClawTermApp {
                         // their mouse-down away from the root outside-click
                         // handler so a second click can toggle the menu closed.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(header_svg_icon_button(
+                        .child(header_svg_icon_button_with_color(
                             palette,
                             "ai-header-execution-mode-toggle",
                             match self.ai.settings_config().agent_command_execution_mode {
@@ -802,6 +800,9 @@ impl ZzClawTermApp {
                                 }
                             },
                             t!("ai.agentCommandExecutionMode"),
+                            (self.ai.settings_config().agent_command_execution_mode
+                                == AgentCommandExecutionMode::Auto)
+                                .then_some(palette.warning),
                             !ai_running,
                             cx.listener(|this, _, _, cx| {
                                 this.ai.toggle_execution_menu();
@@ -815,21 +816,7 @@ impl ZzClawTermApp {
                             t!("ai.history"),
                             true,
                             cx.listener(|this, _, window, cx| {
-                                if this.ai.toggle_history() {
-                                    this.refresh_ai_session_list(cx);
-                                    let query = this.ai.history_query().to_string();
-                                    this.reset_text_input("ai.history-search", &query, cx);
-                                    let field = this.text_input(
-                                        "ai.history-search",
-                                        &query,
-                                        TextInputSetup::placeholder("Search history..."),
-                                        cx,
-                                    );
-                                    window.focus(&field.read(cx).focus_handle(), cx);
-                                } else {
-                                    this.forget_text_inputs("ai.history-search");
-                                }
-                                this.defer_ai_panel_snapshot_flush(cx);
+                                this.toggle_ai_history(window, cx);
                             }),
                         ))
                         .child(header_svg_icon_button(
@@ -1127,16 +1114,30 @@ fn header_svg_icon_button(
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    header_svg_icon_button_with_color(palette, id, icon_path, tooltip, None, enabled, on_click)
+}
+
+fn header_svg_icon_button_with_color(
+    palette: ThemePalette,
+    id: impl Into<String>,
+    icon_path: &'static str,
+    tooltip: impl Into<String>,
+    icon_color: Option<u32>,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let tooltip = tooltip.into();
+    let id = id.into();
     div()
-        .id(SharedString::from(id.into()))
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
         .size(px(28.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_md()
         .text_color(rgb(if enabled {
-            palette.text_muted
+            icon_color.unwrap_or(palette.text_muted)
         } else {
             palette.text_dimmed
         }))
@@ -1154,7 +1155,7 @@ fn header_svg_icon_button(
                 .flex_none()
                 .path(icon_path)
                 .text_color(rgb(if enabled {
-                    palette.text_muted
+                    icon_color.unwrap_or(palette.text_muted)
                 } else {
                     palette.text_dimmed
                 })),

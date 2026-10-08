@@ -220,7 +220,7 @@ impl ZzClawTermApp {
 
         let Some(config) = ssh_config else {
             // Non-SSH sessions cannot probe; start rz immediately.
-            self.begin_zmodem_upload_after_probe(session_id, files, cx);
+            self.begin_zmodem_upload_after_probe(session_id, files, false, cx);
             return;
         };
 
@@ -279,10 +279,11 @@ impl ZzClawTermApp {
                     resolver.as_ref(),
                 )
                 .map(
-                    |(resolved, probe_skipped)| TransferJobOutput::ZmodemProbeReady {
+                    |(resolved, probe_skipped, overwrite)| TransferJobOutput::ZmodemProbeReady {
                         session_id: probe_session_id,
                         files: resolved,
                         probe_skipped,
+                        overwrite,
                     },
                 )
                 .map_err(|error| error.to_string());
@@ -300,8 +301,16 @@ impl ZzClawTermApp {
         &mut self,
         session_id: String,
         files: Vec<PathBuf>,
+        overwrite: bool,
         cx: &mut Context<Self>,
     ) {
+        if !self.session.manager().supports_modem_transfer(&session_id) {
+            self.shell.set_status(
+                rust_i18n::t!("dialog.serialSoftwareFlowControlModemDisabled").to_string(),
+            );
+            cx.notify();
+            return;
+        }
         if files.is_empty() {
             self.shell.set_status(
                 "ZMODEM upload cancelled — no files remaining after conflict resolution"
@@ -326,7 +335,7 @@ impl ZzClawTermApp {
         state.pending_upload = Some(files.clone());
         state.pending_download = false;
         // Remote side runs `rz` and emits ZMODEM upload (local send) headers.
-        let cmd = b"rz\r".to_vec();
+        let cmd = zzclawterm_transport::zmodem::receive_command(overwrite);
         match self.write_session_input_recorded(&session_id, &cmd) {
             Ok(()) => {
                 self.shell.set_status(format!(
@@ -476,6 +485,9 @@ impl ZzClawTermApp {
         data: &[u8],
         cx: &mut Context<Self>,
     ) -> (Vec<u8>, bool) {
+        if !self.session.manager().supports_modem_transfer(session_id) {
+            return (data.to_vec(), false);
+        }
         if data.is_empty() {
             return (Vec::new(), false);
         }
@@ -943,13 +955,13 @@ fn probe_zmodem_remote_conflicts(
     files: Vec<PathBuf>,
     policy: SftpDuplicatePolicy,
     resolver: &dyn SftpDuplicateResolver,
-) -> Result<(Vec<PathBuf>, bool), String> {
+) -> Result<(Vec<PathBuf>, bool, bool), String> {
     let service = SftpService::new(config);
     let entries = match service.list_dir(&remote_dir) {
         Ok(entries) => entries,
         Err(_) => {
             // Tauri: SFTP probe failure/timeout falls through without blocking upload.
-            return Ok((files, true));
+            return Ok((files, true, false));
         }
     };
     let existing: HashSet<String> = entries.into_iter().map(|entry| entry.name).collect();
@@ -967,7 +979,7 @@ fn probe_zmodem_remote_conflicts(
         }
     }
     if conflicts.is_empty() {
-        return Ok((clean, false));
+        return Ok((clean, false, false));
     }
 
     let join_remote = |name: &str| -> String {
@@ -979,18 +991,15 @@ fn probe_zmodem_remote_conflicts(
     };
 
     match policy {
-        SftpDuplicatePolicy::Skip => Ok((clean, false)),
+        SftpDuplicatePolicy::Skip => Ok((clean, false, false)),
         SftpDuplicatePolicy::Overwrite | SftpDuplicatePolicy::Rename => {
-            for (_path, name) in &conflicts {
-                let remote_path = join_remote(name);
-                let _ = service.delete_path(&remote_path);
-            }
             let mut all = clean;
             all.extend(conflicts.into_iter().map(|(path, _)| path));
-            Ok((all, false))
+            Ok((all, false, true))
         }
         SftpDuplicatePolicy::Ask => {
             let mut resolved = clean;
+            let mut overwrite = false;
             for (path, name) in conflicts {
                 let remote_path = join_remote(&name);
                 let request = SftpDuplicateRequest {
@@ -1004,13 +1013,13 @@ fn probe_zmodem_remote_conflicts(
                     .unwrap_or(SftpDuplicateDecision::Skip);
                 match decision {
                     SftpDuplicateDecision::Overwrite | SftpDuplicateDecision::Rename => {
-                        let _ = service.delete_path(&remote_path);
+                        overwrite = true;
                         resolved.push(path);
                     }
                     SftpDuplicateDecision::Skip => {}
                 }
             }
-            Ok((resolved, false))
+            Ok((resolved, false, overwrite))
         }
     }
 }
@@ -1020,6 +1029,7 @@ const ZMODEM_WORKER_EVENT_DRAIN_BATCH: usize = 32;
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use gpui::{AppContext as _, Context, Subscription, TestAppContext};
     use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
     use zzclawterm_transport::{
@@ -1027,7 +1037,6 @@ mod tests {
     };
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
 
     use super::{ZmodemTransferJobUpdate, ZmodemWorkerCommand, process_zmodem_worker_command};

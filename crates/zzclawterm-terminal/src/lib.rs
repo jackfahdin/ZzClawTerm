@@ -14,9 +14,13 @@ use alacritty_terminal::vte::ansi;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 mod cells;
+pub mod command_navigation;
+pub mod editing;
 mod encoding;
 mod graphics;
 mod kitty_payload;
+pub mod navigation;
+pub mod recording_sanitizer;
 mod sixel;
 pub use cells::{
     TerminalTextCell, terminal_byte_index_for_cell_col, terminal_cell_col_for_byte_index,
@@ -47,6 +51,13 @@ pub enum ShellCommandMark {
 pub struct TerminalLineId {
     pub epoch: u64,
     pub logical_line: i64,
+}
+
+/// Exact OSC 133 B input boundary within a coordinate epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellInputAnchor {
+    pub line_id: TerminalLineId,
+    pub col: usize,
 }
 
 /// Shell input classification for a snapshot row.
@@ -205,6 +216,12 @@ pub struct TerminalSnapshotRow {
     pub hyperlinks: Box<[HyperlinkSpan]>,
     pub command_mark: Option<ShellCommandMark>,
     pub shell_input: Option<ShellInputLineKind>,
+    /// Proven input region for highlighting; columns are half-open. While editing,
+    /// only the OSC input anchor and its soft wraps qualify, since completion output
+    /// can appear before OSC 133 C. Submitted regions retain their column bounds.
+    pub shell_input_columns: Option<(usize, usize)>,
+    /// Disables prompt guessing even when integration marks are outside the viewport.
+    pub shell_integration: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +233,7 @@ pub struct TerminalSnapshotMeta {
     pub scrollback_len: usize,
     pub total_rows: usize,
     pub display_offset: usize,
+    pub shell_input_anchor: Option<ShellInputAnchor>,
     pub images: Vec<GraphicsImageSnapshot>,
 }
 
@@ -246,6 +264,7 @@ pub struct TerminalSnapshot {
     pub total_rows: usize,
     /// Alacritty display offset represented by this snapshot.
     pub display_offset: usize,
+    pub shell_input_anchor: Option<ShellInputAnchor>,
     /// Inline graphics placements visible in this viewport (Kitty / iTerm2 / Sixel).
     pub images: Vec<GraphicsImageSnapshot>,
 }
@@ -265,6 +284,7 @@ impl TerminalSnapshot {
             scrollback_len: meta.scrollback_len,
             total_rows: meta.total_rows,
             display_offset: meta.display_offset,
+            shell_input_anchor: meta.shell_input_anchor,
             images: meta.images,
         }
     }
@@ -364,6 +384,8 @@ struct TerminalSnapshotRowCacheKey {
     command_mark: Option<ShellCommandMark>,
     line_id: Option<TerminalLineId>,
     shell_input: Option<ShellInputLineKind>,
+    shell_input_columns: Option<(usize, usize)>,
+    shell_integration: bool,
 }
 
 #[derive(Debug)]
@@ -462,19 +484,25 @@ impl Dimensions for TermSize {
 
 #[derive(Debug, Clone, Default)]
 struct LineMetadata {
+    command_anchor: bool,
     timestamp_ms: Option<u64>,
     signature: Option<u64>,
     revision: Option<u64>,
     command_mark: Option<ShellCommandMark>,
     shell_input: bool,
+    input_start_col: Option<usize>,
+    input_end_col: Option<usize>,
 }
 
 #[derive(Debug, Default)]
 struct ScreenLineState {
+    command_navigation: command_navigation::CommandNavigationState,
+    pending_command_prompt: Option<i64>,
     epoch: u64,
     logical_origin: i64,
     metadata: BTreeMap<i64, LineMetadata>,
     active_input_start: Option<i64>,
+    input_anchor: Option<ShellInputAnchor>,
     active_input_end: Option<i64>,
     consumed_scroll_epoch: u64,
     consumed_generation: u64,
@@ -496,6 +524,11 @@ impl ScreenLineState {
             let _ = retained.split_off(&after_last);
         }
         self.metadata = retained;
+        if self.input_anchor.is_some_and(|anchor| {
+            anchor.line_id.logical_line < first || anchor.line_id.logical_line > last
+        }) {
+            self.input_anchor = None;
+        }
         match (self.active_input_start, self.active_input_end) {
             (Some(start), Some(end)) if start <= end => {
                 let retained_start = start.max(first);
@@ -505,12 +538,14 @@ impl ScreenLineState {
                     self.active_input_end = Some(retained_end);
                 } else {
                     self.active_input_start = None;
+                    self.input_anchor = None;
                     self.active_input_end = None;
                 }
             }
             (None, None) => {}
             _ => {
                 self.active_input_start = None;
+                self.input_anchor = None;
                 self.active_input_end = None;
             }
         }
@@ -543,6 +578,7 @@ pub struct TerminalCore {
     primary_lines: ScreenLineState,
     alternate_lines: ScreenLineState,
     consumed_reset_generation: u64,
+    presentation_alternate: bool,
     next_line_revision: u64,
     snapshot_row_cache: Mutex<TerminalSnapshotRowCache>,
     search_cache: Mutex<TerminalSearchCache>,
@@ -589,13 +625,17 @@ impl TerminalOutputDecoder {
         }
     }
 
-    pub fn set_encoding(&mut self, label: &str) {
-        let next = SessionEncoding::from_label(label);
+    pub fn set_encoding(
+        &mut self,
+        label: &str,
+    ) -> Result<(), zzclawterm_core::character_encoding::EncodingError> {
+        let next = SessionEncoding::from_label(label)?;
         if self.session_encoding.label() == next.label() {
-            return;
+            return Ok(());
         }
         self.session_encoding = next;
         self.graphics_ingress = GraphicsIngress::new();
+        Ok(())
     }
 
     pub fn encoding_label(&self) -> &str {
@@ -721,6 +761,7 @@ impl TerminalCore {
             primary_lines,
             alternate_lines,
             consumed_reset_generation,
+            presentation_alternate: false,
             next_line_revision: 1,
             snapshot_row_cache: Mutex::new(TerminalSnapshotRowCache::default()),
             search_cache: Mutex::new(TerminalSearchCache::default()),
@@ -766,6 +807,10 @@ impl TerminalCore {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let old_cols = self.cols;
+        if self.cols != usize::from(cols).max(1) || self.rows != usize::from(rows).max(1) {
+            self.primary_lines.input_anchor = None;
+            self.alternate_lines.input_anchor = None;
+        }
         self.cols = usize::from(cols).max(1);
         self.rows = usize::from(rows).max(1);
         let size = TermSize {
@@ -777,9 +822,15 @@ impl TerminalCore {
         if self.cols != old_cols {
             self.primary_lines.metadata.clear();
             self.alternate_lines.metadata.clear();
+            self.primary_lines.command_navigation = Default::default();
+            self.alternate_lines.command_navigation = Default::default();
+            self.primary_lines.pending_command_prompt = None;
+            self.alternate_lines.pending_command_prompt = None;
             self.primary_lines.active_input_start = None;
+            self.primary_lines.input_anchor = None;
             self.primary_lines.active_input_end = None;
             self.alternate_lines.active_input_start = None;
+            self.alternate_lines.input_anchor = None;
             self.alternate_lines.active_input_end = None;
             self.primary_lines.epoch = self.primary_lines.epoch.saturating_add(1);
             self.alternate_lines.epoch = self.alternate_lines.epoch.saturating_add(1);
@@ -827,6 +878,10 @@ impl TerminalCore {
 
     pub fn mouse_reporting(&self) -> bool {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    pub fn mouse_utf8(&self) -> bool {
+        self.term.mode().contains(TermMode::UTF8_MOUSE)
     }
 
     pub fn mouse_sgr(&self) -> bool {
@@ -994,17 +1049,22 @@ impl TerminalCore {
         let rows = self.rows as u16;
         let mut config = self.term_config.clone();
         config.scrolling_history = self.scrollback_limit;
-        let encoding_label = self.session_encoding.label().to_string();
+        let session_encoding = self.session_encoding.clone();
         let cell_metrics = (self.cell_width_px, self.cell_height_px);
         *self = Self::new_with_config(cols, rows, config);
         self.primary_lines.epoch = next_epoch;
         self.alternate_lines.epoch = next_epoch;
-        self.set_encoding(&encoding_label);
+        self.session_encoding = session_encoding;
         self.set_cell_metrics(cell_metrics.0, cell_metrics.1);
     }
 
     /// Discard history and completed output while retaining the editable input rows.
     pub fn clear_except_input(&mut self) {
+        self.active_line_state_mut().command_navigation = Default::default();
+        self.active_line_state_mut().pending_command_prompt = None;
+        for metadata in self.active_line_state_mut().metadata.values_mut() {
+            metadata.command_anchor = false;
+        }
         let cursor = self.term.renderable_content().cursor.point;
         let cursor_row = cursor.line.0.clamp(0, self.rows.saturating_sub(1) as i32) as usize;
         let state = self.active_line_state();
@@ -1039,19 +1099,14 @@ impl TerminalCore {
             }
         }
         self.term.grid_mut().cursor = cursor;
-        if start > 0 {
-            self.term
-                .grid_mut()
-                .scroll_up(&(Line(0)..Line(end as i32 + 1)), start);
-            self.term.grid_mut().cursor.point.line -= start as i32;
-            // Moving blank rows into history must not make them scrollable again.
-            self.clear_scrollback();
-        }
+        // The host shell owns physical cursor coordinates (especially CMD/ConPTY).
+        // Keep input at its original rows rather than relocating it behind the host.
         self.drain_alacritty_events();
         self.sync_presentation_state();
         let origin = self.active_line_state().logical_origin;
         self.active_line_state_mut().metadata.retain(|line, _| {
-            *line >= origin && *line <= origin.saturating_add((end - start) as i64)
+            *line >= origin.saturating_add(start as i64)
+                && *line <= origin.saturating_add(end as i64)
         });
         self.graphics.clear_screen(self.active_graphics_screen());
         self.clear_snapshot_row_cache();
@@ -1062,13 +1117,17 @@ impl TerminalCore {
     /// Set session charset used for output decode and input encode.
     /// No-op when the resolved label is unchanged so multi-byte decoder state
     /// survives across output chunks.
-    pub fn set_encoding(&mut self, label: &str) {
-        let next = SessionEncoding::from_label(label);
+    pub fn set_encoding(
+        &mut self,
+        label: &str,
+    ) -> Result<(), zzclawterm_core::character_encoding::EncodingError> {
+        let next = SessionEncoding::from_label(label)?;
         if self.session_encoding.label() == next.label() {
-            return;
+            return Ok(());
         }
         self.session_encoding = next;
         self.graphics_ingress = GraphicsIngress::new();
+        Ok(())
     }
 
     pub fn encoding_label(&self) -> &str {
@@ -1076,11 +1135,17 @@ impl TerminalCore {
     }
 
     /// Encode UTF-8 / ASCII input bytes for the session wire charset.
-    pub fn encode_outgoing(&self, utf8_or_ascii: &[u8]) -> Vec<u8> {
+    pub fn encode_outgoing(
+        &self,
+        utf8_or_ascii: &[u8],
+    ) -> Result<Vec<u8>, zzclawterm_core::character_encoding::EncodingError> {
         self.session_encoding.encode_outgoing(utf8_or_ascii)
     }
 
-    pub fn encode_outgoing_str(&self, text: &str) -> Vec<u8> {
+    pub fn encode_outgoing_str(
+        &self,
+        text: &str,
+    ) -> Result<Vec<u8>, zzclawterm_core::character_encoding::EncodingError> {
         self.session_encoding.encode_str(text)
     }
 
@@ -1212,6 +1277,7 @@ impl TerminalCore {
             &self.term,
             offset,
             self.active_line_state(),
+            self.shell_integration_enabled(),
             &self.snapshot_row_cache,
         );
         snapshot.images = self.graphics.viewport_images_for_screen(
@@ -1252,6 +1318,7 @@ impl TerminalCore {
                 newer_rows,
             },
             self.active_line_state(),
+            self.shell_integration_enabled(),
             &self.snapshot_row_cache,
         );
         snapshot.images = self
@@ -1330,6 +1397,19 @@ impl TerminalCore {
             rows.push((text, wrapped));
         }
         rows
+    }
+
+    /// Full buffer text, preserving hard breaks and joining soft-wrapped rows.
+    pub fn all_text(&self) -> Option<String> {
+        let mut text = String::new();
+        for (index, (line, wrapped)) in self.all_text_rows().into_iter().enumerate() {
+            if index > 0 && !wrapped {
+                text.push('\n');
+            }
+            text.push_str(line.trim_end());
+        }
+        text.truncate(text.trim_end_matches('\n').len());
+        (!text.is_empty()).then_some(text)
     }
 
     pub fn search_grid(
@@ -1700,13 +1780,25 @@ impl TerminalCore {
     }
 
     fn sync_presentation_state(&mut self) {
+        let alternate = self.alternate_screen();
+        if alternate != self.presentation_alternate {
+            self.primary_lines.input_anchor = None;
+            self.alternate_lines.input_anchor = None;
+            self.presentation_alternate = alternate;
+        }
         let reset_generation = self.term.reset_generation();
         if reset_generation != self.consumed_reset_generation {
             self.primary_lines.metadata.clear();
             self.alternate_lines.metadata.clear();
+            self.primary_lines.command_navigation = Default::default();
+            self.alternate_lines.command_navigation = Default::default();
+            self.primary_lines.pending_command_prompt = None;
+            self.alternate_lines.pending_command_prompt = None;
             self.primary_lines.active_input_start = None;
+            self.primary_lines.input_anchor = None;
             self.primary_lines.active_input_end = None;
             self.alternate_lines.active_input_start = None;
+            self.alternate_lines.input_anchor = None;
             self.alternate_lines.active_input_end = None;
             self.primary_lines.epoch = self.primary_lines.epoch.saturating_add(1);
             self.alternate_lines.epoch = self.alternate_lines.epoch.saturating_add(1);
@@ -1723,6 +1815,11 @@ impl TerminalCore {
         let alternate_epoch = self.term.alternate_grid_scroll_epoch();
         let primary_generation = self.term.primary_screen_generation();
         let alternate_generation = self.term.alternate_screen_generation();
+        // Entering and leaving alternate screen can occur in one parser chunk.
+        // Its generation records the transition even when the final mode agrees.
+        if alternate_generation != self.alternate_lines.consumed_generation {
+            self.primary_lines.input_anchor = None;
+        }
         Self::sync_screen_line_state(
             &mut self.primary_lines,
             primary_epoch,
@@ -1748,8 +1845,11 @@ impl TerminalCore {
     ) {
         if generation != state.consumed_generation {
             state.metadata.clear();
+            state.command_navigation = Default::default();
+            state.pending_command_prompt = None;
             state.logical_origin = 0;
             state.active_input_start = None;
+            state.input_anchor = None;
             state.active_input_end = None;
             state.epoch = state.epoch.saturating_add(1);
             state.pending_scroll_rows = 0;
@@ -1812,17 +1912,33 @@ impl TerminalCore {
                     self.commit_shell_input_range(start, end);
                 }
                 let state = self.active_line_state_mut();
+                state.pending_command_prompt = Some(logical_line);
                 state.active_input_start = None;
+                state.input_anchor = None;
                 state.active_input_end = None;
             }
             ShellBoundaryKind::InputStart => {
                 metadata.command_mark = Some(ShellCommandMark::Prompt);
+                metadata.input_start_col = Some(point.column.0);
+                metadata.input_end_col = None;
                 let state = self.active_line_state_mut();
+                state.input_anchor = Some(ShellInputAnchor {
+                    line_id: TerminalLineId {
+                        epoch: state.epoch,
+                        logical_line,
+                    },
+                    col: point.column.0,
+                });
                 state.active_input_start = Some(logical_line);
                 state.active_input_end = Some(logical_line);
             }
             ShellBoundaryKind::OutputStart => {
                 metadata.command_mark = Some(ShellCommandMark::Output);
+                metadata.input_end_col = Some(point.column.0);
+                let state = self.active_line_state_mut();
+                if let Some(prompt) = state.pending_command_prompt.take() {
+                    state.metadata.entry(prompt).or_default().command_anchor = true;
+                }
                 let start = self.active_line_state().active_input_start;
                 let end = if point.column.0 == 0 {
                     logical_line.saturating_sub(1)
@@ -1834,6 +1950,7 @@ impl TerminalCore {
                 }
                 let state = self.active_line_state_mut();
                 state.active_input_start = None;
+                state.input_anchor = None;
                 state.active_input_end = None;
             }
             ShellBoundaryKind::Finished { exit_code } => {
@@ -1843,6 +1960,7 @@ impl TerminalCore {
                     self.commit_shell_input_range(start, end);
                     let state = self.active_line_state_mut();
                     state.active_input_start = None;
+                    state.input_anchor = None;
                     state.active_input_end = None;
                 }
             }
@@ -1881,6 +1999,7 @@ fn snapshot_from_term(
     term: &Term<ZzClawTermEventProxy>,
     requested_offset: usize,
     line_state: &ScreenLineState,
+    shell_integration: bool,
     row_cache: &Mutex<TerminalSnapshotRowCache>,
 ) -> (TerminalSnapshot, TerminalSnapshotBuildStats) {
     snapshot_window_from_term(
@@ -1891,8 +2010,39 @@ fn snapshot_from_term(
             newer_rows: 0,
         },
         line_state,
+        shell_integration,
         row_cache,
     )
+}
+
+fn active_input_soft_wrap_end(
+    term: &Term<ZzClawTermEventProxy>,
+    line_state: &ScreenLineState,
+) -> Option<i64> {
+    let anchor = line_state.input_anchor?;
+    let end = line_state.active_input_end?;
+    if anchor.line_id.epoch != line_state.epoch || end < anchor.line_id.logical_line {
+        return None;
+    }
+    let physical = anchor
+        .line_id
+        .logical_line
+        .checked_sub(line_state.logical_origin)?;
+    let mut line = Line(i32::try_from(physical).ok()?);
+    if line < term.topmost_line() || line > term.bottommost_line() || term.columns() == 0 {
+        return None;
+    }
+    // OSC B..C describes an editing phase, which can also contain Readline's
+    // completion pages. Hard newlines alone do not prove an editable continuation.
+    // Scan the connected soft wraps once per snapshot, not once per snapshot row.
+    let last_col = Column(term.columns() - 1);
+    while line < term.bottommost_line()
+        && line_state.logical_line(line) < end
+        && term.grid()[line][last_col].flags.contains(Flags::WRAPLINE)
+    {
+        line = Line(line.0 + 1);
+    }
+    Some(line_state.logical_line(line))
 }
 
 #[derive(Clone, Copy)]
@@ -1906,6 +2056,7 @@ fn snapshot_window_from_term(
     term: &Term<ZzClawTermEventProxy>,
     window: TerminalSnapshotWindow,
     line_state: &ScreenLineState,
+    shell_integration: bool,
     row_cache: &Mutex<TerminalSnapshotRowCache>,
 ) -> (TerminalSnapshot, TerminalSnapshotBuildStats) {
     let content = term.renderable_content();
@@ -1924,6 +2075,7 @@ fn snapshot_window_from_term(
 
     let topmost = term.topmost_line();
     let bottommost = term.bottommost_line();
+    let active_input_highlight_end = active_input_soft_wrap_end(term, line_state);
     for row in 0..rows {
         let line = Line(row as i32 - window.display_offset as i32 - window.older_rows as i32);
         let line_in_grid = (line >= topmost && line <= bottommost).then_some(line);
@@ -1943,6 +2095,24 @@ fn snapshot_window_from_term(
             logical_line: line_state.logical_line(line),
         });
         let shell_input = line_state.shell_input_kind(line_id.map(|id| id.logical_line));
+        let shell_input_columns = shell_input.and_then(|kind| {
+            if kind == ShellInputLineKind::Active
+                && !active_input_highlight_end
+                    .zip(line_id)
+                    .is_some_and(|(end, id)| id.logical_line <= end)
+            {
+                return None;
+            }
+            let start = metadata
+                .and_then(|m| m.input_start_col)
+                .unwrap_or(0)
+                .min(cols);
+            let end = metadata
+                .and_then(|m| m.input_end_col)
+                .unwrap_or(cols)
+                .min(cols);
+            Some((start, end.max(start)))
+        });
         let revision = metadata
             .and_then(|metadata| metadata.revision)
             .unwrap_or(signature);
@@ -1963,6 +2133,8 @@ fn snapshot_window_from_term(
             command_mark,
             line_id,
             shell_input,
+            shell_input_columns,
+            shell_integration,
         };
         let generation = row_cache.next_generation();
         let cached = row_cache.entries.get_mut(&key).and_then(|entry| {
@@ -1988,6 +2160,8 @@ fn snapshot_window_from_term(
                     command_mark,
                     line_id,
                     shell_input,
+                    shell_input_columns,
+                    shell_integration,
                 },
             ));
             row_cache.entries.insert(
@@ -2044,6 +2218,7 @@ fn snapshot_window_from_term(
                 .saturating_add(viewport_rows)
                 .saturating_add(window.newer_rows),
             display_offset,
+            shell_input_anchor: line_state.input_anchor,
             images: Vec::new(),
         },
         row_data,
@@ -2059,6 +2234,8 @@ struct SnapshotRowMetadata {
     command_mark: Option<ShellCommandMark>,
     line_id: Option<TerminalLineId>,
     shell_input: Option<ShellInputLineKind>,
+    shell_input_columns: Option<(usize, usize)>,
+    shell_integration: bool,
 }
 
 fn snapshot_row_from_term(
@@ -2075,6 +2252,8 @@ fn snapshot_row_from_term(
         command_mark,
         line_id,
         shell_input,
+        shell_input_columns,
+        shell_integration,
     } = metadata;
     let mut hyperlink_intern = HashMap::new();
     let cells = if let Some(line) = line {
@@ -2118,6 +2297,8 @@ fn snapshot_row_from_term(
         wrapped,
         command_mark,
         shell_input,
+        shell_input_columns,
+        shell_integration,
     }
 }
 
@@ -2774,11 +2955,36 @@ pub fn encode_mouse_report_with_modifiers(
         let suffix = if press { 'M' } else { 'm' };
         format!("\x1b[<{code};{x};{y}{suffix}").into_bytes()
     } else {
-        let cb = 32u16.saturating_add(u16::from(code)).min(255) as u8;
-        let cx = 32u16.saturating_add(x).min(255) as u8;
-        let cy = 32u16.saturating_add(y).min(255) as u8;
-        vec![0x1b, b'[', b'M', cb, cx, cy]
+        encode_legacy_mouse_report(code, col, row, screen.mouse_utf8())
     }
+}
+
+/// Encode X10 or DECSET 1005 coordinates independently of the session charset.
+pub fn encode_legacy_mouse_report(code: u8, col: u16, row: u16, utf8: bool) -> Vec<u8> {
+    if utf8 && (col >= 2015 || row >= 2015) {
+        return Vec::new();
+    }
+    let mut bytes = vec![
+        0x1b,
+        b'[',
+        b'M',
+        32u16.saturating_add(u16::from(code)).min(255) as u8,
+    ];
+    for coordinate in [col, row] {
+        let value = 33u16.saturating_add(coordinate);
+        if utf8 {
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(
+                char::from_u32(u32::from(value))
+                    .unwrap()
+                    .encode_utf8(&mut buffer)
+                    .as_bytes(),
+            );
+        } else {
+            bytes.push(value.min(255) as u8);
+        }
+    }
+    bytes
 }
 
 /// Encode plain Up/Down for alternate-screen mouse wheel emulation.

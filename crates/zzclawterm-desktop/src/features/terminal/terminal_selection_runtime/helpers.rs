@@ -134,21 +134,7 @@ impl EntityInputHandler for ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.terminal.input.ime_marked_text.clear();
-        if !text.is_empty() {
-            if let Some(selected) = self.smart_cursor_selected_input_range()
-                && self.replace_smart_input_selection(selected, text, cx)
-            {
-                return;
-            }
-            let bytes = text.as_bytes().to_vec();
-            let has_buffer_selection = self.terminal.selection.selection.is_some()
-                && self.smart_cursor_selected_input_range().is_none();
-            if has_buffer_selection {
-                self.send_terminal_input_without_suggestion_track(bytes, cx);
-            } else {
-                self.send_terminal_input(bytes, cx);
-            }
-        }
+        self.commit_terminal_text(text, cx);
     }
 
     fn replace_and_mark_text_in_range(

@@ -13,9 +13,8 @@ use zzclawterm_core::{OtpEntry, SavedCredential, SavedPassword, SecretString, Ss
 use zzclawterm_store::KnownHostEntry;
 
 use crate::models::{
-    SecurityAuthTab, SecurityCredentialDropTarget, SecurityCredentialEditorState,
-    SecurityKeyEditorState, SecurityOtpEditorState, SecurityPasswordEditorState,
-    SecurityUnlockAction,
+    SecurityAuthTab, SecurityCredentialEditorState, SecurityDropTarget, SecurityKeyEditorState,
+    SecurityOtpEditorState, SecurityPasswordEditorState, SecurityUnlockAction,
 };
 
 pub(in crate::features) struct SecurityFeatureState {
@@ -105,9 +104,10 @@ struct SecurityPrivateKeyViewState {
 struct SecurityPanelInteractionState {
     visible_otp_ids: HashSet<String>,
     otp_refresh_armed: bool,
-    credential_drop_target: Option<SecurityCredentialDropTarget>,
+    drop_target: Option<SecurityDropTarget>,
     request_id: u64,
     pending_request: Option<SecurityPanelRequest>,
+    reorder_request: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,7 +116,6 @@ enum SecurityPanelRequestKind {
     Password,
     Credential,
     Delete,
-    Reorder,
     PublicKey,
 }
 
@@ -186,9 +185,10 @@ impl SecurityFeatureState {
             panel: SecurityPanelInteractionState {
                 visible_otp_ids: HashSet::new(),
                 otp_refresh_armed: false,
-                credential_drop_target: None,
+                drop_target: None,
                 request_id: 0,
                 pending_request: None,
+                reorder_request: None,
             },
             status,
             unlock: SecurityUnlockState {
@@ -299,7 +299,7 @@ impl SecurityFeatureState {
         self.revealed.private_key = None;
         self.panel.visible_otp_ids.clear();
         self.panel.otp_refresh_armed = false;
-        self.panel.credential_drop_target = None;
+        self.panel.drop_target = None;
         self.panel.pending_request = None;
         self.clear_editors();
         self.status = format!("{} tab", tab.label().to_lowercase());
@@ -607,10 +607,8 @@ impl SecurityFeatureState {
         self.revealed.private_key = None;
     }
 
-    pub(in crate::features) fn credential_drop_target(
-        &self,
-    ) -> Option<&SecurityCredentialDropTarget> {
-        self.panel.credential_drop_target.as_ref()
+    pub(in crate::features) fn drop_target(&self) -> Option<&SecurityDropTarget> {
+        self.panel.drop_target.as_ref()
     }
 
     pub(in crate::features) fn editor_busy(&self) -> bool {
@@ -618,7 +616,8 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn begin_editor_request(&mut self) -> Option<u64> {
-        if self.editors.busy
+        if self.reorder_busy()
+            || self.editors.busy
             || (self.editors.key.is_none()
                 && self.editors.otp.is_none()
                 && self.editors.password.is_none()
@@ -655,8 +654,17 @@ impl SecurityFeatureState {
         self.begin_panel_request(SecurityPanelRequestKind::Delete, item_id)
     }
 
-    pub(in crate::features) fn begin_reorder_request(&mut self) -> u64 {
-        self.begin_panel_request(SecurityPanelRequestKind::Reorder, String::new())
+    pub(in crate::features) fn reorder_busy(&self) -> bool {
+        self.panel.reorder_request.is_some()
+    }
+
+    pub(in crate::features) fn begin_reorder_request(&mut self) -> Option<u64> {
+        if self.reorder_busy() || self.editor_busy() {
+            return None;
+        }
+        self.panel.request_id = self.panel.request_id.wrapping_add(1).max(1);
+        self.panel.reorder_request = Some(self.panel.request_id);
+        Some(self.panel.request_id)
     }
 
     pub(in crate::features) fn begin_known_host_delete(&mut self, item_id: String) -> Option<u64> {
@@ -750,7 +758,11 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn finish_reorder_request(&mut self, request_id: u64) -> bool {
-        self.finish_panel_request(request_id, SecurityPanelRequestKind::Reorder, "")
+        if self.panel.reorder_request != Some(request_id) {
+            return false;
+        }
+        self.panel.reorder_request = None;
+        true
     }
 
     fn begin_panel_request(&mut self, kind: SecurityPanelRequestKind, item_id: String) -> u64 {
@@ -778,41 +790,43 @@ impl SecurityFeatureState {
         matches
     }
 
-    pub(in crate::features) fn set_credential_drop_target(
-        &mut self,
-        target: Option<SecurityCredentialDropTarget>,
-    ) {
-        self.panel.credential_drop_target = target;
+    pub(in crate::features) fn set_drop_target(&mut self, target: Option<SecurityDropTarget>) {
+        self.panel.drop_target = target;
     }
 
-    pub(in crate::features) fn reordered_credentials(
+    pub(in crate::features) fn reordered_entries(
         &self,
+        tab: SecurityAuthTab,
         source_id: &str,
         target_id: &str,
         after: bool,
-    ) -> Option<Vec<SavedCredential>> {
-        if source_id == target_id {
-            return None;
-        }
-        let source = self
-            .catalog
-            .credentials
-            .iter()
-            .find(|entry| entry.id == source_id)?
-            .clone();
-        let mut next = self
-            .catalog
-            .credentials
-            .iter()
-            .filter(|entry| entry.id != source_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let target = next.iter().position(|entry| entry.id == target_id)?;
-        next.insert(if after { target + 1 } else { target }, source);
-        for (index, entry) in next.iter_mut().enumerate() {
-            entry.sort_order = index as i32;
-        }
-        Some(next)
+    ) -> Option<Vec<(String, i32)>> {
+        let ids = match tab {
+            SecurityAuthTab::Passwords => self
+                .catalog
+                .passwords
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+            SecurityAuthTab::Keys => self
+                .catalog
+                .ssh_keys
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+            SecurityAuthTab::Credentials => self
+                .catalog
+                .credentials
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+            SecurityAuthTab::Otp | SecurityAuthTab::KnownHosts => return None,
+        };
+        reordered_ids(ids, source_id, target_id, after)
+    }
+
+    pub(in crate::features) fn clear_drop_target(&mut self) -> bool {
+        self.panel.drop_target.take().is_some()
     }
 
     pub(in crate::features) fn clear_revealed_for_deleted(
@@ -1113,7 +1127,7 @@ impl SecurityFeatureState {
         self.revealed.otp_codes.clear();
         self.panel.visible_otp_ids.clear();
         self.panel.otp_refresh_armed = false;
-        self.panel.credential_drop_target = None;
+        self.panel.drop_target = None;
         self.panel.pending_request = None;
         self.editors.key = None;
         self.editors.otp = None;
@@ -1129,6 +1143,27 @@ impl SecurityFeatureState {
     }
 }
 
+fn reordered_ids(
+    mut ids: Vec<String>,
+    source_id: &str,
+    target_id: &str,
+    after: bool,
+) -> Option<Vec<(String, i32)>> {
+    if source_id == target_id {
+        return None;
+    }
+    let source_index = ids.iter().position(|id| id == source_id)?;
+    let source = ids.remove(source_index);
+    let target_index = ids.iter().position(|id| id == target_id)?;
+    ids.insert(target_index + usize::from(after), source);
+    Some(
+        ids.into_iter()
+            .enumerate()
+            .map(|(index, id)| (id, index as i32))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -1136,7 +1171,7 @@ mod tests {
     use gpui::TestAppContext;
     use zzclawterm_core::{OtpEntry, SavedCredential, SavedPassword, SshKey};
 
-    use super::{SecurityCatalogState, SecurityFeatureFocus, SecurityFeatureState};
+    use super::{SecurityCatalogState, SecurityFeatureFocus, SecurityFeatureState, reordered_ids};
     use crate::models::{
         SecurityKeyEditorState, SecurityPasswordEditorState, SecurityUnlockAction,
     };
@@ -1165,6 +1200,7 @@ mod tests {
 
         security.replace_catalog(
             vec![SshKey {
+                sort_order: 0,
                 id: "key-id".to_string(),
                 name: "key".to_string(),
                 key: None,
@@ -1188,6 +1224,7 @@ mod tests {
                 has_secret: false,
             }],
             vec![SavedPassword {
+                sort_order: 0,
                 username: String::new(),
                 id: "password-id".to_string(),
                 name: "password".to_string(),
@@ -1401,16 +1438,116 @@ mod tests {
         );
 
         let reordered = security
-            .reordered_credentials("a", "b", true)
+            .reordered_entries(crate::models::SecurityAuthTab::Credentials, "a", "b", true)
             .expect("valid reorder");
         assert_eq!(
             reordered
                 .iter()
-                .map(|entry| (entry.id.as_str(), entry.sort_order))
+                .map(|(id, order)| (id.as_str(), *order))
                 .collect::<Vec<_>>(),
             vec![("b", 0), ("a", 1), ("c", 2)]
         );
         assert_eq!(security.credentials()[0].id, "a");
+    }
+
+    #[test]
+    fn reorder_moves_before_after_and_to_both_ends() {
+        for (source, target, after, expected) in [
+            ("a", "c", true, ["b", "c", "a"]),
+            ("c", "a", false, ["c", "a", "b"]),
+            ("a", "c", false, ["b", "a", "c"]),
+            ("c", "a", true, ["a", "c", "b"]),
+        ] {
+            let ids = ["a", "b", "c"].map(str::to_string).to_vec();
+            let actual = reordered_ids(ids, source, target, after).unwrap();
+            let expected = expected
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| (id.to_string(), index as i32))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+        for (source, target) in [("a", "a"), ("missing", "b"), ("a", "missing")] {
+            assert!(
+                reordered_ids(
+                    ["a", "b"].map(str::to_string).to_vec(),
+                    source,
+                    target,
+                    false
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn account_and_key_reorder_use_only_their_own_catalog_without_mutating_it() {
+        use crate::models::SecurityAuthTab;
+
+        let mut security = security_state();
+        let passwords = ["account-a", "account-b"]
+            .map(|id| {
+                serde_json::from_value(
+                    serde_json::json!({"id": id, "name": id, "username": "user"}),
+                )
+                .unwrap()
+            })
+            .to_vec();
+        let keys = ["key-a", "key-b"]
+            .map(|id| serde_json::from_value(serde_json::json!({"id": id, "name": id})).unwrap())
+            .to_vec();
+        security.replace_catalog(keys, Vec::new(), passwords, Vec::new());
+        assert_eq!(
+            security
+                .reordered_entries(SecurityAuthTab::Passwords, "account-b", "account-a", false)
+                .unwrap(),
+            vec![("account-b".to_string(), 0), ("account-a".to_string(), 1)]
+        );
+        assert_eq!(
+            security
+                .reordered_entries(SecurityAuthTab::Keys, "key-a", "key-b", true)
+                .unwrap(),
+            vec![("key-b".to_string(), 0), ("key-a".to_string(), 1)]
+        );
+        assert!(
+            security
+                .reordered_entries(SecurityAuthTab::Keys, "account-a", "key-b", true)
+                .is_none()
+        );
+        assert!(
+            security
+                .reordered_entries(SecurityAuthTab::Passwords, "key-a", "account-b", true)
+                .is_none()
+        );
+        assert!(
+            security
+                .reordered_entries(SecurityAuthTab::Otp, "account-a", "account-b", true)
+                .is_none()
+        );
+        assert_eq!(security.passwords()[0].id, "account-a");
+        assert_eq!(security.ssh_keys()[0].id, "key-a");
+    }
+
+    #[test]
+    fn reorder_completion_survives_tab_changes_and_other_panel_requests() {
+        use crate::models::{SecurityAuthTab, SecurityDropTarget};
+
+        let mut security = security_state();
+        let request = security.begin_reorder_request().unwrap();
+        assert!(security.begin_reorder_request().is_none());
+        security.set_drop_target(Some(SecurityDropTarget {
+            tab: SecurityAuthTab::Keys,
+            id: "key-a".to_string(),
+            after: false,
+        }));
+        security.set_auth_tab(SecurityAuthTab::Passwords);
+        assert!(security.drop_target().is_none());
+        security.begin_password_request("account-a".to_string());
+        assert!(!security.finish_reorder_request(request.wrapping_add(1)));
+        assert!(security.reorder_busy());
+        assert!(security.finish_reorder_request(request));
+        assert!(!security.reorder_busy());
+        assert!(!security.finish_reorder_request(request));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use gpui::{KeyDownEvent, KeyUpEvent};
 use zzclawterm_terminal::TerminalScreen;
+use zzclawterm_terminal::navigation::{NavigationKey, navigation_key_bytes};
 
 /// Terminal keyboard mode flags that affect encoding of plain navigation keys.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -84,46 +85,34 @@ pub fn terminal_key_bytes_with_mode(
             "space" => return Some(b" ".to_vec()),
             "escape" => return Some(vec![0x1b]),
             "up" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOA".to_vec()
-                } else {
-                    b"\x1b[A".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::Up, mode.application_cursor).to_vec(),
+                );
             }
             "down" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOB".to_vec()
-                } else {
-                    b"\x1b[B".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::Down, mode.application_cursor).to_vec(),
+                );
             }
             "right" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOC".to_vec()
-                } else {
-                    b"\x1b[C".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::Right, mode.application_cursor).to_vec(),
+                );
             }
             "left" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOD".to_vec()
-                } else {
-                    b"\x1b[D".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::Left, mode.application_cursor).to_vec(),
+                );
             }
             "home" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOH".to_vec()
-                } else {
-                    b"\x1b[H".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::Home, mode.application_cursor).to_vec(),
+                );
             }
             "end" => {
-                return Some(if mode.application_cursor {
-                    b"\x1bOF".to_vec()
-                } else {
-                    b"\x1b[F".to_vec()
-                });
+                return Some(
+                    navigation_key_bytes(NavigationKey::End, mode.application_cursor).to_vec(),
+                );
             }
             "insert" => return Some(b"\x1b[2~".to_vec()),
             "delete" => return Some(b"\x1b[3~".to_vec()),

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use gpui::{
-    App, Context, Entity, FontWeight, IntoElement, SharedString, div,
+    App, Context, Entity, IntoElement, SharedString, div,
     prelude::{
         FluentBuilder, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled,
     },
@@ -21,7 +21,7 @@ use crate::models::{
 };
 use zzclawterm_ui::{
     NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInput, ZzClawInputState, ZzClawNumberInput,
-    ZzClawNumberInputState, ZzClawSelect, ZzClawSelectState,
+    ZzClawNumberInputState, ZzClawSelect, ZzClawSelectState, ZzClawSwitch,
 };
 
 #[derive(Clone)]
@@ -478,56 +478,34 @@ pub(super) fn connection_editor_select(
         )
 }
 
-pub(super) fn toggle_chip(
+pub(super) fn editor_switch_row(
     palette: crate::theme::ThemePalette,
+    id: &'static str,
     label: impl Into<SharedString>,
-    selected: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    checked: bool,
+    on_click: impl Fn(&bool, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let label: SharedString = label.into();
     div()
-        .id(SharedString::from(format!("connection-toggle-{label}")))
-        .h(px(28.))
-        .px_2()
+        .w_full()
+        .min_h(px(EDITOR_CONTROL_HEIGHT_PX))
+        .flex_shrink_0()
+        .py_1()
         .flex()
         .items_center()
-        .gap_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .text_size(px(10.))
-        .font_weight(FontWeight(500.))
-        .cursor_pointer()
-        .text_color(if selected {
-            rgb(palette.text)
-        } else {
-            rgb(palette.text_muted)
-        })
-        .bg(rgb(palette.input))
-        .hover(|this| this.bg(rgb(palette.hover)))
-        .child(div().min_w_0().child(label))
+        .justify_between()
+        .gap_3()
+        .text_xs()
+        .text_color(rgb(palette.text))
+        .child(div().min_w_0().flex_1().child(label.clone()))
         .child(
-            div()
-                .w(px(28.))
-                .h(px(16.))
-                .flex()
-                .items_center()
-                .justify_start()
-                .when(selected, |this| this.justify_end())
-                .px(px(2.))
-                .rounded_full()
-                .bg(if selected {
-                    rgb(palette.primary)
-                } else {
-                    rgb(palette.border)
-                })
-                .child(div().size(px(12.)).rounded_full().bg(if selected {
-                    rgb(palette.on_primary)
-                } else {
-                    rgb(palette.text_dimmed)
-                })),
+            div().flex_shrink_0().child(
+                ZzClawSwitch::new(id)
+                    .checked(checked)
+                    .tooltip(label)
+                    .on_click(on_click),
+            ),
         )
-        .on_click(on_click)
 }
 
 #[cfg(test)]

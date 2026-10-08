@@ -311,7 +311,7 @@ impl ZzClawTermApp {
                                 cx.listener(|this, _, window, cx| {
                                     this.terminal.close_actions();
                                     this.set_bottom_panel_mode(BottomPanelMode::CommandSend);
-                                    window.focus(this.send_command.editor_focus(), cx);
+                                    this.focus_send_command_composer(window, cx);
                                     cx.notify();
                                 }),
                             )),

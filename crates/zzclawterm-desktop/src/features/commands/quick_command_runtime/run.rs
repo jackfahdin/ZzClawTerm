@@ -13,20 +13,6 @@ use super::helpers::{
 use super::variables::parse_quick_command_variables;
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn save_ai_command_card(
-        &mut self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(card) = self.ai.command_card(index) else {
-            self.ai
-                .set_panel_status("AI command card is no longer available");
-            self.defer_ai_panel_snapshot_flush(cx);
-            return;
-        };
-        self.save_ai_command_card_value(card, cx);
-    }
-
     pub(in crate::features) fn save_ai_command_card_by_id(
         &mut self,
         card_id: String,

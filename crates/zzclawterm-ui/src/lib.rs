@@ -2,11 +2,13 @@
 
 mod app_menu_bar;
 mod button;
+pub mod chat;
 mod child_window;
 mod command;
 mod dialog;
 mod document_editor;
 pub mod document_syntax;
+pub mod hex_editor;
 mod hover_card;
 mod input;
 mod input_focus;
@@ -14,6 +16,7 @@ mod markdown;
 mod menu;
 pub mod notification;
 mod number_input;
+pub mod plot;
 mod popover;
 mod root;
 mod selectable_text;

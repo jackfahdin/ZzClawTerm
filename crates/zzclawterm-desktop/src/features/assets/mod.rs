@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gpui::{AppContext as _, Context, Entity, ScrollHandle, Subscription, UniformListScrollHandle};
 use zzclawterm_core::{
@@ -95,6 +96,21 @@ pub(in crate::features) struct StartWorkspaceFeatureState {
     card_scroll: UniformListScrollHandle,
     card_columns: usize,
     monitoring: AssetMonitoringCache,
+    record_source_key: Option<((u64, u64), String)>,
+    source_records: Vec<AssetRecord>,
+    record_view_key: Option<AssetRecordViewKey>,
+    visible_records: Arc<[AssetRecord]>,
+    group_options_key: Option<(Vec<Group>, String)>,
+    group_options_revision: Option<(u64, String)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AssetRecordViewKey {
+    search: String,
+    filters: HashSet<AssetFilterKey>,
+    group: Option<String>,
+    sort: Option<AssetSortState>,
+    labels: AssetDisplayLabels,
 }
 
 impl StartWorkspaceFeatureState {
@@ -164,6 +180,12 @@ impl StartWorkspaceFeatureState {
             card_scroll: UniformListScrollHandle::new(),
             card_columns: 3,
             monitoring: AssetMonitoringCache::new(),
+            record_source_key: None,
+            source_records: Vec::new(),
+            record_view_key: None,
+            visible_records: Arc::from([]),
+            group_options_key: None,
+            group_options_revision: None,
         }
     }
 
@@ -185,12 +207,22 @@ impl StartWorkspaceFeatureState {
         self.group_select.clone()
     }
     pub fn sync_group_options(&mut self, groups: &[Group], cx: &mut Context<ZzClawTermApp>) {
+        self.group_options_revision = None;
+        let root_label = rust_i18n::t!("assets.title").to_string();
         if self
             .selected_group_id
             .as_ref()
             .is_some_and(|selected| !groups.iter().any(|group| &group.id == selected))
         {
             self.selected_group_id = None;
+        }
+        if self
+            .group_options_key
+            .as_ref()
+            .is_some_and(|(cached, label)| cached == groups && label == &root_label)
+        {
+            self.sync_selected_group(cx);
+            return;
         }
         let mut options = vec![ZzClawSelectOption::new("", rust_i18n::t!("assets.title"))];
         options.extend(
@@ -205,6 +237,28 @@ impl StartWorkspaceFeatureState {
         self.group_select.update(cx, |select, cx| {
             select.set_options(options, cx);
             select.set_selected_value(Some(selected), cx);
+        });
+        self.group_options_key = Some((groups.to_vec(), root_label));
+    }
+
+    pub fn sync_group_options_for_catalog(
+        &mut self,
+        revision: u64,
+        groups: &[Group],
+        cx: &mut Context<ZzClawTermApp>,
+    ) {
+        let key = (revision, rust_i18n::t!("assets.title").to_string());
+        if self.group_options_revision.as_ref() == Some(&key) {
+            self.sync_selected_group(cx);
+            return;
+        }
+        self.sync_group_options(groups, cx);
+        self.group_options_revision = Some(key);
+    }
+
+    fn sync_selected_group(&self, cx: &mut Context<ZzClawTermApp>) {
+        self.group_select.update(cx, |select, cx| {
+            select.set_selected_value(Some(self.selected_group_id.clone().unwrap_or_default()), cx);
         });
     }
     pub fn selected_group_id(&self) -> Option<&str> {
@@ -312,13 +366,30 @@ impl StartWorkspaceFeatureState {
     }
 
     pub fn records(
-        &self,
+        &mut self,
+        revisions: (u64, u64),
         connections: &[SavedConnection],
         groups: &[Group],
         labels: &AssetDisplayLabels,
         root_label: &str,
-    ) -> Vec<AssetRecord> {
-        let records = build_asset_records(connections, groups, root_label);
+    ) -> Arc<[AssetRecord]> {
+        let source_key = (revisions, root_label.to_string());
+        if self.record_source_key.as_ref() != Some(&source_key) {
+            self.source_records = build_asset_records(connections, groups, root_label);
+            self.record_source_key = Some(source_key);
+            self.record_view_key = None;
+        }
+        let view_key = AssetRecordViewKey {
+            search: self.search.trim().to_lowercase(),
+            filters: self.filters.clone(),
+            group: self.selected_group_id.clone(),
+            sort: self.sort,
+            labels: labels.clone(),
+        };
+        if self.record_view_key.as_ref() == Some(&view_key) {
+            return self.visible_records.clone();
+        }
+        let records = self.source_records.clone();
         let mut records = records_in_group(
             records,
             connections,
@@ -332,7 +403,9 @@ impl StartWorkspaceFeatureState {
                 && connection_matches_filters(&record.connection, &filters)
         });
         sort_asset_records(&mut records, self.sort, labels);
-        records
+        self.visible_records = records.into();
+        self.record_view_key = Some(view_key);
+        self.visible_records.clone()
     }
 }
 

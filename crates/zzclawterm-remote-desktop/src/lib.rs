@@ -7,6 +7,7 @@ mod ipc;
 mod protocol;
 mod session;
 mod vnc;
+pub mod vnc_trust;
 
 pub use certificate::{
     CertificateDecision, CertificateEvaluation, CertificateMatchState, CertificatePromptReason,
@@ -41,9 +42,9 @@ pub use protocol::{
     RemotePointerButton, RemotePointerEvent, RemoteWheelAxis, VncClipboardConfig,
     VncControlMessage, VncDisplayConfig, VncError, VncErrorKind, VncInputEvent, VncReconnectConfig,
     VncRuntimeEvent, VncScaleMode, VncSecurityConfig, VncSecurityMode, VncServerCapabilities,
-    VncSessionConfig, VncSessionDrain, VncSessionState, parse_rdp_certificate_policy,
-    parse_rdp_clipboard_mode, parse_rdp_display_mode, parse_vnc_scale_mode,
-    parse_vnc_security_mode, validate_committed_text,
+    VncServerKeyRequest, VncSessionConfig, VncSessionDrain, VncSessionState,
+    parse_rdp_certificate_policy, parse_rdp_clipboard_mode, parse_rdp_display_mode,
+    parse_vnc_scale_mode, parse_vnc_security_mode, validate_committed_text,
 };
 pub use session::{RdpSessionManager, resolve_helper_path};
 pub use vnc::{VncSessionManager, validate_vnc_config};

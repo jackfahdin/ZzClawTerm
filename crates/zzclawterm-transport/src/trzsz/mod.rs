@@ -9,6 +9,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use base64::Engine as _;
@@ -16,6 +17,10 @@ use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use serde::{Deserialize, Serialize};
 
 const TRZSZ_PREFIX: &[u8] = b"::TRZSZ:TRANSFER:";
+// Bare colons are common shell echoes. A recognizable marker gets more time
+// for fragmented delivery, but neither prefix may hide terminal text forever.
+const TRZSZ_COLON_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
+const TRZSZ_TRIGGER_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 const TRZSZ_MAX_TRIGGER_LEN: usize = 96;
 const TRZSZ_MAX_PROTOCOL_LINE_LEN: usize = 1024 * 1024;
 const TRZSZ_MAX_DECODED_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
@@ -318,6 +323,7 @@ pub struct TrzszOutputScan {
 #[derive(Debug, Default)]
 pub struct TrzszDetector {
     pending: Vec<u8>,
+    pending_updated_at: Option<Instant>,
     seen_unique_ids: HashMap<String, usize>,
 }
 
@@ -338,7 +344,14 @@ impl TrzszDetector {
     }
 
     pub fn feed(&mut self, data: &[u8]) -> TrzszDetectResult {
+        self.feed_at(data, Instant::now())
+    }
+
+    fn feed_at(&mut self, data: &[u8], now: Instant) -> TrzszDetectResult {
         self.pending.extend_from_slice(data);
+        if !data.is_empty() {
+            self.pending_updated_at = Some(now);
+        }
 
         let mut search_from = 0;
         while let Some((trigger, start, end)) = detect_trzsz_trigger(&self.pending, search_from) {
@@ -350,6 +363,7 @@ impl TrzszDetector {
             let passthrough = self.pending[..start].to_vec();
             let remaining = self.pending[end..].to_vec();
             self.pending.clear();
+            self.pending_updated_at = None;
             return TrzszDetectResult::Detected {
                 trigger,
                 passthrough,
@@ -362,8 +376,30 @@ impl TrzszDetector {
         if keep_from > 0 {
             self.pending.drain(..keep_from);
         }
+        if self.pending.is_empty() {
+            self.pending_updated_at = None;
+        }
 
         TrzszDetectResult::NoMatch { passthrough }
+    }
+
+    /// Release an incomplete marker after input goes idle. Callers must poll
+    /// this even when no more output arrives, and route these bytes through the
+    /// same protocol/terminal path as ordinary passthrough output.
+    pub fn flush_pending_if_idle(&mut self, now: Instant) -> Vec<u8> {
+        let Some(updated_at) = self.pending_updated_at else {
+            return Vec::new();
+        };
+        let timeout = if matches!(self.pending.as_slice(), b":" | b"::") {
+            TRZSZ_COLON_IDLE_TIMEOUT
+        } else {
+            TRZSZ_TRIGGER_IDLE_TIMEOUT
+        };
+        if now.saturating_duration_since(updated_at) < timeout {
+            return Vec::new();
+        }
+        self.pending_updated_at = None;
+        std::mem::take(&mut self.pending)
     }
 
     pub fn filter_terminal_output(&mut self, data: &[u8]) -> TrzszFilteredOutput {
@@ -417,6 +453,7 @@ impl TrzszDetector {
 
     pub fn reset(&mut self) {
         self.pending.clear();
+        self.pending_updated_at = None;
     }
 
     fn is_repeated_unique_id(&mut self, trigger: &TrzszTrigger) -> bool {

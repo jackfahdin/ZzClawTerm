@@ -16,16 +16,19 @@ use zzclawterm_ui::ZzClawScrollable;
 use std::sync::Arc;
 
 use super::panels::{PanelChrome, RemoteMonitorKind, RemoteMonitorPanel};
-use crate::features::remote::NetworkHistorySample;
 use crate::features::remote::StatsPresentationState;
 use crate::features::remote::{
     ACCELERATOR_PROCESS_VIEWPORT_ROWS, GpuPresentationState, NpuPresentationState, max_list_offset,
 };
 use crate::features::{shell::gpui_code_font_family, view_widgets::stats_progress_bar};
 use gpui::Entity;
-use zzclawterm_ui::{ZzClawInputState, ZzClawSearchInput};
+use zzclawterm_ui::plot::ZzClawRingGauge;
+use zzclawterm_ui::{ZzClawInputState, ZzClawSearchInput, ZzClawSelectState};
 
 use super::process::usage_color;
+
+mod network;
+use network::resource_network_card;
 
 #[derive(Clone, Copy)]
 struct ResourceRowPosition {
@@ -62,6 +65,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
     chrome: PanelChrome,
     has_session: bool,
     stats_state: StatsPresentationState,
+    network_select: Entity<ZzClawSelectState>,
     cx: &mut Context<RemoteMonitorPanel>,
 ) -> gpui::AnyElement {
     let palette = chrome.palette;
@@ -75,7 +79,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
             ))
             .into_any_element();
     }
-    let Some(stats) = stats_state.data else {
+    let Some(stats) = stats_state.data.as_ref() else {
         let message = if stats_state.pending {
             t!("common.loading")
         } else if stats_state.error {
@@ -110,27 +114,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
     let memory_label = t!("resourceMonitor.memory").to_string();
     let available_label = t!("resourceMonitor.available").to_string();
     let cached_label = t!("resourceMonitor.cached").to_string();
-    let network_label = t!("resourceMonitor.network").to_string();
     let disk_label = t!("resourceMonitor.disk").to_string();
-
-    let mut network_rows = div().flex().flex_col();
-    if stats.networks.is_empty() {
-        network_rows = network_rows.child(resource_empty_value(palette));
-    } else {
-        let total = stats.networks.len();
-        for (index, network) in stats.networks.iter().enumerate() {
-            network_rows = network_rows.child(resource_network_row(
-                palette,
-                &network.nic,
-                network.tx_bytes_per_sec,
-                network.rx_bytes_per_sec,
-                ResourceRowPosition {
-                    first: index == 0,
-                    last: index + 1 == total,
-                },
-            ));
-        }
-    }
 
     let mut disk_rows = div().flex().flex_col();
     if stats.disks.is_empty() {
@@ -218,6 +202,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
                                     .gap_3()
                                     .child(resource_ring_gauge(
                                         palette,
+                                        "stats-cpu-ring",
                                         stats.cpu.usage,
                                         format_resource_percent(cpu_usage),
                                     ))
@@ -316,6 +301,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
                                     .gap_3()
                                     .child(resource_ring_gauge(
                                         palette,
+                                        "stats-memory-ring",
                                         Some(memory_percent),
                                         format!("{memory_percent:.0}%"),
                                     ))
@@ -389,81 +375,12 @@ pub(in crate::features::pages::remote) fn stats_panel(
                                     )),
                             ),
                     ))
-                .child(resource_section_card(
-                    palette,
-                    "icons/network.svg",
-                    network_label,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .when(!stats_state.network_history.is_empty(), |this| {
-                            this.child(resource_network_history_chart(
-                                palette,
-                                stats_state.network_history.clone(),
-                            ))
-                        })
-                        .child(network_rows),
-                ))
+                .child(resource_network_card(palette, &stats_state, &network_select))
                 .child(resource_section_card(palette, "icons/file/storage.svg", disk_label, disk_rows))
                 .overflow_y_scrollbar()
                 .id(SharedString::from("stats-scroll")),
             )
             .into_any_element()
-}
-
-fn resource_network_history_chart(
-    palette: crate::theme::ThemePalette,
-    history: Arc<[NetworkHistorySample]>,
-) -> gpui::Div {
-    let rx_color = rgb(palette.success);
-    let tx_color = rgb(palette.primary);
-    div()
-        .relative()
-        .h(px(72.))
-        .w_full()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.surface))
-        .child(
-            gpui::canvas(
-                move |_, _, _| {},
-                move |bounds, _, window, _| {
-                    let max_rate = history
-                        .iter()
-                        .flat_map(|sample| [sample.rx_bytes_per_sec, sample.tx_bytes_per_sec])
-                        .fold(1.0_f64, f64::max);
-                    for (is_rx, color) in [(true, rx_color), (false, tx_color)] {
-                        let mut builder = gpui::PathBuilder::stroke(px(1.5));
-                        let count = history.len().max(2);
-                        for (index, sample) in history.iter().enumerate() {
-                            let rate = if is_rx {
-                                sample.rx_bytes_per_sec
-                            } else {
-                                sample.tx_bytes_per_sec
-                            };
-                            let x = bounds.origin.x
-                                + bounds.size.width * (index as f32 / (count - 1) as f32);
-                            let y = bounds.origin.y
-                                + bounds.size.height
-                                    * (1.0 - (rate / max_rate).clamp(0.0, 1.0) as f32);
-                            let point = gpui::point(x, y);
-                            if index == 0 {
-                                builder.move_to(point);
-                            } else {
-                                builder.line_to(point);
-                            }
-                        }
-                        if let Ok(path) = builder.build() {
-                            window.paint_path(path, color);
-                        }
-                    }
-                },
-            )
-            .absolute()
-            .inset_0(),
-        )
 }
 
 /// The GPU panel, rendered from a snapshot. See `stats_panel` on why there is no app.
@@ -1655,6 +1572,16 @@ fn resource_section_card(
     title: String,
     child: impl IntoElement,
 ) -> gpui::Div {
+    resource_section_card_with_action(palette, icon_path, title, None, child)
+}
+
+fn resource_section_card_with_action(
+    palette: crate::theme::ThemePalette,
+    icon_path: &'static str,
+    title: String,
+    action: Option<gpui::AnyElement>,
+    child: impl IntoElement,
+) -> gpui::Div {
     div()
         .rounded_md()
         .border_1()
@@ -1677,11 +1604,14 @@ fn resource_section_card(
                 ))
                 .child(
                     div()
+                        .min_w_0()
+                        .flex_1()
                         .text_size(px(11.))
                         .font_weight(FontWeight(700.))
                         .text_color(rgb(palette.text))
                         .child(title),
-                ),
+                )
+                .children(action),
         )
         .child(child)
 }
@@ -1712,6 +1642,7 @@ fn resource_info_cell(
 
 fn resource_ring_gauge(
     palette: crate::theme::ThemePalette,
+    id: &'static str,
     percent: Option<f64>,
     label: String,
 ) -> gpui::Div {
@@ -1728,28 +1659,10 @@ fn resource_ring_gauge(
         .items_center()
         .justify_center()
         .child(
-            gpui::canvas(
-                move |_, _, _| {},
-                move |bounds, _, window, _| {
-                    let width = f32::from(bounds.size.width);
-                    let height = f32::from(bounds.size.height);
-                    let center = gpui::point(
-                        bounds.origin.x + px(width / 2.),
-                        bounds.origin.y + px(height / 2.),
-                    );
-                    let radius = width.min(height) / 2. - 3.;
-                    if let Some(path) = resource_ring_path(center, radius, 1.) {
-                        window.paint_path(path, track);
-                    }
-                    if ratio > 0.
-                        && let Some(path) = resource_ring_path(center, radius, ratio as f32)
-                    {
-                        window.paint_path(path, accent);
-                    }
-                },
-            )
-            .absolute()
-            .inset_0(),
+            div()
+                .child(ZzClawRingGauge::new(id, ratio, track.into(), accent))
+                .absolute()
+                .inset_0(),
         )
         .child(
             div()
@@ -1759,30 +1672,6 @@ fn resource_ring_gauge(
                 .text_color(usage_color(palette, ratio))
                 .child(label),
         )
-}
-
-fn resource_ring_path(
-    center: gpui::Point<gpui::Pixels>,
-    radius: f32,
-    ratio: f32,
-) -> Option<gpui::Path<gpui::Pixels>> {
-    let ratio = ratio.clamp(0., 1.);
-    let segments = (64. * ratio).ceil().max(1.) as usize;
-    let mut builder = gpui::PathBuilder::stroke(px(5.));
-    for index in 0..=segments {
-        let progress = index as f32 / segments as f32 * ratio;
-        let angle = -std::f32::consts::FRAC_PI_2 + progress * std::f32::consts::TAU;
-        let point = gpui::point(
-            center.x + px(angle.cos() * radius),
-            center.y + px(angle.sin() * radius),
-        );
-        if index == 0 {
-            builder.move_to(point);
-        } else {
-            builder.line_to(point);
-        }
-    }
-    builder.build().ok()
 }
 
 fn resource_load_badge(
@@ -1839,55 +1728,6 @@ fn resource_metric_chip(
                 .text_size(px(11.))
                 .text_color(rgb(palette.text_muted))
                 .child(value),
-        )
-}
-
-fn resource_network_row(
-    palette: crate::theme::ThemePalette,
-    nic: &str,
-    tx: f64,
-    rx: f64,
-    position: ResourceRowPosition,
-) -> gpui::Div {
-    let ResourceRowPosition { first, last } = position;
-    div()
-        .when(!first, |this| this.pt_2())
-        .when(!last, |this| {
-            this.pb_2().border_b_1().border_color(rgb(palette.border))
-        })
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .font_family(crate::features::shell::gpui_code_font_family())
-                .text_size(px(12.))
-                .font_weight(FontWeight(600.))
-                .text_color(rgb(palette.text))
-                .overflow_hidden()
-                .child(truncate_preview(nic, 34)),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap_2()
-                .flex_wrap()
-                .child(rate_value(
-                    palette,
-                    "icons/fe/up.svg",
-                    tx,
-                    rgb(0x22c55e).into(),
-                ))
-                .child(rate_value(
-                    palette,
-                    "icons/arrow-down.svg",
-                    rx,
-                    rgb(0x3b82f6).into(),
-                )),
         )
 }
 
@@ -1956,23 +1796,6 @@ fn resource_disk_row(
                     format_resource_bytes(available),
                 )),
         )
-}
-
-fn rate_value(
-    palette: crate::theme::ThemePalette,
-    arrow: &'static str,
-    value: f64,
-    color: gpui::Hsla,
-) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .font_family(crate::features::shell::gpui_code_font_family())
-        .text_size(px(11.))
-        .text_color(rgb(palette.text_muted))
-        .child(crate::features::view_widgets::mono_icon(arrow, color, 11.))
-        .child(format_resource_rate(value))
 }
 
 fn resource_empty_value(palette: crate::theme::ThemePalette) -> gpui::Div {

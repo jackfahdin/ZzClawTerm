@@ -403,16 +403,25 @@ impl ZzClawTermApp {
         let remote_file_path = entry.remote_path();
         if let Some(local_path) = service.local_path(&remote_file_path) {
             let default_editor = self.settings.summary().transfer_default_editor.clone();
-            match open_local_path_with_editor(&local_path, &default_editor) {
-                Ok(()) => {
-                    self.transfer
-                        .set_browser_status(format!("opened {} externally", entry.path));
-                    self.shell
-                        .set_status(format!("opened local file {} externally", entry.path));
-                }
-                Err(error) => self.shell.set_status(error),
-            }
-            cx.notify();
+            let request = cx
+                .background_executor()
+                .spawn(async move { open_local_path_with_editor(&local_path, &default_editor) });
+            cx.spawn(async move |this, cx| {
+                let result = request.await;
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(()) => {
+                            this.transfer
+                                .set_browser_status(format!("opened {} externally", entry.path));
+                            this.shell
+                                .set_status(format!("opened local file {} externally", entry.path));
+                        }
+                        Err(error) => this.shell.set_status(error),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
             return;
         }
         let Some(service) = service.remote_service() else {

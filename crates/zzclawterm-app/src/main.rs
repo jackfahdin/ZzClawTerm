@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)
         .context("preload translation catalogs")?;
 
+    zzclawterm_desktop::platform::init_native_menu_theme();
     let application = gpui_platform::application().with_assets(assets::ZzClawTermAssets);
     let open_url_tx = activation_tx.clone();
     application.on_open_urls(move |urls| {

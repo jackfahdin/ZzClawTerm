@@ -13,6 +13,8 @@ use super::{
 fn provider_debug_output_redacts_api_keys() {
     let secret = "nya-ai-key-never-log";
     let credential = AiProviderCredential {
+        icon_data_url: None,
+        api_protocol: None,
         api_format: Default::default(),
         id: "credential-1".to_string(),
         name: "Test".to_string(),

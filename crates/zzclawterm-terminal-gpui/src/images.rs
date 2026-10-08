@@ -1,10 +1,12 @@
 //! Decode terminal graphics payloads into GPUI `RenderImage`s.
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
-use gpui::RenderImage;
+use futures::channel::oneshot;
+use gpui::{App, RenderImage, Window, WindowId};
 use image::{Frame, ImageReader, Limits};
 use smallvec::SmallVec;
 
@@ -29,6 +31,8 @@ struct DecodeCache {
     pending_bytes: u64,
     completed_tx: mpsc::Sender<CompletedDecode>,
     completed_rx: mpsc::Receiver<CompletedDecode>,
+    waiting_windows: HashMap<WindowId, oneshot::Sender<()>>,
+    residents: HashMap<DecodeCacheKey, Vec<(Weak<()>, Instant)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +49,7 @@ struct CachedDecode {
 enum DecodeCacheEntryState {
     Pending,
     Ready(Option<Arc<RenderImage>>),
+    Deferred,
 }
 
 struct CompletedDecode {
@@ -80,6 +85,8 @@ impl Default for DecodeCache {
             pending_bytes: 0,
             completed_tx,
             completed_rx,
+            waiting_windows: HashMap::new(),
+            residents: HashMap::new(),
         }
     }
 }
@@ -97,6 +104,7 @@ impl DecodeCache {
             DecodeCacheEntryState::Pending => CachedRenderImage::Pending,
             DecodeCacheEntryState::Ready(Some(image)) => CachedRenderImage::Ready(image.clone()),
             DecodeCacheEntryState::Ready(None) => CachedRenderImage::Failed,
+            DecodeCacheEntryState::Deferred => CachedRenderImage::Failed,
         };
         self.touch(key);
         Some(state)
@@ -163,6 +171,14 @@ impl DecodeCache {
         self.touch(key);
         while self.entries.len() > max_entries || self.decoded_bytes > max_bytes {
             if !self.evict_oldest_ready() {
+                // Keep visible images resident within the byte budget. New
+                // images degrade to a stable placeholder until they leave the
+                // viewport, rather than evicting and decoding each other.
+                if let Some(entry) = self.entries.get_mut(&key) {
+                    self.decoded_bytes = self.decoded_bytes.saturating_sub(entry.decoded_bytes);
+                    entry.decoded_bytes = 0;
+                    entry.state = DecodeCacheEntryState::Deferred;
+                }
                 break;
             }
         }
@@ -177,6 +193,7 @@ impl DecodeCache {
             }
         }
         self.lru.retain(|candidate| *candidate != key);
+        self.residents.remove(&key);
     }
 
     fn evict_oldest_ready(&mut self) -> bool {
@@ -189,11 +206,17 @@ impl DecodeCache {
                 .entries
                 .get(&key)
                 .is_some_and(|entry| matches!(entry.state, DecodeCacheEntryState::Pending));
-            if is_pending {
+            let resident = self.residents.get(&key).is_some_and(|leases| {
+                leases.iter().any(|(lease, seen)| {
+                    lease.strong_count() > 0 && seen.elapsed() < Duration::from_secs(2)
+                })
+            });
+            if is_pending || resident {
                 self.lru.push_back(key);
                 continue;
             }
             if let Some(removed) = self.entries.remove(&key) {
+                self.residents.remove(&key);
                 self.decoded_bytes = self.decoded_bytes.saturating_sub(removed.decoded_bytes);
                 return true;
             }
@@ -208,6 +231,45 @@ impl DecodeCache {
 
     fn completed_sender(&self) -> mpsc::Sender<CompletedDecode> {
         self.completed_tx.clone()
+    }
+
+    fn mark_visible(&mut self, key: DecodeCacheKey, lease: &Arc<()>) {
+        let leases = self.residents.entry(key).or_default();
+        leases.retain(|(lease, _)| lease.strong_count() > 0);
+        let weak = Arc::downgrade(lease);
+        if let Some((_, seen)) = leases
+            .iter_mut()
+            .find(|(existing, _)| existing.ptr_eq(&weak))
+        {
+            *seen = Instant::now();
+        } else {
+            leases.push((weak, Instant::now()));
+        }
+    }
+}
+
+/// Renew all visible leases before pumping any completions. Otherwise a slow
+/// decode could evict another visible image whose lease has not yet been read.
+pub(crate) fn protect_visible_images(leases: &HashMap<u64, Arc<()>>) {
+    let mut guard = cache();
+    let cache = guard.get_or_insert_with(DecodeCache::default);
+    for (&content_id, lease) in leases {
+        let key = DecodeCacheKey { content_id };
+        if cache
+            .entries
+            .get(&key)
+            .is_some_and(|entry| matches!(entry.state, DecodeCacheEntryState::Deferred))
+            && !cache
+                .residents
+                .get(&key)
+                .is_some_and(|leases| leases.iter().any(|(lease, _)| lease.strong_count() > 0))
+        {
+            // A viewport that left and returned may retry its degraded images.
+            cache.remove(key);
+        }
+        if cache.entries.contains_key(&key) {
+            cache.mark_visible(key, lease);
+        }
     }
 }
 
@@ -233,6 +295,11 @@ impl DecodeWorkerPool {
                             key: job.key,
                             image,
                         });
+                        if let Some(cache) = cache().as_mut() {
+                            for (_, waiter) in cache.waiting_windows.drain() {
+                                let _ = waiter.send(());
+                            }
+                        }
                     }
                 })
                 .expect("spawn terminal image decode worker");
@@ -337,10 +404,20 @@ fn unpack_nyar(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 /// Cached decode for a payload. First access schedules decode work and returns
 /// pending; later accesses return ready or failed state.
+#[cfg(test)]
 pub fn cached_render_image(
     placement_id: u64,
     content_id: u64,
     data: Arc<[u8]>,
+) -> CachedRenderImage {
+    cached_render_image_inner(placement_id, content_id, data, None)
+}
+
+fn cached_render_image_inner(
+    placement_id: u64,
+    content_id: u64,
+    data: Arc<[u8]>,
+    lease: Option<&Arc<()>>,
 ) -> CachedRenderImage {
     if data.is_empty() {
         return CachedRenderImage::Failed;
@@ -350,11 +427,21 @@ pub fn cached_render_image(
         let mut guard = cache();
         let cache = guard.get_or_insert_with(DecodeCache::default);
         if let Some(hit) = cache.get(key) {
+            if let Some(lease) = lease {
+                cache.mark_visible(key, lease);
+            }
             return hit;
         }
         let input_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
         if !cache.insert_pending(key, input_bytes) {
-            return CachedRenderImage::Pending;
+            return if cache.pending_count > 0 && input_bytes <= MAX_PENDING_DECODE_BYTES {
+                CachedRenderImage::Pending
+            } else {
+                CachedRenderImage::Failed
+            };
+        }
+        if let Some(lease) = lease {
+            cache.mark_visible(key, lease);
         }
         let job = DecodeJob {
             key,
@@ -367,6 +454,46 @@ pub fn cached_render_image(
     }
 
     CachedRenderImage::Pending
+}
+
+/// Register at most one completion waiter per window, without refreshing while
+/// workers are busy. Registration rechecks completions to avoid a lost wake.
+pub(crate) fn cached_render_image_in_window(
+    placement_id: u64,
+    content_id: u64,
+    data: Arc<[u8]>,
+    lease: &Arc<()>,
+    window: &mut Window,
+    cx: &mut App,
+) -> CachedRenderImage {
+    let result = cached_render_image_inner(placement_id, content_id, data, Some(lease));
+    if !matches!(result, CachedRenderImage::Pending) {
+        return result;
+    }
+    let window_id = window.window_handle().window_id();
+    let mut guard = cache();
+    let cache = guard.get_or_insert_with(DecodeCache::default);
+    if let Some(hit) = cache.get(cache_key(placement_id, content_id))
+        && !matches!(hit, CachedRenderImage::Pending)
+    {
+        return hit;
+    }
+    if cache.pending_count == 0 {
+        return CachedRenderImage::Failed;
+    }
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.waiting_windows.entry(window_id)
+    {
+        let (tx, rx) = oneshot::channel();
+        entry.insert(tx);
+        window
+            .spawn(cx, async move |cx| {
+                if rx.await.is_ok() {
+                    let _ = cx.update(|window, _| window.refresh());
+                }
+            })
+            .detach();
+    }
+    result
 }
 
 #[cfg(test)]
@@ -385,6 +512,7 @@ fn cached_render_image_poll(placement_id: u64, content_id: u64) -> CachedRenderI
 #[cfg(test)]
 mod tests {
     use gpui::RenderImage;
+    use std::time::{Duration, Instant};
 
     use super::{
         CachedRenderImage, DecodeCache, MAX_DECODE_CACHE_ENTRIES, MAX_DECODED_IMAGE_BYTES,
@@ -393,9 +521,64 @@ mod tests {
     };
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
 
     static TEST_CACHE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn visible_images_degrade_new_images_without_redecode_or_exceeding_budget() {
+        let mut cache = DecodeCache::default();
+        let first = cache_key(1, 1);
+        let second = cache_key(2, 2);
+        let lease = Arc::new(());
+        cache.insert_pending(first, 4);
+        cache.mark_visible(first, &lease);
+        cache.insert_ready_with_limits(first, decode_render_image(&tiny_nyar([0; 4])), 10, 4);
+        cache.insert_pending(second, 4);
+        cache.mark_visible(second, &lease);
+        cache.insert_ready_with_limits(second, decode_render_image(&tiny_nyar([1; 4])), 10, 4);
+        assert_eq!(cache.decoded_bytes, 4);
+        assert!(matches!(
+            cache.get(first),
+            Some(CachedRenderImage::Ready(_))
+        ));
+        assert!(matches!(cache.get(second), Some(CachedRenderImage::Failed)));
+        assert!(!cache.insert_pending(second, 4));
+        drop(lease);
+        assert!(cache.evict_oldest_ready());
+    }
+
+    #[test]
+    fn hidden_viewports_stop_protecting_decoded_images() {
+        let mut cache = DecodeCache::default();
+        let key = cache_key(1, 1);
+        let lease = Arc::new(());
+        cache.insert_ready(key, decode_render_image(&tiny_nyar([0; 4])));
+        cache.mark_visible(key, &lease);
+        assert!(!cache.evict_oldest_ready());
+        cache.residents.get_mut(&key).unwrap()[0].1 = Instant::now() - Duration::from_secs(3);
+        assert!(cache.evict_oldest_ready());
+    }
+
+    #[test]
+    fn degraded_images_can_retry_after_leaving_the_viewport() {
+        let _guard = TEST_CACHE_LOCK.lock().unwrap();
+        clear_cache();
+        let key = cache_key(1, 1);
+        let lease = Arc::new(());
+        {
+            let mut guard = cache();
+            let cache = guard.get_or_insert_with(DecodeCache::default);
+            cache.insert_pending(key, 4);
+            cache.mark_visible(key, &lease);
+            cache.insert_ready_with_limits(key, decode_render_image(&tiny_nyar([0; 4])), 10, 0);
+            assert!(matches!(cache.get(key), Some(CachedRenderImage::Failed)));
+        }
+        drop(lease);
+        let leases = std::collections::HashMap::from([(1, Arc::new(()))]);
+        super::protect_visible_images(&leases);
+        assert!(!cache().as_ref().unwrap().entries.contains_key(&key));
+        clear_cache();
+    }
 
     fn clear_cache() {
         *cache() = None;

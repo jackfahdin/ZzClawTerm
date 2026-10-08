@@ -160,6 +160,22 @@ impl SecurityStoreProxy {
         self.mutate(move |store| store.reorder_credentials(&updates))
     }
 
+    pub(super) fn reorder_passwords(
+        &self,
+        updates: &[(String, i32)],
+    ) -> Result<(), StoreClientError> {
+        let updates = updates.to_vec();
+        self.mutate(move |store| store.reorder_passwords(&updates))
+    }
+
+    pub(super) fn reorder_ssh_keys(
+        &self,
+        updates: &[(String, i32)],
+    ) -> Result<(), StoreClientError> {
+        let updates = updates.to_vec();
+        self.mutate(move |store| store.reorder_ssh_keys(&updates))
+    }
+
     pub(super) fn delete_credential(&self, credential_id: &str) -> Result<(), StoreClientError> {
         let credential_id = credential_id.to_string();
         self.mutate(move |store| store.delete_credential(&credential_id))

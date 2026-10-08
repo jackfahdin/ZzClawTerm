@@ -190,11 +190,15 @@ pub(super) struct ShellWorkspaceState {
     pub(super) split_resize: Option<WorkspaceSplitResizeState>,
     pub(super) pane_roots: HashMap<String, WorkspacePaneNode>,
     pub(super) tab_owner: HashMap<String, String>,
-    pub(super) focused_terminal_leaf_id: Option<String>,
     pub(super) pane_layout_restored: bool,
+    pub(super) pane_layout_loading: bool,
 }
 
 impl ShellFeatureState {
+    pub(in crate::features) fn workspace_layout_restore_is_settled(&self) -> bool {
+        self.workspace.pane_layout_restored && !self.workspace.pane_layout_loading
+    }
+
     pub(in crate::features) fn pane_focus_mode(&self) -> bool {
         self.workspace.pane_focus_mode
     }
@@ -210,7 +214,9 @@ impl ShellFeatureState {
             bottom_panel: ShellBottomPanelState {
                 mode: init.bottom_panel_mode,
                 quick_commands_height: init.quick_commands_height,
-                command_send_height: init.command_send_height,
+                command_send_height: ShellBottomPanelState::clamp_command_send_height(
+                    init.command_send_height,
+                ),
                 resize: None,
             },
             viewport: ShellViewportState {
@@ -274,8 +280,8 @@ impl ShellFeatureState {
                 split_resize: None,
                 pane_roots: HashMap::new(),
                 tab_owner: HashMap::new(),
-                focused_terminal_leaf_id: None,
                 pane_layout_restored: false,
+                pane_layout_loading: false,
             },
             diagnostics: ShellDiagnosticState::default(),
             resize_handle_hover: ResizeHandleHoverState::default(),
@@ -548,6 +554,11 @@ impl ShellFeatureState {
 
     pub(in crate::features) fn left_panel_width(&self) -> f32 {
         self.panels.left_width
+    }
+
+    #[cfg(test)]
+    pub(in crate::features) fn set_left_panel_width_for_test(&mut self, width: f32) {
+        self.panels.left_width = width;
     }
 
     /// Set the stored right-panel width. Test-only: the real writers are the resize
@@ -856,14 +867,6 @@ impl ShellFeatureState {
         self.workspace.tab_owner.get(session_id).map(String::as_str)
     }
 
-    pub(in crate::features) fn set_focused_terminal_leaf(&mut self, leaf_id: Option<String>) {
-        self.workspace.focused_terminal_leaf_id = leaf_id;
-    }
-
-    pub(in crate::features) fn focused_terminal_leaf(&self) -> Option<&str> {
-        self.workspace.focused_terminal_leaf_id.as_deref()
-    }
-
     pub(in crate::features) fn set_workspace_pane_layout_restored(&mut self, restored: bool) {
         self.workspace.pane_layout_restored = restored;
     }
@@ -949,8 +952,12 @@ impl ShellDiagnosticState {
 
 impl ShellBottomPanelState {
     const QUICK_COMMANDS_HEIGHT_MIN: f32 = 36.;
-    const COMMAND_SEND_HEIGHT_MIN: f32 = 60.;
+    const COMMAND_SEND_HEIGHT_MIN: f32 = 120.;
     const HEIGHT_MAX: f32 = 520.;
+
+    pub(super) fn clamp_command_send_height(height: f32) -> f32 {
+        height.clamp(Self::COMMAND_SEND_HEIGHT_MIN, Self::HEIGHT_MAX)
+    }
 
     pub(in crate::features) fn start_resize(&mut self, start_y: Pixels) -> bool {
         let start_height = match self.mode {
@@ -1239,7 +1246,11 @@ mod tests {
     };
 
     fn shell(mode: BottomPanelMode) -> ShellFeatureState {
-        ShellFeatureState::new(ShellFeatureInit {
+        ShellFeatureState::new(shell_init(mode))
+    }
+
+    fn shell_init(mode: BottomPanelMode) -> ShellFeatureInit {
+        ShellFeatureInit {
             status: "idle".to_string(),
             selected_nav: NavItem::Workspace,
             bottom_panel_mode: mode,
@@ -1257,7 +1268,7 @@ mod tests {
             left_panel_width: 240.,
             right_panel_width: 320.,
             activity_bar_layout: ActivityBarLayoutState::default(),
-        })
+        }
     }
 
     #[test]
@@ -1271,6 +1282,28 @@ mod tests {
         assert_eq!(shell.bottom_panel.command_send_height, 180.);
         assert!(shell.bottom_panel.finish_resize());
         assert!(!shell.bottom_panel.finish_resize());
+    }
+
+    #[test]
+    fn command_send_resize_preserves_other_panels_and_clamps_to_usable_heights() {
+        let mut shell = shell(BottomPanelMode::CommandSend);
+        assert!(shell.bottom_panel.start_resize(px(400.)));
+        assert_eq!(shell.bottom_panel.update_resize(px(1000.)), Some(120.));
+        assert_eq!(shell.command_send_height(), 120.);
+        assert_eq!(shell.bottom_panel.update_resize(px(-1000.)), Some(520.));
+        assert_eq!(shell.command_send_height(), 520.);
+        assert_eq!(shell.quick_commands_height(), 120.);
+    }
+
+    #[test]
+    fn command_send_restores_legacy_heights_inside_the_current_layout_range() {
+        for (stored, expected) in [(60., 120.), (120., 120.), (180., 180.), (600., 520.)] {
+            let shell = ShellFeatureState::new(ShellFeatureInit {
+                command_send_height: stored,
+                ..shell_init(BottomPanelMode::CommandSend)
+            });
+            assert_eq!(shell.command_send_height(), expected);
+        }
     }
 
     #[test]

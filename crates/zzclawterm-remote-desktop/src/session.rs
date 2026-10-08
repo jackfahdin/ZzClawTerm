@@ -260,12 +260,23 @@ impl EventQueue {
     }
 
     fn drain(&self) -> RdpSessionDrain {
+        self.drain_with_limit(false)
+    }
+
+    fn drain_with_limit(&self, bounded: bool) -> RdpSessionDrain {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let frames: Vec<RdpFrameEvent> = state.frames.drain(..).collect();
-        state.frame_bytes = 0;
+        let count = if bounded {
+            crate::frame::frame_batch_len(&state.frames)
+        } else {
+            state.frames.len()
+        };
+        let frames: Vec<RdpFrameEvent> = state.frames.drain(..count).collect();
+        state.frame_bytes = state
+            .frame_bytes
+            .saturating_sub(frames.iter().map(frame_byte_cost).sum());
         let mut cursors = Vec::with_capacity(3);
         cursors.extend(state.cursor_shape.take().map(RemoteCursorEvent::Shape));
         cursors.extend(
@@ -297,6 +308,13 @@ impl EventQueue {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
+        state.control.clear();
+        state.control_bytes = 0;
+        state.frames.clear();
+        state.frame_bytes = 0;
+        state.cursor_shape = None;
+        state.cursor_position = None;
+        state.cursor_visibility = None;
         drop(state);
         self.space_available.notify_all();
     }
@@ -492,6 +510,17 @@ impl RdpSessionManager {
                 }),
         );
         drain.control
+    }
+
+    /// Drain control state and a bounded, ordered prefix of frame deltas.
+    pub fn drain_batch(&self, session_id: &str) -> RdpSessionDrain {
+        let Ok(sessions) = self.sessions.lock() else {
+            return RdpSessionDrain::default();
+        };
+        sessions
+            .get(session_id)
+            .map(|record| record.queue.drain_with_limit(true))
+            .unwrap_or_default()
     }
 
     /// Return the static helper capabilities confirmed by `ServerHello`.
@@ -699,6 +728,41 @@ impl RdpSessionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id.to_string(), record);
+        Ok(())
+    }
+
+    /// Permanently remove the record before reaping its helper in the background.
+    /// A reconnect using the same id cannot be overwritten by the old reader.
+    pub fn close_detached(&self, session_id: &str) -> Result<(), RdpError> {
+        let Some(mut record) = self
+            .sessions
+            .lock()
+            .map_err(|_| RdpError::new(RdpErrorKind::Ipc, "RDP session registry lock is poisoned"))?
+            .remove(session_id)
+        else {
+            return Ok(());
+        };
+        set_state(&record.state, RdpSessionState::Disconnecting);
+        record.queue.close();
+        self.pending_certificates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, pending_session| pending_session != session_id);
+        let session_id = session_id.to_owned();
+        thread::spawn(move || {
+            let _ = send_control(
+                &record.writer,
+                &RdpControlMessage::Input {
+                    session_id: session_id.clone(),
+                    events: vec![RdpInputEvent::ReleaseAllInputs],
+                },
+            );
+            let _ = send_control(
+                &record.writer,
+                &RdpControlMessage::Disconnect { session_id },
+            );
+            cleanup_child(&mut record);
+        });
         Ok(())
     }
 
@@ -978,11 +1042,25 @@ fn handle_control(
             });
         }
         RdpControlMessage::CertificateRequest(request) => {
-            pending
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(request.request_id.clone(), session_id.to_string());
-            queue.push_control(RdpRuntimeEvent::CertificateRequest(request));
+            let request_id = request.request_id.clone();
+            // Serialize registration with close's queue gate. An old reader must
+            // never register a prompt after ownership has been removed.
+            {
+                let gate = queue.state.lock().unwrap_or_else(|p| p.into_inner());
+                if gate.closed {
+                    return Ok(());
+                }
+                pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(request_id.clone(), session_id.to_string());
+            }
+            if !queue.push_control(RdpRuntimeEvent::CertificateRequest(request)) {
+                pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&request_id);
+            }
         }
         RdpControlMessage::Capability {
             session_id: event_session,
@@ -1094,12 +1172,76 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use super::{EventQueue, handle_control, require_server_hello, validate_rdp_input};
+    use super::{
+        EventQueue, RdpSessionManager, SessionRecord, handle_control, require_server_hello,
+        validate_rdp_input,
+    };
     use crate::{
         CursorPosition, PROTOCOL_VERSION, PixelFormat, RdpCapability, RdpClipboardTransferProgress,
         RdpClipboardTransferStatus, RdpControlMessage, RdpFrameEvent, RdpInputEvent,
         RdpRuntimeEvent, RdpServerCapabilities, RdpSessionState, RemoteCursorEvent,
     };
+
+    #[test]
+    fn detached_close_removes_resources_before_a_stalled_reader_is_reaped() {
+        let manager = RdpSessionManager::new();
+        let queue = Arc::new(EventQueue::default());
+        queue.push_reset("s", 1, 1, 1);
+        queue.push_frame(frame(1, 0, true));
+        manager
+            .pending_certificates
+            .lock()
+            .unwrap()
+            .insert("old-request".to_string(), "s".to_string());
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(2));
+            finished_tx.send(()).unwrap();
+        });
+        manager.sessions.lock().unwrap().insert(
+            "s".to_string(),
+            SessionRecord {
+                state: Arc::new(Mutex::new(RdpSessionState::Connected)),
+                capabilities: Arc::new(Mutex::new(None)),
+                queue: queue.clone(),
+                writer: crate::helper_process::IpcWriter::test_mailbox(),
+                child: None,
+                reader: Some(reader),
+            },
+        );
+        let start = std::time::Instant::now();
+        manager.close_detached("s").unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert!(manager.state("s").is_none());
+        assert!(manager.pending_certificates.lock().unwrap().is_empty());
+        assert!(queue.drain().frames.is_empty());
+        manager.sessions.lock().unwrap().insert(
+            "s".to_string(),
+            SessionRecord {
+                state: Arc::new(Mutex::new(RdpSessionState::Connected)),
+                capabilities: Arc::new(Mutex::new(None)),
+                queue: Arc::new(EventQueue::default()),
+                writer: crate::helper_process::IpcWriter::test_mailbox(),
+                child: None,
+                reader: None,
+            },
+        );
+        release_tx.send(()).unwrap();
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while Arc::strong_count(&queue) > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            Arc::strong_count(&queue),
+            1,
+            "the reaped record must be dropped"
+        );
+        assert_eq!(manager.state("s"), Some(RdpSessionState::Connected));
+    }
 
     #[test]
     fn server_hello_must_be_first_and_records_capabilities_only_once() {
@@ -1364,6 +1506,61 @@ mod tests {
         std::thread::yield_now();
         queue.close();
         assert!(!producer.join().unwrap());
+        let drain = queue.drain();
+        assert!(drain.control.is_empty());
+        assert!(drain.frames.is_empty());
+        assert!(drain.cursors.is_empty());
+        let state = queue.state.lock().unwrap();
+        assert_eq!(state.frame_bytes, 0);
+        assert_eq!(state.control_bytes, 0);
+    }
+
+    #[test]
+    fn bounded_drain_preserves_delta_order_and_accounting() {
+        let queue = EventQueue::default();
+        queue.push_reset("s", 1, 32, 1);
+        for x in 0..20 {
+            assert!(queue.push_frame(frame(1, x, false)));
+        }
+        let first = queue.drain_with_limit(true);
+        assert_eq!(first.frames.len(), 8);
+        assert_eq!(queue.state.lock().unwrap().frame_bytes, 12 * 4);
+        let second = queue.drain_with_limit(true);
+        assert_eq!(second.frames.len(), 8);
+        assert!(matches!(
+            second.frames[0],
+            RdpFrameEvent::Bitmap { x: 8, .. }
+        ));
+        assert_eq!(queue.drain_with_limit(true).frames.len(), 4);
+        assert_eq!(queue.state.lock().unwrap().frame_bytes, 0);
+    }
+
+    #[test]
+    fn a_closed_reader_cannot_register_a_certificate_prompt() {
+        let queue = Arc::new(EventQueue::default());
+        queue.close();
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        handle_control(
+            "s",
+            RdpControlMessage::CertificateRequest(crate::RdpCertificateRequest {
+                request_id: "stale".to_string(),
+                host: "host".to_string(),
+                port: 3389,
+                sha256_fingerprint: "fingerprint".to_string(),
+                subject: None,
+                issuer: None,
+                valid_from: None,
+                valid_to: None,
+            }),
+            &queue,
+            &Arc::new(Mutex::new(RdpSessionState::Disconnecting)),
+            &Arc::new(Mutex::new(None)),
+            &pending,
+            &mut true,
+        )
+        .unwrap();
+        assert!(pending.lock().unwrap().is_empty());
+        assert!(queue.drain().control.is_empty());
     }
 
     #[test]

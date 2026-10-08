@@ -223,7 +223,9 @@ impl ZzClawTermApp {
                     }
                     ZzClawInputEvent::Submitted(text) => {
                         app.on_text_input_changed(subscription_id.clone(), text.clone(), cx);
-                        if subscription_id.as_ref() == "ai.chat.prompt" {
+                        if subscription_id.starts_with("ai.agent-answer.") {
+                            app.submit_native_answer_input(subscription_id.as_ref(), cx);
+                        } else if subscription_id.as_ref() == "ai.chat.prompt" {
                             if app.ai.chat_mention_is_open() {
                                 app.select_ai_mention_candidate(cx);
                             } else {
@@ -249,7 +251,7 @@ impl ZzClawTermApp {
         seed: &str,
         setup: TextInputSetup,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<I> {
+    ) -> ZzClawInputShell {
         let id = id.into();
         let multi_line = setup.multi_line;
         let field = self.text_input(id.clone(), seed, setup, cx);
@@ -503,14 +505,14 @@ impl ZzClawTermApp {
             self.apply_send_command_control_input(control, text, cx);
         } else if let Some(field) = id.strip_prefix("security.editor.") {
             self.apply_security_editor_input(field, text, cx);
+        } else if id.starts_with("ai.agent-answer.") {
+            self.apply_native_answer_input(id.as_ref(), text, cx);
         } else if id.as_ref() == "ai.chat.prompt" {
             self.apply_ai_prompt(text, cx);
         } else if id.as_ref() == "ai.model-search" {
             self.apply_ai_model_search(text, cx);
         } else if id.as_ref() == "ai.history-search" {
             self.apply_ai_history_search(text, cx);
-        } else if id.as_ref() == "ai.settings.model-search" {
-            self.apply_ai_settings_model_search(text, cx);
         } else if id.as_ref() == "quick-command.search" {
             self.apply_quick_command_search(text, cx);
         } else if id.as_ref() == "quick-command.ai-prompt" {

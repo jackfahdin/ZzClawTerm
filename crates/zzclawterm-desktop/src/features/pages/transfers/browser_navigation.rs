@@ -80,11 +80,19 @@ impl ZzClawTermApp {
     pub(in crate::features) fn restore_transfer_browser_session_cache(
         &mut self,
         session_id: &str,
+        cx: &mut Context<Self>,
     ) -> bool {
         let Some(remote_path) = self.transfer.restore_browser_session_cache(session_id) else {
             return false;
         };
         self.transfer.set_remote_path(remote_path);
+        if self.transfer.take_delete_refresh_pending(session_id) {
+            let rollback = self.prepare_transfer_browser_navigation();
+            let path = self.transfer.browser_remote_file_path();
+            self.open_transfer_browser_directory_with_history_and_rollback(
+                path, false, rollback, cx,
+            );
+        }
         true
     }
 
@@ -151,13 +159,16 @@ impl ZzClawTermApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_transfer_browser_directory_path(entry.remote_path(), cx);
+    }
+
+    pub(in crate::features) fn open_transfer_browser_directory_path(
+        &mut self,
+        path: RemoteFilePath,
+        cx: &mut Context<Self>,
+    ) {
         let rollback = self.prepare_transfer_browser_navigation();
-        self.open_transfer_browser_directory_with_history_and_rollback(
-            entry.remote_path(),
-            true,
-            rollback,
-            cx,
-        );
+        self.open_transfer_browser_directory_with_history_and_rollback(path, true, rollback, cx);
     }
 
     fn open_transfer_browser_directory_with_history_and_rollback(

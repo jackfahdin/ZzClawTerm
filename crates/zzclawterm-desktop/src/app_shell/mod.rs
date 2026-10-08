@@ -2,7 +2,8 @@
 
 mod controller;
 mod process_state;
-mod session_hub;
+pub(crate) mod session_hub;
+pub(crate) mod tab_drag;
 mod window_state;
 
 use self::window_state::{
@@ -337,18 +338,19 @@ impl AppShell {
             overlays: self.overlays.clone(),
         };
         let update_store = self.controller.read(cx).update_store();
+        let plugin_process = self.controller.read(cx).plugin_process();
         let app = cx.new(|cx| {
-            let session_manager = self.session_hub.read(cx).manager();
+            let session_hub = self.session_hub.read(cx).clone();
             ZzClawTermApp::from_bootstrap(
                 self.runtime.clone(),
                 stores,
-                ZzClawTermProcessEntities::new(process_state, update_store.clone()),
+                ZzClawTermProcessEntities::new(process_state, update_store.clone(), plugin_process),
                 workspace_init,
                 ZzClawTermStoreClients::new(
                     store_runtime.ui_client(),
                     store_runtime.blocking_client(),
                 ),
-                session_manager,
+                session_hub,
                 cx,
             )
         });
@@ -671,16 +673,38 @@ impl AppShell {
 
     fn quit_after_worker_shutdown(&mut self, launch_update: bool, cx: &mut Context<Self>) {
         let started_at = Instant::now();
+        let mut tasks = self.controller.update(cx, |controller, cx| {
+            let mut tasks = controller.shutdown_other_workspaces(self.workspace_id, cx);
+            tasks.push(controller.shutdown_plugins(cx));
+            tasks
+        });
         // The current shell is already borrowed by the persistence completion callback.
         if let Some(app) = &self.app {
-            app.update(cx, |app, _| {
+            tasks.push(app.update(cx, |app, cx| {
                 app.shutdown_workspace_sessions();
-                app.shutdown_blocking_jobs();
-            });
+                app.shutdown_blocking_jobs(cx)
+            }));
         }
-        self.controller.update(cx, |controller, cx| {
-            controller.shutdown_other_workspaces(self.workspace_id, cx)
-        });
+        if !matches!(self.lifecycle, AppShellLifecycle::Flushing) {
+            self.enter_flushing(cx);
+        }
+        cx.spawn(async move |this, cx| {
+            for task in tasks {
+                task.await;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.finish_worker_shutdown(launch_update, started_at, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_worker_shutdown(
+        &mut self,
+        launch_update: bool,
+        started_at: Instant,
+        cx: &mut Context<Self>,
+    ) {
         tracing::info!(
             elapsed_ms = started_at.elapsed().as_millis(),
             "workspace workers stopped"
@@ -692,8 +716,10 @@ impl AppShell {
                 if let Some(store_runtime) = &self.store_runtime {
                     store_runtime.resume_after_failed_shutdown();
                 }
-                self.controller
-                    .update(cx, |controller, _| controller.cancel_process_quit());
+                self.controller.update(cx, |controller, cx| {
+                    controller.cancel_process_quit();
+                    controller.restart_plugins(cx);
+                });
                 self.lifecycle = AppShellLifecycle::FlushFailed(error.clone());
                 app.update(cx, |app, cx| app.report_close_save_failed(error, cx));
                 cx.notify();

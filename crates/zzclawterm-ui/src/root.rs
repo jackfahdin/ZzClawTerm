@@ -2,20 +2,11 @@
 
 use gpui::{
     AnyView, App, AppContext as _, Context, Font, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, WindowHandle, deferred, div,
+    ParentElement as _, Render, Styled as _, Window, WindowHandle, div,
 };
 
 use crate::input_focus::schedule_nya_input_blur_on_outside_pointer_down;
 use crate::theme_bridge::component_typography;
-
-/// The base deferred priority at the component level.
-///
-/// The drag divider on the main interface uses the default priority `0`,
-/// while Select/Popover inside components typically use `1` or `2`.
-/// The component root layer also uses `1`, so it can cover the main interface divider,
-/// while internal popups are added to the deferred queue after the parent layer and
-/// can still appear above the dialog card.
-const COMPONENT_OVERLAY_PRIORITY: usize = 1;
 
 /// ZzClawTerm's component root type.
 ///
@@ -38,7 +29,7 @@ impl ZzClawRootContent {
 }
 
 impl Render for ZzClawRootContent {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let typography = component_typography(cx);
         div()
             .size_full()
@@ -48,23 +39,6 @@ impl Render for ZzClawRootContent {
                 schedule_nya_input_blur_on_outside_pointer_down(event.button, window, cx);
             })
             .child(self.view.clone())
-            // GPUI's deferred rendering occurs after normal views. The panel boundaries
-            // and drag lines in the main interface also use this mechanism,
-            // so all component layers use a unified base priority to avoid hierarchies
-            // being scattered across various popup types. The priority of internal popups
-            // continues to take effect after the parent layer.
-            .children(
-                gpui_kit::component::Root::render_sheet_layer(window, cx)
-                    .map(|layer| deferred(layer).with_priority(COMPONENT_OVERLAY_PRIORITY)),
-            )
-            .children(
-                gpui_kit::component::Root::render_dialog_layer(window, cx)
-                    .map(|layer| deferred(layer).with_priority(COMPONENT_OVERLAY_PRIORITY)),
-            )
-            .children(
-                gpui_kit::component::Root::render_notification_layer(window, cx)
-                    .map(|layer| deferred(layer).with_priority(COMPONENT_OVERLAY_PRIORITY)),
-            )
     }
 }
 
@@ -74,8 +48,8 @@ pub fn zzclaw_root(
     cx: &mut Context<ZzClawRoot>,
 ) -> ZzClawRoot {
     let content = cx.new(|_| ZzClawRootContent::new(view));
-    // gpui-kit renders managed tooltips beside the content view, so the root
-    // must carry the complete font stack as well.
+    // Registered component plugins mount overlays beside the content, so the
+    // root must carry the complete font stack as well.
     gpui_kit::component::Root::new(content, window, cx).font(component_typography(cx).font)
 }
 

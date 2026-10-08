@@ -1,18 +1,22 @@
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::mem;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use thiserror::Error;
 use time::OffsetDateTime;
 use zzclawterm_core::terminal::input_tracker::{TerminalInputState, resync_from_terminal_line};
+use zzclawterm_terminal::recording_sanitizer::RecordingSanitizer;
 
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 5 * 1024 * 1024;
+
+#[cfg(test)]
+mod audit_tests;
 pub const DEFAULT_HISTORY_SEARCH_LINES: usize = 30_000;
 pub const MAX_HISTORY_SEARCH_LINES: usize = 100_000;
 pub const DEFAULT_HISTORY_SEARCH_LIMIT: usize = 100;
@@ -69,6 +73,14 @@ pub struct RecordingProfile {
     pub rotation: RecordingRotationPolicy,
     pub existing_file_behavior: ExistingFileBehavior,
     pub include_binary_transfer_payloads: bool,
+    pub include_input: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RecordingCapturePolicy {
+    pub mode: RecordingMode,
+    pub include_input: bool,
+    pub include_binary_transfer_payloads: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -87,6 +99,7 @@ pub struct RecordingStatus {
     pub state: RecordingStatusState,
     pub mode: RecordingMode,
     pub file_path: Option<PathBuf>,
+    pub input_file_path: Option<PathBuf>,
     pub started_at: Option<OffsetDateTime>,
     pub written_bytes: u64,
     pub queued_bytes: u64,
@@ -117,8 +130,11 @@ struct TranscriptRecord {
 
 impl TranscriptRecord {
     fn new(line_id: u64, label: &'static str, data: String) -> Self {
-        let timestamp = chrono_timestamp();
-        let size_bytes = format_record_parts(&timestamp, label, &data, true, true).len();
+        Self::at_timestamp(line_id, label, data, chrono_timestamp())
+    }
+
+    fn at_timestamp(line_id: u64, label: &'static str, data: String, timestamp: String) -> Self {
+        let size_bytes = timestamp.len() + label.len() + data.len() + 7;
         Self {
             line_id,
             timestamp,
@@ -178,33 +194,111 @@ pub struct TerminalHistorySearchResult {
     pub source: String,
 }
 
+/// Final paths remain available even when writing or flushing failed.
+#[derive(Clone, Debug)]
+pub struct RecordingCompletion {
+    pub file_path: PathBuf,
+    pub input_file_path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
 struct FileRecording {
     writer: BufWriter<File>,
+    input_writer: Option<BufWriter<File>>,
+    input_file_path: Option<PathBuf>,
     file_path: PathBuf,
+    original_path: PathBuf,
+    explicit_path: bool,
+    used_paths: HashSet<PathBuf>,
     profile: RecordingProfile,
     context: RecordingContext,
     written_bytes: u64,
+    segment_bytes: u64,
     size_rotation_index: u64,
     daily_key: String,
+    finished: bool,
+    active_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FileRecording {
     fn new(
         file: File,
+        input_file: Option<File>,
         file_path: PathBuf,
+        explicit_path: bool,
         profile: RecordingProfile,
         context: RecordingContext,
-    ) -> Self {
+        active_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    ) -> Result<Self, RecordingError> {
         let daily_key = recording_day_key(context.started_at);
-        Self {
+        let segment_bytes = file.metadata()?.len()
+            + input_file
+                .as_ref()
+                .map(|file| file.metadata().map(|meta| meta.len()))
+                .transpose()?
+                .unwrap_or(0);
+        let input_file_path = input_file
+            .as_ref()
+            .map(|_| input_recording_path(&file_path));
+        let used_paths = std::iter::once(file_path.clone())
+            .chain(input_file_path.iter().cloned())
+            .collect();
+        let mut recording = Self {
             writer: BufWriter::new(file),
+            input_writer: input_file.map(BufWriter::new),
+            input_file_path,
+            original_path: file_path.clone(),
+            explicit_path,
+            used_paths,
             file_path,
             profile,
             context,
             written_bytes: 0,
+            segment_bytes,
             size_rotation_index: 0,
             daily_key,
+            finished: false,
+            active_paths,
+        };
+        recording.write_header()?;
+        lock_recover(&recording.active_paths).extend(
+            std::iter::once(recording.file_path.clone()).chain(recording.input_file_path.clone()),
+        );
+        Ok(recording)
+    }
+
+    fn write_header(&mut self) -> Result<(), RecordingError> {
+        if self.profile.mode == RecordingMode::Transcript && self.profile.include_session_metadata {
+            let header = format_session_header(&self.context);
+            self.writer.write_all(header.as_bytes())?;
+            self.note_written(header.len());
         }
+        Ok(())
+    }
+
+    fn note_written(&mut self, bytes: usize) {
+        self.written_bytes = self.written_bytes.saturating_add(bytes as u64);
+        self.segment_bytes = self.segment_bytes.saturating_add(bytes as u64);
+    }
+
+    fn write_input_bytes(&mut self, data: &[u8]) -> Result<(), RecordingError> {
+        if self.input_writer.is_none() || data.is_empty() {
+            return Ok(());
+        }
+        self.maybe_rotate(data.len() as u64)?;
+        if let Some(writer) = self.input_writer.as_mut() {
+            writer.write_all(data)?;
+            self.note_written(data.len());
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), RecordingError> {
+        let output = self.writer.flush();
+        let input = self.input_writer.as_mut().map(Write::flush).transpose();
+        output?;
+        input?;
+        Ok(())
     }
 
     fn write_record(&mut self, record: &TranscriptRecord) -> Result<(), RecordingError> {
@@ -230,36 +324,50 @@ impl FileRecording {
     fn write_bytes(&mut self, data: &[u8]) -> Result<(), RecordingError> {
         self.maybe_rotate(data.len() as u64)?;
         self.writer.write_all(data)?;
-        self.written_bytes = self.written_bytes.saturating_add(data.len() as u64);
+        self.note_written(data.len());
         Ok(())
     }
 
     fn finish(&mut self) -> Result<(), RecordingError> {
-        if self.profile.mode == RecordingMode::Transcript && self.profile.include_session_metadata {
+        let mut footer_result = Ok(());
+        if !self.finished
+            && self.profile.mode == RecordingMode::Transcript
+            && self.profile.include_session_metadata
+        {
+            self.finished = true;
             let footer = format_session_footer(&self.context, "Stopped").into_bytes();
-            self.writer.write_all(&footer)?;
-            self.written_bytes = self.written_bytes.saturating_add(footer.len() as u64);
+            footer_result = self.writer.write_all(&footer);
+            if footer_result.is_ok() {
+                self.note_written(footer.len());
+            }
         }
-        self.writer.flush()?;
+        let flush_result = self.flush();
+        footer_result?;
+        flush_result?;
         Ok(())
     }
 
     fn maybe_rotate(&mut self, incoming_bytes: u64) -> Result<(), RecordingError> {
+        match self.profile.rotation {
+            RecordingRotationPolicy::Session => return Ok(()),
+            RecordingRotationPolicy::Size { max_bytes }
+                if max_bytes == 0
+                    || self.segment_bytes == 0
+                    || self.segment_bytes.saturating_add(incoming_bytes) <= max_bytes =>
+            {
+                return Ok(());
+            }
+            _ => {}
+        }
+        let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        let next_key = recording_day_key(now);
         let rotate = match self.profile.rotation {
             RecordingRotationPolicy::Session => false,
-            RecordingRotationPolicy::Daily => {
-                let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-                let next_key = recording_day_key(now);
-                if next_key == self.daily_key {
-                    false
-                } else {
-                    self.context.started_at = now;
-                    self.daily_key = next_key;
-                    true
-                }
-            }
+            RecordingRotationPolicy::Daily => next_key != self.daily_key,
             RecordingRotationPolicy::Size { max_bytes } => {
-                max_bytes > 0 && self.written_bytes.saturating_add(incoming_bytes) >= max_bytes
+                max_bytes > 0
+                    && self.segment_bytes > 0
+                    && self.segment_bytes.saturating_add(incoming_bytes) > max_bytes
             }
         };
         if !rotate {
@@ -269,23 +377,96 @@ impl FileRecording {
         self.size_rotation_index = self.size_rotation_index.saturating_add(1);
         let suffix = matches!(self.profile.rotation, RecordingRotationPolicy::Size { .. })
             .then_some(self.size_rotation_index);
-        let path =
-            resolve_recording_path(&self.profile, &self.context, suffix).and_then(|path| {
-                open_collision_safe_path(&path, self.profile.existing_file_behavior)
-            })?;
-        self.writer.flush()?;
-        let file = open_recording_file(&path, self.profile.existing_file_behavior)?;
+        let mut rotation_context = self.context.clone();
+        rotation_context.started_at = now;
+        let mut requested = if self.explicit_path {
+            match self.profile.rotation {
+                RecordingRotationPolicy::Daily => {
+                    append_named_suffix(&self.original_path, &next_key)
+                }
+                _ => append_numbered_suffix(self.original_path.clone(), self.size_rotation_index),
+            }
+        } else {
+            resolve_recording_path(&self.profile, &rotation_context, suffix)?
+        };
+        while self.used_paths.contains(&requested) {
+            requested = append_numbered_suffix(requested, self.size_rotation_index);
+        }
+        // Refuse aliases of active files and earlier segments before any truncation.
+        let protected = lock_recover(&self.active_paths);
+        for path in std::iter::once(&requested).chain(
+            (self.profile.mode == RecordingMode::Raw && self.profile.include_input)
+                .then(|| input_recording_path(&requested))
+                .as_ref(),
+        ) {
+            for active in protected.iter().chain(self.used_paths.iter()) {
+                if path == active
+                    || (path.exists() && active.exists() && same_file::is_same_file(path, active)?)
+                {
+                    return Err(RecordingError::Config(
+                        "rotation destination aliases a recording segment".into(),
+                    ));
+                }
+            }
+        }
+        drop(protected);
+        self.flush()?;
+        let (path, file, input_file) = open_recording_pair(
+            &requested,
+            self.profile.existing_file_behavior,
+            self.profile.mode == RecordingMode::Raw && self.profile.include_input,
+        )?;
+        if self.profile.mode == RecordingMode::Transcript && self.profile.include_session_metadata {
+            let footer = format_session_footer(&self.context, "Rotated");
+            self.writer.write_all(footer.as_bytes())?;
+            self.note_written(footer.len());
+        }
+        self.flush()?;
         let mut next_writer = BufWriter::new(file);
-        let mut written_bytes = 0;
+        let mut segment_bytes = next_writer.get_ref().metadata()?.len()
+            + input_file
+                .as_ref()
+                .map(|file| file.metadata().map(|meta| meta.len()))
+                .transpose()?
+                .unwrap_or(0);
         if self.profile.mode == RecordingMode::Transcript && self.profile.include_session_metadata {
             let header = format_session_header(&self.context).into_bytes();
             next_writer.write_all(&header)?;
-            written_bytes = header.len() as u64;
+            self.written_bytes += header.len() as u64;
+            segment_bytes += header.len() as u64;
         }
+        let mut active = lock_recover(&self.active_paths);
+        active.remove(&self.file_path);
+        if let Some(input) = &self.input_file_path {
+            active.remove(input);
+        }
+        active.insert(path.clone());
+        if input_file.is_some() {
+            active.insert(input_recording_path(&path));
+        }
+        drop(active);
         self.writer = next_writer;
+        self.input_writer = input_file.map(BufWriter::new);
+        self.input_file_path = self
+            .input_writer
+            .as_ref()
+            .map(|_| input_recording_path(&path));
+        self.used_paths.insert(path.clone());
+        self.used_paths.extend(self.input_file_path.iter().cloned());
         self.file_path = path;
-        self.written_bytes = written_bytes;
+        self.segment_bytes = segment_bytes;
+        self.daily_key = next_key;
         Ok(())
+    }
+}
+
+impl Drop for FileRecording {
+    fn drop(&mut self) {
+        let mut active = lock_recover(&self.active_paths);
+        active.remove(&self.file_path);
+        if let Some(input) = &self.input_file_path {
+            active.remove(input);
+        }
     }
 }
 
@@ -303,11 +484,16 @@ struct SessionCaptureState {
     input_needs_terminal_resync: bool,
     input_before_tab: Option<String>,
     output_buffer: String,
+    output_scan_from: usize,
     provisional_raw_output: VecDeque<u8>,
     live_echo_buffer: String,
     submitted_line_echo: Option<String>,
     suppress_next_newline: bool,
     next_line_id: u64,
+    sanitizer: RecordingSanitizer,
+    history_truncated: bool,
+    history_include_input: bool,
+    batch_timestamp: String,
 }
 
 impl SessionCaptureState {
@@ -326,11 +512,16 @@ impl SessionCaptureState {
             input_needs_terminal_resync: false,
             input_before_tab: None,
             output_buffer: String::new(),
+            output_scan_from: 0,
             provisional_raw_output: VecDeque::new(),
             live_echo_buffer: String::new(),
             submitted_line_echo: None,
             suppress_next_newline: false,
             next_line_id: 1,
+            sanitizer: RecordingSanitizer::default(),
+            history_truncated: false,
+            history_include_input: false,
+            batch_timestamp: chrono_timestamp(),
         }
     }
 
@@ -339,13 +530,7 @@ impl SessionCaptureState {
         self.trim_records();
     }
 
-    fn start_recording(
-        &mut self,
-        file: File,
-        file_path: PathBuf,
-        profile: RecordingProfile,
-        context: RecordingContext,
-    ) -> Result<(), RecordingError> {
+    fn start_recording(&mut self, recording: FileRecording) -> Result<(), RecordingError> {
         if self.recording.is_some() {
             return Err(RecordingError::Config(
                 "recording is already active".to_string(),
@@ -356,12 +541,21 @@ impl SessionCaptureState {
         self.dropped_bytes = 0;
         self.flush_output_lines(true);
         self.provisional_raw_output.clear();
-        self.recording = Some(FileRecording::new(file, file_path, profile, context));
+        self.commit_partial_input();
+        self.recording = Some(recording);
         self.recording_state = RecordingStatusState::Recording;
         Ok(())
     }
 
     fn stop_recording(&mut self) -> Result<String, RecordingError> {
+        let completion = self.stop_complete()?;
+        match completion.error {
+            Some(error) => Err(RecordingError::Runtime(error)),
+            None => Ok(completion.file_path.to_string_lossy().into_owned()),
+        }
+    }
+
+    fn stop_complete(&mut self) -> Result<RecordingCompletion, RecordingError> {
         if self.recording.is_none() {
             return Err(RecordingError::Config("no active recording".to_string()));
         }
@@ -374,15 +568,20 @@ impl SessionCaptureState {
             .recording
             .take()
             .ok_or_else(|| RecordingError::Config("no active recording".to_string()))?;
-        let path = recording.file_path.to_string_lossy().to_string();
+        let file_path = recording.file_path.clone();
+        let input_file_path = recording.input_file_path.clone();
         if let Err(error) = recording.finish() {
             self.mark_failed(error.to_string());
         }
-        if let Some(error) = self.last_error.clone() {
-            return Err(RecordingError::Runtime(error));
+        let error = self.last_error.clone();
+        if error.is_none() {
+            self.recording_state = RecordingStatusState::Recording;
         }
-        self.recording_state = RecordingStatusState::Recording;
-        Ok(path)
+        Ok(RecordingCompletion {
+            file_path,
+            input_file_path,
+            error,
+        })
     }
 
     fn mark_failed(&mut self, error: String) {
@@ -391,7 +590,14 @@ impl SessionCaptureState {
     }
 
     fn report_dropped(&mut self, bytes: usize) {
+        self.commit_partial_input();
+        self.flush_output_lines(true);
         self.dropped_bytes = self.dropped_bytes.saturating_add(bytes as u64);
+        self.sanitizer.reset();
+        self.pending_input_escape = None;
+        self.live_echo_buffer.clear();
+        self.submitted_line_echo = None;
+        self.history_truncated = true;
         if self.recording_state != RecordingStatusState::Failed {
             self.recording_state = RecordingStatusState::Degraded;
             self.last_error = Some("recording writer queue overflowed".to_string());
@@ -399,6 +605,17 @@ impl SessionCaptureState {
     }
 
     fn write_input(&mut self, data: &[u8]) {
+        self.batch_timestamp = chrono_timestamp();
+        if !self.includes_input() {
+            return;
+        }
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|file| file.profile.mode == RecordingMode::Raw)
+        {
+            return;
+        }
         let mut index = 0;
 
         while index < data.len() {
@@ -458,10 +675,18 @@ impl SessionCaptureState {
                     }
                 },
             }
+            if self.input_buffer.len() >= self.fragment_limit() {
+                self.commit_partial_input();
+            }
+            self.trim_records();
         }
     }
 
     fn write_raw_input(&mut self, data: &[u8]) {
+        self.batch_timestamp = chrono_timestamp();
+        if !self.includes_input() {
+            return;
+        }
         if data.is_empty() {
             return;
         }
@@ -474,7 +699,7 @@ impl SessionCaptureState {
                 .recording
                 .as_mut()
                 .expect("recording checked above")
-                .write_raw(data);
+                .write_input_bytes(data);
             if let Err(error) = result {
                 self.mark_failed(error.to_string());
             }
@@ -502,44 +727,42 @@ impl SessionCaptureState {
             self.input_buffer = recovered.value;
             self.live_echo_buffer.clear();
             self.output_buffer.clear();
+            self.output_scan_from = 0;
             self.input_needs_terminal_resync = false;
             self.input_before_tab = None;
+            if self.input_buffer.len() >= self.fragment_limit() {
+                self.commit_partial_input();
+            }
+            self.trim_records();
+        }
+    }
+
+    fn includes_input(&self) -> bool {
+        self.recording
+            .as_ref()
+            .map_or(self.history_include_input, |file| {
+                file.profile.include_input
+            })
+    }
+
+    fn write_raw_output(&mut self, data: &[u8]) {
+        if let Some(recording) = self.recording.as_mut() {
+            if self.recording_state != RecordingStatusState::Failed
+                && let Err(error) = recording.write_raw(data)
+            {
+                self.mark_failed(error.to_string());
+            }
+        } else {
+            let keep = self.memory_limit_bytes.min(data.len());
+            self.provisional_raw_output
+                .extend(&data[data.len() - keep..]);
+            self.trim_records();
         }
     }
 
     fn write_output(&mut self, data: &str) {
-        if self
-            .recording
-            .as_ref()
-            .is_some_and(|recording| recording.profile.mode == RecordingMode::Raw)
-        {
-            let result = self
-                .recording
-                .as_mut()
-                .expect("recording checked above")
-                .write_raw(data.as_bytes());
-            if let Err(error) = result {
-                self.mark_failed(error.to_string());
-            }
-            return;
-        }
-        if self.recording.is_none() {
-            let bytes = data.as_bytes();
-            let keep = self.memory_limit_bytes.min(bytes.len());
-            if keep == self.memory_limit_bytes {
-                self.provisional_raw_output.clear();
-            }
-            self.provisional_raw_output
-                .extend(&bytes[bytes.len() - keep..]);
-            let excess = self
-                .provisional_raw_output
-                .len()
-                .saturating_sub(self.memory_limit_bytes);
-            if excess > 0 {
-                self.provisional_raw_output.drain(..excess);
-            }
-        }
-        let mut sanitized = strip_terminal_control_sequences(data);
+        self.batch_timestamp = chrono_timestamp();
+        let mut sanitized = self.sanitizer.feed(data);
         if sanitized.is_empty() {
             return;
         }
@@ -570,8 +793,11 @@ impl SessionCaptureState {
             }
         }
 
-        self.output_buffer.push_str(&sanitized);
-        self.flush_output_lines(false);
+        for chunk in utf8_fragments(&sanitized, self.fragment_limit()) {
+            self.output_buffer.push_str(chunk);
+            self.flush_output_lines(false);
+            self.trim_records();
+        }
     }
 
     fn finish(&mut self) {
@@ -599,7 +825,7 @@ impl SessionCaptureState {
         self.suppress_next_newline = false;
         self.append_record("SYSTEM", "Session disconnected".to_string());
         if let Some(recording) = self.recording.as_mut()
-            && let Err(error) = recording.writer.flush()
+            && let Err(error) = recording.flush()
         {
             self.mark_failed(error.to_string());
         }
@@ -633,20 +859,42 @@ impl SessionCaptureState {
         }
     }
 
-    fn snapshot_records(&mut self) -> Vec<TranscriptRecord> {
-        self.flush_output_lines(true);
-        self.records.iter().cloned().collect()
+    fn snapshot_records(&self) -> Vec<TranscriptRecord> {
+        let mut records: Vec<_> = self.records.iter().cloned().collect();
+        if !self.output_buffer.is_empty() {
+            records.push(TranscriptRecord::new(
+                self.next_line_id,
+                "OUTPUT",
+                self.output_buffer.clone(),
+            ));
+        }
+        if self.includes_input() && !self.input_buffer.trim().is_empty() {
+            records.push(TranscriptRecord::new(
+                self.next_line_id + 1,
+                "INPUT",
+                self.input_buffer.clone(),
+            ));
+        }
+        records
     }
 
     fn append_record(&mut self, label: &'static str, data: String) {
-        if data.is_empty() {
+        if data.is_empty() && label != "OUTPUT" {
+            return;
+        }
+        if data.len() > self.fragment_limit() {
+            for fragment in utf8_fragments(&data, self.fragment_limit()) {
+                self.append_record(label, fragment.to_string());
+            }
             return;
         }
 
         let line_id = self.next_line_id;
         self.next_line_id = self.next_line_id.saturating_add(1);
-        let record = TranscriptRecord::new(line_id, label, data);
-        if let Some(recording) = self.recording.as_mut()
+        let record =
+            TranscriptRecord::at_timestamp(line_id, label, data, self.batch_timestamp.clone());
+        if self.recording_state != RecordingStatusState::Failed
+            && let Some(recording) = self.recording.as_mut()
             && let Err(error) = recording.write_record(&record)
         {
             self.recording_state = RecordingStatusState::Failed;
@@ -658,11 +906,45 @@ impl SessionCaptureState {
         self.trim_records();
     }
 
+    fn fragment_limit(&self) -> usize {
+        (self.memory_limit_bytes / 4).clamp(4, 64 * 1024)
+    }
+
+    fn buffered_bytes(&self) -> usize {
+        self.input_buffer.len()
+            + self.output_buffer.len()
+            + self.live_echo_buffer.len()
+            + self.input_before_tab.as_ref().map_or(0, String::len)
+            + self.submitted_line_echo.as_ref().map_or(0, String::len)
+            + self.provisional_raw_output.len()
+    }
+
     fn trim_records(&mut self) {
-        while self.records.len() > 1 && self.record_bytes > self.memory_limit_bytes {
+        while self.record_bytes + self.buffered_bytes() > self.memory_limit_bytes {
             if let Some(record) = self.records.pop_front() {
                 self.record_bytes = self.record_bytes.saturating_sub(record.size_bytes);
+                self.history_truncated = true;
+                continue;
             }
+            if !self.provisional_raw_output.is_empty() {
+                let excess = (self.buffered_bytes() - self.memory_limit_bytes)
+                    .min(self.provisional_raw_output.len());
+                self.provisional_raw_output.drain(..excess);
+            } else if !self.live_echo_buffer.is_empty()
+                || self.input_before_tab.is_some()
+                || self.submitted_line_echo.is_some()
+            {
+                self.live_echo_buffer.clear();
+                self.input_before_tab = None;
+                self.submitted_line_echo = None;
+            } else if !self.output_buffer.is_empty() {
+                self.flush_output_lines(true);
+            } else if !self.input_buffer.is_empty() {
+                self.commit_partial_input();
+            } else {
+                break;
+            }
+            self.history_truncated = true;
         }
     }
 
@@ -733,15 +1015,35 @@ impl SessionCaptureState {
     }
 
     fn flush_output_lines(&mut self, flush_partial: bool) {
-        while let Some(pos) = self.output_buffer.find('\n') {
-            let line = self.output_buffer[..pos].to_string();
-            self.output_buffer.drain(..=pos);
-            self.append_record("OUTPUT", line);
+        let limit = self.fragment_limit();
+        if !flush_partial && self.output_buffer.len() < limit {
+            let start = self.output_scan_from.min(self.output_buffer.len());
+            let complete_line = self.output_buffer[start..].contains('\n');
+            self.output_scan_from = self.output_buffer.len();
+            if !complete_line {
+                return;
+            }
         }
-
-        if flush_partial && !self.output_buffer.is_empty() {
-            let tail = mem::take(&mut self.output_buffer);
-            self.append_record("OUTPUT", tail);
+        let buffer = mem::take(&mut self.output_buffer);
+        self.output_scan_from = 0;
+        let mut start = 0;
+        while start < buffer.len() {
+            let tail = &buffer[start..];
+            if let Some(pos) = tail[..utf8_prefix_len(tail, limit)].find('\n') {
+                self.append_record("OUTPUT", tail[..pos].to_string());
+                start += pos + 1;
+            } else if tail.len() >= limit {
+                let end = utf8_prefix_len(tail, limit);
+                self.append_record("OUTPUT", tail[..end].to_string());
+                start += end;
+            } else if flush_partial {
+                self.append_record("OUTPUT", tail.to_string());
+                break;
+            } else {
+                self.output_buffer.push_str(tail);
+                self.output_scan_from = tail.len();
+                break;
+            }
         }
     }
 }
@@ -749,13 +1051,80 @@ impl SessionCaptureState {
 pub struct RecordingManager {
     sessions: Mutex<HashMap<String, SessionCaptureState>>,
     memory_limit_bytes: Mutex<usize>,
+    history_include_input: Mutex<bool>,
+    active_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl RecordingManager {
+    pub fn set_history_include_input(&self, enabled: bool) {
+        *lock_recover(&self.history_include_input) = enabled;
+        for state in lock_recover(&self.sessions).values_mut() {
+            state.history_include_input = enabled;
+            if !state.includes_input() {
+                state.input_buffer.clear();
+                state.input_before_tab = None;
+                state.live_echo_buffer.clear();
+                state.submitted_line_echo = None;
+                state.pending_input_escape = None;
+            }
+        }
+    }
+
+    pub fn capture_policy(&self, session_id: &str) -> RecordingCapturePolicy {
+        let sessions = lock_recover(&self.sessions);
+        if let Some(file) = sessions
+            .get(session_id)
+            .and_then(|state| state.recording.as_ref())
+        {
+            RecordingCapturePolicy {
+                mode: file.profile.mode,
+                include_input: file.profile.include_input,
+                include_binary_transfer_payloads: file.profile.include_binary_transfer_payloads,
+            }
+        } else {
+            RecordingCapturePolicy {
+                include_input: *lock_recover(&self.history_include_input),
+                ..Default::default()
+            }
+        }
+    }
+
+    pub fn write_raw_output(&self, session_id: &str, data: &[u8]) {
+        let memory_limit = *lock_recover(&self.memory_limit_bytes);
+        let mut sessions = lock_recover(&self.sessions);
+        let state = sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionCaptureState::new(memory_limit));
+        state.write_raw_output(data);
+    }
+
+    pub fn flush_recordings(&self) {
+        for state in lock_recover(&self.sessions).values_mut() {
+            if let Some(file) = state.recording.as_mut()
+                && let Err(error) = file.flush()
+            {
+                state.mark_failed(error.to_string());
+            }
+        }
+    }
+
+    pub fn finish_all(&self) -> Vec<RecordingError> {
+        let mut errors = Vec::new();
+        for state in lock_recover(&self.sessions).values_mut() {
+            if state.recording.is_some()
+                && let Err(error) = state.stop_recording()
+            {
+                errors.push(error);
+            }
+        }
+        errors
+    }
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             memory_limit_bytes: Mutex::new(DEFAULT_MEMORY_LIMIT_BYTES),
+            history_include_input: Mutex::new(false),
+            active_paths: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -786,6 +1155,7 @@ impl RecordingManager {
             rotation: RecordingRotationPolicy::Session,
             existing_file_behavior: ExistingFileBehavior::Overwrite,
             include_binary_transfer_payloads: false,
+            include_input: *lock_recover(&self.history_include_input),
         };
         let context = RecordingContext {
             session_id: session_id.to_string(),
@@ -810,29 +1180,48 @@ impl RecordingManager {
         profile: RecordingProfile,
         explicit_path: Option<PathBuf>,
     ) -> Result<String, RecordingError> {
+        let mut sessions = lock_recover(&self.sessions);
+        if sessions
+            .get(session_id)
+            .is_some_and(|state| state.recording.is_some())
+        {
+            return Err(RecordingError::Config(
+                "recording is already active".to_string(),
+            ));
+        }
+        let is_explicit = explicit_path.is_some();
         let requested_path = match explicit_path {
             Some(path) => path,
             None => resolve_recording_path(&profile, &context, None)?,
         };
-        let path = open_collision_safe_path(&requested_path, profile.existing_file_behavior)?;
-        let file = open_recording_file(&path, profile.existing_file_behavior)?;
+        if profile.existing_file_behavior != ExistingFileBehavior::Unique {
+            reject_active_path(&sessions, &requested_path)?;
+        }
+        if profile.existing_file_behavior != ExistingFileBehavior::Unique
+            && profile.mode == RecordingMode::Raw
+            && profile.include_input
+        {
+            reject_active_path(&sessions, &input_recording_path(&requested_path))?;
+        }
+        let (path, file, input_file) = open_recording_pair(
+            &requested_path,
+            profile.existing_file_behavior,
+            profile.mode == RecordingMode::Raw && profile.include_input,
+        )?;
         let memory_limit_bytes = *lock_recover(&self.memory_limit_bytes);
-
-        let mut sessions = lock_recover(&self.sessions);
         let state = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionCaptureState::new(memory_limit_bytes));
         state.set_memory_limit(memory_limit_bytes);
-        state.start_recording(file, path.clone(), profile.clone(), context.clone())?;
-        if profile.mode == RecordingMode::Transcript
-            && profile.include_session_metadata
-            && let Some(recording) = state.recording.as_mut()
-            && let Err(error) = recording.write_bytes(format_session_header(&context).as_bytes())
-        {
-            state.recording = None;
-            state.mark_failed(error.to_string());
-            return Err(error);
-        }
+        state.start_recording(FileRecording::new(
+            file,
+            input_file,
+            path.clone(),
+            is_explicit,
+            profile,
+            context,
+            Arc::clone(&self.active_paths),
+        )?)?;
         Ok(path.to_string_lossy().to_string())
     }
 
@@ -842,6 +1231,13 @@ impl RecordingManager {
             .get_mut(session_id)
             .ok_or_else(|| RecordingError::Config("no active recording".to_string()))?;
         state.stop_recording()
+    }
+
+    pub fn stop_complete(&self, session_id: &str) -> Result<RecordingCompletion, RecordingError> {
+        lock_recover(&self.sessions)
+            .get_mut(session_id)
+            .ok_or_else(|| RecordingError::Config("no active recording".into()))?
+            .stop_complete()
     }
 
     pub fn status(&self, session_id: &str) -> Option<RecordingStatus> {
@@ -864,25 +1260,79 @@ impl RecordingManager {
         include_io_labels: bool,
         include_timestamps: bool,
     ) -> Result<String, RecordingError> {
-        let path = prepare_output_file_path(file_path)?;
-        let records = {
-            let mut sessions = lock_recover(&self.sessions);
-            sessions
-                .get_mut(session_id)
-                .map(SessionCaptureState::snapshot_records)
-                .unwrap_or_default()
-        };
+        self.save_transcript_impl(
+            session_id,
+            file_path,
+            include_io_labels,
+            include_timestamps,
+            false,
+        )
+    }
 
-        let mut writer = BufWriter::new(File::create(&path)?);
+    pub fn save_transcript_unique(
+        &self,
+        session_id: &str,
+        file_path: &str,
+        include_io_labels: bool,
+        include_timestamps: bool,
+    ) -> Result<String, RecordingError> {
+        self.save_transcript_impl(
+            session_id,
+            file_path,
+            include_io_labels,
+            include_timestamps,
+            true,
+        )
+    }
+
+    fn save_transcript_impl(
+        &self,
+        session_id: &str,
+        file_path: &str,
+        include_io_labels: bool,
+        include_timestamps: bool,
+        unique: bool,
+    ) -> Result<String, RecordingError> {
+        let sessions = lock_recover(&self.sessions);
+        let path = prepare_output_file_path(file_path)?;
+        reject_active_path(&sessions, &path)?;
+        let records = sessions
+            .get(session_id)
+            .map(SessionCaptureState::snapshot_records)
+            .unwrap_or_default();
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         for record in &records {
-            writer.write_all(
+            temporary.write_all(
                 record
                     .format(include_io_labels, include_timestamps)
                     .as_bytes(),
             )?;
         }
-        writer.flush()?;
-        Ok(path.to_string_lossy().to_string())
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        let mut candidate = path.clone();
+        for index in 0..10_000 {
+            if unique {
+                match temporary.persist_noclobber(&candidate) {
+                    Ok(_) => return Ok(candidate.to_string_lossy().into_owned()),
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        temporary = error.file;
+                        candidate = append_numbered_suffix(path.clone(), index + 1);
+                    }
+                    Err(error) => return Err(error.error.into()),
+                }
+            } else {
+                temporary.persist(&candidate).map_err(|error| error.error)?;
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
+        }
+        Err(RecordingError::Config(
+            "too many transcript file collisions".into(),
+        ))
     }
 
     pub fn search_history(
@@ -908,9 +1358,9 @@ impl RecordingManager {
             .unwrap_or(DEFAULT_HISTORY_SEARCH_LINES)
             .clamp(1, MAX_HISTORY_SEARCH_LINES);
         let records = {
-            let mut sessions = lock_recover(&self.sessions);
+            let sessions = lock_recover(&self.sessions);
             sessions
-                .get_mut(&request.session_id)
+                .get(&request.session_id)
                 .map(SessionCaptureState::snapshot_records)
                 .unwrap_or_default()
         };
@@ -947,7 +1397,11 @@ impl RecordingManager {
         Ok(TerminalHistorySearchResponse {
             total,
             elapsed_ms: started.elapsed().as_millis(),
-            truncated: total > results.len() || records.len() > max_lines,
+            truncated: total > results.len()
+                || records.len() > max_lines
+                || lock_recover(&self.sessions)
+                    .get(&request.session_id)
+                    .is_some_and(|state| state.history_truncated),
             results,
         })
     }
@@ -985,8 +1439,19 @@ impl RecordingManager {
         let state = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionCaptureState::new(memory_limit_bytes));
+        state.history_include_input = *lock_recover(&self.history_include_input);
         state.set_memory_limit(memory_limit_bytes);
         state.write_output(data);
+    }
+
+    pub fn write_local_message(&self, session_id: &str, text: &str) {
+        let budget = *lock_recover(&self.memory_limit_bytes);
+        let mut sessions = lock_recover(&self.sessions);
+        let state = sessions
+            .entry(session_id.into())
+            .or_insert_with(|| SessionCaptureState::new(budget));
+        state.batch_timestamp = chrono_timestamp();
+        state.append_record("SYSTEM", text.to_string());
     }
 
     pub fn write_input(&self, session_id: &str, data: &[u8]) {
@@ -995,6 +1460,7 @@ impl RecordingManager {
         let state = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionCaptureState::new(memory_limit_bytes));
+        state.history_include_input = *lock_recover(&self.history_include_input);
         state.set_memory_limit(memory_limit_bytes);
         state.write_input(data);
     }
@@ -1012,15 +1478,14 @@ impl RecordingManager {
         let state = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| SessionCaptureState::new(memory_limit_bytes));
+        state.history_include_input = *lock_recover(&self.history_include_input);
         state.set_memory_limit(memory_limit_bytes);
         state.write_raw_input(data);
     }
 
     pub fn report_dropped(&self, session_id: &str, bytes: usize) {
         let mut sessions = lock_recover(&self.sessions);
-        if let Some(state) = sessions.get_mut(session_id)
-            && state.recording.is_some()
-        {
+        if let Some(state) = sessions.get_mut(session_id) {
             state.report_dropped(bytes);
         }
     }
@@ -1068,6 +1533,7 @@ fn recording_status_for_state(
         state: state.recording_state,
         mode: recording.profile.mode,
         file_path: Some(recording.file_path.clone()),
+        input_file_path: recording.input_file_path.clone(),
         started_at: Some(recording.context.started_at),
         written_bytes: recording.written_bytes,
         queued_bytes: 0,
@@ -1080,6 +1546,144 @@ impl Default for RecordingManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn utf8_prefix_len(text: &str, limit: usize) -> usize {
+    let mut end = limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        text.chars().next().map_or(0, char::len_utf8)
+    } else {
+        end
+    }
+}
+
+fn utf8_fragments(text: &str, limit: usize) -> impl Iterator<Item = &str> {
+    let mut remaining = text;
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let end = utf8_prefix_len(remaining, limit);
+        let (fragment, tail) = remaining.split_at(end);
+        remaining = tail;
+        Some(fragment)
+    })
+}
+
+fn input_recording_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".input.bin");
+    PathBuf::from(name)
+}
+
+fn append_named_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match path.extension() {
+        Some(extension) => format!("{stem}-{suffix}.{}", extension.to_string_lossy()),
+        None => format!("{stem}-{suffix}"),
+    };
+    path.with_file_name(name)
+}
+
+fn open_recording_pair(
+    requested: &Path,
+    behavior: ExistingFileBehavior,
+    include_input: bool,
+) -> Result<(PathBuf, File, Option<File>), RecordingError> {
+    prepare_output_file_path(&requested.to_string_lossy())?;
+    for index in 0..10_000 {
+        let path = if index == 0 {
+            requested.to_path_buf()
+        } else {
+            append_numbered_suffix(requested.to_path_buf(), index)
+        };
+        let input_path = input_recording_path(&path);
+        if behavior == ExistingFileBehavior::Unique && include_input && input_path.exists() {
+            continue;
+        }
+        let open = |path: &Path| {
+            if behavior == ExistingFileBehavior::Overwrite {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)
+                    .map_err(RecordingError::Io)
+            } else {
+                open_recording_file(path, behavior)
+            }
+        };
+        let file = match open(&path) {
+            Err(RecordingError::Io(error))
+                if behavior == ExistingFileBehavior::Unique
+                    && error.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                continue;
+            }
+            result => result?,
+        };
+        let input_file = if include_input {
+            match open(&input_path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    drop(file);
+                    if behavior == ExistingFileBehavior::Unique {
+                        let _ = fs::remove_file(&path);
+                        if matches!(&error, RecordingError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+                        {
+                            continue;
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if behavior == ExistingFileBehavior::Overwrite {
+            if let Some(input) = input_file.as_ref() {
+                if same_file::is_same_file(&path, &input_path)? {
+                    return Err(RecordingError::Config(
+                        "output and input destinations alias the same file".into(),
+                    ));
+                }
+                input.metadata()?;
+            }
+            file.metadata()?;
+            // Opening the companion may fail (permissions/directory); no existing bytes
+            // are removed until both handles have been obtained successfully.
+            file.set_len(0)?;
+            if let Some(input) = input_file.as_ref() {
+                input.set_len(0)?;
+            }
+        }
+        return Ok((path, file, input_file));
+    }
+    Err(RecordingError::Config(
+        "failed to reserve a unique recording file".into(),
+    ))
+}
+
+fn reject_active_path(
+    sessions: &HashMap<String, SessionCaptureState>,
+    path: &Path,
+) -> Result<(), RecordingError> {
+    for file in sessions
+        .values()
+        .filter_map(|state| state.recording.as_ref())
+    {
+        for active in std::iter::once(&file.file_path).chain(file.input_file_path.iter()) {
+            if path == active || (path.exists() && same_file::is_same_file(path, active)?) {
+                return Err(RecordingError::Config(
+                    "destination is an active recording file".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn safe_recording_name(name: &str) -> String {
@@ -1235,26 +1839,6 @@ fn sanitize_path_segment(segment: &str) -> String {
     } else {
         safe
     }
-}
-
-fn open_collision_safe_path(
-    requested: &Path,
-    behavior: ExistingFileBehavior,
-) -> Result<PathBuf, RecordingError> {
-    prepare_output_file_path(&requested.to_string_lossy())?;
-    if behavior != ExistingFileBehavior::Unique || !requested.exists() {
-        return Ok(requested.to_path_buf());
-    }
-    for index in 1..10_000u64 {
-        let candidate = append_numbered_suffix(requested.to_path_buf(), index);
-        if !candidate.exists() {
-            prepare_output_file_path(&candidate.to_string_lossy())?;
-            return Ok(candidate);
-        }
-    }
-    Err(RecordingError::Config(
-        "failed to find a unique recording file name".to_string(),
-    ))
 }
 
 fn open_recording_file(
@@ -1645,109 +2229,9 @@ fn context_records(
         .collect()
 }
 
+#[cfg(test)]
 fn strip_terminal_control_sequences(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\x1b' => {
-                i += 1;
-                if i >= bytes.len() {
-                    break;
-                }
-                match bytes[i] {
-                    b'[' => {
-                        i += 1;
-                        while i < bytes.len() {
-                            let b = bytes[i];
-                            i += 1;
-                            if (0x40..=0x7e).contains(&b) {
-                                break;
-                            }
-                        }
-                    }
-                    b']' => {
-                        i += 1;
-                        while i < bytes.len() {
-                            if bytes[i] == b'\x07' {
-                                i += 1;
-                                break;
-                            }
-                            if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    b'P' | b'X' | b'^' | b'_' => {
-                        i += 1;
-                        while i < bytes.len() {
-                            if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    _ => {
-                        advance_one_char(text, &mut i);
-                    }
-                }
-            }
-            b'\r' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    out.push('\n');
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            b'\n' | b'\t' => {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            b if b.is_ascii_control() => {
-                i += 1;
-            }
-            b if b.is_ascii() => {
-                out.push(b as char);
-                i += 1;
-            }
-            _ => {
-                if !text.is_char_boundary(i) {
-                    i += 1;
-                    continue;
-                }
-                let Some(ch) = text[i..].chars().next() else {
-                    break;
-                };
-                out.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-    }
-
-    out
-}
-
-fn advance_one_char(text: &str, index: &mut usize) {
-    if *index >= text.len() {
-        return;
-    }
-
-    if !text.is_char_boundary(*index) {
-        *index += 1;
-        return;
-    }
-
-    if let Some(ch) = text[*index..].chars().next() {
-        *index += ch.len_utf8();
-    } else {
-        *index = text.len();
-    }
+    RecordingSanitizer::default().feed(text)
 }
 
 #[cfg(test)]
@@ -1758,6 +2242,12 @@ mod tests {
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn input_enabled_manager() -> RecordingManager {
+        let manager = RecordingManager::new();
+        manager.set_history_include_input(true);
+        manager
+    }
 
     fn unique_path(name: &str) -> String {
         let nanos = SystemTime::now()
@@ -1772,7 +2262,7 @@ mod tests {
 
     #[test]
     fn transcript_survives_disconnect_and_multiple_rekeys() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("rekey-transcript");
         manager.write_output("s1", "first\n");
         manager.disconnect_session("s1");
@@ -1797,7 +2287,7 @@ mod tests {
 
     #[test]
     fn recording_rekey_keeps_file_and_merges_early_output_without_crossing_sessions() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("rekey-file");
         let other_path = unique_path("rekey-other");
         let transcript_path = unique_path("rekey-merged");
@@ -1835,7 +2325,7 @@ mod tests {
 
     #[test]
     fn raw_recording_rekey_preserves_early_wire_output() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = std::path::PathBuf::from(unique_path("raw-rekey"));
         let profile = super::RecordingProfile {
             mode: super::RecordingMode::Raw,
@@ -1847,6 +2337,7 @@ mod tests {
             rotation: super::RecordingRotationPolicy::Session,
             existing_file_behavior: super::ExistingFileBehavior::Overwrite,
             include_binary_transfer_payloads: false,
+            include_input: true,
         };
         let context = super::RecordingContext {
             session_id: "s1".to_string(),
@@ -1863,11 +2354,11 @@ mod tests {
         manager
             .start_with_profile("s1", context, profile, Some(path.clone()))
             .unwrap();
-        manager.write_output("s1", "before\n");
+        manager.write_raw_output("s1", b"before\n");
         manager.disconnect_session("s1");
-        manager.write_output("s2", "\x1b[32mearly\x1b[0m\n");
+        manager.write_raw_output("s2", b"\x1b[32mearly\x1b[0m\n");
         manager.rekey_session("s1", "s2");
-        manager.write_output("s2", "after\n");
+        manager.write_raw_output("s2", b"after\n");
         manager.stop("s2").unwrap();
         assert_eq!(
             fs::read(&path).unwrap(),
@@ -1921,7 +2412,7 @@ mod tests {
 
     #[test]
     fn writes_recording_with_and_without_io_labels() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let labeled_path = unique_path("labels");
         manager.start("s1", &labeled_path, true, true).unwrap();
         manager.write_input("s1", b"echo hi\r");
@@ -1948,7 +2439,7 @@ mod tests {
 
     #[test]
     fn writes_recording_without_timestamps() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
 
         let labeled_path = unique_path("no-timestamp-labels");
         manager.start("s1", &labeled_path, true, false).unwrap();
@@ -1972,7 +2463,7 @@ mod tests {
 
     #[test]
     fn text_input_records_logical_utf8_text() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("logical-input");
 
         manager.start("s1", &path, true, false).unwrap();
@@ -1988,7 +2479,7 @@ mod tests {
 
     #[test]
     fn tab_completion_uses_terminal_line_and_drops_partial_repaint() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("tab-completion");
         manager.write_input("s1", b"vi ins");
         manager.write_input("s1", b"\t");
@@ -2006,7 +2497,7 @@ mod tests {
 
     #[test]
     fn tab_completion_keeps_complete_candidate_lines() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("tab-candidates");
         manager.write_input("s1", b"vi ins");
         manager.write_input("s1", b"\t\t");
@@ -2024,7 +2515,7 @@ mod tests {
 
     #[test]
     fn tab_completion_recovers_when_more_text_is_typed_before_enter() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("tab-continued-input");
         manager.write_input("s1", b"vi ins\t");
         manager.write_output("s1", "\r\x1b[2Kvi install-node-exporter.sh");
@@ -2042,7 +2533,7 @@ mod tests {
 
     #[test]
     fn resync_without_tab_preserves_manual_input_and_backspace() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("manual-input");
         manager.write_input("s1", b"vi nginx_cp.confx\x7f");
         manager.write_input("s1", b"\x1b[D");
@@ -2059,7 +2550,7 @@ mod tests {
 
     #[test]
     fn raw_input_records_exact_bytes_as_hex() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("raw-input");
         let bytes = [0x00, 0xff, 0x1b, b'[', b'A'];
 
@@ -2086,7 +2577,7 @@ mod tests {
 
     #[test]
     fn raw_recording_keeps_tab_and_terminal_bytes_unchanged() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = std::path::PathBuf::from(unique_path("raw-tab"));
         let profile = super::RecordingProfile {
             mode: super::RecordingMode::Raw,
@@ -2098,6 +2589,7 @@ mod tests {
             rotation: super::RecordingRotationPolicy::Session,
             existing_file_behavior: super::ExistingFileBehavior::Overwrite,
             include_binary_transfer_payloads: false,
+            include_input: true,
         };
         let context = super::RecordingContext {
             session_id: "s1".to_string(),
@@ -2115,21 +2607,26 @@ mod tests {
             .start_with_profile("s1", context, profile, Some(path.clone()))
             .unwrap();
         manager.write_raw_input("s1", b"vi ins\t");
-        manager.write_output("s1", "\r\x1b[2Kvi install-node-exporter.sh");
+        manager.write_raw_output("s1", b"\r\x1b[2Kvi install-node-exporter.sh");
         manager.resync_input_line("s1", "[root@rocky9 ~]# vi install-node-exporter.sh");
         manager.write_raw_input("s1", b"\r");
         manager.stop("s1").unwrap();
 
         assert_eq!(
             fs::read(&path).unwrap(),
-            b"vi ins\t\r\x1b[2Kvi install-node-exporter.sh\r"
+            b"\r\x1b[2Kvi install-node-exporter.sh"
         );
+        assert_eq!(
+            fs::read(super::input_recording_path(&path)).unwrap(),
+            b"vi ins\t\r"
+        );
+        let _ = fs::remove_file(super::input_recording_path(&path));
         let _ = fs::remove_file(path);
     }
 
     #[test]
     fn terminal_protocol_input_sequences_do_not_pollute_recorded_text() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("protocol-input");
 
         manager.write_input("s1", b"\x1b[A");
@@ -2149,7 +2646,7 @@ mod tests {
 
     #[test]
     fn split_terminal_protocol_input_sequences_do_not_pollute_recorded_text() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let path = unique_path("split-protocol-input");
 
         manager.write_input("s1", b"echo ");
@@ -2175,7 +2672,7 @@ mod tests {
 
     #[test]
     fn saves_memory_transcript_and_trims_old_records() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.set_memory_limit(90);
         manager.write_output("s1", "first line\n");
         manager.write_output("s1", "second line\n");
@@ -2193,7 +2690,7 @@ mod tests {
 
     #[test]
     fn terminal_history_search_finds_literal_matches() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.write_output("s1", "alpha\nbeta install\nbeta done\n");
 
         let result = manager
@@ -2220,7 +2717,7 @@ mod tests {
 
     #[test]
     fn terminal_history_search_honors_case_and_whole_word() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.write_output("s1", "install\nInstall\ninstaller\n");
 
         let case_sensitive = manager
@@ -2257,7 +2754,7 @@ mod tests {
 
     #[test]
     fn terminal_history_search_supports_regex_limit_and_truncation() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.write_output("s1", "error 100\nerror 200\nok\n");
 
         let result = manager
@@ -2282,7 +2779,7 @@ mod tests {
 
     #[test]
     fn recording_does_not_backfill_existing_memory() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.write_output("s1", "before\n");
 
         let path = unique_path("no-backfill");
@@ -2299,7 +2796,7 @@ mod tests {
 
     #[test]
     fn recording_does_not_backfill_partial_output_buffer() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         manager.write_output("s1", "prompt without newline");
 
         let path = unique_path("no-partial-backfill");
@@ -2316,10 +2813,10 @@ mod tests {
 
     #[test]
     fn rotation_write_failure_marks_recording_failed_and_surfaces_on_stop() {
-        let manager = RecordingManager::new();
+        let manager = input_enabled_manager();
         let initial_path = std::path::PathBuf::from(unique_path("rotation-initial"));
         let blocked_base_path = std::path::PathBuf::from(unique_path("rotation-blocked-base"));
-        fs::write(&blocked_base_path, b"not a directory").unwrap();
+        fs::create_dir(super::append_numbered_suffix(initial_path.clone(), 1)).unwrap();
         let context = super::RecordingContext {
             session_id: "s1".to_string(),
             session_name: "session".to_string(),
@@ -2342,11 +2839,13 @@ mod tests {
             rotation: super::RecordingRotationPolicy::Size { max_bytes: 1 },
             existing_file_behavior: super::ExistingFileBehavior::Overwrite,
             include_binary_transfer_payloads: false,
+            include_input: true,
         };
 
         manager
             .start_with_profile("s1", context, profile, Some(initial_path.clone()))
             .unwrap();
+        manager.write_output("s1", "first\n");
         manager.write_output("s1", "rotation must fail\n");
 
         let status = manager
@@ -2359,7 +2858,8 @@ mod tests {
             .expect_err("stop must surface the failure");
         assert!(matches!(error, super::RecordingError::Runtime(_)));
 
-        let _ = fs::remove_file(initial_path);
+        let _ = fs::remove_file(&initial_path);
         let _ = fs::remove_file(blocked_base_path);
+        let _ = fs::remove_dir(super::append_numbered_suffix(initial_path, 1));
     }
 }

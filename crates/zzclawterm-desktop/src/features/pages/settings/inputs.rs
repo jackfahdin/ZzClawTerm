@@ -31,6 +31,88 @@ use crate::models::{
 };
 
 impl ZzClawTermApp {
+    /// Rebase existing buffers after a save or rollback without creating inactive inputs.
+    pub(in crate::features) fn reset_ai_settings_inputs(&mut self, cx: &mut Context<Self>) {
+        let config = self.ai.settings_config().clone();
+        for (field, value) in [
+            (AiInputField::RequestUserAgent, config.request_user_agent),
+            (AiInputField::ProxyHost, config.proxy.host.clone()),
+            (AiInputField::ProxyPort, config.proxy.port.to_string()),
+            (
+                AiInputField::ProxyUsername,
+                config.proxy.username.clone().unwrap_or_default(),
+            ),
+            (
+                AiInputField::ProxyPassword,
+                config
+                    .proxy
+                    .password
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            (AiInputField::ProxyBypass, config.proxy.no_proxy.clone()),
+            (
+                AiInputField::CodexExecutable,
+                config.codex.executable_path.unwrap_or_default(),
+            ),
+            (
+                AiInputField::CodexDefaultModel,
+                config.codex.default_model.unwrap_or_default(),
+            ),
+            (
+                AiInputField::CodexConfigDirectory,
+                config.codex.config_directory.unwrap_or_default(),
+            ),
+            (
+                AiInputField::ClaudeExecutable,
+                config.claude_code.executable_path.unwrap_or_default(),
+            ),
+            (
+                AiInputField::ClaudeDefaultModel,
+                config.claude_code.default_model.unwrap_or_default(),
+            ),
+            (
+                AiInputField::ClaudeConfigDirectory,
+                config.claude_code.config_directory.unwrap_or_default(),
+            ),
+        ] {
+            if let Some(input) = self.existing_text_input(format!("ai.input.{}", field.input_key()))
+            {
+                input.update(cx, |input, cx| input.set_content_silent(&value, cx));
+            }
+        }
+        for (id, value) in [
+            ("context-line-limit", config.context_line_limit.to_string()),
+            ("timeout-ms", config.timeout_ms.to_string()),
+            (
+                "agent-steps",
+                config.max_agent_steps.unwrap_or(10).to_string(),
+            ),
+            (
+                "agent-step-timeout-ms",
+                config.agent_step_timeout_ms.unwrap_or(30_000).to_string(),
+            ),
+            (
+                "terminal-output-lines",
+                config.terminal_output_lines.to_string(),
+            ),
+            (
+                "file-size-mb",
+                (config.max_ai_file_size_bytes / (1024 * 1024))
+                    .max(1)
+                    .to_string(),
+            ),
+        ] {
+            if let Some(input) = self
+                .number_input_fields_snapshot()
+                .get(format!("ai.number.{id}").as_str())
+            {
+                input.update(cx, |input, cx| input.set_content_silent(&value, cx));
+            }
+        }
+    }
+
     /// Build every input the given tab draws.
     ///
     /// Called when the Settings page opens and whenever a tab is activated. Cheap to
@@ -69,6 +151,8 @@ impl ZzClawTermApp {
         tab: SettingsTab,
         cx: &mut Context<Self>,
     ) {
+        self.hide_ai_provider_secret(cx);
+        self.ai.invalidate_provider_jobs();
         self.ensure_settings_tab_inputs(tab, cx);
         self.shell.set_settings_active_tab(tab);
         self.request_settings_panel_refresh(cx);
@@ -475,6 +559,32 @@ impl ZzClawTermApp {
             cx,
         );
         let config = self.ai.settings_config().clone();
+        for (field, value) in [
+            (AiInputField::ProxyHost, config.proxy.host.clone()),
+            (AiInputField::ProxyPort, config.proxy.port.to_string()),
+            (
+                AiInputField::ProxyUsername,
+                config.proxy.username.clone().unwrap_or_default(),
+            ),
+            (
+                AiInputField::ProxyPassword,
+                config
+                    .proxy
+                    .password
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            (AiInputField::ProxyBypass, config.proxy.no_proxy.clone()),
+        ] {
+            self.ensure_text_input(
+                format!("ai.input.{}", field.input_key()),
+                &value,
+                secret_input_setup(field == AiInputField::ProxyPassword),
+                cx,
+            );
+        }
+
         for (id, value, min, max, step) in [
             (
                 "ai.number.context-line-limit",
@@ -524,6 +634,8 @@ impl ZzClawTermApp {
     }
 
     fn ensure_ai_model_inputs(&mut self, cx: &mut Context<Self>) {
+        self.ai.prepare_provider_settings();
+        self.load_ai_provider_icons(cx);
         let credential_ids: Vec<String> = self
             .ai
             .settings_config()
@@ -534,13 +646,6 @@ impl ZzClawTermApp {
         for credential_id in credential_ids {
             self.ensure_ai_credential_inputs(&credential_id, cx);
         }
-        let query = self.ai.settings_model_query().to_string();
-        self.ensure_text_input(
-            "ai.settings.model-search",
-            &query,
-            TextInputSetup::placeholder(t!("ai.searchModels")),
-            cx,
-        );
     }
 
     /// Build the inputs a provider credential row draws.
@@ -583,7 +688,14 @@ impl ZzClawTermApp {
             self.ensure_text_input(
                 format!("ai.credential.{credential_id}.{suffix}"),
                 &value,
-                secret_input_setup(secret_field),
+                TextInputSetup {
+                    placeholder: if secret_field && credential.api_key.is_some() {
+                        "••••••••".into()
+                    } else {
+                        "".into()
+                    },
+                    ..secret_input_setup(secret_field)
+                },
                 cx,
             );
         }
@@ -668,7 +780,9 @@ pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use std::path::Path;
+    use zzclawterm_ui::ZzClawInputEvent;
 
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, Render, Subscription, TestAppContext,
@@ -677,7 +791,6 @@ mod tests {
     use zzclawterm_core::{AppRuntime, CloudSyncState, RuntimeMode};
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::features::sync::CloudSyncLiveState;
     use crate::models::{AiActionEditorField, AiActionListKind, NavItem, SettingsTab};
     use crate::test_support::TestConfigDir;
@@ -771,6 +884,53 @@ mod tests {
     /// The release half of the lifecycle is proven by these tests reaching teardown at
     /// all: `TestAppContext` fails on any entity still reachable when it drops, so a
     /// clean exit is the assertion that nothing but the app retains them.
+    #[test]
+    fn cancelling_ai_settings_restores_existing_text_and_number_buffers() {
+        let test_dir = TestConfigDir::new("zzclawterm-ai-input-rollback");
+        let mut cx = TestAppContext::single();
+        let app = hosted(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.ensure_settings_tab_inputs(SettingsTab::AiGeneral, cx);
+            app.ensure_settings_tab_inputs(SettingsTab::AiAgents, cx);
+            let baseline = app.ai.settings_config().clone();
+            app.reset_text_input("ai.input.request-user-agent", "edited-agent", cx);
+            app.reset_text_input("ai.input.codex-executable", "edited-codex", cx);
+            app.reset_number_input("ai.number.timeout-ms", "9000", cx);
+            app.apply_ai_input(
+                crate::models::AiInputField::RequestUserAgent,
+                "edited-agent".into(),
+                cx,
+            );
+            app.apply_ai_input(
+                crate::models::AiInputField::CodexExecutable,
+                "edited-codex".into(),
+                cx,
+            );
+            app.set_ai_timeout_ms(9000, cx);
+            app.cancel_settings(cx);
+            assert_eq!(app.ai.settings_config(), &baseline);
+            for (id, expected) in [
+                ("ai.input.request-user-agent", baseline.request_user_agent),
+                (
+                    "ai.input.codex-executable",
+                    baseline.codex.executable_path.unwrap_or_default(),
+                ),
+            ] {
+                assert_eq!(
+                    app.existing_text_input(id).unwrap().read(cx).value(cx),
+                    expected
+                );
+            }
+            assert_eq!(
+                app.number_input_fields_snapshot()["ai.number.timeout-ms"]
+                    .read(cx)
+                    .value(cx),
+                baseline.timeout_ms.to_string()
+            );
+        });
+    }
+
     #[test]
     fn static_settings_inputs_outlive_the_page() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
@@ -901,13 +1061,17 @@ mod tests {
                 app.focus_settings_tab(SettingsTab::AiModels, cx)
             });
         });
-        vcx.update(|window, cx| app.update(cx, |app, cx| app.add_ai_credential(window, cx)));
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.add_ai_provider_preset(zzclawterm_core::AiProviderKind::OpenaiCompatible, cx)
+            })
+        });
         let credential_id = vcx.update(|_, cx| {
             app.read(cx)
                 .ai
                 .settings_config()
                 .provider_credentials
-                .last()
+                .first()
                 .expect("the credential was added")
                 .id
                 .clone()
@@ -1099,8 +1263,6 @@ mod tests {
     /// stops being grey.
     #[test]
     fn master_password_keystroke_enables_the_flushed_panel_apply_button() {
-        use zzclawterm_ui::ZzClawInputEvent;
-
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
         let app = app(&mut cx, test_dir.path());

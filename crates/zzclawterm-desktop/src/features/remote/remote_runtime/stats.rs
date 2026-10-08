@@ -85,6 +85,31 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
+    pub(in crate::features) fn select_stats_network_interface(
+        &mut self,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let interface = match value {
+            "all" => None,
+            value => {
+                let Some(nic) = value.strip_prefix("nic:") else {
+                    return;
+                };
+                Some(nic)
+            }
+        };
+        let Some(session_id) = self.session.active_id() else {
+            return;
+        };
+        if self
+            .remote_ops
+            .select_stats_network_interface(session_id, interface)
+        {
+            self.flush_remote_panel_snapshots(cx);
+        }
+    }
+
     /// Deliver stats job replies as they arrive.
     ///
     /// Started once at window open. Before this the runtime tick polled

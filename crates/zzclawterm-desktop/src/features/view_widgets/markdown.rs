@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use gpui::{
     FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString, StrikethroughStyle,
     StyledText, UnderlineStyle, div, prelude::*, px, rgb,
@@ -8,35 +10,123 @@ use crate::features::formatting::{
 };
 use crate::theme::ThemePalette;
 
+/// Theme-independent parse output, prepared before constructing GPUI elements.
+#[derive(Default)]
+pub(in crate::features) struct PreparedMarkdown {
+    blocks: Vec<MarkdownBlock>,
+    inline: HashMap<String, crate::features::formatting::markdown::InlineMarkdown>,
+}
+
+impl PreparedMarkdown {
+    pub(in crate::features) fn parse(source: &str) -> Self {
+        let blocks = parse_markdown_blocks(source);
+        let mut inline = HashMap::new();
+        let mut prepare = |raw: &str| {
+            inline
+                .entry(raw.to_string())
+                .or_insert_with(|| parse_inline_markdown(raw));
+        };
+        for block in &blocks {
+            match block {
+                MarkdownBlock::Paragraph(text)
+                | MarkdownBlock::Bullet(text)
+                | MarkdownBlock::Numbered { text, .. }
+                | MarkdownBlock::Heading { text, .. } => prepare(text),
+                MarkdownBlock::Quote(text) => {
+                    for line in text.lines() {
+                        prepare(line);
+                    }
+                }
+                MarkdownBlock::Table { headers, rows } => {
+                    prepare("");
+                    for cell in headers.iter().chain(rows.iter().flatten()) {
+                        prepare(cell);
+                    }
+                }
+                MarkdownBlock::Code { .. } | MarkdownBlock::ThematicBreak => {}
+            }
+        }
+        Self { blocks, inline }
+    }
+}
+
+pub(in crate::features) fn prepared_markdown_view(
+    palette: ThemePalette,
+    prepared: &PreparedMarkdown,
+    answer: bool,
+) -> gpui::Div {
+    markdown_prepared_view(
+        palette,
+        prepared,
+        if answer { 14. } else { 12. },
+        if answer { 22. } else { 18. },
+    )
+}
+
 /// Lightweight GFM markdown renderer for AI transcript (Tauri MarkdownContent parity).
 pub(in crate::features) fn markdown_content_view(
     palette: ThemePalette,
     content: &str,
 ) -> impl IntoElement {
-    let blocks = parse_markdown_blocks(content);
+    markdown_view(palette, content, 12., 18.)
+}
+
+fn markdown_view(
+    palette: ThemePalette,
+    content: &str,
+    text_size: f32,
+    line_height: f32,
+) -> gpui::Div {
+    markdown_prepared_view(
+        palette,
+        &PreparedMarkdown::parse(content),
+        text_size,
+        line_height,
+    )
+}
+
+fn markdown_prepared_view(
+    palette: ThemePalette,
+    prepared: &PreparedMarkdown,
+    text_size: f32,
+    line_height: f32,
+) -> gpui::Div {
+    let blocks = &prepared.blocks;
     let mut root = div()
         .min_w_0()
         .w_full()
         .flex()
         .flex_col()
         .gap_1()
-        .text_size(px(12.))
-        .line_height(px(18.));
+        .text_size(px(text_size))
+        .line_height(px(line_height))
+        .when(text_size > 12., |root| root.gap_2());
     if blocks.is_empty() {
         return root;
     }
-    for (index, block) in blocks.into_iter().enumerate() {
-        root = root.child(markdown_block_view(palette, index, block));
+    for (index, block) in blocks.iter().cloned().enumerate() {
+        root = root.child(markdown_block_view(
+            palette,
+            index,
+            block,
+            prepared,
+            text_size,
+            line_height,
+        ));
     }
     root
 }
 
-fn markdown_inline_text(palette: ThemePalette, raw: &str) -> gpui::AnyElement {
-    let parsed = parse_inline_markdown(raw);
+fn markdown_inline_text(
+    palette: ThemePalette,
+    prepared: &PreparedMarkdown,
+    raw: &str,
+) -> gpui::AnyElement {
+    let parsed = prepared.inline.get(raw).expect("all inline nodes prepared");
     if parsed.highlights.is_empty() {
-        return div().child(parsed.text).into_any_element();
+        return div().child(parsed.text.clone()).into_any_element();
     }
-    let highlights = parsed.highlights.into_iter().map(|(range, style)| {
+    let highlights = parsed.highlights.iter().cloned().map(|(range, style)| {
         let highlight = match style {
             InlineMdStyle::Bold => HighlightStyle {
                 font_weight: Some(FontWeight(700.)),
@@ -85,7 +175,7 @@ fn markdown_inline_text(palette: ThemePalette, raw: &str) -> gpui::AnyElement {
         };
         (range, highlight)
     });
-    StyledText::new(parsed.text)
+    StyledText::new(parsed.text.clone())
         .with_highlights(highlights)
         .into_any_element()
 }
@@ -94,14 +184,17 @@ fn markdown_block_view(
     palette: ThemePalette,
     index: usize,
     block: MarkdownBlock,
+    prepared: &PreparedMarkdown,
+    text_size: f32,
+    line_height: f32,
 ) -> gpui::AnyElement {
     match block {
         MarkdownBlock::Paragraph(text) => div()
             .id(SharedString::from(format!("md-p-{index}")))
-            .text_size(px(12.))
+            .text_size(px(text_size))
             .text_color(rgb(palette.text))
-            .line_height(px(18.))
-            .child(markdown_inline_text(palette, &text))
+            .line_height(px(line_height))
+            .child(markdown_inline_text(palette, prepared, &text))
             .into_any_element(),
         MarkdownBlock::Bullet(text) => div()
             .id(SharedString::from(format!("md-ul-{index}")))
@@ -111,7 +204,7 @@ fn markdown_block_view(
             .pl_1()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(text_size))
                     .text_color(rgb(palette.text_muted))
                     .child("•"),
             )
@@ -119,10 +212,10 @@ fn markdown_block_view(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .text_size(px(12.))
+                    .text_size(px(text_size))
                     .text_color(rgb(palette.text))
-                    .line_height(px(18.))
-                    .child(markdown_inline_text(palette, &text)),
+                    .line_height(px(line_height))
+                    .child(markdown_inline_text(palette, prepared, &text)),
             )
             .into_any_element(),
         MarkdownBlock::Numbered { index: n, text } => div()
@@ -133,7 +226,7 @@ fn markdown_block_view(
             .pl_1()
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(text_size))
                     .text_color(rgb(palette.text_muted))
                     .child(format!("{n}.")),
             )
@@ -141,10 +234,10 @@ fn markdown_block_view(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .text_size(px(12.))
+                    .text_size(px(text_size))
                     .text_color(rgb(palette.text))
-                    .line_height(px(18.))
-                    .child(markdown_inline_text(palette, &text)),
+                    .line_height(px(line_height))
+                    .child(markdown_inline_text(palette, prepared, &text)),
             )
             .into_any_element(),
         MarkdownBlock::Code { language, code } => div()
@@ -187,7 +280,7 @@ fn markdown_block_view(
                 body = body.child(
                     div()
                         .id(SharedString::from(format!("md-q-{index}-{qi}")))
-                        .child(markdown_inline_text(palette, line)),
+                        .child(markdown_inline_text(palette, prepared, line)),
                 );
             }
             div()
@@ -195,25 +288,26 @@ fn markdown_block_view(
                 .pl_3()
                 .border_l_2()
                 .border_color(rgb(palette.border))
-                .text_size(px(12.))
+                .text_size(px(text_size))
                 .text_color(rgb(palette.text_muted))
-                .line_height(px(18.))
+                .line_height(px(line_height))
                 .child(body)
                 .into_any_element()
         }
         MarkdownBlock::Heading { level, text } => {
-            let size = match level {
-                1 => 16.,
-                2 => 14.,
-                _ => 13.,
-            };
+            let size = text_size - 12.
+                + match level {
+                    1 => 16.,
+                    2 => 14.,
+                    _ => 13.,
+                };
             div()
                 .id(SharedString::from(format!("md-h-{index}")))
                 .text_size(px(size))
                 .font_weight(FontWeight(800.))
                 .text_color(rgb(palette.text))
                 .line_height(px(size + 4.))
-                .child(markdown_inline_text(palette, &text))
+                .child(markdown_inline_text(palette, prepared, &text))
                 .into_any_element()
         }
         MarkdownBlock::Table { headers, rows } => {
@@ -245,10 +339,10 @@ fn markdown_block_view(
                         .py_1()
                         .border_r_1()
                         .border_color(rgb(palette.border))
-                        .text_size(px(11.))
+                        .text_size(px(text_size - 1.))
                         .font_weight(FontWeight(700.))
                         .text_color(rgb(palette.text))
-                        .child(markdown_inline_text(palette, &cell)),
+                        .child(markdown_inline_text(palette, prepared, &cell)),
                 );
             }
             table = table.child(header_row);
@@ -273,9 +367,9 @@ fn markdown_block_view(
                             .py_1()
                             .border_r_1()
                             .border_color(rgb(palette.surface_elevated))
-                            .text_size(px(11.))
+                            .text_size(px(text_size - 1.))
                             .text_color(rgb(palette.text))
-                            .child(markdown_inline_text(palette, &cell)),
+                            .child(markdown_inline_text(palette, prepared, &cell)),
                     );
                 }
                 table = table.child(body_row);

@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use rust_i18n::t;
 
@@ -7,7 +7,7 @@ use gpui::{
     SharedString, div, prelude::*, px, relative, rgb, rgba,
 };
 use zzclawterm_core::QuickCommand;
-use zzclawterm_ui::{ZzClawContextMenu, ZzClawMenuItem};
+use zzclawterm_ui::ZzClawMenuItem;
 
 use super::super::super::{
     quick_command_icon_mark, quick_command_pin_mark, quick_command_single_line,
@@ -23,7 +23,7 @@ use crate::models::QuickCommandViewMode;
 use super::{QuickCommandDragKind, QuickCommandDragPayload, QuickCommandDragPreview};
 use crate::features::{commands::QuickCommandDropPosition, commands::QuickCommandDropTarget};
 
-const QUICK_COMMAND_MENU_WIDTH: f32 = 148.;
+pub(super) const QUICK_COMMAND_MENU_WIDTH: f32 = 148.;
 
 /// Tauri wraps every command icon in a fixed square so that a color dot and a
 /// brand glyph occupy the same slot and the label does not shift between the two.
@@ -42,6 +42,7 @@ impl ZzClawTermApp {
         &mut self,
         commands: &[QuickCommand],
         palette: crate::theme::ThemePalette,
+        context_target: &Rc<RefCell<Option<String>>>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let view_mode = self.commands.quick_view_mode();
@@ -80,110 +81,103 @@ impl ZzClawTermApp {
                     let tooltip_command_id_for_right_click = command_id.clone();
                     let tooltip_control_for_hover = tile_tooltip_control.clone();
                     let tooltip_command_id_for_hover = command_id.clone();
-                    ZzClawContextMenu::new(
-                        div()
-                            .id(SharedString::from(format!(
-                                "quick-command-tile-{command_id}"
-                            )))
-                            .relative()
-                            // Content-width chip in a wrapping row, like Tauri's
-                            // `max-w-full shrink-0`: it never pads out to a grid cell, and
-                            // only a chip wider than the row truncates.
-                            .flex_none()
-                            .max_w_full()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgba((palette.border << 8) | 0x59))
-                            .bg(rgba((palette.surface_elevated << 8) | 0x33))
-                            .px_2()
-                            .py(px(4.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .cursor_pointer()
-                            .hover(move |this| {
-                                this.bg(rgba((palette.surface_elevated << 8) | 0x80))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_quick_command_by_id(run_command_id.clone(), cx);
-                            }))
-                            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                                tooltip_control_for_right_click
-                                    .dismiss(&tooltip_command_id_for_right_click, cx);
-                            })
-                            .on_hover(move |hovered, _, _| {
-                                if *hovered {
-                                    tooltip_control_for_hover
-                                        .begin_hover(&tooltip_command_id_for_hover);
-                                }
-                            })
-                            .child(quick_command_icon_slot(
-                                14.,
-                                quick_command_icon_mark(
-                                    palette,
-                                    command.icon_tag.as_deref(),
-                                    command.color_tag.as_deref(),
-                                    12.,
-                                ),
-                            ))
-                            .when(command.pinned.unwrap_or_default(), |this| {
-                                this.child(quick_command_pin_mark(palette, 10.))
-                            })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(11.))
-                                    .font_weight(FontWeight(500.))
-                                    .text_color(rgb(palette.text))
-                                    .truncate()
-                                    .child(command.label.clone()),
-                            )
-                            // Tauri's tile hover is the full command card, not a text
-                            // blurb: in tile mode it is the only way to read the command.
-                            // Hoverable so the pointer can enter the card and copy, as
-                            // it can in Tauri's non-`disableHoverableContent` tooltip.
-                            .hoverable_tooltip({
-                                let tooltip_command = command.clone();
-                                let tooltip_category = quick_command_category_label(
-                                    self.commands.quick_command_categories(),
-                                    &command,
+                    div()
+                        .id(SharedString::from(format!(
+                            "quick-command-tile-{command_id}"
+                        )))
+                        .relative()
+                        // Content-width chip in a wrapping row, like Tauri's
+                        // `max-w-full shrink-0`: it never pads out to a grid cell, and
+                        // only a chip wider than the row truncates.
+                        .flex_none()
+                        .max_w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba((palette.border << 8) | 0x59))
+                        .bg(rgba((palette.surface_elevated << 8) | 0x33))
+                        .px_2()
+                        .py(px(4.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .cursor_pointer()
+                        .hover(move |this| this.bg(rgba((palette.surface_elevated << 8) | 0x80)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_quick_command_by_id(run_command_id.clone(), cx);
+                        }))
+                        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                            tooltip_control_for_right_click
+                                .dismiss(&tooltip_command_id_for_right_click, cx);
+                        })
+                        .on_hover(move |hovered, _, _| {
+                            if *hovered {
+                                tooltip_control_for_hover
+                                    .begin_hover(&tooltip_command_id_for_hover);
+                            }
+                        })
+                        .child(quick_command_icon_slot(
+                            14.,
+                            quick_command_icon_mark(
+                                palette,
+                                command.icon_tag.as_deref(),
+                                command.color_tag.as_deref(),
+                                12.,
+                            ),
+                        ))
+                        .when(command.pinned.unwrap_or_default(), |this| {
+                            this.child(quick_command_pin_mark(palette, 10.))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight(500.))
+                                .text_color(rgb(palette.text))
+                                .truncate()
+                                .child(command.label.clone()),
+                        )
+                        // Tauri's tile hover is the full command card, not a text
+                        // blurb: in tile mode it is the only way to read the command.
+                        // Hoverable so the pointer can enter the card and copy, as
+                        // it can in Tauri's non-`disableHoverableContent` tooltip.
+                        .hoverable_tooltip({
+                            let tooltip_command = command.clone();
+                            let tooltip_category = quick_command_category_label(
+                                self.commands.quick_command_categories(),
+                                &command,
+                            );
+                            let tooltip_app = cx.entity().downgrade();
+                            let tooltip_badge = badge_mode.clone();
+                            let tile_tooltip_control = tile_tooltip_control.clone();
+                            let tooltip_command_id = command_id.clone();
+                            move |_, cx| {
+                                let tooltip = cx.new(|_| {
+                                    QuickCommandTooltip::new(
+                                        palette,
+                                        card_surface,
+                                        tooltip_command.clone(),
+                                        tooltip_category.clone(),
+                                        tooltip_badge.clone(),
+                                        tooltip_app.clone(),
+                                        tile_tooltip_control.is_suppressed(&tooltip_command_id),
+                                    )
+                                });
+                                let tooltip_to_dismiss = tooltip.downgrade();
+                                tile_tooltip_control.register(
+                                    tooltip_command_id.clone(),
+                                    Rc::new(move |cx| {
+                                        if let Some(tooltip) = tooltip_to_dismiss.upgrade() {
+                                            tooltip.update(cx, |tooltip, cx| tooltip.dismiss(cx));
+                                        }
+                                    }),
                                 );
-                                let tooltip_app = cx.entity().downgrade();
-                                let tooltip_badge = badge_mode.clone();
-                                let tile_tooltip_control = tile_tooltip_control.clone();
-                                let tooltip_command_id = command_id.clone();
-                                move |_, cx| {
-                                    let tooltip = cx.new(|_| {
-                                        QuickCommandTooltip::new(
-                                            palette,
-                                            card_surface,
-                                            tooltip_command.clone(),
-                                            tooltip_category.clone(),
-                                            tooltip_badge.clone(),
-                                            tooltip_app.clone(),
-                                            tile_tooltip_control.is_suppressed(&tooltip_command_id),
-                                        )
-                                    });
-                                    let tooltip_to_dismiss = tooltip.downgrade();
-                                    tile_tooltip_control.register(
-                                        tooltip_command_id.clone(),
-                                        Rc::new(move |cx| {
-                                            if let Some(tooltip) = tooltip_to_dismiss.upgrade() {
-                                                tooltip
-                                                    .update(cx, |tooltip, cx| tooltip.dismiss(cx));
-                                            }
-                                        }),
-                                    );
-                                    tooltip.into()
-                                }
-                            }),
-                        menu_items,
-                    )
-                    .min_width(px(QUICK_COMMAND_MENU_WIDTH))
-                    .into_any_element()
+                                tooltip.into()
+                            }
+                        })
+                        .into_any_element()
                 }
                 QuickCommandViewMode::Compact => {
-                    // Tauri compact: send + details + more (edit / send-all / delete).
+                    // Compact: send + details + more.
                     let actions = quick_command_row_actions(
                         palette,
                         QuickCommandRowPresentation {
@@ -210,8 +204,7 @@ impl ZzClawTermApp {
                         },
                     );
 
-                    ZzClawContextMenu::new(
-                        div()
+                    div()
                             .id(SharedString::from(format!(
                                 "quick-command-compact-{command_id}"
                             )))
@@ -283,10 +276,7 @@ impl ZzClawTermApp {
                                             .child(command_preview.clone()),
                                     ),
                             )
-                            .child(actions),
-                        menu_items,
-                    )
-                    .min_width(px(QUICK_COMMAND_MENU_WIDTH))
+                            .child(actions)
                     .into_any_element()
                 }
                 QuickCommandViewMode::List => {
@@ -317,106 +307,97 @@ impl ZzClawTermApp {
                         },
                     );
 
-                    ZzClawContextMenu::new(
-                        div()
-                            .id(SharedString::from(format!(
-                                "quick-command-list-{command_id}"
-                            )))
-                            .relative()
-                            .min_h(px(44.))
-                            .w_full()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgba((palette.border << 8) | 0x59))
-                            .bg(rgba((palette.surface_elevated << 8) | 0x26))
-                            .px_2()
-                            .py(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .hover(move |this| {
-                                this.bg(rgba((palette.surface_elevated << 8) | 0x73))
-                            })
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "quick-command-list-run-head-{command_id}"
-                                    )))
-                                    .min_w_0()
-                                    .flex_1()
-                                    .px_1()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.run_quick_command_by_id(
-                                            list_header_command_id.clone(),
-                                            cx,
-                                        );
-                                    }))
-                                    .child(quick_command_icon_slot(
-                                        16.,
-                                        quick_command_icon_mark(
-                                            palette,
-                                            command.icon_tag.as_deref(),
-                                            command.color_tag.as_deref(),
-                                            14.4,
-                                        ),
-                                    ))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(2.))
-                                            .child(
-                                                // The pin sits left of the label, as in
-                                                // Tauri. Trailing a `flex_1` label parked
-                                                // it at the far edge of the row instead.
-                                                div()
-                                                    .min_w_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(6.))
-                                                    .when(
-                                                        command.pinned.unwrap_or_default(),
-                                                        |this| {
-                                                            this.child(quick_command_pin_mark(
-                                                                palette, 11.2,
-                                                            ))
-                                                        },
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .text_xs()
-                                                            .font_weight(FontWeight(500.))
-                                                            .text_color(rgb(palette.text))
-                                                            .truncate()
-                                                            .child(command.label.clone()),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .font_family(
-                                                        crate::features::shell::gpui_code_font_family(),
-                                                    )
-                                                    .text_size(px(11.))
-                                                    .line_height(px(14.))
-                                                    .text_color(rgb(palette.text_muted))
-                                                    .truncate()
-                                                    .child(command_preview.clone()),
-                                            ),
+                    div()
+                        .id(SharedString::from(format!(
+                            "quick-command-list-{command_id}"
+                        )))
+                        .relative()
+                        .min_h(px(44.))
+                        .w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba((palette.border << 8) | 0x59))
+                        .bg(rgba((palette.surface_elevated << 8) | 0x26))
+                        .px_2()
+                        .py(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .hover(move |this| this.bg(rgba((palette.surface_elevated << 8) | 0x73)))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "quick-command-list-run-head-{command_id}"
+                                )))
+                                .min_w_0()
+                                .flex_1()
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.run_quick_command_by_id(
+                                        list_header_command_id.clone(),
+                                        cx,
+                                    );
+                                }))
+                                .child(quick_command_icon_slot(
+                                    16.,
+                                    quick_command_icon_mark(
+                                        palette,
+                                        command.icon_tag.as_deref(),
+                                        command.color_tag.as_deref(),
+                                        14.4,
                                     ),
-                            )
-                            .child(actions),
-                        menu_items,
-                    )
-                    .min_width(px(QUICK_COMMAND_MENU_WIDTH))
-                    .into_any_element()
+                                ))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .child(
+                                            // The pin sits left of the label, as in
+                                            // Tauri. Trailing a `flex_1` label parked
+                                            // it at the far edge of the row instead.
+                                            div()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(6.))
+                                                .when(command.pinned.unwrap_or_default(), |this| {
+                                                    this.child(quick_command_pin_mark(
+                                                        palette, 11.2,
+                                                    ))
+                                                })
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight(500.))
+                                                        .text_color(rgb(palette.text))
+                                                        .truncate()
+                                                        .child(command.label.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .font_family(
+                                                    crate::features::shell::gpui_code_font_family(),
+                                                )
+                                                .text_size(px(11.))
+                                                .line_height(px(14.))
+                                                .text_color(rgb(palette.text_muted))
+                                                .truncate()
+                                                .child(command_preview.clone()),
+                                        ),
+                                ),
+                        )
+                        .child(actions)
+                        .into_any_element()
                 }
             };
 
@@ -424,18 +405,27 @@ impl ZzClawTermApp {
             let drag_command_label = command.label.clone();
             let move_target_id = command.id.clone();
             let drop_target_id = command.id.clone();
+            let row_context_target = context_target.clone();
+            let row_context_command_id = command_id.clone();
+            let row_selector = format!("quick-command-row-{command_id}");
             let tile = view_mode == QuickCommandViewMode::Tile;
             items.push(
                 div()
                     .id(SharedString::from(format!(
                         "quick-command-drag-{command_id}"
                     )))
+                    .debug_selector(move || row_selector.clone())
                     // A tile is one item in a wrapping row, so its wrapper must not claim
                     // the full width the way a list row's does.
                     .when(tile, |this| this.flex_none().min_w_0().max_w_full())
                     .when(!tile, |this| this.w_full())
                     .relative()
                     .cursor_move()
+                    .capture_any_mouse_down(move |event, _, _| {
+                        if event.button == MouseButton::Right {
+                            *row_context_target.borrow_mut() = Some(row_context_command_id.clone());
+                        }
+                    })
                     .on_drag(
                         QuickCommandDragPayload {
                             kind: QuickCommandDragKind::Command,
@@ -494,12 +484,30 @@ impl ZzClawTermApp {
         items
     }
 
+    pub(super) fn quick_command_context_menu_items(
+        &self,
+        command_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Vec<ZzClawMenuItem> {
+        match command_id {
+            Some(command_id) => self.quick_command_row_menu_items(command_id, cx),
+            None => vec![
+                ZzClawMenuItem::action(t!("quickCommands.addCommand"))
+                    .icon("icons/conn/terminal.svg")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_new_quick_command_editor(window, cx);
+                    })),
+            ],
+        }
+    }
+
     fn quick_command_row_menu_items(
         &self,
         command_id: String,
         cx: &mut Context<Self>,
     ) -> Vec<ZzClawMenuItem> {
         let edit_command_id = command_id.clone();
+        let copy_command_id = command_id.clone();
         let all_command_id = command_id.clone();
         let delete_command_id = command_id;
         let send_to_all_disabled = self.session.live_session_count() == 0;
@@ -508,6 +516,18 @@ impl ZzClawTermApp {
                 .icon("icons/net/edit.svg")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_edit_quick_command_editor(edit_command_id.clone(), window, cx);
+                })),
+            ZzClawMenuItem::action(t!("quickCommands.copyCommand"))
+                .icon("icons/copy.svg")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(command) = this
+                        .commands
+                        .quick_commands()
+                        .iter()
+                        .find(|command| command.id == copy_command_id)
+                    {
+                        this.copy_quick_command_text(command.command.clone(), cx);
+                    }
                 })),
             ZzClawMenuItem::action(t!("quickCommands.sendToAll"))
                 .icon("icons/menu/broadcast.svg")
@@ -531,12 +551,12 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use gpui::{AppContext as _, TestAppContext};
     use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
 
     use super::QUICK_COMMAND_MENU_WIDTH;
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
 
     fn menu_app(cx: &mut TestAppContext) -> gpui::Entity<ZzClawTermApp> {
         let root = std::env::temp_dir().join(format!(
@@ -572,9 +592,9 @@ mod tests {
                 .iter()
                 .map(|item| item.test_label())
                 .collect::<Vec<_>>(),
-            vec!["Edit", "Send to All", "", "Delete"]
+            vec!["Edit", "Copy command", "Send to All", "", "Delete"]
         );
-        assert!(items[1].test_presentation().3);
+        assert!(items[2].test_presentation().3);
         assert_eq!(QUICK_COMMAND_MENU_WIDTH, 148.);
     }
 }

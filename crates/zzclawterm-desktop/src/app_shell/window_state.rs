@@ -347,7 +347,7 @@ fn intersection_area(left: Bounds<Pixels>, right: Bounds<Pixels>) -> f32 {
     (x2 - x1).max(0.) * (y2 - y1).max(0.)
 }
 
-fn clamp_window_bounds(
+pub(super) fn clamp_window_bounds(
     saved: Bounds<Pixels>,
     visible: Bounds<Pixels>,
     preserve_origin: bool,

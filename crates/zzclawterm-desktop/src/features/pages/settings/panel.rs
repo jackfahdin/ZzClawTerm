@@ -145,8 +145,6 @@ pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) snapshot_password_prompt: Option<SnapshotPasswordPromptState>,
     pub(in crate::features) snapshot_password_prompt_active: bool,
     pub(in crate::features) config_path_prompt_active: bool,
-    pub(in crate::features) local_backup_status: String,
-    pub(in crate::features) local_backup_ready: bool,
     pub(in crate::features) terminal_theme_is_dark: bool,
     pub(in crate::features) panel_multi_open: bool,
 }
@@ -179,8 +177,6 @@ impl SettingsPresentation {
             snapshot_password_prompt: None,
             snapshot_password_prompt_active: false,
             config_path_prompt_active: false,
-            local_backup_status: String::new(),
-            local_backup_ready: true,
             terminal_theme_is_dark: true,
             panel_multi_open: false,
         }
@@ -287,26 +283,20 @@ impl SettingsPresentation {
 
 #[derive(Clone, PartialEq)]
 pub(in crate::features) struct AiSettingsPresentation {
+    pub(in crate::features) providers: crate::features::ai::ProviderSettingsView,
     pub(in crate::features) config: Arc<AiSettings>,
-    pub(in crate::features) model_query: String,
-    pub(in crate::features) model_collapsed_groups: Arc<HashSet<String>>,
     pub(in crate::features) manual_model_drafts: Arc<HashMap<String, String>>,
-    pub(in crate::features) credential_secret_drafts: Arc<HashMap<String, String>>,
-    pub(in crate::features) action_focus: gpui::FocusHandle,
-    pub(in crate::features) discovery_pending: bool,
+    pub(in crate::features) credential_draft_key_ids: Arc<HashSet<String>>,
     pub(in crate::features) agent_management: AgentManagementView,
 }
 
 impl AiSettingsPresentation {
-    fn empty(cx: &mut Context<SettingsPanel>) -> Self {
+    fn empty(_cx: &mut Context<SettingsPanel>) -> Self {
         Self {
+            providers: Default::default(),
             config: Arc::new(AiSettings::default()),
-            model_query: String::new(),
-            model_collapsed_groups: Arc::new(HashSet::new()),
             manual_model_drafts: Arc::new(HashMap::new()),
-            credential_secret_drafts: Arc::new(HashMap::new()),
-            action_focus: cx.focus_handle(),
-            discovery_pending: false,
+            credential_draft_key_ids: Arc::new(HashSet::new()),
             agent_management: AgentManagementView::default(),
         }
     }
@@ -317,30 +307,8 @@ impl AiSettingsPresentation {
         &self.config
     }
 
-    pub(in crate::features) fn settings_model_query(&self) -> &str {
-        &self.model_query
-    }
-
-    pub(in crate::features) fn settings_model_collapsed_groups(&self) -> &HashSet<String> {
-        &self.model_collapsed_groups
-    }
-
     pub(in crate::features) fn settings_manual_model_drafts(&self) -> &HashMap<String, String> {
         &self.manual_model_drafts
-    }
-
-    pub(in crate::features) fn settings_credential_secret_drafts(
-        &self,
-    ) -> &HashMap<String, String> {
-        &self.credential_secret_drafts
-    }
-
-    pub(in crate::features) fn settings_action_focus(&self) -> &gpui::FocusHandle {
-        &self.action_focus
-    }
-
-    pub(in crate::features) fn discovery_is_pending(&self) -> bool {
-        self.discovery_pending
     }
 }
 
@@ -489,6 +457,8 @@ impl FontSelectOptionCache {
 }
 
 pub(in crate::features) struct SettingsPanel {
+    content_scroll_handles: HashMap<String, gpui::ScrollHandle>,
+    pub(in crate::features::pages::settings) viewport_width: f32,
     app: WeakEntity<ZzClawTermApp>,
     surface: SettingsSurface,
     snapshot: Option<SettingsSnapshot>,
@@ -549,6 +519,8 @@ impl SettingsPanel {
             }
         });
         Self {
+            content_scroll_handles: HashMap::new(),
+            viewport_width: 800.,
             app,
             surface,
             snapshot: None,
@@ -677,16 +649,6 @@ impl SettingsPanel {
             .upgrade()
             .map(|app| app.read(cx).mcp_host_status())
             .unwrap_or(crate::features::mcp::McpHostStatus::Unavailable)
-    }
-
-    pub(in crate::features::pages::settings) fn mcp_helper_status(
-        &self,
-        cx: &Context<Self>,
-    ) -> crate::features::ai::McpHelperStatus {
-        self.app
-            .upgrade()
-            .map(|app| app.read(cx).mcp_helper_status())
-            .unwrap_or(crate::features::ai::McpHelperStatus::Missing)
     }
 
     pub(in crate::features::pages::settings) fn form_select_control<I>(
@@ -1052,6 +1014,7 @@ impl SettingsPanel {
 
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport_width = f32::from(window.viewport_size().width);
         #[cfg(test)]
         {
             self.paint_count += 1;
@@ -1166,6 +1129,11 @@ impl SettingsPanel {
         let viewport_width = f32::from(window.viewport_size().width);
         let active_item_id = settings_tab_nav_id(snapshot.active_tab);
         let active_label = t!(snapshot.active_tab.i18n_key());
+        let scroll_handle = self
+            .content_scroll_handles
+            .entry(active_item_id.to_string())
+            .or_default()
+            .clone();
         let content = self.settings_tab_content(snapshot, cx);
         let panel = cx.entity();
         let toggle_panel = panel.clone();
@@ -1179,6 +1147,7 @@ impl SettingsPanel {
         .palette(snapshot.chrome.palette)
         .active_title(active_label)
         .sidebar_title(t!("settings.title"))
+        .content_scroll_handle(scroll_handle)
         .viewport_width(viewport_width)
         .compact_breakpoint(640.)
         .wide_breakpoint(1024.)
@@ -1189,8 +1158,7 @@ impl SettingsPanel {
                         if tab == SettingsTab::Appearance {
                             app.ensure_appearance_font_options(cx);
                         }
-                        app.ensure_settings_tab_inputs(tab, cx);
-                        app.shell.set_settings_active_tab(tab);
+                        app.focus_settings_tab(tab, cx);
                         if tab == SettingsTab::AiAgents {
                             app.refresh_ai_agents(cx);
                         }
@@ -1213,7 +1181,7 @@ impl SettingsPanel {
             ZzClawSettingsNavGroup::new(
                 "workspace",
                 t!("settings.groupWorkspace"),
-                "icons/workspace.svg",
+                "icons/settings/dashboard.svg",
             )
             .accent(palette.link)
             .expanded(snapshot.group_is_expanded("workspace"))
@@ -1226,7 +1194,7 @@ impl SettingsPanel {
             ZzClawSettingsNavGroup::new(
                 "terminal_session",
                 t!("settings.groupTerminalSession"),
-                "icons/conn/terminal.svg",
+                "icons/settings/terminal.svg",
             )
             .accent(palette.success)
             .expanded(snapshot.group_is_expanded("terminal_session"))
@@ -1235,14 +1203,14 @@ impl SettingsPanel {
                 settings_nav_item(SettingsTab::Search),
                 settings_nav_item(SettingsTab::Translation),
             ]),
-            ZzClawSettingsNavGroup::new("ai_group", t!("ai.title"), "icons/ai.svg")
+            ZzClawSettingsNavGroup::new("ai_group", t!("ai.title"), "icons/settings/ai.svg")
                 .accent(0xbc8cff)
                 .expanded(snapshot.group_is_expanded("ai_group"))
                 .items([
                     settings_nav_item(SettingsTab::AiGeneral),
                     settings_nav_item(SettingsTab::AiModels),
-                    settings_nav_item(SettingsTab::AiRules),
                     settings_nav_item(SettingsTab::AiAgents),
+                    settings_nav_item(SettingsTab::AiRules),
                 ]),
             ZzClawSettingsNavGroup::standalone([
                 settings_nav_item(SettingsTab::Transfer),
@@ -1288,12 +1256,11 @@ impl SettingsPanel {
         let apply_disabled = !dirty || validation_error.is_some();
         let confirm_disabled = validation_error.is_some();
         let status = validation_error.clone().unwrap_or_else(|| {
-            t!(if dirty {
-                "fileEditor.unsavedDesc"
+            if dirty {
+                t!("settings.unappliedChanges").to_string()
             } else {
-                "updater.noUpdate"
-            })
-            .to_string()
+                String::new()
+            }
         });
         let cancel_label = t!("common.cancel");
         let apply_label = t!("common.apply");
@@ -1485,39 +1452,11 @@ impl SettingsPanel {
         self.settings.terminal_theme_is_dark()
     }
 
-    pub(in crate::features) fn clear_ai_model_search(&mut self, cx: &mut Context<Self>) {
-        self.with_app(cx, |app, cx| {
-            app.ai.clear_settings_model_query();
-            app.reset_text_input("ai.settings.model-search", "", cx);
-            cx.notify();
-        });
-    }
-
     pub(in crate::features) fn clear_keybinding_search(&mut self, cx: &mut Context<Self>) {
         self.with_app(cx, |app, cx| {
             app.settings.clear_keybinding_search();
             app.reset_text_input("settings.keybindings.search", "", cx);
             cx.notify();
-        });
-    }
-
-    pub(in crate::features) fn prompt_encrypted_portable_snapshot_export(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.prompt_encrypted_portable_snapshot_export(window, cx)
-        });
-    }
-
-    pub(in crate::features) fn prompt_encrypted_portable_snapshot_import(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.prompt_encrypted_portable_snapshot_import(window, cx)
         });
     }
 
@@ -1692,44 +1631,6 @@ impl SettingsPanel {
         self.with_app(cx, |app, cx| app.copy_external_mcp_config(client, cx));
     }
 
-    pub(in crate::features) fn toggle_ai_model_group(
-        &mut self,
-        group_key: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| app.toggle_ai_model_group(group_key, cx));
-    }
-
-    pub(in crate::features) fn remove_ai_manual_model(
-        &mut self,
-        model_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| app.remove_ai_manual_model(model_id, cx));
-    }
-
-    pub(in crate::features) fn add_ai_manual_model(
-        &mut self,
-        credential_id: String,
-        name: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.add_ai_manual_model(credential_id, name, cx)
-        });
-    }
-
-    pub(in crate::features) fn focus_ai_manual_model_input(
-        &mut self,
-        group_key: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.focus_ai_manual_model_input(group_key, window, cx)
-        });
-    }
-
     pub(in crate::features) fn handle_ai_manual_model_key_down(
         &mut self,
         group_key: &str,
@@ -1740,50 +1641,6 @@ impl SettingsPanel {
         self.with_app(cx, |app, cx| {
             app.handle_ai_manual_model_key_down(group_key, event, window, cx)
         })
-    }
-
-    pub(in crate::features) fn clear_ai_manual_model_draft(
-        &mut self,
-        group_key: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| app.clear_ai_manual_model_draft(group_key, cx));
-    }
-
-    pub(in crate::features) fn toggle_ai_credential_enabled(
-        &mut self,
-        credential_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.toggle_ai_credential_enabled(credential_id, cx)
-        });
-    }
-
-    pub(in crate::features) fn add_ai_credential(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| app.add_ai_credential(window, cx));
-    }
-
-    pub(in crate::features) fn remove_ai_credential(
-        &mut self,
-        credential_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| app.remove_ai_credential(credential_id, cx));
-    }
-
-    pub(in crate::features) fn persist_ai_credential_edits(
-        &mut self,
-        credential_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.persist_ai_credential_edits(credential_id, cx)
-        });
     }
 
     pub(in crate::features) fn toggle_ai_action_enabled(
@@ -1813,30 +1670,6 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) {
         self.with_app(cx, |app, cx| app.add_ai_action(kind, window, cx));
-    }
-
-    pub(in crate::features) fn focus_ai_action_field(
-        &mut self,
-        kind: AiActionListKind,
-        action_id: String,
-        field: AiActionEditorField,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.with_app(cx, |app, cx| {
-            app.focus_ai_action_field(kind, action_id, field, window, cx)
-        });
-    }
-
-    pub(in crate::features) fn handle_ai_action_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        self.with_app(cx, |app, cx| {
-            app.handle_ai_action_key_down(event, window, cx)
-        })
     }
 
     pub(in crate::features) fn ai_action_text_input_id(
@@ -2041,7 +1874,6 @@ forward_app_action!(
     clear_background_image,
     confirm_keybinding_recording,
     copy_github_gist_user_code,
-    discover_ai_models,
     refresh_ai_agents,
     refresh_codex_account,
     refresh_claude_account,
@@ -2091,6 +1923,7 @@ forward_app_action!(
     toggle_recording_auto_start,
     toggle_recording_binary_transfer_payloads,
     toggle_recording_io_labels,
+    toggle_recording_input,
     toggle_recording_session_metadata,
     toggle_recording_timestamps,
     toggle_remote_stats_panel,
@@ -2609,15 +2442,15 @@ mod tests {
 
         // A freshly added provider credential draws three fields.
         activate(&app, vcx, SettingsTab::AiModels);
-        from_panel(&app, vcx, |app, window, cx| {
-            app.add_ai_credential(window, cx)
+        from_panel(&app, vcx, |app, _, cx| {
+            app.add_ai_provider_preset(zzclawterm_core::AiProviderKind::OpenaiCompatible, cx)
         });
         let credential_id = vcx.update(|_, cx| {
             app.read(cx)
                 .ai
                 .settings_config()
                 .provider_credentials
-                .last()
+                .first()
                 .expect("the credential was added")
                 .id
                 .clone()

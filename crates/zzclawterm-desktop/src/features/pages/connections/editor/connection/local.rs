@@ -1,4 +1,5 @@
 use rust_i18n::t;
+use zzclawterm_ui::ZzClawSwitch;
 
 use gpui::{
     Context, FontWeight, div,
@@ -13,7 +14,7 @@ use crate::models::{ConnectionEditorField, ConnectionEditorSelect};
 use crate::widgets::small_button;
 
 use super::super::super::list::{
-    ConnectionEditorRenderContext, connection_editor_select, editor_field, toggle_chip,
+    ConnectionEditorRenderContext, connection_editor_select, editor_field,
 };
 
 use super::{ConnectionEditorSectionContext, recording::connection_editor_recording_section};
@@ -213,17 +214,17 @@ pub(super) fn connection_editor_local_section(
                                         },
                                     ),
                             )
-                            .child(toggle_chip(
-                                palette,
-                                t!("dialog.enabled"),
-                                editor.dynamic_tab_title,
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_connection_editor_flag(
-                                        ConnectionEditorToggle::DynamicTabTitle,
-                                        cx,
-                                    );
-                                }),
-                            )),
+                            .child(
+                                ZzClawSwitch::new("connection-editor-local-dynamic-tab-title")
+                                    .checked(editor.dynamic_tab_title)
+                                    .tooltip(t!("dialog.dynamicTabTitle"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_connection_editor_flag(
+                                            ConnectionEditorToggle::DynamicTabTitle,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     )
                     .child(connection_editor_recording_section(section, cx)),
             )

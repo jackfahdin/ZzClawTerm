@@ -26,6 +26,10 @@ pub(crate) enum TransferJobKind {
     },
     ResolveHome,
     SyncCwd,
+    /// Native consumer owns the destination; there is no local target path.
+    DragExport {
+        remote_path: String,
+    },
     Download {
         remote_path: String,
         raw_path_token: Option<String>,
@@ -47,7 +51,7 @@ pub(crate) enum TransferJobKind {
     },
     Delete {
         remote_path: String,
-        parent_path: String,
+        batch_id: String,
     },
     /// Copy a remote entry from the active (source) session to another connected
     /// SSH session's directory. Reuses `FileCopyRequest` under the hood; the copy
@@ -229,7 +233,8 @@ impl TransferJobState {
     pub(crate) fn display_name_for_kind(kind: &TransferJobKind) -> String {
         match kind {
             TransferJobKind::ListTree { path, .. } => remote_file_name(&path.display_path),
-            TransferJobKind::Download { remote_path, .. }
+            TransferJobKind::DragExport { remote_path }
+            | TransferJobKind::Download { remote_path, .. }
             | TransferJobKind::OpenExternal { remote_path, .. }
             | TransferJobKind::LoadEditor { remote_path, .. }
             | TransferJobKind::LoadPreview { remote_path, .. }
@@ -278,7 +283,8 @@ impl TransferJobState {
     pub(crate) fn is_user_transfer(&self) -> bool {
         matches!(
             &self.kind,
-            TransferJobKind::Download { .. }
+            TransferJobKind::DragExport { .. }
+                | TransferJobKind::Download { .. }
                 | TransferJobKind::Upload { .. }
                 | TransferJobKind::SendTo { .. }
                 | TransferJobKind::OpenExternal { .. }
@@ -317,9 +323,9 @@ fn local_file_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod transfer_job_state_tests {
-    use std::path::PathBuf;
 
     use super::{TransferJobKind, TransferJobState, TransferJobStatus};
+    use std::path::PathBuf;
 
     fn job(kind: TransferJobKind, session_id: Option<&str>) -> TransferJobState {
         TransferJobState {
@@ -486,7 +492,21 @@ pub(crate) struct TransferJobResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct PromisedDownloadDestination {
+    pub raw_path_token: Option<String>,
+    pub local_path: PathBuf,
+    pub source: std::sync::Weak<zzclawterm_transport::RemoteFileService>,
+    pub options: zzclawterm_transport::SftpPathTransferOptions,
+}
+
+#[derive(Debug)]
 pub(crate) enum TransferJobEvent {
+    DragExportOpened {
+        session_id: String,
+        remote_path: String,
+        control: SftpTransferControl,
+        destination: Option<PromisedDownloadDestination>,
+    },
     Started {
         detail: String,
     },
@@ -534,11 +554,7 @@ pub(crate) enum TransferJobOutput {
         parent_path: String,
         entries: Vec<SftpFileEntry>,
     },
-    Deleted {
-        remote_path: String,
-        parent_path: String,
-        entries: Vec<SftpFileEntry>,
-    },
+    Deleted,
     /// A cross-session "Send to" copy finished. `entries` is the refreshed listing
     /// of the target session's destination directory, used to update that
     /// session's browser cache without switching the active session.
@@ -624,6 +640,7 @@ pub(crate) enum TransferJobOutput {
         session_id: String,
         files: Vec<PathBuf>,
         probe_skipped: bool,
+        overwrite: bool,
     },
 }
 

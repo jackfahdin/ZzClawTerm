@@ -428,6 +428,7 @@ mod tests {
             custom_icons: Vec::new(),
             groups: vec![vec!["Imported".to_string()]],
             passwords: vec![SavedPassword {
+                sort_order: 0,
                 username: String::new(),
                 id: "password-1".to_string(),
                 name: "Imported password".to_string(),

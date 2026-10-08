@@ -56,6 +56,7 @@ impl ZzClawTermApp {
     ) -> gpui::AnyElement {
         let palette = self.theme_palette();
         match panel {
+            NavItem::Plugins => self.plugins.panel.clone().into_any_element(),
             NavItem::Transfers => self
                 .transfer_panel
                 .clone()

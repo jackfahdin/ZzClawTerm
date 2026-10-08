@@ -7,8 +7,10 @@
 
 mod browser;
 mod clipboard;
+mod delete;
 pub(in crate::features) use browser::TransferSessionTransferBundle;
 pub(in crate::features) use clipboard::TransferFileClipboard;
+pub(super) use delete::TransferDeleteOutcome;
 mod browser_logic;
 mod tree;
 pub(in crate::features) use tree::TransferTreePresentation;
@@ -47,6 +49,11 @@ use crate::models::{
 
 use super::external_sync_runtime::ExternalEditorWatcher;
 
+struct TransferRetryContext {
+    options: SftpPathTransferOptions,
+    source: Option<std::sync::Weak<zzclawterm_transport::RemoteFileService>>,
+}
+
 pub(in crate::features) struct TransferFeatureState {
     clipboard: Option<TransferFileClipboard>,
     clipboard_generation: u64,
@@ -69,7 +76,7 @@ pub(in crate::features) struct TransferFeatureState {
     external_sync: TransferExternalSyncState,
     panel: TransferPanelState,
     /// 失败和取消的 SFTP 任务保留原策略及 Ask 决定，供手动重试复用。
-    path_options_by_job: HashMap<String, SftpPathTransferOptions>,
+    path_options_by_job: HashMap<String, TransferRetryContext>,
     /// How many times the event drain has entered GPUI.
     ///
     /// The coalescing test needs the batch count, not the event count: the point
@@ -145,6 +152,7 @@ pub(in crate::features) struct TransferBrowserView<'a> {
     pub context_target: &'a TransferBrowserContextTarget,
     pub favorites_menu: &'a Option<TransferBrowserFavoritesMenuState>,
     pub path_menu: &'a Option<TransferBrowserPathMenuState>,
+    pub path_menu_scroll: &'a ScrollHandle,
     pub upload_menu: &'a Option<TransferBrowserUploadMenuState>,
     pub focus: &'a FocusHandle,
 }
@@ -194,12 +202,15 @@ pub(super) struct TransferBrowserState {
     pub(super) pending_rename_token: u64,
     pub(super) favorites_menu: Option<TransferBrowserFavoritesMenuState>,
     pub(super) path_menu: Option<TransferBrowserPathMenuState>,
+    pub(super) path_menu_scroll: ScrollHandle,
     pub(super) upload_menu: Option<TransferBrowserUploadMenuState>,
     pub(super) focus: FocusHandle,
 }
 
 /// Rename/move/delete/create/properties dialogs over browser entries.
 struct TransferFileOpsState {
+    delete_batches: HashMap<String, delete::TransferDeleteBatch>,
+    delete_refresh_pending: HashSet<String>,
     rename: Option<TransferRenameState>,
     rename_focus_pending: bool,
     move_to: Option<TransferMoveState>,
@@ -361,6 +372,7 @@ impl TransferFeatureState {
                 pending_rename_token: 0,
                 favorites_menu: None,
                 path_menu: None,
+                path_menu_scroll: ScrollHandle::default(),
                 upload_menu: None,
                 focus: focus.browser,
             },
@@ -436,9 +448,38 @@ impl TransferFeatureState {
     ) -> SftpPathTransferOptions {
         let retry_options =
             path_options.with_transfer_options(path_options.transfer_options().clone());
-        self.path_options_by_job
-            .insert(job_id.to_string(), retry_options);
+        self.path_options_by_job.insert(
+            job_id.to_string(),
+            TransferRetryContext {
+                options: retry_options,
+                source: None,
+            },
+        );
         path_options
+    }
+
+    pub(in crate::features) fn bind_promised_download(
+        &mut self,
+        job_id: &str,
+        options: SftpPathTransferOptions,
+        source: std::sync::Weak<zzclawterm_transport::RemoteFileService>,
+    ) {
+        self.path_options_by_job.insert(
+            job_id.to_owned(),
+            TransferRetryContext {
+                options,
+                source: Some(source),
+            },
+        );
+    }
+
+    pub(in crate::features) fn promised_download_source(
+        &self,
+        job_id: &str,
+    ) -> Option<std::sync::Weak<zzclawterm_transport::RemoteFileService>> {
+        self.path_options_by_job
+            .get(job_id)
+            .and_then(|context| context.source.clone())
     }
 
     /// 已有任务沿用原策略和 Ask 决定，只接受当前的执行参数；旧任务才使用回退值。
@@ -448,7 +489,13 @@ impl TransferFeatureState {
         fallback: SftpPathTransferOptions,
     ) -> SftpPathTransferOptions {
         if let Some(path_options) = self.path_options_by_job.get(job_id) {
-            return path_options.with_transfer_options(fallback.transfer_options().clone());
+            return path_options.options.with_transfer_options(
+                if path_options.options.is_promised_download() {
+                    path_options.options.transfer_options().clone()
+                } else {
+                    fallback.transfer_options().clone()
+                },
+            );
         }
         self.bind_transfer_job_path_options(job_id, fallback)
     }
@@ -1172,6 +1219,12 @@ impl TransferFeatureState {
 
         let mut changed = false;
         self.tree.replace_session(old_id, new_id);
+        if self.file_ops.delete_refresh_pending.remove(old_id) {
+            self.file_ops
+                .delete_refresh_pending
+                .insert(new_id.to_owned());
+            changed = true;
+        }
         if let Some(cache) = self.browser.session_cache.remove(old_id) {
             self.browser.session_cache.insert(new_id.to_string(), cache);
             changed = true;
@@ -1191,7 +1244,11 @@ impl TransferFeatureState {
 
         for job in &mut self.queue.jobs {
             if (job.is_user_transfer()
-                || matches!(job.kind, crate::models::TransferJobKind::ListTree { .. }))
+                || matches!(
+                    job.kind,
+                    crate::models::TransferJobKind::ListTree { .. }
+                        | crate::models::TransferJobKind::Delete { .. }
+                ))
                 && job.session_id.as_deref() == Some(old_id)
             {
                 job.session_id = Some(new_id.to_string());
@@ -1218,6 +1275,8 @@ impl TransferFeatureState {
 impl TransferFileOpsState {
     fn new() -> Self {
         Self {
+            delete_batches: HashMap::new(),
+            delete_refresh_pending: HashSet::new(),
             rename: None,
             rename_focus_pending: false,
             move_to: None,

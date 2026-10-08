@@ -12,6 +12,29 @@ use super::{
     is_default_telnet_auto_login_config,
 };
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SerialFlowControl {
+    #[default]
+    None,
+    Software,
+    Hardware,
+}
+
+impl SerialFlowControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Software => "software",
+            Self::Hardware => "hardware",
+        }
+    }
+}
+
+fn is_default_serial_flow_control(value: &SerialFlowControl) -> bool {
+    *value == SerialFlowControl::None
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -542,6 +565,8 @@ pub enum ConnectionType {
         data_bits: u8,
         #[serde(default = "default_parity")]
         parity: String,
+        #[serde(default, skip_serializing_if = "is_default_serial_flow_control")]
+        flow_control: SerialFlowControl,
         #[serde(default = "default_stop_bits")]
         stop_bits: String,
         #[serde(default)]
@@ -569,6 +594,8 @@ pub enum ConnectionType {
         reconnect: RdpReconnectSettings,
     },
     Vnc {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        username: String,
         host: String,
         #[serde(default = "default_vnc_port")]
         port: u16,

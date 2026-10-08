@@ -190,6 +190,9 @@ impl ZzClawTermApp {
         if let Some(error) = self.pending_settings_cloud_error() {
             return Some(error);
         }
+        if let Some(error) = self.ai_provider_validation_error() {
+            return Some(error);
+        }
         let master_password = self.settings.master_password();
         if master_password.enabled
             && !self.settings.summary().has_master_password
@@ -258,6 +261,8 @@ impl ZzClawTermApp {
             return;
         }
 
+        self.hide_ai_provider_secret(cx);
+        self.ai.invalidate_provider_jobs();
         let settings = self.settings.summary().clone();
         let base_settings = self
             .shell
@@ -470,6 +475,10 @@ impl ZzClawTermApp {
                     this.settings
                         .replace_keyword_config(saved_keyword_highlights);
                     this.sync_ai_drafts_from_active_profile();
+                    this.reset_ai_settings_inputs(cx);
+                    this.forget_text_inputs("ai.credential.");
+                    this.forget_text_inputs("ai.settings.action.");
+                    this.forget_text_inputs("ai.settings.manual-model.");
                     this.recording.set_memory_limit(
                         this.settings.summary().recording_memory_limit_bytes as usize,
                     );
@@ -497,6 +506,7 @@ impl ZzClawTermApp {
                         this.finish_settings_page(cx);
                     } else {
                         this.begin_settings_draft(cx);
+                        this.ensure_settings_tab_inputs(this.shell.settings_active_tab(), cx);
                         cx.notify();
                     }
                     this.request_settings_panel_refresh(cx);
@@ -514,6 +524,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn cancel_settings(&mut self, cx: &mut Context<Self>) {
+        self.hide_ai_provider_secret(cx);
         if let Some(snapshot) = self.shell.take_settings_draft_snapshot() {
             self.apply_gpui_settings(snapshot.settings, cx);
             self.ai.restore_settings_draft(
@@ -546,6 +557,7 @@ impl ZzClawTermApp {
             self.invalidate_terminal_cell_metrics(cx);
             self.invalidate_paint_theme_caches();
             self.sync_ai_drafts_from_active_profile();
+            self.reset_ai_settings_inputs(cx);
             self.refresh_visible_terminal_surfaces(cx);
         }
         self.settings.clear_draft_dirty_domains();
@@ -601,7 +613,9 @@ impl ZzClawTermApp {
 
     fn finish_settings_page(&mut self, cx: &mut Context<Self>) {
         self.cancel_github_gist_auth(cx);
+        self.hide_ai_provider_secret(cx);
         self.ai.close_settings_editors();
+        self.forget_text_inputs("ai.credential.");
         self.settings.clear_keyword_highlight_edit();
         self.forget_text_inputs("ai.settings.action.");
         self.forget_text_inputs("ai.settings.manual-model.");
@@ -634,11 +648,12 @@ fn drive_validation_key(
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
+    use crate::models::CloudSyncInputField;
     use gpui::{AppContext as _, TestAppContext};
     use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::features::settings::SettingsSaveKind;
     use crate::models::HeaderStatusMode;
 
@@ -683,6 +698,87 @@ mod tests {
             summary.ui_header_status_mode,
             summary.ui_header_status_visible,
         )
+    }
+
+    #[test]
+    fn editing_or_clearing_external_editor_refreshes_the_draft_and_persists() {
+        for next in ["", r"D:\Softwares\Microsoft VS Code\Code.exe"] {
+            let mut cx = TestAppContext::single();
+            let app = app(&mut cx);
+            let input = cx.update_entity(&app, |app, cx| {
+                let saved = app
+                    .store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        let mut settings = store.load_app_settings_summary()?;
+                        settings.transfer_default_editor = r"D:\Softwares\Zed\Zed.exe".into();
+                        store.save_transfer_settings(&settings)?;
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap();
+                app.apply_gpui_settings(saved, cx);
+                app.begin_settings_draft(cx);
+                app.ensure_settings_tab_inputs(crate::models::SettingsTab::Transfer, cx);
+                app.existing_text_input("settings.transfer.default-editor")
+                    .unwrap()
+            });
+            cx.update_entity(&input, |_, cx| {
+                cx.emit(zzclawterm_ui::ZzClawInputEvent::Changed(next.to_string()));
+            });
+            cx.run_until_parked();
+            cx.update_entity(&app, |app, cx| {
+                assert_eq!(app.settings.summary().transfer_default_editor, next);
+                assert!(app.settings_panel.read(cx).snapshot().unwrap().draft_dirty);
+                assert!(
+                    app.settings
+                        .draft_dirty_domains()
+                        .contains(&crate::features::settings::SettingsPersistenceDomain::Transfer)
+                );
+                app.apply_settings_draft(false, cx);
+            });
+            cx.run_until_parked();
+            let saved = cx.update_entity(&app, |app, _| {
+                app.store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap()
+            });
+            assert_eq!(saved.transfer_default_editor, next);
+        }
+    }
+
+    #[test]
+    fn tray_preference_persists_without_saving_unrelated_settings_drafts() {
+        for draft_open in [false, true] {
+            let mut cx = TestAppContext::single();
+            let app = app(&mut cx);
+            let baseline = cx
+                .update_entity(&app, |app, _| {
+                    app.store_blocking_client()
+                        .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                            store.load_app_settings_summary()
+                        })
+                })
+                .unwrap();
+            cx.update_entity(&app, |app, cx| {
+                if draft_open {
+                    app.begin_settings_draft(cx);
+                    app.toggle_confirm_on_close(cx);
+                }
+                app.toggle_minimize_to_tray_from_tray(cx);
+            });
+            cx.run_until_parked();
+            let persisted = cx
+                .update_entity(&app, |app, _| {
+                    app.store_blocking_client()
+                        .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                            store.load_app_settings_summary()
+                        })
+                })
+                .unwrap();
+            assert_eq!(persisted.minimize_to_tray, !baseline.minimize_to_tray);
+            assert_eq!(persisted.confirm_on_close, baseline.confirm_on_close);
+        }
     }
 
     /// Applying a draft must write the header-status mode it changed.
@@ -985,8 +1081,6 @@ mod tests {
     /// no message explains the block -- and apply must report the missing password.
     #[test]
     fn webdav_edits_with_a_staged_master_password_report_the_missing_password() {
-        use crate::models::CloudSyncInputField;
-
         let mut cx = TestAppContext::single();
         let app = app(&mut cx);
         let draft_survived = cx.update_entity(&app, |app, cx| {
@@ -1043,8 +1137,6 @@ mod tests {
     /// sync stays disabled, but the endpoint edit persists when applied.
     #[test]
     fn webdav_edits_persist_without_a_master_password_while_cloud_stays_disabled() {
-        use crate::models::CloudSyncInputField;
-
         let mut cx = TestAppContext::single();
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
@@ -1087,8 +1179,6 @@ mod tests {
     /// while a master password is staged without a stored one.
     #[test]
     fn flushed_panel_snapshot_reports_webdav_edits() {
-        use crate::models::CloudSyncInputField;
-
         let mut cx = TestAppContext::single();
         let app = app(&mut cx);
         let panel = cx.update_entity(&app, |app, cx| {

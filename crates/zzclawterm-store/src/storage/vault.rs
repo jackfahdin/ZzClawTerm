@@ -34,7 +34,10 @@ impl ConnectionStore {
             apply_ssh_key_status_flags(key);
         }
         keys.sort_by(|left: &SshKey, right| {
-            left.name.cmp(&right.name).then(left.id.cmp(&right.id))
+            left.sort_order
+                .cmp(&right.sort_order)
+                .then(left.name.cmp(&right.name))
+                .then(left.id.cmp(&right.id))
         });
         Ok(keys)
     }
@@ -138,11 +141,24 @@ impl ConnectionStore {
     }
 
     pub fn save_ssh_key(&self, mut key: SshKey) -> Result<String, StorageError> {
-        if key.id.trim().is_empty() {
+        let is_new = key.id.trim().is_empty();
+        if is_new {
             key.id = uuid::Uuid::new_v4().to_string();
         }
         let target_id = key.id.clone();
         let existing = self.load_ssh_key_by_id(&target_id)?;
+        key.sort_order = if let Some(existing) = &existing {
+            existing.sort_order
+        } else if is_new {
+            self.list_ssh_keys()?
+                .iter()
+                .map(|entry| entry.sort_order)
+                .max()
+                .unwrap_or(-1)
+                .saturating_add(1)
+        } else {
+            key.sort_order
+        };
         let crypto = self.credential_crypto()?;
 
         key.key = if let Some(path) = key
@@ -289,7 +305,12 @@ impl ConnectionStore {
             password.has_password = password.password.is_some();
             password.password = None;
         }
-        passwords.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        passwords.sort_by(|left, right| {
+            left.sort_order
+                .cmp(&right.sort_order)
+                .then(left.name.cmp(&right.name))
+                .then(left.id.cmp(&right.id))
+        });
         Ok(passwords)
     }
 
@@ -349,11 +370,24 @@ impl ConnectionStore {
     }
 
     pub fn save_password(&self, mut entry: SavedPassword) -> Result<String, StorageError> {
-        if entry.id.trim().is_empty() {
+        let is_new = entry.id.trim().is_empty();
+        if is_new {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
         let target_id = entry.id.clone();
         let existing = self.load_password_by_id(&target_id)?;
+        entry.sort_order = if let Some(existing) = &existing {
+            existing.sort_order
+        } else if is_new {
+            self.list_passwords()?
+                .iter()
+                .map(|entry| entry.sort_order)
+                .max()
+                .unwrap_or(-1)
+                .saturating_add(1)
+        } else {
+            entry.sort_order
+        };
         let crypto = self.credential_crypto()?;
         entry.password = match entry
             .password
@@ -485,15 +519,39 @@ impl ConnectionStore {
     }
 
     pub fn reorder_credentials(&self, updates: &[(String, i32)]) -> Result<(), StorageError> {
+        self.reorder_vault_entries::<SavedCredential>(CREDENTIAL_PREFIX, updates)
+    }
+
+    pub fn reorder_passwords(&self, updates: &[(String, i32)]) -> Result<(), StorageError> {
+        self.reorder_vault_entries::<SavedPassword>(PASSWORD_PREFIX, updates)
+    }
+
+    pub fn reorder_ssh_keys(&self, updates: &[(String, i32)]) -> Result<(), StorageError> {
+        self.reorder_vault_entries::<SshKey>(SSH_KEY_PREFIX, updates)?;
+        bump_ssh_key_revision();
+        Ok(())
+    }
+
+    fn reorder_vault_entries<T: serde::de::DeserializeOwned>(
+        &self,
+        prefix: &str,
+        updates: &[(String, i32)],
+    ) -> Result<(), StorageError> {
         let txn = self.db.begin_write()?;
-        for (credential_id, sort_order) in updates {
-            let key = entity_key(CREDENTIAL_PREFIX, credential_id);
+        for (id, sort_order) in updates {
+            let key = entity_key(prefix, id);
             let table = txn.open_table(CREDENTIALS_TABLE)?;
             let Some(raw) = table.get(key.as_str())? else {
                 continue;
             };
-            let mut entry: SavedCredential = deserialize_json(raw.value())?;
-            entry.sort_order = *sort_order;
+            // Validate the supported record before writing, but update raw JSON so
+            // unknown fields and encrypted payloads survive metadata-only edits.
+            let _: T = deserialize_json(raw.value())?;
+            let mut entry: serde_json::Value = deserialize_json(raw.value())?;
+            let object = entry.as_object_mut().ok_or_else(|| {
+                StorageError::InvalidData("vault record must be a JSON object".to_string())
+            })?;
+            object.insert("sort_order".to_string(), (*sort_order).into());
             drop(raw);
             drop(table);
             write_json_in_txn(&txn, CREDENTIALS_TABLE, &key, &entry)?;
@@ -531,4 +589,238 @@ fn read_limited_ssh_key_file(path: &str, label: &str) -> Result<String, StorageE
     std::fs::read_to_string(path).map_err(|source| {
         StorageError::InvalidData(format!("failed to read {label} from {path}: {source}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use zzclawterm_core::models::credentials::{SavedPassword, SshKey};
+    use zzclawterm_core::portable_snapshot::PortableSnapshotKind;
+    use zzclawterm_core::test_support::TestTempDir;
+
+    use crate::storage::{
+        CREDENTIAL_PREFIX, CREDENTIALS_TABLE, ConnectionStore, PASSWORD_PREFIX, SSH_KEY_PREFIX,
+        StorageError, entity_key, write_json_in_txn,
+    };
+
+    fn raw_entry(store: &ConnectionStore, prefix: &str, id: &str) -> Value {
+        store
+            .read_json_table(CREDENTIALS_TABLE, &entity_key(prefix, id))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn seed_raw(store: &ConnectionStore, prefix: &str, id: &str, raw: &Value) {
+        let txn = store.db.begin_write().unwrap();
+        write_json_in_txn(&txn, CREDENTIALS_TABLE, &entity_key(prefix, id), raw).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn seed_encrypted_accounts_and_keys(store: &ConnectionStore) {
+        for (id, name, order) in [("a", "Zulu", 4), ("b", "Alpha", 8)] {
+            let account: SavedPassword = serde_json::from_value(json!({
+                "id":id, "name":name, "username":"user", "password":"synthetic-password", "sort_order":order
+            })).unwrap();
+            store.save_password(account).unwrap();
+            let key: SshKey = serde_json::from_value(json!({
+                "id":id, "name":name, "key":"synthetic-key", "cert":"synthetic-cert",
+                "passphrase":"synthetic-passphrase", "sort_order":order
+            }))
+            .unwrap();
+            store.save_ssh_key(key).unwrap();
+        }
+    }
+
+    fn assert_reordered_catalog(store: &ConnectionStore) {
+        let accounts = store.list_passwords().unwrap();
+        let keys = store.list_ssh_keys().unwrap();
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.sort_order))
+                .collect::<Vec<_>>(),
+            vec![("b", 0), ("a", 1)]
+        );
+        assert_eq!(
+            keys.iter()
+                .map(|entry| (entry.id.as_str(), entry.sort_order))
+                .collect::<Vec<_>>(),
+            vec![("b", 0), ("a", 1)]
+        );
+        assert!(
+            accounts
+                .iter()
+                .all(|entry| entry.password.is_none() && entry.has_password)
+        );
+        let decrypted = store.load_decrypted_password_by_id("a").unwrap().unwrap();
+        assert_eq!(decrypted.password.as_deref(), Some("synthetic-password"));
+        let decrypted = store.load_decrypted_ssh_key_by_id("a").unwrap().unwrap();
+        assert_eq!(decrypted.key_data.as_deref(), Some("synthetic-key"));
+        assert_eq!(decrypted.cert_data.as_deref(), Some("synthetic-cert"));
+        assert_eq!(
+            decrypted.passphrase.as_deref(),
+            Some("synthetic-passphrase")
+        );
+    }
+
+    #[test]
+    fn accounts_and_keys_append_and_edits_preserve_order_and_encrypted_secrets() {
+        let dir = TestTempDir::new("zzclawterm-vault-append-order");
+        let store = ConnectionStore::open(&dir).unwrap();
+        seed_encrypted_accounts_and_keys(&store);
+        let account: SavedPassword =
+            serde_json::from_value(json!({"id":"", "name":"New", "username":"user"})).unwrap();
+        let account_id = store.save_password(account).unwrap();
+        let key: SshKey = serde_json::from_value(json!({"id":"", "name":"New"})).unwrap();
+        let key_id = store.save_ssh_key(key).unwrap();
+        assert_eq!(store.list_passwords().unwrap()[2].id, account_id);
+        assert_eq!(store.list_ssh_keys().unwrap()[2].id, key_id);
+        assert_eq!(store.list_passwords().unwrap()[2].sort_order, 9);
+        assert_eq!(store.list_ssh_keys().unwrap()[2].sort_order, 9);
+
+        let password_ciphertext = raw_entry(&store, PASSWORD_PREFIX, "a")["password"].clone();
+        let key_before = raw_entry(&store, SSH_KEY_PREFIX, "a");
+        let account: SavedPassword =
+            serde_json::from_value(json!({"id":"a", "name":"Renamed", "sort_order":99})).unwrap();
+        let key: SshKey =
+            serde_json::from_value(json!({"id":"a", "name":"Renamed", "sort_order":99})).unwrap();
+        store.save_password(account).unwrap();
+        store.save_ssh_key(key).unwrap();
+        assert_eq!(
+            store.load_password_by_id("a").unwrap().unwrap().sort_order,
+            4
+        );
+        assert_eq!(
+            store.load_ssh_key_by_id("a").unwrap().unwrap().sort_order,
+            4
+        );
+        assert_eq!(
+            raw_entry(&store, PASSWORD_PREFIX, "a")["password"],
+            password_ciphertext
+        );
+        let key_after = raw_entry(&store, SSH_KEY_PREFIX, "a");
+        for field in ["key", "cert", "passphrase"] {
+            assert_eq!(key_after[field], key_before[field]);
+        }
+    }
+
+    #[test]
+    fn vault_reorder_preserves_unknown_fields_and_locked_payloads_and_rolls_back_corruption() {
+        let dir = TestTempDir::new("zzclawterm-vault-reorder-raw");
+        let store = ConnectionStore::open(&dir).unwrap();
+        type Reorder = fn(&ConnectionStore, &[(String, i32)]) -> Result<(), StorageError>;
+        for (prefix, reorder) in [
+            (
+                PASSWORD_PREFIX,
+                ConnectionStore::reorder_passwords as Reorder,
+            ),
+            (SSH_KEY_PREFIX, ConnectionStore::reorder_ssh_keys as Reorder),
+            (
+                CREDENTIAL_PREFIX,
+                ConnectionStore::reorder_credentials as Reorder,
+            ),
+        ] {
+            // Intentionally unsupported encrypted payloads: metadata reordering must
+            // work without needing any decryption or a master-key token.
+            let before = json!({
+                "id":"a", "name":"Account", "username":"user", "sort_order":7,
+                "password":"unsupported-encrypted-payload", "key":"unsupported-encrypted-key",
+                "cert":"unsupported-encrypted-cert", "passphrase":"unsupported-encrypted-passphrase",
+                "future_option":{"keep":true}
+            });
+            seed_raw(&store, prefix, "a", &before);
+            reorder(&store, &[("missing".into(), 0), ("a".into(), 1)]).unwrap();
+            let mut expected = before.clone();
+            expected["sort_order"] = json!(1);
+            assert_eq!(raw_entry(&store, prefix, "a"), expected);
+            seed_raw(&store, prefix, "broken", &json!({"id":"broken", "name":17}));
+            assert!(reorder(&store, &[("a".into(), 2), ("broken".into(), 3)]).is_err());
+            assert_eq!(raw_entry(&store, prefix, "a"), expected);
+            seed_raw(
+                &store,
+                prefix,
+                "broken",
+                &json!(["broken", 0, "Broken", "user"]),
+            );
+            assert!(reorder(&store, &[("a".into(), 2), ("broken".into(), 3)]).is_err());
+            assert_eq!(raw_entry(&store, prefix, "a"), expected);
+        }
+    }
+
+    #[test]
+    fn legacy_vault_records_keep_name_order_until_reordered() {
+        let dir = TestTempDir::new("zzclawterm-vault-legacy-order");
+        let store = ConnectionStore::open(&dir).unwrap();
+        for prefix in [PASSWORD_PREFIX, SSH_KEY_PREFIX] {
+            for (id, name) in [("a", "Zulu"), ("c", "Alpha"), ("b", "Alpha")] {
+                seed_raw(&store, prefix, id, &json!({"id":id,"name":name}));
+            }
+        }
+        assert_eq!(
+            store
+                .list_passwords()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
+        assert_eq!(
+            store
+                .list_ssh_keys()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "a"]
+        );
+        assert!(
+            store
+                .list_passwords()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.sort_order == 0)
+        );
+        assert!(
+            store
+                .list_ssh_keys()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.sort_order == 0)
+        );
+    }
+
+    #[test]
+    fn account_and_key_order_survives_reopen_sync_snapshots_and_nya_backup() {
+        let source_dir = TestTempDir::new("zzclawterm-vault-order-source");
+        let store = ConnectionStore::open(&source_dir).unwrap();
+        seed_encrypted_accounts_and_keys(&store);
+        let updates = [("b".into(), 0), ("a".into(), 1)];
+        store.reorder_passwords(&updates).unwrap();
+        let revision = store.ssh_key_revision();
+        store.reorder_ssh_keys(&updates).unwrap();
+        assert!(store.ssh_key_revision() > revision);
+        drop(store);
+        let store = ConnectionStore::open(&source_dir).unwrap();
+        assert_reordered_catalog(&store);
+        for kind in [PortableSnapshotKind::Backup, PortableSnapshotKind::Sync] {
+            let dir = TestTempDir::new("zzclawterm-vault-order-snapshot");
+            let target = ConnectionStore::open(&dir).unwrap();
+            let mut snapshot = store
+                .build_raw_portable_snapshot(kind, "device", "test")
+                .unwrap();
+            snapshot.recalculate_hash().unwrap();
+            target.apply_raw_portable_snapshot(&snapshot).unwrap();
+            assert_reordered_catalog(&target);
+        }
+        drop(store);
+        let output_dir = TestTempDir::new("zzclawterm-vault-order-backup");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let backup = output_dir.join("vault.nya");
+        let target_dir = TestTempDir::new("zzclawterm-vault-order-restored");
+        ConnectionStore::export_config_database(&source_dir, None, &backup).unwrap();
+        ConnectionStore::import_config_database(&target_dir, None, &backup).unwrap();
+        let target = ConnectionStore::open(&target_dir).unwrap();
+        assert_reordered_catalog(&target);
+    }
 }

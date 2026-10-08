@@ -1,4 +1,5 @@
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::oneshot;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -283,6 +284,7 @@ pub(crate) struct TerminalProtocolState {
     pub(crate) bracketed_paste: bool,
     pub(crate) mouse_reporting: bool,
     pub(crate) mouse_sgr: bool,
+    pub(crate) mouse_utf8: bool,
     pub(crate) mouse_drag_reporting: bool,
     pub(crate) mouse_motion_reporting: bool,
     pub(crate) application_cursor_keys: bool,
@@ -303,6 +305,7 @@ impl TerminalProtocolState {
             bracketed_paste: screen.bracketed_paste(),
             mouse_reporting: screen.mouse_reporting(),
             mouse_sgr: screen.mouse_sgr(),
+            mouse_utf8: screen.mouse_utf8(),
             mouse_drag_reporting: screen.mouse_drag_reporting(),
             mouse_motion_reporting: screen.mouse_motion_reporting(),
             application_cursor_keys: screen.application_cursor_keys(),
@@ -370,10 +373,7 @@ impl TerminalProtocolState {
             let suffix = if press { 'M' } else { 'm' };
             format!("\x1b[<{code};{x};{y}{suffix}").into_bytes()
         } else {
-            let cb = 32u16.saturating_add(u16::from(code)).min(255) as u8;
-            let cx = 32u16.saturating_add(x).min(255) as u8;
-            let cy = 32u16.saturating_add(y).min(255) as u8;
-            vec![0x1b, b'[', b'M', cb, cx, cy]
+            zzclawterm_terminal::encode_legacy_mouse_report(code, col, row, self.mouse_utf8)
         }
     }
 }
@@ -937,9 +937,15 @@ impl TerminalViewState {
     }
 
     pub(crate) fn set_encoding(&mut self, encoding: &str) {
-        self.screen.set_encoding(encoding);
-        self.output_decoder.set_encoding(encoding);
-        self.recording_decoder.set_encoding(encoding);
+        if let Err(error) = self.screen.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
+        if let Err(error) = self.output_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
+        if let Err(error) = self.recording_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
     }
 
     pub(crate) fn reset_reconnect_stream(&mut self, encoding: &str) {
@@ -1384,6 +1390,7 @@ impl KeywordHighlightEditorField {
 
 #[derive(Debug)]
 pub(crate) struct TerminalFramePipeline {
+    recording_writer: RecordingWriteHandle,
     command_tx: TerminalFrameCommandSender,
     event_queue: TerminalFrameEventQueue,
     event_wake_rx: Arc<Mutex<Option<UnboundedReceiver<()>>>>,
@@ -1392,6 +1399,8 @@ pub(crate) struct TerminalFramePipeline {
 }
 
 pub(crate) struct TerminalFrameOutputSubmission {
+    /// Set by ingress capture before charset decoding or UI output processing.
+    pub(crate) raw_already_captured: bool,
     pub(crate) session_id: String,
     pub(crate) data: Vec<u8>,
     pub(crate) encoding: String,
@@ -1431,13 +1440,19 @@ impl TerminalFramePipeline {
         let (event_queue, event_wake_rx) =
             TerminalFrameEventQueue::new_with_wake(TERMINAL_FRAME_EVENT_QUEUE_CAP);
         let event_queue_for_worker = event_queue.clone();
+        let worker_recording_writer = recording_writer.clone();
         let worker = thread::Builder::new()
             .name("zzclawterm-terminal-frame-processor".to_string())
             .spawn(move || {
-                run_terminal_frame_processor(command_rx, event_queue_for_worker, recording_writer)
+                run_terminal_frame_processor(
+                    command_rx,
+                    event_queue_for_worker,
+                    worker_recording_writer,
+                )
             })
             .expect("failed to spawn terminal frame processor");
         Self {
+            recording_writer,
             command_tx,
             event_queue,
             event_wake_rx: Arc::new(Mutex::new(Some(event_wake_rx))),
@@ -1524,6 +1539,23 @@ impl TerminalFramePipeline {
         })
     }
 
+    pub(crate) fn navigate_command(
+        &self,
+        session_id: String,
+        action: zzclawterm_terminal::command_navigation::CommandNavigationAction,
+    ) {
+        let _ = self
+            .command_tx
+            .send(TerminalFrameCommand::NavigateCommand { session_id, action });
+    }
+
+    pub(crate) fn note_command_input(&self, session_id: String, fallback: bool) {
+        let _ = self.command_tx.send(TerminalFrameCommand::CommandInput {
+            session_id,
+            fallback,
+        });
+    }
+
     pub(crate) fn clear_session_except_input(&self, session_id: impl Into<String>) {
         let _ = self
             .command_tx
@@ -1571,6 +1603,15 @@ impl TerminalFramePipeline {
         });
     }
 
+    pub(crate) fn submit_decoded_output(&self, session_id: String, text: String) {
+        if !text.is_empty() {
+            let _ = self
+                .command_tx
+                .send(TerminalFrameCommand::DecodedOutput { session_id, text });
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn submit_output(
         &self,
         session_id: impl Into<String>,
@@ -1578,22 +1619,37 @@ impl TerminalFramePipeline {
         encoding: impl Into<String>,
         scrollback_limit: usize,
     ) {
-        if data.is_empty() {
-            return;
-        }
-        let _ = self.command_tx.send_many(terminal_frame_output_commands(
-            TerminalFrameOutputSubmission {
-                session_id: session_id.into(),
-                data,
-                encoding: encoding.into(),
-                scrollback_limit,
-            },
-        ));
+        self.submit_outputs(vec![TerminalFrameOutputSubmission {
+            session_id: session_id.into(),
+            data,
+            encoding: encoding.into(),
+            scrollback_limit,
+            raw_already_captured: false,
+        }]);
+    }
+
+    pub(crate) fn submit_captured_output(
+        &self,
+        session_id: impl Into<String>,
+        data: Vec<u8>,
+        encoding: impl Into<String>,
+        scrollback_limit: usize,
+    ) {
+        self.submit_outputs(vec![TerminalFrameOutputSubmission {
+            session_id: session_id.into(),
+            data,
+            encoding: encoding.into(),
+            scrollback_limit,
+            raw_already_captured: true,
+        }]);
     }
 
     pub(crate) fn submit_outputs(&self, outputs: Vec<TerminalFrameOutputSubmission>) {
-        if outputs.is_empty() {
-            return;
+        for output in &outputs {
+            if !output.raw_already_captured {
+                self.recording_writer
+                    .write_raw_output(&output.session_id, &output.data);
+            }
         }
         let commands = outputs.into_iter().flat_map(terminal_frame_output_commands);
         let _ = self.command_tx.send_many(commands);
@@ -1669,6 +1725,15 @@ impl TerminalFramePipeline {
         });
     }
 
+    pub(crate) fn request_all_text(&self, session_id: String) -> oneshot::Receiver<Option<String>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let _ = self.command_tx.send(TerminalFrameCommand::RequestAllText {
+            session_id,
+            response_tx,
+        });
+        response_rx
+    }
+
     pub(crate) fn request_search(
         &self,
         session_id: impl Into<String>,
@@ -1704,14 +1769,22 @@ impl TerminalFramePipeline {
     /// event wakes, while tests need deterministic completion without sleeps.
     #[cfg(test)]
     pub(crate) fn flush_for_test(&self) {
+        self.finish_pending_output()
+            .expect("terminal frame worker did not reach fence");
+    }
+
+    /// Called only from background jobs so stop/export include already submitted output.
+    pub(crate) fn finish_pending_output(&self) -> Result<(), String> {
         let (complete_tx, complete_rx) = std::sync::mpsc::sync_channel(0);
-        assert!(
-            self.command_tx
-                .send(TerminalFrameCommand::Fence { complete_tx })
-        );
+        if !self
+            .command_tx
+            .send(TerminalFrameCommand::Fence { complete_tx })
+        {
+            return Err("terminal frame worker stopped".into());
+        }
         complete_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("terminal frame worker did not reach test fence before watchdog timeout");
+            .map_err(|_| "terminal frame worker did not reach recording fence".into())
     }
 
     pub(crate) fn drain_events_into(
@@ -1734,18 +1807,26 @@ impl TerminalFramePipeline {
         self.command_tx.queued_output_bytes()
     }
 
-    pub(crate) fn shutdown(&mut self) {
-        self.event_queue.close();
-        self.command_tx.close();
+    pub(crate) fn take_shutdown(&mut self) -> Option<impl FnOnce() + Send + 'static> {
         let worker = self
             .worker
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(worker) = worker
-            && worker.join().is_err()
-        {
-            tracing::warn!("terminal frame worker panicked during shutdown");
+            .take()?;
+        let commands = self.command_tx.clone();
+        let events = self.event_queue.clone();
+        Some(move || {
+            commands.close();
+            events.close();
+            if worker.join().is_err() {
+                tracing::warn!("terminal frame worker panicked during shutdown");
+            }
+        })
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(shutdown) = self.take_shutdown() {
+            shutdown();
         }
     }
 }
@@ -1754,6 +1835,7 @@ impl Clone for TerminalFramePipeline {
     fn clone(&self) -> Self {
         self.handle_count.fetch_add(1, Ordering::Relaxed);
         Self {
+            recording_writer: self.recording_writer.clone(),
             command_tx: self.command_tx.clone(),
             event_queue: self.event_queue.clone(),
             event_wake_rx: self.event_wake_rx.clone(),
@@ -1782,6 +1864,19 @@ impl Default for TerminalFramePipeline {
 
 #[derive(Debug)]
 enum TerminalFrameCommand {
+    DecodedOutput {
+        session_id: String,
+        text: String,
+    },
+
+    NavigateCommand {
+        session_id: String,
+        action: zzclawterm_terminal::command_navigation::CommandNavigationAction,
+    },
+    CommandInput {
+        session_id: String,
+        fallback: bool,
+    },
     EnsureSession {
         session_id: String,
         encoding: String,
@@ -1835,6 +1930,10 @@ enum TerminalFrameCommand {
         priority: bool,
         purpose: TerminalFrameSnapshotPurpose,
     },
+    RequestAllText {
+        session_id: String,
+        response_tx: oneshot::Sender<Option<String>>,
+    },
     RequestSearch {
         session_id: String,
         purpose: TerminalFrameSearchPurpose,
@@ -1848,7 +1947,6 @@ enum TerminalFrameCommand {
     SetSnapshotPriority {
         session_ids: Vec<String>,
     },
-    #[cfg(test)]
     Fence {
         complete_tx: std::sync::mpsc::SyncSender<()>,
     },
@@ -1862,6 +1960,10 @@ pub(crate) enum TerminalFrameSnapshotPurpose {
 
 #[derive(Clone, Debug)]
 pub(crate) enum TerminalFrameEvent {
+    CommandNavigation {
+        session_id: String,
+        result: zzclawterm_terminal::command_navigation::CommandNavigationResult,
+    },
     Output(TerminalFrameOutputEvent),
     Snapshot(TerminalFrameSnapshotEvent),
     ClearExceptInput(TerminalFrameSnapshotEvent),
@@ -1880,6 +1982,7 @@ impl TerminalFrameEvent {
             Self::Snapshot(event) | Self::ClearExceptInput(event) => &event.session_id,
             Self::Search(event) => &event.session_id,
             Self::Rekeyed { new_id, .. } => new_id,
+            Self::CommandNavigation { session_id, .. } => session_id,
         }
     }
 }
@@ -2107,7 +2210,9 @@ fn terminal_frame_event_wake_interest(event: &TerminalFrameEvent) -> u8 {
             TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT
         }
         TerminalFrameEvent::Search(_) => TERMINAL_FRAME_EVENT_WAKE_SEARCH,
-        TerminalFrameEvent::Rekeyed { .. } => TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT,
+        TerminalFrameEvent::Rekeyed { .. } | TerminalFrameEvent::CommandNavigation { .. } => {
+            TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT
+        }
     }
 }
 
@@ -2288,6 +2393,7 @@ fn terminal_frame_event_can_drop_under_pressure(event: &TerminalFrameEvent) -> b
         TerminalFrameEvent::Snapshot(_)
         | TerminalFrameEvent::ClearExceptInput(_)
         | TerminalFrameEvent::Search(_)
+        | TerminalFrameEvent::CommandNavigation { .. }
         | TerminalFrameEvent::Rekeyed { .. } => false,
     }
 }
@@ -2327,12 +2433,18 @@ impl std::fmt::Debug for TerminalFrameSession {
 impl TerminalFrameSession {
     fn new(encoding: &str, scrollback_limit: usize) -> Self {
         let mut screen = TerminalScreen::default();
-        screen.set_encoding(encoding);
+        if let Err(error) = screen.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         screen.set_scrollback_limit(scrollback_limit);
         let mut output_decoder = TerminalOutputDecoder::default();
-        output_decoder.set_encoding(encoding);
+        if let Err(error) = output_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         let mut recording_decoder = TerminalOutputDecoder::default();
-        recording_decoder.set_encoding(encoding);
+        if let Err(error) = recording_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         Self {
             screen,
             output_decoder,
@@ -2345,10 +2457,16 @@ impl TerminalFrameSession {
     }
 
     fn set_encoding_and_limit(&mut self, encoding: &str, scrollback_limit: usize) {
-        self.screen.set_encoding(encoding);
+        if let Err(error) = self.screen.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         self.screen.set_scrollback_limit(scrollback_limit);
-        self.output_decoder.set_encoding(encoding);
-        self.recording_decoder.set_encoding(encoding);
+        if let Err(error) = self.output_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
+        if let Err(error) = self.recording_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
     }
 
     fn reset_reconnect_stream(&mut self, encoding: &str, scrollback_limit: usize) {
@@ -2362,12 +2480,18 @@ impl TerminalFrameSession {
 
     fn seed(&mut self, output: String, encoding: &str, scrollback_limit: usize) {
         self.screen = terminal_screen_from_output(&output);
-        self.screen.set_encoding(encoding);
+        if let Err(error) = self.screen.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         self.screen.set_scrollback_limit(scrollback_limit);
         self.output_decoder = TerminalOutputDecoder::default();
-        self.output_decoder.set_encoding(encoding);
+        if let Err(error) = self.output_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         self.recording_decoder = TerminalOutputDecoder::default();
-        self.recording_decoder.set_encoding(encoding);
+        if let Err(error) = self.recording_decoder.set_encoding(encoding) {
+            tracing::warn!(%error, "terminal encoding configuration rejected");
+        }
         self.revision = self.revision.saturating_add(1);
         self.action_link_cache = None;
     }
@@ -2884,6 +3008,25 @@ impl TerminalFrameOutputBatch {
     }
 }
 
+fn terminal_advance_decoded_result(
+    screen: &mut TerminalScreen,
+    session_id: &str,
+    text: &str,
+    recording_writer: &RecordingWriteHandle,
+) -> TerminalAdvanceResult {
+    recording_writer.write_output(session_id.to_string(), text.to_string());
+    screen.advance_decoded_text(text);
+    let mut visible_text = String::new();
+    append_terminal_frame_visible_tail(&mut visible_text, text);
+    TerminalAdvanceResult {
+        visible_text,
+        recording_text_bytes: text.len(),
+        effects: screen.take_effects(),
+        accepted_bytes: text.len(),
+        skipped_output_bytes: 0,
+    }
+}
+
 fn terminal_advance_result(
     screen: &mut TerminalScreen,
     output_decoder: &mut TerminalOutputDecoder,
@@ -3271,7 +3414,6 @@ fn terminal_frame_command_is_fence(_command: &TerminalFrameCommand) -> bool {
     if matches!(_command, TerminalFrameCommand::RekeySession { .. }) {
         return true;
     }
-    #[cfg(test)]
     if matches!(_command, TerminalFrameCommand::Fence { .. }) {
         return true;
     }
@@ -3310,6 +3452,7 @@ fn terminal_frame_command_priority_snapshot_insert_before(command: &TerminalFram
 fn terminal_frame_command_output_bytes(command: &TerminalFrameCommand) -> usize {
     match command {
         TerminalFrameCommand::Output { data, .. } => data.len(),
+        TerminalFrameCommand::DecodedOutput { text, .. } => text.len(),
         _ => 0,
     }
 }
@@ -3420,6 +3563,24 @@ fn run_terminal_frame_processor(
                 sessions.remove(&session_id);
                 snapshot_priority.remove(&session_id);
             }
+            TerminalFrameCommand::DecodedOutput { session_id, text } => {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    let started_at = Instant::now();
+                    let mut batch = TerminalFrameOutputBatch::default();
+                    batch.absorb(terminal_advance_decoded_result(
+                        &mut session.screen,
+                        &session_id,
+                        &text,
+                        &recording_writer,
+                    ));
+                    session.revision = session.revision.saturating_add(1);
+                    let event = session.output_event_from_batch(session_id, batch, started_at);
+                    push_terminal_frame_worker_event(
+                        &event_queue,
+                        TerminalFrameEvent::Output(event),
+                    );
+                }
+            }
             TerminalFrameCommand::AppendLocalText { session_id, text } => {
                 if let Some(session) = sessions.get_mut(&session_id) {
                     let started_at = Instant::now();
@@ -3487,6 +3648,27 @@ fn run_terminal_frame_processor(
                     push_terminal_frame_worker_event(
                         &event_queue,
                         TerminalFrameEvent::Snapshot(event),
+                    );
+                }
+            }
+            TerminalFrameCommand::CommandInput {
+                session_id,
+                fallback,
+            } => {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.screen.reset_command_navigation();
+                    if fallback {
+                        session.screen.record_fallback_command();
+                    }
+                }
+            }
+            TerminalFrameCommand::NavigateCommand { session_id, action } => {
+                if let Some(session) = sessions.get_mut(&session_id)
+                    && let Some(result) = session.screen.navigate_command(action)
+                {
+                    push_terminal_frame_worker_event(
+                        &event_queue,
+                        TerminalFrameEvent::CommandNavigation { session_id, result },
                     );
                 }
             }
@@ -3668,6 +3850,17 @@ fn run_terminal_frame_processor(
                     }
                 }
             }
+            TerminalFrameCommand::RequestAllText {
+                session_id,
+                response_tx,
+            } => {
+                if !response_tx.is_canceled() {
+                    let text = sessions
+                        .get(&session_id)
+                        .and_then(|session| session.screen.all_text());
+                    let _ = response_tx.send(text);
+                }
+            }
             TerminalFrameCommand::CancelFindSearch { session_id } => {
                 cancel_find_search_job_for_session(&mut find_search_jobs, &session_id);
             }
@@ -3681,7 +3874,6 @@ fn run_terminal_frame_processor(
                     );
                 }
             }
-            #[cfg(test)]
             TerminalFrameCommand::Fence { complete_tx } => {
                 let _ = complete_tx.send(());
             }

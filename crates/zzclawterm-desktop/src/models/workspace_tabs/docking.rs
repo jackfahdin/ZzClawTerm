@@ -78,7 +78,10 @@ impl TerminalWindowNode {
         target_leaf_id: &str,
         zone: TabDockZone,
     ) -> bool {
-        if tab_id.is_empty() {
+        if tab_id.is_empty()
+            || !self.contains_tab(tab_id)
+            || self.leaf_tabs(target_leaf_id).is_none()
+        {
             return false;
         }
         match zone {

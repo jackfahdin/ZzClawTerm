@@ -201,12 +201,16 @@ impl ZzClawTermApp {
             .text_color(rgb(palette.text))
             .font(self.gpui_ui_font().font())
             .text_size(px(self.settings.summary().ui_font_size.clamp(12, 24) as f32))
+            .child(self.session_tab_drag_listener_layer(cx))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.cancel_session_tab_drag_on_escape(event, window, cx);
+            }))
             .on_click(cx.listener(|this, _, _, _| {
                 this.mark_user_activity();
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
+                cx.listener(|this, _, window, cx| {
                     let transfer_rename_dismissed = this.dismiss_transfer_rename_if_open(cx);
                     let remote_menus_open = this.remote_ops.docker_menus_open();
                     let ai_menus_open = this.ai.transient_menus_are_open();
@@ -222,6 +226,9 @@ impl ZzClawTermApp {
                             this.defer_remote_panel_snapshot_flush(cx);
                         }
                         if ai_menus_open {
+                            if this.ai.history_is_open() {
+                                this.close_ai_history(window, cx);
+                            }
                             this.ai.close_transient_menus();
                             this.defer_ai_panel_snapshot_flush(cx);
                         }
@@ -485,23 +492,25 @@ impl ZzClawTermApp {
                             cx,
                         )))
                         .child(self.panel_resize_handle(PanelResizeSide::Left, cx))
-                        .child(
-                            div()
-                                .id("floating-left-panel-close")
-                                .absolute()
-                                .top(px(6.))
-                                .right(px(8.))
-                                .w(px(20.))
-                                .h(px(20.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .child("×")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_floating_panel(PanelSide::Left, cx);
-                                })),
-                        ),
+                        .when(panel != NavItem::Plugins, |this| {
+                            this.child(
+                                div()
+                                    .id("floating-left-panel-close")
+                                    .absolute()
+                                    .top(px(6.))
+                                    .right(px(8.))
+                                    .w(px(20.))
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .child("×")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_floating_panel(PanelSide::Left, cx);
+                                    })),
+                            )
+                        }),
                 );
             }
 
@@ -528,23 +537,25 @@ impl ZzClawTermApp {
                             window,
                             cx,
                         )))
-                        .child(
-                            div()
-                                .id("floating-right-panel-close")
-                                .absolute()
-                                .top(px(6.))
-                                .right(px(8.))
-                                .w(px(20.))
-                                .h(px(20.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .child("×")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_floating_panel(PanelSide::Right, cx);
-                                })),
-                        ),
+                        .when(panel != NavItem::Plugins, |this| {
+                            this.child(
+                                div()
+                                    .id("floating-right-panel-close")
+                                    .absolute()
+                                    .top(px(6.))
+                                    .right(px(8.))
+                                    .w(px(20.))
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .child("×")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_floating_panel(PanelSide::Right, cx);
+                                    })),
+                            )
+                        }),
                 );
             }
 
@@ -1057,7 +1068,7 @@ impl ZzClawTermApp {
                                     )
                                 }),
                             ))
-                            .when(!request.destructive, |this| {
+                            .when(request.allow_session, |this| {
                                 this.child(overlay_button(
                                     "mcp-approval-session",
                                     t!("ai.mcp.allowSession"),

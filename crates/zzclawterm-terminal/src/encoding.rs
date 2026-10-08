@@ -6,11 +6,12 @@
 
 use std::borrow::Cow;
 
-use encoding_rs::{Decoder, Encoding, GBK, UTF_8};
+use encoding_rs::{Decoder, Encoding, UTF_8};
+use zzclawterm_core::character_encoding::{CharacterEncoding, EncodingError};
 
 /// Stateful charset converter owned by [`crate::TerminalCore`].
 pub struct SessionEncoding {
-    label: String,
+    charset: CharacterEncoding,
     encoding: &'static Encoding,
     decoder: Decoder,
     /// Trailing bytes of a multi-byte sequence that the UTF-8 fast path held
@@ -22,7 +23,7 @@ pub struct SessionEncoding {
 impl std::fmt::Debug for SessionEncoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionEncoding")
-            .field("label", &self.label)
+            .field("label", &self.charset.label())
             .field("encoding", &self.encoding.name())
             .finish()
     }
@@ -30,22 +31,26 @@ impl std::fmt::Debug for SessionEncoding {
 
 impl Default for SessionEncoding {
     fn default() -> Self {
-        Self::from_label("UTF-8")
+        Self::from_encoding(CharacterEncoding::Utf8)
     }
 }
 
 impl Clone for SessionEncoding {
     fn clone(&self) -> Self {
-        Self::from_label(&self.label)
+        Self::from_encoding(self.charset)
     }
 }
 
 impl SessionEncoding {
     /// Resolve a user/settings label (`UTF-8`, `GBK`, …) to a streaming converter.
-    pub fn from_label(label: &str) -> Self {
-        let (label, encoding) = resolve_encoding(label);
+    pub fn from_label(label: &str) -> Result<Self, EncodingError> {
+        Ok(Self::from_encoding(CharacterEncoding::parse(label)?))
+    }
+
+    pub fn from_encoding(charset: CharacterEncoding) -> Self {
+        let encoding = charset.codec();
         Self {
-            label: label.to_string(),
+            charset,
             encoding,
             decoder: encoding.new_decoder_without_bom_handling(),
             utf8_tail: Vec::new(),
@@ -53,7 +58,7 @@ impl SessionEncoding {
     }
 
     pub fn label(&self) -> &str {
-        &self.label
+        self.charset.label()
     }
 
     pub fn is_utf8(&self) -> bool {
@@ -132,26 +137,15 @@ impl SessionEncoding {
     }
 
     /// Encode UTF-8 text for the session wire format (paste / typed text).
-    pub fn encode_str(&self, text: &str) -> Vec<u8> {
-        if self.is_utf8() {
-            return text.as_bytes().to_vec();
-        }
-        let (cow, _, _) = self.encoding.encode(text);
-        cow.into_owned()
+    pub fn encode_str(&self, text: &str) -> Result<Vec<u8>, EncodingError> {
+        self.charset.encode(text)
     }
 
-    /// Encode a UTF-8 byte buffer. Non-UTF-8 / pure-ASCII control payloads pass through.
-    pub fn encode_outgoing(&self, utf8_or_ascii: &[u8]) -> Vec<u8> {
-        if self.is_utf8() || utf8_or_ascii.is_empty() {
-            return utf8_or_ascii.to_vec();
-        }
-        if utf8_or_ascii.iter().all(|b| b.is_ascii()) {
-            return utf8_or_ascii.to_vec();
-        }
-        match std::str::from_utf8(utf8_or_ascii) {
-            Ok(text) => self.encode_str(text),
-            Err(_) => utf8_or_ascii.to_vec(),
-        }
+    /// Logical input is UTF-8; protocol and binary writes use a separate raw path.
+    pub fn encode_outgoing(&self, utf8_or_ascii: &[u8]) -> Result<Vec<u8>, EncodingError> {
+        let text =
+            std::str::from_utf8(utf8_or_ascii).map_err(|_| EncodingError::InvalidUtf8Input)?;
+        self.encode_str(text)
     }
 
     /// Reset decoder state (e.g. after a hard screen clear/reconnect).
@@ -201,46 +195,23 @@ fn incomplete_utf8_tail_len(buf: &[u8]) -> usize {
     0
 }
 
-fn resolve_encoding(label: &str) -> (&'static str, &'static Encoding) {
-    let trimmed = label.trim();
-    if trimmed.eq_ignore_ascii_case("gbk")
-        || trimmed.eq_ignore_ascii_case("gb2312")
-        || trimmed.eq_ignore_ascii_case("cp936")
-    {
-        ("GBK", GBK)
-    } else if trimmed.eq_ignore_ascii_case("gb18030") {
-        ("GB18030", encoding_rs::GB18030)
-    } else if trimmed.eq_ignore_ascii_case("big5") {
-        ("Big5", encoding_rs::BIG5)
-    } else if trimmed.eq_ignore_ascii_case("shift_jis")
-        || trimmed.eq_ignore_ascii_case("shift-jis")
-        || trimmed.eq_ignore_ascii_case("sjis")
-    {
-        ("Shift_JIS", encoding_rs::SHIFT_JIS)
-    } else if trimmed.eq_ignore_ascii_case("euc-kr") || trimmed.eq_ignore_ascii_case("euckr") {
-        ("EUC-KR", encoding_rs::EUC_KR)
-    } else {
-        ("UTF-8", UTF_8)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
 
     use super::{SessionEncoding, incomplete_utf8_tail_len};
+    use std::borrow::Cow;
 
     #[test]
     fn utf8_is_passthrough() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         assert!(enc.is_utf8());
         assert_eq!(enc.decode_output_chunk(b"hi"), b"hi");
-        assert_eq!(enc.encode_str("hi"), b"hi");
+        assert_eq!(enc.encode_str("hi").unwrap(), b"hi");
     }
 
     #[test]
     fn utf8_split_multibyte_across_chunks() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         let bytes = "测".as_bytes();
 
         let part1 = enc.decode_output_text(&bytes[..1]);
@@ -256,7 +227,7 @@ mod tests {
     /// with no decoder pass and no allocation.
     #[test]
     fn utf8_valid_input_is_borrowed_not_copied() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         let input = "hello 世界".as_bytes();
         assert!(matches!(
             enc.decode_output_bytes(input),
@@ -266,7 +237,7 @@ mod tests {
 
     #[test]
     fn utf8_malformed_byte_becomes_replacement_char() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         // 0xff can never appear in valid UTF-8.
         assert_eq!(enc.decode_output_text(b"a\xffb"), "a\u{fffd}b");
     }
@@ -275,7 +246,7 @@ mod tests {
     /// including a character split across the next chunk boundary.
     #[test]
     fn utf8_stream_recovers_after_a_malformed_byte() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         assert_eq!(enc.decode_output_text(b"\xff"), "\u{fffd}");
 
         let bytes = "测".as_bytes();
@@ -285,7 +256,7 @@ mod tests {
 
     #[test]
     fn utf8_reset_decoder_drops_the_held_tail() {
-        let mut enc = SessionEncoding::from_label("UTF-8");
+        let mut enc = SessionEncoding::from_label("UTF-8").unwrap();
         let bytes = "测".as_bytes();
         assert!(enc.decode_output_text(&bytes[..1]).is_empty());
 
@@ -316,22 +287,22 @@ mod tests {
 
     #[test]
     fn gbk_roundtrip_chinese() {
-        let mut enc = SessionEncoding::from_label("GBK");
+        let mut enc = SessionEncoding::from_label("GBK").unwrap();
         assert!(!enc.is_utf8());
         // "测试" in GBK
         let gbk = [0xb2, 0xe2, 0xca, 0xd4];
         let utf8 = enc.decode_output_chunk(&gbk);
         assert_eq!(String::from_utf8(utf8.clone()).unwrap(), "测试");
-        assert_eq!(enc.encode_str("测试"), gbk);
+        assert_eq!(enc.encode_str("测试").unwrap(), gbk);
         // Outgoing UTF-8 bytes re-encode.
-        assert_eq!(enc.encode_outgoing("测试".as_bytes()), gbk);
+        assert_eq!(enc.encode_outgoing("测试".as_bytes()).unwrap(), gbk);
         // ASCII CSI stays intact.
-        assert_eq!(enc.encode_outgoing(b"\x1b[A"), b"\x1b[A");
+        assert_eq!(enc.encode_outgoing(b"\x1b[A").unwrap(), b"\x1b[A");
     }
 
     #[test]
     fn gbk_split_multibyte_across_chunks() {
-        let mut enc = SessionEncoding::from_label("GBK");
+        let mut enc = SessionEncoding::from_label("GBK").unwrap();
         // First byte of "测" (0xb2 0xe2)
         let part1 = enc.decode_output_chunk(&[0xb2]);
         assert!(

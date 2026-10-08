@@ -20,6 +20,10 @@ pub(crate) enum ShortcutId {
     TerminalPasteSelected,
     TerminalFind,
     TerminalClear,
+    TerminalClearAll,
+    TerminalCommandPrevious,
+    TerminalCommandNext,
+    TerminalCommandSelect,
     TerminalSelectAll,
     ManageSyncGroups,
     ShowCommandSuggestions,
@@ -32,6 +36,8 @@ pub(crate) enum ShortcutId {
     CloseTab,
     NextTab,
     PreviousTab,
+    NextTerminalGroup,
+    PreviousTerminalGroup,
     SwitchToTab,
     DuplicateSession,
     MultiplexSsh,
@@ -60,6 +66,10 @@ impl ShortcutId {
             Self::TerminalPasteSelected => "terminal.pasteSelected",
             Self::TerminalFind => "terminal.find",
             Self::TerminalClear => "terminal.clear",
+            Self::TerminalClearAll => "terminal.clearAll",
+            Self::TerminalCommandPrevious => "terminal.commandNav.prev",
+            Self::TerminalCommandNext => "terminal.commandNav.next",
+            Self::TerminalCommandSelect => "terminal.commandNav.select",
             Self::TerminalSelectAll => "terminal.selectAll",
             Self::ManageSyncGroups => "terminal.manageSyncGroups",
             Self::ShowCommandSuggestions => "terminal.showCommandSuggestions",
@@ -72,6 +82,8 @@ impl ShortcutId {
             Self::CloseTab => "tab.close",
             Self::NextTab => "tab.next",
             Self::PreviousTab => "tab.prev",
+            Self::NextTerminalGroup => "workspace.nextGroup",
+            Self::PreviousTerminalGroup => "workspace.previousGroup",
             Self::SwitchToTab => "tab.switchTo",
             Self::DuplicateSession => "tab.duplicateSession",
             Self::MultiplexSsh => "tab.multiplexSsh",
@@ -320,7 +332,11 @@ impl ShortcutDefinition {
         } else {
             self.non_macos_defaults
         };
-        ShortcutBinding::parse(source).expect("registry defaults must be valid")
+        if source.is_empty() {
+            ShortcutBinding { chords: Vec::new() }
+        } else {
+            ShortcutBinding::parse(source).expect("registry defaults must be valid")
+        }
     }
 
     pub(crate) fn default_keys(&self) -> String {
@@ -361,7 +377,7 @@ macro_rules! shortcut {
     };
 }
 
-pub(crate) const SHORTCUT_REGISTRY: [ShortcutDefinition; 35] = [
+pub(crate) const SHORTCUT_REGISTRY: [ShortcutDefinition; 41] = [
     shortcut!(
         TerminalCopy,
         Terminal,
@@ -405,6 +421,50 @@ pub(crate) const SHORTCUT_REGISTRY: [ShortcutDefinition; 35] = [
         "meta+shift+f",
         Supported,
         "Opens terminal buffer search."
+    ),
+    shortcut!(
+        TerminalClearAll,
+        Terminal,
+        "terminalCtx.clearAll",
+        Terminal,
+        ShortcutKind::Direct,
+        "ctrl+shift+l",
+        "meta+shift+l",
+        Supported,
+        "Clears completed output and history while preserving input."
+    ),
+    shortcut!(
+        TerminalCommandPrevious,
+        Terminal,
+        "settings.shortcutLabels.commandNavPrev",
+        Terminal,
+        ShortcutKind::Direct,
+        "ctrl+shift+left",
+        "meta+shift+left",
+        Supported,
+        "Go to the previous command."
+    ),
+    shortcut!(
+        TerminalCommandNext,
+        Terminal,
+        "settings.shortcutLabels.commandNavNext",
+        Terminal,
+        ShortcutKind::Direct,
+        "ctrl+shift+right",
+        "meta+shift+right",
+        Supported,
+        "Go to the next command."
+    ),
+    shortcut!(
+        TerminalCommandSelect,
+        Terminal,
+        "settings.shortcutLabels.commandNavSelect",
+        Terminal,
+        ShortcutKind::Direct,
+        "ctrl+shift+/",
+        "meta+shift+/",
+        Supported,
+        "Select and extend command blocks."
     ),
     shortcut!(
         TerminalClear,
@@ -548,6 +608,28 @@ pub(crate) const SHORTCUT_REGISTRY: [ShortcutDefinition; 35] = [
         "meta+shift+tab",
         Supported,
         "Cycles backward through sessions."
+    ),
+    shortcut!(
+        NextTerminalGroup,
+        Tab,
+        "settings.shortcutLabels.nextTerminalGroup",
+        Workspace,
+        ShortcutKind::Direct,
+        "",
+        "",
+        Supported,
+        "Focuses the next terminal group."
+    ),
+    shortcut!(
+        PreviousTerminalGroup,
+        Tab,
+        "settings.shortcutLabels.previousTerminalGroup",
+        Workspace,
+        ShortcutKind::Direct,
+        "",
+        "",
+        Supported,
+        "Focuses the previous terminal group."
     ),
     shortcut!(
         SwitchToTab,
@@ -994,6 +1076,10 @@ fn binding_for_action(id: ShortcutId, chord: &ShortcutChord, context: Option<&st
         ShortcutId::TerminalPasteSelected => binding!(TerminalPasteSelected),
         ShortcutId::TerminalFind => binding!(TerminalFind),
         ShortcutId::TerminalClear => binding!(TerminalClear),
+        ShortcutId::TerminalClearAll => binding!(TerminalClearAll),
+        ShortcutId::TerminalCommandPrevious => binding!(TerminalCommandPrevious),
+        ShortcutId::TerminalCommandNext => binding!(TerminalCommandNext),
+        ShortcutId::TerminalCommandSelect => binding!(TerminalCommandSelect),
         ShortcutId::TerminalSelectAll => binding!(TerminalSelectAll),
         ShortcutId::ManageSyncGroups => binding!(ManageSyncGroups),
         ShortcutId::ShowCommandSuggestions => binding!(ShowCommandSuggestions),
@@ -1006,6 +1092,8 @@ fn binding_for_action(id: ShortcutId, chord: &ShortcutChord, context: Option<&st
         ShortcutId::CloseTab => binding!(CloseTab),
         ShortcutId::NextTab => binding!(NextTab),
         ShortcutId::PreviousTab => binding!(PreviousTab),
+        ShortcutId::NextTerminalGroup => binding!(NextTerminalGroup),
+        ShortcutId::PreviousTerminalGroup => binding!(PreviousTerminalGroup),
         ShortcutId::SwitchToTab => unreachable!("indexed actions are expanded separately"),
         ShortcutId::DuplicateSession => binding!(DuplicateSession),
         ShortcutId::MultiplexSsh => binding!(MultiplexSsh),
@@ -1282,12 +1370,18 @@ mod tests {
 
     #[test]
     fn registry_is_complete_unique_and_has_valid_platform_defaults() {
-        assert_eq!(SHORTCUT_REGISTRY.len(), 35);
+        assert_eq!(SHORTCUT_REGISTRY.len(), 41);
         let mut ids = HashSet::new();
         for definition in SHORTCUT_REGISTRY {
             assert!(ids.insert(definition.id));
             assert_eq!(definition.action, definition.id);
-            assert!(!definition.default_binding().chords().is_empty());
+            assert_eq!(
+                definition.default_binding().chords().is_empty(),
+                matches!(
+                    definition.id,
+                    ShortcutId::NextTerminalGroup | ShortcutId::PreviousTerminalGroup
+                )
+            );
             assert_eq!(
                 ShortcutId::parse(definition.id.as_str()),
                 Some(definition.id)

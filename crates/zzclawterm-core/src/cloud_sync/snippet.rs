@@ -359,6 +359,18 @@ fn ensure_snippet_http_success(
     if (200..300).contains(&status) {
         return Ok(());
     }
+    let lower = body.to_ascii_lowercase();
+    if provider == "Gitee snippet"
+        && matches!(status, 400 | 422)
+        && (lower.contains("gist_capacity")
+            || lower.contains("too many files")
+            || (lower.contains("file")
+                && (lower.contains("maximum")
+                    || lower.contains("limit")
+                    || lower.contains("capacity"))))
+    {
+        return Err(CloudSyncError::GistCapacity);
+    }
     Err(CloudSyncError::Remote(format!(
         "{provider} request failed ({status}): {}",
         body.trim()
@@ -392,6 +404,16 @@ impl<B> CloudSyncRemote for SnippetRemote<B>
 where
     B: SnippetBlobBackend,
 {
+    fn file_capacity(&self) -> Result<Option<super::RemoteFileCapacity>, CloudSyncError> {
+        if self.provider != "gitee_snippet" {
+            return Ok(None);
+        }
+        Ok(Some(super::RemoteFileCapacity {
+            used: self.backend.list_blob_names()?.len(),
+            limit: 10,
+        }))
+    }
+
     fn provider(&self) -> &'static str {
         self.provider
     }

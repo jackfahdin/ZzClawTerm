@@ -1,0 +1,21 @@
+schema_version = 1
+id = "diagnostic-command"
+name = "Diagnostic command generator"
+version = "1.0.0"
+authors = ["ZzClawTerm"]
+description = "Stateful Rust/Wasm command drafts"
+host_version = ">=0.1.0"
+api_version = "1.0.0"
+component = "plugin.wasm"
+
+[[actions]]
+id = "diagnose"
+name = "Diagnose a hostname"
+description = "Draft nslookup and ping commands"
+result = "command"
+[[actions.parameters]]
+id = "host"
+name = "Hostname"
+kind = "string"
+required = true
+default = "example.org"

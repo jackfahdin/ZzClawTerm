@@ -35,13 +35,13 @@ use zzclawterm_remote_desktop::{
     MAX_VNC_FRAMEBUFFER_WIDTH, MAX_VNC_INPUT_BATCH, PROTOCOL_VERSION, Packet, PixelFormat,
     RemoteCursorEvent, RemoteFrameEvent, RemotePoint, RemotePointerButton, RemotePointerEvent,
     RemoteWheelAxis, VncControlMessage, VncError, VncErrorKind, VncInputEvent, VncSecurityMode,
-    VncServerCapabilities, VncSessionConfig, VncSessionState, decode_vnc_control,
-    encode_cursor_packet, encode_frame_packet_owned, encode_vnc_control, read_packet,
-    validate_committed_text, write_packet_into,
+    VncServerCapabilities, VncServerKeyRequest, VncSessionConfig, VncSessionState,
+    decode_vnc_control, encode_cursor_packet, encode_frame_packet_owned, encode_vnc_control,
+    read_packet, validate_committed_text, write_packet_into,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const UPDATE_REQUEST_INTERVAL: Duration = Duration::from_millis(16);
 const STDOUT_BUFFER_BYTES: usize = 256 * 1024;
@@ -70,6 +70,7 @@ struct WorkerMailboxState {
     release_all: bool,
     resyncing: bool,
     closed: bool,
+    trust_reply: Option<(u64, String, tokio::sync::oneshot::Sender<bool>)>,
 }
 
 struct WorkerMailbox {
@@ -133,6 +134,7 @@ impl WorkerMailbox {
     fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
+            state.trust_reply = None;
             state.reliable.clear();
             state.latest_move = None;
         }
@@ -257,14 +259,17 @@ fn validate_control_phase(message: &VncControlMessage, hello_complete: bool) -> 
             io::ErrorKind::InvalidData,
             "VNC IPC ClientHello may only be sent once",
         )),
-        VncControlMessage::ServerHello { .. }
+        VncControlMessage::ServerKeyRequest(_)
+        | VncControlMessage::ServerKeyAuthenticated(_)
+        | VncControlMessage::ServerHello { .. }
         | VncControlMessage::DesktopReset { .. }
         | VncControlMessage::State { .. }
         | VncControlMessage::Error { .. } => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "VNC IPC helper-only message received from application",
         )),
-        VncControlMessage::Connect { .. }
+        VncControlMessage::ServerKeyResponse { .. }
+        | VncControlMessage::Connect { .. }
         | VncControlMessage::Input { .. }
         | VncControlMessage::Clipboard { .. }
         | VncControlMessage::RequestFullFrame { .. }
@@ -341,6 +346,25 @@ fn run() -> io::Result<()> {
                     continue;
                 }
                 session = Some(spawn_session(session_id, config, output_tx.clone()));
+            }
+            VncControlMessage::ServerKeyResponse {
+                session_id,
+                generation,
+                request_id,
+                accept,
+            } => {
+                if let Some(session) = session
+                    .as_ref()
+                    .filter(|session| session.session_id == session_id)
+                    && let Ok(mut state) = session.mailbox.state.lock()
+                    && state
+                        .trust_reply
+                        .as_ref()
+                        .is_some_and(|(g, id, _)| *g == generation && id == &request_id)
+                    && let Some((_, _, reply)) = state.trust_reply.take()
+                {
+                    let _ = reply.send(accept);
+                }
             }
             VncControlMessage::Input { session_id, events } => {
                 if !hello_complete {
@@ -439,7 +463,9 @@ fn run() -> io::Result<()> {
                 break;
             }
             // Messages the application never sends inbound.
-            VncControlMessage::ServerHello { .. }
+            VncControlMessage::ServerKeyRequest(_)
+            | VncControlMessage::ServerKeyAuthenticated(_)
+            | VncControlMessage::ServerHello { .. }
             | VncControlMessage::DesktopReset { .. }
             | VncControlMessage::State { .. }
             | VncControlMessage::Error { .. } => {
@@ -579,6 +605,7 @@ struct SessionOutput {
     session_id: String,
     output_tx: mpsc::SyncSender<Outbound>,
     epoch: u64,
+    generation: u64,
     cursor_shape_id: u64,
 }
 
@@ -587,6 +614,7 @@ impl SessionOutput {
         Self {
             session_id,
             output_tx,
+            generation: 0,
             epoch: 0,
             cursor_shape_id: 0,
         }
@@ -661,6 +689,7 @@ async fn run_worker(
             // The parent owns the Disconnecting/Disconnected pair.
             return;
         }
+        output.generation = output.generation.wrapping_add(1).max(1);
         let connecting_state = if attempt == 0 {
             VncSessionState::Connecting
         } else {
@@ -734,7 +763,73 @@ async fn run_generation(
             .map(|password| password.expose_secret().to_owned())
             .unwrap_or_default(),
     );
+    let trust_mailbox = mailbox.clone();
+    let trust_output = output.output_tx.clone();
+    let trust_session = output.session_id.clone();
+    let trust_generation = output.generation;
+    let trust_host = config.host.clone();
+    let trust_port = config.port;
+    let verified_request = Arc::new(Mutex::new(None::<VncServerKeyRequest>));
+    let pending_request = verified_request.clone();
     let connector = VncConnector::new(stream)
+        .set_username(config.username.clone())
+        .set_server_key_verifier(move |key| {
+            use sha2::{Digest, Sha256};
+            let mailbox = trust_mailbox.clone();
+            let output = trust_output.clone();
+            let pending_request = pending_request.clone();
+            let request = VncServerKeyRequest {
+                session_id: trust_session.clone(),
+                generation: trust_generation,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                host: trust_host.clone(),
+                port: trust_port,
+                sha256_fingerprint: format!(
+                    "SHA256:{}",
+                    Sha256::digest(key.encoded())
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
+                key_bits: key.bits(),
+            };
+            async move {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                {
+                    let mut state = mailbox.state.lock().map_err(|_| {
+                        vnc::VncError::Ra2ServerKeyRejected("verification unavailable".into())
+                    })?;
+                    if state.closed {
+                        return Err(vnc::VncError::Ra2ServerKeyRejected("session closed".into()));
+                    }
+                    state.trust_reply = Some((request.generation, request.request_id.clone(), tx));
+                }
+                output
+                    .send(Outbound::Control(VncControlMessage::ServerKeyRequest(
+                        request.clone(),
+                    )))
+                    .map_err(|_| {
+                        vnc::VncError::Ra2ServerKeyRejected("verification channel closed".into())
+                    })?;
+                let accepted = timeout(Duration::from_secs(60), rx)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false);
+                if let Ok(mut state) = mailbox.state.lock() {
+                    state.trust_reply = None;
+                }
+                if !accepted {
+                    return Err(vnc::VncError::Ra2ServerKeyRejected(
+                        "server key rejected or verification expired".into(),
+                    ));
+                }
+                *pending_request.lock().map_err(|_| {
+                    vnc::VncError::Ra2ServerKeyRejected("verification unavailable".into())
+                })? = Some(request);
+                Ok(())
+            }
+        })
         .set_auth_method(async move { Ok(auth_password.to_string()) })
         .set_security_policy(security_policy(
             config.security.mode,
@@ -760,6 +855,17 @@ async fn run_generation(
         })?
         .and_then(|state| state.finish())
         .map_err(classify_vnc_error)?;
+    if close_requested.load(Ordering::Acquire) {
+        let _ = client.close().await;
+        return Ok(());
+    }
+    if let Some(request) = verified_request
+        .lock()
+        .ok()
+        .and_then(|mut request| request.take())
+    {
+        output.control(VncControlMessage::ServerKeyAuthenticated(request))?;
+    }
     output.state(VncSessionState::Negotiating, None)?;
     let mut pressed_keys = Vec::new();
     let mut pointer_state = VncPointerState::default();
@@ -1144,7 +1250,13 @@ async fn release_pressed_keys(client: &VncClient, pressed_keys: &mut Vec<u32>) {
 
 fn classify_vnc_error(error: vnc::VncError) -> VncError {
     let (kind, message) = match error {
-        vnc::VncError::NoPassword | vnc::VncError::WrongPassword => (
+        vnc::VncError::Ra2ServerKeyRejected(_)
+        | vnc::VncError::Ra2ServerKeyVerifierRequired
+        | vnc::VncError::Ra2ServerHashMismatch
+        | vnc::VncError::Ra2Crypto(_)
+        | vnc::VncError::CredentialTooLong { .. }
+        | vnc::VncError::NoPassword
+        | vnc::VncError::WrongPassword => (
             VncErrorKind::Authentication,
             "VNC authentication failed".to_string(),
         ),
@@ -1153,14 +1265,20 @@ fn classify_vnc_error(error: vnc::VncError) -> VncError {
         | vnc::VncError::InvalidSecurityType(_) => (
             VncErrorKind::Authentication,
             format!(
-                "The VNC server requires an unsupported security type. Currently supported: None and VNC Authentication. Details: {error}"
+                "The VNC server requires an unsupported security type. Currently supported: None, VNC Authentication and RA2_256. Details: {error}"
             ),
         ),
         vnc::VncError::InvalidEncoding(_) | vnc::VncError::InvalidImageData => {
             (VncErrorKind::Encoding, error.to_string())
         }
         vnc::VncError::IoError(_) => (VncErrorKind::Transport, error.to_string()),
-        vnc::VncError::LimitExceeded { .. }
+        vnc::VncError::InvalidRa2KeyLength { .. }
+        | vnc::VncError::InvalidRa2PublicKey
+        | vnc::VncError::InvalidRa2EncryptedRandomLength { .. }
+        | vnc::VncError::InvalidRa2RandomLength(_)
+        | vnc::VncError::InvalidRa2Subtype(_)
+        | vnc::VncError::InvalidRa2RecordLimit(_)
+        | vnc::VncError::LimitExceeded { .. }
         | vnc::VncError::InvalidDimensions
         | vnc::VncError::IntegerOverflow(_)
         | vnc::VncError::WrongPixelFormat
@@ -1172,12 +1290,11 @@ fn classify_vnc_error(error: vnc::VncError) -> VncError {
     VncError::new(kind, message)
 }
 
-fn security_policy(mode: VncSecurityMode, has_password: bool) -> VncSecurityPolicy {
+fn security_policy(mode: VncSecurityMode, _has_password: bool) -> VncSecurityPolicy {
     match mode {
         VncSecurityMode::None => VncSecurityPolicy::NoneOnly,
         VncSecurityMode::VncAuth => VncSecurityPolicy::VncAuthOnly,
-        VncSecurityMode::Auto if has_password => VncSecurityPolicy::VncAuthOnly,
-        VncSecurityMode::Auto => VncSecurityPolicy::NoneOnly,
+        VncSecurityMode::Auto => VncSecurityPolicy::Auto,
     }
 }
 
@@ -1379,11 +1496,11 @@ mod tests {
         ));
         assert!(matches!(
             security_policy(VncSecurityMode::Auto, true),
-            VncSecurityPolicy::VncAuthOnly
+            VncSecurityPolicy::Auto
         ));
         assert!(matches!(
             security_policy(VncSecurityMode::Auto, false),
-            VncSecurityPolicy::NoneOnly
+            VncSecurityPolicy::Auto
         ));
     }
 

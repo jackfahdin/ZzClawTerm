@@ -264,7 +264,17 @@ fn strip_rz_echo(data: &mut Vec<u8>) {
     // Try to strip from the end: \r\n, \r, or just the command text.
     // The command is always at the end of the passthrough because the
     // ZMODEM header follows immediately.
-    let patterns: &[&[u8]] = &[b"rz\r\n", b"rz\r", b"rz"];
+    let patterns: &[&[u8]] = &[
+        b"rz -e -y\r\n",
+        b"rz -e -y\r",
+        b"rz -e -y",
+        b"rz -e\r\n",
+        b"rz -e\r",
+        b"rz -e",
+        b"rz\r\n",
+        b"rz\r",
+        b"rz",
+    ];
     for &pat in patterns {
         if data.ends_with(pat) {
             data.truncate(data.len() - pat.len());
@@ -1429,5 +1439,38 @@ mod tests {
             }
         }
         wire
+    }
+}
+
+/// Ask the peer to escape controls; overwrite only after conflict resolution.
+pub fn receive_command(overwrite: bool) -> Vec<u8> {
+    if overwrite {
+        b"rz -e -y\r".to_vec()
+    } else {
+        b"rz -e\r".to_vec()
+    }
+}
+
+#[cfg(test)]
+mod receive_command_tests {
+    use super::{receive_command, strip_rz_echo};
+    #[test]
+    fn receive_commands_request_control_escaping_and_strip_their_echo() {
+        for overwrite in [false, true] {
+            let command = receive_command(overwrite);
+            assert_eq!(
+                command,
+                if overwrite {
+                    b"rz -e -y\r".to_vec()
+                } else {
+                    b"rz -e\r".to_vec()
+                }
+            );
+            let mut echoed = b"prompt> ".to_vec();
+            echoed.extend(command);
+            echoed.push(b'\n');
+            strip_rz_echo(&mut echoed);
+            assert_eq!(echoed, b"prompt> ");
+        }
     }
 }

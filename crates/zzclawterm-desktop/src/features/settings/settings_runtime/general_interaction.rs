@@ -127,6 +127,42 @@ impl ZzClawTermApp {
         self.save_general_settings(cx);
     }
 
+    pub(in crate::features) fn toggle_minimize_to_tray_from_tray(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        // A tray action changes the saved preference even while a settings draft
+        // is open. Load the saved summary on the store worker so unrelated draft
+        // fields are never persisted by this shortcut.
+        self.submit_store_request(
+            0,
+            zzclawterm_store::store_mutation(StoreDomain::Settings, |store| {
+                let mut settings = store.load_app_settings_summary()?;
+                settings.minimize_to_tray = !settings.minimize_to_tray;
+                store.save_general_settings(&settings)
+            }),
+            |this, event, cx| {
+                match event.outcome {
+                    Ok(settings) => {
+                        if !this.shell.has_settings_draft() {
+                            this.apply_gpui_settings(settings.clone(), cx);
+                        }
+                        this.publish_shared_settings(settings, cx);
+                    }
+                    Err(error) => {
+                        this.settings.update_store_status(
+                            format!("tray preference save failed: {error}"),
+                            false,
+                        );
+                        this.shell.set_status("tray preference save failed");
+                    }
+                }
+                cx.notify();
+            },
+            cx,
+        );
+    }
+
     pub(in crate::features) fn set_diagnostics_level(
         &mut self,
         level: &'static str,

@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 aho-corasick = "1"
 gpui.workspace = true
+futures.workspace = true
 zzclawterm-core.workspace = true
 zzclawterm-terminal.workspace = true
 zzclawterm-ui.workspace = true

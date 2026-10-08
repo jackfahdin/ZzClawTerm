@@ -19,17 +19,8 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.commands
-            .open_quick_editor(QuickCommandEditorState::blank());
-        // The boxes own their text, so they have to be dropped for the next
-        // command to seed from its own values.
-        self.forget_text_inputs("quick-command.editor.");
-        self.shell
-            .set_status("quick command editor opened".to_string());
-        if !self.open_quick_command_window(cx) {
-            window.focus(self.commands.quick_editor_focus(), cx);
-        }
-        cx.notify();
+        let category = self.commands.quick_command_creation_category();
+        self.open_new_quick_command_editor_in_category(category, window, cx);
     }
 
     pub(in crate::features) fn open_quick_command_editor_with_command(
@@ -49,7 +40,7 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    /// "Add command" from a group row. The child window reads the editor state when
+    /// The child window reads the editor state when
     /// it opens, so seeding the draft first is what carries the category across.
     pub(in crate::features) fn open_new_quick_command_editor_in_category(
         &mut self,

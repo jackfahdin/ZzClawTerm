@@ -61,6 +61,7 @@ pub(crate) enum NavItem {
     Transfers,
     Notes,
     Settings,
+    Plugins,
     AiAssistant,
     ActiveSessions,
     CommandHistory,
@@ -82,6 +83,7 @@ impl NavItem {
             NavItem::Transfers => "panel.fileExplorer",
             NavItem::Notes => "panel.notes",
             NavItem::Settings => "settings.title",
+            NavItem::Plugins => "plugins.title",
             NavItem::AiAssistant => "ai.title",
             NavItem::ActiveSessions => "panel.activeSessions",
             NavItem::CommandHistory => "panel.commandHistory",
@@ -105,6 +107,7 @@ impl NavItem {
             NavItem::Transfers => "File Explorer",
             NavItem::Notes => "Notes",
             NavItem::Settings => "Settings",
+            NavItem::Plugins => "Plugins",
             NavItem::AiAssistant => "AI Assistant",
             NavItem::ActiveSessions => "Active Sessions",
             NavItem::CommandHistory => "Command History",
@@ -133,6 +136,7 @@ impl NavItem {
             NavItem::SecurityAuth => "Security",
             NavItem::Recording => "Recording",
             NavItem::Settings => "Settings",
+            NavItem::Plugins => "Plugins",
             NavItem::Workspace => "Workspace",
         }
     }
@@ -147,6 +151,7 @@ impl NavItem {
             NavItem::SecurityAuth => "icons/auth.svg",
             NavItem::SyncBackupHistory => "icons/sync.svg",
             NavItem::Settings => "icons/settings.svg",
+            NavItem::Plugins => "icons/extensions.svg",
             NavItem::Connections => "icons/connections.svg",
             NavItem::AiAssistant => "icons/ai.svg",
             NavItem::ActiveSessions => "icons/sessions.svg",
@@ -169,6 +174,7 @@ impl NavItem {
                 | NavItem::Tunnels
                 | NavItem::SecurityAuth
                 | NavItem::SyncBackupHistory
+                | NavItem::Plugins
         )
     }
 
@@ -207,6 +213,7 @@ impl NavItem {
             NavItem::Transfers => "fileExplorer",
             NavItem::Notes => "notes",
             NavItem::Settings => "settings",
+            NavItem::Plugins => "plugins",
             NavItem::AiAssistant => "aiAssistant",
             NavItem::ActiveSessions => "activeSessions",
             NavItem::CommandHistory => "commandHistory",
@@ -229,6 +236,7 @@ impl NavItem {
             "fileExplorer" | "fileTransfer" | "transfers" => Some(NavItem::Transfers),
             "notes" => Some(NavItem::Notes),
             "settings" => Some(NavItem::Settings),
+            "plugins" => Some(NavItem::Plugins),
             "aiAssistant" | "ai" => Some(NavItem::AiAssistant),
             "activeSessions" => Some(NavItem::ActiveSessions),
             "commandHistory" => Some(NavItem::CommandHistory),
@@ -369,7 +377,11 @@ impl Default for ActivityBarLayoutState {
                 "network".to_string(),
                 "securityAuth".to_string(),
             ],
-            left_bottom: vec!["syncBackupHistory".to_string(), "settings".to_string()],
+            left_bottom: vec![
+                "syncBackupHistory".to_string(),
+                "plugins".to_string(),
+                "settings".to_string(),
+            ],
             right_top: vec![
                 "savedConnections".to_string(),
                 "aiAssistant".to_string(),
@@ -394,6 +406,19 @@ impl Default for ActivityBarLayoutState {
 }
 
 impl ActivityBarLayoutState {
+    /// Add the new entry before restoring panels, without changing saved placement.
+    pub(crate) fn ensure_plugin_entry(&mut self) {
+        if self.find_entry("plugins").is_some() {
+            return;
+        }
+        let insert_at = self
+            .left_bottom
+            .iter()
+            .position(|id| id == "settings")
+            .unwrap_or(self.left_bottom.len());
+        self.left_bottom.insert(insert_at, "plugins".to_string());
+    }
+
     pub(crate) fn zone_mut(&mut self, zone: ActivityBarZone) -> &mut Vec<String> {
         match zone {
             ActivityBarZone::LeftTop => &mut self.left_top,
@@ -619,6 +644,68 @@ mod tests {
         ActivityBarEntry, ActivityBarLayoutState, ActivityBarZone, NavItem, PanelOpenMode,
         PanelSide, panel_collapsed_from_persistence,
     };
+
+    #[test]
+    fn plugins_use_a_stable_panel_id_and_default_left_bottom_entry() {
+        assert_eq!(NavItem::Plugins.persistence_id(), "plugins");
+        assert_eq!(
+            NavItem::from_persistence_id("plugins"),
+            Some(NavItem::Plugins)
+        );
+        assert_eq!(
+            ActivityBarEntry::from_persistence_id("plugins"),
+            Some(ActivityBarEntry::Panel(NavItem::Plugins)),
+        );
+        assert!(NavItem::Plugins.is_left_panel());
+        assert!(!NavItem::Plugins.opens_settings());
+        assert_eq!(NavItem::Plugins.i18n_key(), Some("plugins.title"));
+        assert_eq!(NavItem::Plugins.icon_path(), "icons/extensions.svg");
+        let layout = ActivityBarLayoutState::default();
+        assert_eq!(
+            layout.left_bottom,
+            ["syncBackupHistory", "plugins", "settings"]
+        );
+    }
+
+    #[test]
+    fn legacy_layout_adds_plugins_once_without_reordering_unknown_entries() {
+        let mut layout = ActivityBarLayoutState {
+            left_bottom: vec![
+                "futureEntry".into(),
+                "settings".into(),
+                "syncBackupHistory".into(),
+            ],
+            hidden_items: vec!["futureEntry".into()],
+            ..ActivityBarLayoutState::default()
+        };
+        let hidden = layout.hidden_items.clone();
+        layout.ensure_plugin_entry();
+        assert_eq!(
+            layout.left_bottom,
+            ["futureEntry", "plugins", "settings", "syncBackupHistory"]
+        );
+        let once = layout.clone();
+        layout.ensure_plugin_entry();
+        assert_eq!(layout, once);
+        assert_eq!(layout.hidden_items, hidden);
+
+        layout.left_bottom = vec!["futureEntry".into()];
+        layout.ensure_plugin_entry();
+        assert_eq!(layout.left_bottom, ["futureEntry", "plugins"]);
+    }
+
+    #[test]
+    fn saved_plugin_placement_and_hidden_state_survive_layout_completion() {
+        for zone in ActivityBarZone::all() {
+            let mut layout = ActivityBarLayoutState::default();
+            layout.left_bottom.retain(|id| id != "plugins");
+            layout.zone_mut(zone).insert(0, "plugins".into());
+            layout.hidden_items.push("plugins".into());
+            let saved = layout.clone();
+            layout.ensure_plugin_entry();
+            assert_eq!(layout, saved);
+        }
+    }
 
     #[test]
     fn retired_migration_panel_is_ignored_when_loading_persisted_layouts() {

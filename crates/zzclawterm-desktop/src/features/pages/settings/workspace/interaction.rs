@@ -16,7 +16,10 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let encoding = self.settings.summary().interaction_default_encoding.clone();
+        let raw_encoding = self.settings.summary().interaction_default_encoding.clone();
+        let encoding = zzclawterm_core::character_encoding::CharacterEncoding::parse(&raw_encoding)
+            .map(|encoding| encoding.label().to_string())
+            .unwrap_or(raw_encoding);
         // Built before the form, which reads `self` throughout: creating the
         // box needs it mutably.
         let word_separators_input =
@@ -292,10 +295,12 @@ impl SettingsPanel {
                     t!("settings.defaultEncoding"),
                     Some(SharedString::from(t!("settings.defaultEncodingDesc"))),
                     (
-                        vec![
-                            ZzClawSelectOption::new("UTF-8", "UTF-8"),
-                            ZzClawSelectOption::new("GBK", "GBK"),
-                        ],
+                        zzclawterm_core::character_encoding::CharacterEncoding::ALL
+                            .into_iter()
+                            .map(|encoding| {
+                                ZzClawSelectOption::new(encoding.label(), encoding.label())
+                            })
+                            .collect(),
                         encoding,
                         false,
                     ),

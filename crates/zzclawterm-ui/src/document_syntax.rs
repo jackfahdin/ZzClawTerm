@@ -2,6 +2,46 @@
 use gpui_kit::component::highlighter::SyntaxHighlighter;
 use std::ops::Range;
 
+use gpui::{HighlightStyle, rgb};
+use gpui_base::input::HighlightStyleResolver;
+
+use crate::theme::ThemePalette;
+
+struct CommandColors(ThemePalette);
+
+impl HighlightStyleResolver for CommandColors {
+    fn style(&self, name: &str) -> Option<HighlightStyle> {
+        // Keep shell previews to three accents from the current theme rather
+        // than importing a separate editor color scheme.
+        let color = match name.split('.').next()? {
+            "function" | "keyword" => self.0.link,
+            "string" => self.0.success,
+            "variable" | "constant" | "number" => self.0.accent,
+            "comment" => self.0.text_muted,
+            _ => return None,
+        };
+        Some(HighlightStyle {
+            color: Some(rgb(color).into()),
+            ..Default::default()
+        })
+    }
+}
+
+/// Parse once off the UI thread. The returned byte ranges are safe to cache
+/// and render without a parser, theme singleton, or GPUI context.
+pub fn command_highlights(
+    content: &str,
+    palette: ThemePalette,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if content.is_empty() || content.len() > 64 * 1024 {
+        return Vec::new();
+    }
+    let text = ropey::Rope::from(content);
+    let mut highlighter = SyntaxHighlighter::new("bash");
+    highlighter.update(None, &text, Some(std::time::Duration::from_millis(50)));
+    highlighter.styles(&(0..content.len()), &CommandColors(palette))
+}
+
 pub fn document_fold_ranges(content: &str, language: &str) -> Vec<Range<usize>> {
     let text = ropey::Rope::from(content);
     let mut highlighter = SyntaxHighlighter::new(language);
@@ -75,7 +115,28 @@ pub fn document_fold_ranges(content: &str, language: &str) -> Vec<Range<usize>> 
 
 #[cfg(test)]
 mod tests {
-    use super::document_fold_ranges;
+    use super::{command_highlights, document_fold_ranges};
+
+    #[test]
+    fn shell_highlights_use_theme_colors_and_preserve_utf8_ranges() {
+        let command = "printf '%s' \"你好 $HOME\" | head -n 3 # 注释";
+        for theme in ["github-dark", "solarized-light"] {
+            let palette = crate::theme::theme_palette(theme);
+            let highlights = command_highlights(command, palette);
+            for (range, _) in &highlights {
+                assert!(range.end <= command.len());
+                assert!(command.is_char_boundary(range.start));
+                assert!(command.is_char_boundary(range.end));
+            }
+            for color in [palette.link, palette.success, palette.text_muted] {
+                assert!(
+                    highlights
+                        .iter()
+                        .any(|(_, style)| style.color == Some(gpui::rgb(color).into()))
+                );
+            }
+        }
+    }
     #[test]
     fn syntax_and_indentation_folds_keep_the_header_and_following_line() {
         let json = "{\n  \"a\": 1,\n  \"b\": 2\n}\n";

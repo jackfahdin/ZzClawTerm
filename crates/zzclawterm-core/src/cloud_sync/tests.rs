@@ -368,6 +368,8 @@ fn recover_current_snapshot_with_remote(
 struct MemoryRemote {
     files: Mutex<HashMap<String, Vec<u8>>>,
     fail_writes_containing: Mutex<VecDeque<String>>,
+    capacity_limit: Option<usize>,
+    fail_delete: bool,
 }
 
 impl MemoryRemote {
@@ -469,6 +471,13 @@ impl SnippetBlobBackend for MemorySnippetBackend {
 }
 
 impl CloudSyncRemote for MemoryRemote {
+    fn file_capacity(&self) -> Result<Option<super::RemoteFileCapacity>, CloudSyncError> {
+        Ok(self.capacity_limit.map(|limit| super::RemoteFileCapacity {
+            used: self.files.lock().unwrap().len(),
+            limit,
+        }))
+    }
+
     fn provider(&self) -> &'static str {
         "memory"
     }
@@ -504,6 +513,9 @@ impl CloudSyncRemote for MemoryRemote {
     }
 
     fn delete(&self, path: &str) -> Result<(), CloudSyncError> {
+        if self.fail_delete {
+            return Err(CloudSyncError::Remote("injected delete failure".into()));
+        }
         self.files.lock().expect("memory lock").remove(path);
         Ok(())
     }
@@ -538,6 +550,9 @@ impl ConcurrentUpdateRemote {
 }
 
 impl CloudSyncRemote for ConcurrentUpdateRemote {
+    fn file_capacity(&self) -> Result<Option<super::RemoteFileCapacity>, CloudSyncError> {
+        self.inner.file_capacity()
+    }
     fn provider(&self) -> &'static str {
         "concurrent-memory"
     }
@@ -2022,4 +2037,166 @@ fn history_line(id: &str, timestamp_ms: u64) -> String {
         }
     })
     .to_string()
+}
+
+#[test]
+fn capacity_cleanup_protects_head_target_foreign_and_corrupted_snapshots() {
+    let dir = unique_temp_dir("capacity-source");
+    let options = options(&dir, &dir, "device");
+    let store = OptionsTestLocalStore(&options);
+    let remote = MemoryRemote {
+        capacity_limit: Some(8),
+        ..Default::default()
+    };
+    let mut snapshots = Vec::new();
+    for (age, revision) in ["old", "head", "target", "recent"].into_iter().enumerate() {
+        let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+        snapshot.meta.revision_id = revision.into();
+        snapshot.meta.created_at_ms = age as u64;
+        snapshot.recalculate_hash().unwrap();
+        let bytes = store.encode_sync_snapshot(&snapshot, "secret").unwrap();
+        remote
+            .write(
+                &remote_path("zzclawterm", &super::legacy_sync_snapshot_file(revision)),
+                &bytes,
+            )
+            .unwrap();
+        snapshots.push(snapshot);
+    }
+    let pointer = super::protocol::pointer_from_snapshot(&snapshots[1]);
+    super::write_sync_pointer(&store, &remote, "zzclawterm", &pointer).unwrap();
+    remote
+        .write(
+            &remote_path("zzclawterm", super::SYNC_CURRENT_FILE),
+            &store.encode_sync_snapshot(&snapshots[1], "secret").unwrap(),
+        )
+        .unwrap();
+    remote
+        .write("foreign/sync/snapshots/old.redb.enc", b"foreign")
+        .unwrap();
+    remote
+        .write(
+            &remote_path("zzclawterm", &super::legacy_sync_snapshot_file("corrupted")),
+            b"corrupted",
+        )
+        .unwrap();
+    // An overwrite consumes no extra slot and must not collect the oldest snapshot.
+    super::gc::reserve_snapshot_capacity(&store, &options, &remote, Some(&pointer), "target")
+        .unwrap();
+    let old = remote_path("zzclawterm", &super::legacy_sync_snapshot_file("old"));
+    assert!(remote.read_if_exists(&old).unwrap().is_some());
+    super::gc::reserve_snapshot_capacity(&store, &options, &remote, Some(&pointer), "new").unwrap();
+    assert!(remote.read_if_exists(&old).unwrap().is_none());
+    assert!(
+        remote
+            .read_if_exists("foreign/sync/snapshots/old.redb.enc")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        remote
+            .read_if_exists(&remote_path(
+                "zzclawterm",
+                &super::legacy_sync_snapshot_file("corrupted")
+            ))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        super::protocol::read_snapshot_for_pointer(&store, &remote, &options, &pointer).is_ok()
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn capacity_cleanup_rechecks_changed_or_unreadable_head_before_deleting() {
+    for corrupt in [false, true] {
+        let dir = unique_temp_dir("capacity-head-change");
+        let options = options(&dir, &dir, "device");
+        let store = OptionsTestLocalStore(&options);
+        let remote = ConcurrentUpdateRemote {
+            inner: MemoryRemote {
+                capacity_limit: Some(5),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut snapshots = Vec::new();
+        for (age, revision) in ["old", "expected", "spare"].into_iter().enumerate() {
+            let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+            snapshot.meta.revision_id = revision.into();
+            snapshot.meta.created_at_ms = age as u64;
+            snapshot.recalculate_hash().unwrap();
+            remote
+                .write(
+                    &remote_path("zzclawterm", &super::legacy_sync_snapshot_file(revision)),
+                    &store.encode_sync_snapshot(&snapshot, "secret").unwrap(),
+                )
+                .unwrap();
+            snapshots.push(snapshot);
+        }
+        let expected = super::protocol::pointer_from_snapshot(&snapshots[1]);
+        super::write_sync_pointer(&store, &remote, "zzclawterm", &expected).unwrap();
+        remote
+            .write(
+                &remote_path("zzclawterm", super::SYNC_CURRENT_FILE),
+                &store.encode_sync_snapshot(&snapshots[1], "secret").unwrap(),
+            )
+            .unwrap();
+        let changed = super::protocol::pointer_from_snapshot(&snapshots[0]);
+        remote.replace_latest_on_second_read(if corrupt {
+            b"unreadable-head".to_vec()
+        } else {
+            store.encode_sync_pointer(&changed).unwrap()
+        });
+        let result =
+            super::gc::reserve_snapshot_capacity(&store, &options, &remote, Some(&expected), "new");
+        assert_eq!(result.is_err(), corrupt);
+        for revision in ["old", "expected"] {
+            assert!(
+                remote
+                    .read_if_exists(&remote_path(
+                        "zzclawterm",
+                        &super::legacy_sync_snapshot_file(revision)
+                    ))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            remote
+                .read_if_exists(&remote_path(
+                    "zzclawterm",
+                    &super::legacy_sync_snapshot_file("spare")
+                ))
+                .unwrap()
+                .is_some(),
+            corrupt
+        );
+    }
+}
+
+#[test]
+fn capacity_cleanup_stops_on_delete_failure_without_removing_other_files() {
+    let dir = unique_temp_dir("capacity-delete-failure");
+    let options = options(&dir, &dir, "device");
+    let store = OptionsTestLocalStore(&options);
+    let remote = MemoryRemote {
+        capacity_limit: Some(2),
+        fail_delete: true,
+        ..Default::default()
+    };
+    for revision in ["old-a", "old-b"] {
+        let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+        snapshot.meta.revision_id = revision.into();
+        snapshot.recalculate_hash().unwrap();
+        remote
+            .write(
+                &remote_path("zzclawterm", &super::legacy_sync_snapshot_file(revision)),
+                &store.encode_sync_snapshot(&snapshot, "secret").unwrap(),
+            )
+            .unwrap();
+    }
+    assert!(super::gc::reserve_snapshot_capacity(&store, &options, &remote, None, "new").is_err());
+    assert_eq!(remote.files.lock().unwrap().len(), 2);
 }

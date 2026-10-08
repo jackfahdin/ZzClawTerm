@@ -25,13 +25,44 @@ impl ZzClawTermApp {
     ) {
         let encoding = metadata.launch_config.encoding().map(ToOwned::to_owned);
         let is_terminal = encoding.is_some();
-        self.session.register_session_metadata_for_start(
+        self.session.prepare_session_metadata_for_start(
             session_id,
             metadata,
             tab_placement,
             insert_index,
         );
+        self.queue_auto_recording(session_id);
+        self.session.claim_session_events(session_id);
         self.finish_session_registration(session_id, encoding, is_terminal);
+        if let Some(placement) = tab_placement {
+            self.terminal
+                .place_started_terminal_tab(session_id, placement.request_sequence);
+            // Worker completion order must not reorder requests issued in the same group.
+            let before = self
+                .terminal
+                .terminal_group_for_tab(session_id)
+                .and_then(|group| self.terminal.terminal_group_tabs(&group))
+                .and_then(|(tabs, _)| {
+                    tabs.into_iter().find(|id| {
+                        self.session
+                            .session_start_tab_placement(id)
+                            .is_some_and(|other| {
+                                (other.insert_index, other.request_sequence)
+                                    > (placement.insert_index, placement.request_sequence)
+                            })
+                    })
+                });
+            if let Some(before) = before {
+                self.terminal
+                    .place_tab_before_in_terminal_windows(session_id, &before);
+            }
+            // A completed background request can select its destination group,
+            // but must never hide the session that still owns keyboard input.
+            if let Some(active) = self.session.active_id_owned() {
+                self.sync_terminal_windows_active_tab(&active);
+            }
+            self.sync_terminal_frame_snapshot_priority();
+        }
     }
 
     pub(in crate::features) fn register_session_for_reconnect(
@@ -41,7 +72,10 @@ impl ZzClawTermApp {
     ) {
         let encoding = metadata.launch_config.encoding().map(ToOwned::to_owned);
         self.session
-            .register_provisional_reconnect(session_id, metadata);
+            .prepare_provisional_reconnect(session_id, metadata);
+        self.queue_auto_recording(session_id);
+        self.session.claim_session_events(session_id);
+        self.sync_session_event_bridge_config();
         if let Some(encoding) = encoding {
             self.terminal.ensure_frame_session(
                 session_id.to_string(),
@@ -64,6 +98,7 @@ impl ZzClawTermApp {
                 self.terminal_scrollback_line_limit(),
             );
         }
+        self.sync_session_event_bridge_config();
         self.reconcile_terminal_windows();
         if !is_terminal {
             self.terminal.remove_frame_session(session_id);
@@ -76,6 +111,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn settle_session_start_tab_placements_if_idle(&mut self) {
         if self.session.start_visible_tab_reservation_count() == 0 {
             self.session.clear_start_tab_placements();
+            self.terminal.clear_terminal_start_groups();
         }
     }
 
@@ -149,6 +185,22 @@ impl ZzClawTermApp {
             {
                 ordered.push(session);
             }
+        }
+        if self.terminal.terminal_windows_restore_is_complete()
+            && self.shell.workspace_pane_roots().is_empty()
+        {
+            let ids = self.terminal.terminal_window_tab_ids();
+            let positions = ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (id.as_str(), index))
+                .collect::<std::collections::HashMap<_, _>>();
+            ordered.sort_by_key(|session| {
+                positions
+                    .get(session.id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
         }
         ordered
     }

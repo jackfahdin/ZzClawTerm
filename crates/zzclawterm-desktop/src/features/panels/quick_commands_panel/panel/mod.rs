@@ -1,6 +1,6 @@
 use rust_i18n::t;
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent,
@@ -15,11 +15,15 @@ use crate::features::{
 use crate::models::{QuickCommandSortMode, QuickCommandViewMode};
 use crate::widgets::small_button;
 use zzclawterm_ui::{
-    ZzClawDropdownMenu, ZzClawMenuItem, ZzClawScrollable, ZzClawSearchInput, ZzClawTooltip,
+    ZzClawContextMenu, ZzClawDropdownMenu, ZzClawMenuItem, ZzClawScrollable, ZzClawSearchInput,
+    ZzClawTooltip,
 };
 
 mod rows;
 mod sidebar;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QuickCommandDragKind {
@@ -195,6 +199,11 @@ impl ZzClawTermApp {
             QuickCommandViewMode::Compact => 38.,
             QuickCommandViewMode::List | QuickCommandViewMode::Tile => 50.,
         };
+        // The pane owns one menu; capture resets its target before a row aims it.
+        let context_target = Rc::new(RefCell::new(None::<String>));
+        let context_target_for_rows = context_target.clone();
+        let context_target_for_reset = context_target.clone();
+        let menu_app = cx.entity().downgrade();
         let rows = if filtered_commands.is_empty() {
             div()
                 .flex_1()
@@ -226,16 +235,18 @@ impl ZzClawTermApp {
                                 .path("icons/conn/terminal.svg"),
                         )
                         .child(t!("quickCommands.noCommandsFound"))
-                        .when(total_commands == 0, |this| {
-                            this.child(small_button(
-                                palette,
-                                "quick-command-empty-add",
-                                t!("quickCommands.addCommand"),
-                                cx.listener(|this, _, window, cx| {
-                                    this.open_new_quick_command_editor(window, cx);
-                                }),
-                            ))
-                        }),
+                        .child(
+                            div()
+                                .debug_selector(|| "quick-command-empty-add".to_string())
+                                .child(small_button(
+                                    palette,
+                                    "quick-command-empty-add",
+                                    t!("quickCommands.addCommand"),
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_new_quick_command_editor(window, cx);
+                                    }),
+                                )),
+                        ),
                 )
                 .into_any_element()
         } else if view_mode == QuickCommandViewMode::Tile {
@@ -243,7 +254,8 @@ impl ZzClawTermApp {
             // width and wrap when the row fills. That cannot be expressed as
             // uniform_list rows without guessing how many chips fit, and a wrong
             // guess is exactly the ragged padding this replaces.
-            let tiles = self.quick_command_items(&filtered_commands, palette, cx);
+            let tiles =
+                self.quick_command_items(&filtered_commands, palette, &context_target_for_rows, cx);
             div()
                 .id(SharedString::from("quick-command-tiles-scroll"))
                 .flex_1()
@@ -268,8 +280,12 @@ impl ZzClawTermApp {
                         let Some(command) = filtered_commands.get(index) else {
                             continue;
                         };
-                        let command_items =
-                            this.quick_command_items(std::slice::from_ref(command), palette, cx);
+                        let command_items = this.quick_command_items(
+                            std::slice::from_ref(command),
+                            palette,
+                            &context_target_for_rows,
+                            cx,
+                        );
                         rows.push(
                             div()
                                 .h(px(logical_row_height))
@@ -331,6 +347,11 @@ impl ZzClawTermApp {
                     .child(
                         div()
                             .w(px(144.))
+                            .h(px(28.))
+                            .rounded_md()
+                            .bg(rgb(palette.surface_elevated))
+                            .flex()
+                            .items_center()
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
@@ -340,6 +361,8 @@ impl ZzClawTermApp {
                             )
                             .child(
                                 ZzClawSearchInput::new("quick-command-search-input", &search_field)
+                                    .compact()
+                                    .bare()
                                     .on_key_down(cx.listener(
                                         |this, event: &KeyDownEvent, _, cx| {
                                             if event.keystroke.key == "escape" {
@@ -450,21 +473,41 @@ impl ZzClawTermApp {
                     )
                     .child(category_sidebar)
                     .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .min_h_0()
-                            .h_full()
-                            .p(px(6.))
-                            .relative()
-                            .flex()
-                            .flex_col()
-                            .child(rows)
-                            // Tile mode scrolls in-flow with its own bar; attaching this
-                            // one too would paint a second, idle track on the same edge.
-                            .when(view_mode != QuickCommandViewMode::Tile, |this| {
-                                this.vertical_scrollbar(&row_scroll)
-                            }),
+                        ZzClawContextMenu::new_dynamic(
+                            div()
+                                .id("quick-command-pane")
+                                .debug_selector(|| "quick-command-pane".to_string())
+                                .capture_any_mouse_down(move |event, _, _| {
+                                    if event.button == MouseButton::Right {
+                                        *context_target_for_reset.borrow_mut() = None;
+                                    }
+                                })
+                                .min_w_0()
+                                .flex_1()
+                                .min_h_0()
+                                .h_full()
+                                .p(px(6.))
+                                .relative()
+                                .flex()
+                                .flex_col()
+                                .child(rows)
+                                // Tile mode scrolls in-flow with its own bar; attaching this
+                                // one too would paint a second, idle track on the same edge.
+                                .when(view_mode != QuickCommandViewMode::Tile, |this| {
+                                    this.vertical_scrollbar(&row_scroll)
+                                }),
+                            move |_, cx| {
+                                menu_app
+                                    .update(cx, |app, cx| {
+                                        app.quick_command_context_menu_items(
+                                            context_target.borrow().clone(),
+                                            cx,
+                                        )
+                                    })
+                                    .unwrap_or_default()
+                            },
+                        )
+                        .min_width(px(rows::QUICK_COMMAND_MENU_WIDTH)),
                     ),
             )
     }
@@ -713,6 +756,7 @@ fn quick_command_toolbar_icon_button(
     let tooltip = tooltip.into();
     div()
         .id(SharedString::from(id))
+        .debug_selector(move || id.to_string())
         .size(px(24.))
         .flex_none()
         .flex()

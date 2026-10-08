@@ -5,6 +5,8 @@ use gpui::{App, KeyBinding, actions};
 mod assist_state;
 mod command_suggestions;
 mod credential_autofill;
+mod editing_runtime;
+mod editing_state;
 mod input_runtime;
 mod send_command_runtime;
 mod state;
@@ -17,6 +19,25 @@ mod terminal_surface;
 mod terminal_surface_entity;
 mod view_state;
 mod window_state;
+
+pub(in crate::features) fn encoding_error_text(
+    error: zzclawterm_core::character_encoding::EncodingError,
+) -> String {
+    use zzclawterm_core::character_encoding::EncodingError;
+    match error {
+        EncodingError::UnsupportedEncoding => {
+            rust_i18n::t!("terminal.encodingUnsupported").to_string()
+        }
+        EncodingError::InvalidUtf8Input => {
+            rust_i18n::t!("terminal.encodingInvalidInput").to_string()
+        }
+        EncodingError::UnrepresentableText(encoding) => rust_i18n::t!(
+            "terminal.encodingUnrepresentable",
+            encoding = encoding.label()
+        )
+        .to_string(),
+    }
+}
 
 pub(in crate::features) const TERMINAL_KEY_CONTEXT: &str = "Terminal";
 
@@ -43,9 +64,7 @@ pub(in crate::features) use terminal_surface_entity::{
     FULL_SHELL_PAINT_COUNT, terminal_surface_paint_count,
 };
 pub(in crate::features) use view_state::TerminalSessionTransferBundle;
-pub(in crate::features) use window_state::{
-    TerminalWindowDockResult, TerminalWindowReconcileResult,
-};
+pub(in crate::features) use window_state::TerminalWindowDockResult;
 
 #[cfg(test)]
 mod tests {

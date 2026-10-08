@@ -1,5 +1,7 @@
 pub mod connection_attempt;
 pub mod download_path;
+pub mod drag_export;
+#[cfg(windows)]
 pub mod network_route;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -82,7 +84,7 @@ pub use x11_server::{
 mod sftp_transfer_types;
 mod trzsz;
 pub mod xymodem;
-mod zmodem;
+pub mod zmodem;
 
 pub use directory_command::{
     DirectoryShell, build_directory_change_command, local_directory_shell,
@@ -180,10 +182,10 @@ pub use local_fs::{LocalDirectoryChild, LocalFileService};
 pub use reconnect_cwd::build_ssh_reconnect_cwd_command;
 pub use recording::{
     DEFAULT_HISTORY_SEARCH_LIMIT, DEFAULT_HISTORY_SEARCH_LINES, DEFAULT_MEMORY_LIMIT_BYTES,
-    ExistingFileBehavior, MAX_HISTORY_SEARCH_LINES, RecordingContext, RecordingError,
-    RecordingManager, RecordingMode, RecordingProfile, RecordingRotationPolicy, RecordingStatus,
-    RecordingStatusState, TerminalHistorySearchRequest, TerminalHistorySearchResponse,
-    TerminalHistorySearchResult, safe_recording_name,
+    ExistingFileBehavior, MAX_HISTORY_SEARCH_LINES, RecordingCapturePolicy, RecordingCompletion,
+    RecordingContext, RecordingError, RecordingManager, RecordingMode, RecordingProfile,
+    RecordingRotationPolicy, RecordingStatus, RecordingStatusState, TerminalHistorySearchRequest,
+    TerminalHistorySearchResponse, TerminalHistorySearchResult, safe_recording_name,
 };
 pub use remote_file::{
     FileCopyRequest, FileCopySummary, FileTransferEndpoint, RemoteFileBackendKind,
@@ -238,6 +240,7 @@ type ForwardedTcpIpRegistry = Arc<tokio::sync::Mutex<ForwardedTcpIpDispatch>>;
 type X11Registry = Arc<tokio::sync::Mutex<Option<X11Registration>>>;
 
 struct SshMultiplexInner {
+    attempt: connection_attempt::ConnectionAttempt,
     docker_elevation: Arc<Mutex<Option<docker::DockerElevation>>>,
     runtime: Arc<tokio::runtime::Runtime>,
     target: SharedSshHandle,
@@ -338,6 +341,10 @@ impl std::fmt::Debug for SshMultiplexHandle {
 }
 
 impl SshMultiplexHandle {
+    pub fn shell_availability(&self) -> connection_attempt::ShellAvailability {
+        self.inner.attempt.shell_availability()
+    }
+
     pub fn info(&self) -> SshMultiplexInfo {
         self.inner.info.clone()
     }
@@ -544,6 +551,7 @@ pub fn open_ssh_multiplex_handle(config: SshSessionConfig) -> anyhow::Result<Ssh
     };
     Ok(SshMultiplexHandle {
         inner: Arc::new(SshMultiplexInner {
+            attempt: config.attempt.clone(),
             docker_elevation: Default::default(),
             runtime,
             target: Arc::new(tokio::sync::Mutex::new(target)),
@@ -623,6 +631,7 @@ pub struct TelnetTransport {
 
 pub struct SshChannelTransport {
     info: SessionInfo,
+    attempt: connection_attempt::ConnectionAttempt,
     command_tx: tokio_mpsc::UnboundedSender<SshCommand>,
     backspace_as_bs: bool,
     worker_thread: Option<JoinHandle<()>>,
@@ -634,11 +643,29 @@ pub struct SerialTransport {
     backspace_as_bs: bool,
     stop_reader: Arc<AtomicBool>,
     reader_thread: Option<JoinHandle<()>>,
+    flow_control: zzclawterm_core::models::connection::SerialFlowControl,
 }
 
 struct QueuedTransportWriter {
     command_tx: mpsc::Sender<TransportWriterCommand>,
     worker_thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy)]
+enum WriterFlushPolicy {
+    Never,
+    AfterWrite,
+    EachByte,
+}
+
+impl WriterFlushPolicy {
+    fn serial() -> Self {
+        if cfg!(windows) {
+            Self::Never
+        } else {
+            Self::AfterWrite
+        }
+    }
 }
 
 enum TransportWriterCommand {
@@ -650,7 +677,7 @@ impl QueuedTransportWriter {
     fn spawn<W>(
         session_id: String,
         writer: W,
-        flush_each_byte: bool,
+        flush_policy: WriterFlushPolicy,
         event_queue: SessionEventQueue,
     ) -> Self
     where
@@ -658,7 +685,7 @@ impl QueuedTransportWriter {
     {
         let (command_tx, command_rx) = mpsc::channel();
         let worker_thread = std::thread::spawn(move || {
-            run_transport_writer(session_id, writer, flush_each_byte, command_rx, event_queue)
+            run_transport_writer(session_id, writer, flush_policy, command_rx, event_queue)
         });
         Self {
             command_tx,
@@ -686,7 +713,7 @@ impl QueuedTransportWriter {
 fn run_transport_writer<W>(
     session_id: String,
     mut writer: W,
-    flush_each_byte: bool,
+    flush_policy: WriterFlushPolicy,
     command_rx: mpsc::Receiver<TransportWriterCommand>,
     event_queue: SessionEventQueue,
 ) where
@@ -695,14 +722,20 @@ fn run_transport_writer<W>(
     while let Ok(command) = command_rx.recv() {
         match command {
             TransportWriterCommand::Write(data) => {
-                let write_result = if flush_each_byte {
+                let write_result = if matches!(flush_policy, WriterFlushPolicy::EachByte) {
                     data.iter().try_for_each(|byte| {
                         writer
                             .write_all(std::slice::from_ref(byte))
                             .and_then(|_| writer.flush())
                     })
                 } else {
-                    writer.write_all(&data).and_then(|_| writer.flush())
+                    writer.write_all(&data).and_then(|_| {
+                        if matches!(flush_policy, WriterFlushPolicy::Never) {
+                            Ok(())
+                        } else {
+                            writer.flush()
+                        }
+                    })
                 };
                 if let Err(error) = write_result {
                     send_session_error(&event_queue, &session_id, error);
@@ -879,7 +912,7 @@ impl SessionManager {
         let writer = QueuedTransportWriter::spawn(
             session_id.clone(),
             writer,
-            false,
+            WriterFlushPolicy::AfterWrite,
             self.event_queue.clone(),
         );
         let session = LocalPtyTransport {
@@ -984,7 +1017,11 @@ impl SessionManager {
         let writer = QueuedTransportWriter::spawn(
             session_id.clone(),
             writer,
-            config.force_character_at_a_time,
+            if config.force_character_at_a_time {
+                WriterFlushPolicy::EachByte
+            } else {
+                WriterFlushPolicy::AfterWrite
+            },
             self.event_queue.clone(),
         );
 
@@ -1048,6 +1085,10 @@ impl SessionManager {
         let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let event_queue = self.event_queue.clone();
+        let attempt = multiplex
+            .as_ref()
+            .map(|handle| handle.inner.attempt.clone())
+            .unwrap_or_else(|| config.attempt.clone());
         let worker_config = config.clone();
         let worker_session_id = session_id.clone();
         let shell_environment = self.shell_environment();
@@ -1091,6 +1132,7 @@ impl SessionManager {
         };
         let session = SshChannelTransport {
             info: info.clone(),
+            attempt,
             command_tx,
             backspace_as_bs: zzclawterm_core::terminal::connection_input::BackspaceMode::parse(
                 &config.backspace_mode,
@@ -1138,9 +1180,14 @@ impl SessionManager {
             stop_reader.clone(),
             self.event_queue.clone(),
         );
-        let writer =
-            QueuedTransportWriter::spawn(session_id.clone(), port, false, self.event_queue.clone());
+        let writer = QueuedTransportWriter::spawn(
+            session_id.clone(),
+            port,
+            WriterFlushPolicy::serial(),
+            self.event_queue.clone(),
+        );
         let session = SerialTransport {
+            flow_control: config.flow_control,
             info: info.clone(),
             writer,
             backspace_as_bs: zzclawterm_core::terminal::connection_input::BackspaceMode::parse(
@@ -1196,6 +1243,33 @@ impl SessionManager {
             session_id: session_id.to_string(),
             source,
         })
+    }
+
+    /// Software flow control may consume XON/XOFF in binary transfer payloads.
+    pub fn supports_modem_transfer(&self, session_id: &str) -> bool {
+        self.sessions.lock().is_ok_and(|sessions| {
+            // Output already queued by an exited session still needs protocol filtering.
+            // Session existence is checked by the eventual writer, not this policy gate.
+            !matches!(sessions.get(session_id), Some(ManagedSession::Serial(serial))
+                if serial.flow_control == zzclawterm_core::models::connection::SerialFlowControl::Software)
+        })
+    }
+
+    /// Send protocol bytes without transport text-input transformations.
+    pub fn write_raw(&self, session_id: &str, data: &[u8]) -> Result<(), SessionError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        session
+            .write_raw(data)
+            .map_err(|source| SessionError::Write {
+                session_id: session_id.to_string(),
+                source,
+            })
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), SessionError> {
@@ -1312,6 +1386,15 @@ impl ManagedSession {
         }
     }
 
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Local(session) => session.write_raw(data),
+            Self::Tcp(session) => session.write_raw(data),
+            Self::Ssh(session) => session.write_raw(data),
+            Self::Serial(session) => session.write_raw(data),
+        }
+    }
+
     fn resize(
         &mut self,
         cols: u16,
@@ -1414,6 +1497,14 @@ impl TerminalTransport for TelnetTransport {
         Ok(())
     }
 
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.writer
+            .write(telnet_codec::escape_telnet_application_data(
+                data,
+                self.config.raw_tcp,
+            ))
+    }
+
     fn resize(
         &mut self,
         cols: u16,
@@ -1441,6 +1532,7 @@ impl TerminalTransport for TelnetTransport {
 
 impl TerminalTransport for SshChannelTransport {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.attempt.ensure_shell_available()?;
         let data = if self.backspace_as_bs {
             remap_del_to_bs(data)
         } else {
@@ -1450,6 +1542,13 @@ impl TerminalTransport for SshChannelTransport {
             .send(SshCommand::Write(data))
             .map_err(|_| anyhow::anyhow!("SSH worker stopped"))?;
         Ok(())
+    }
+
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.attempt.ensure_shell_available()?;
+        self.command_tx
+            .send(SshCommand::Write(data.to_vec()))
+            .map_err(|_| anyhow::anyhow!("SSH worker stopped"))
     }
 
     fn resize(
@@ -1489,6 +1588,10 @@ impl TerminalTransport for SerialTransport {
             data.to_vec()
         };
         self.writer.write(data)
+    }
+
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.writer.write(data.to_vec())
     }
 
     fn resize(
@@ -1875,6 +1978,16 @@ fn run_ssh_worker(
                     let _ = ready_tx.send(Ok(()));
                     session
                 }
+                Err(_)
+                    if multiplex.as_ref().is_some_and(|handle| {
+                        handle.shell_availability()
+                            == connection_attempt::ShellAvailability::Unavailable
+                    }) =>
+                {
+                    let _ = ready_tx.send(Ok(()));
+                    run_sftp_only_session(&session_id, command_rx, &event_queue).await;
+                    return;
+                }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error.to_string()));
                     return;
@@ -1964,8 +2077,35 @@ async fn run_deferred_ssh_worker(
             )
             .await;
         }
+        Err(_)
+            if multiplex.as_ref().is_some_and(|handle| {
+                handle.shell_availability() == connection_attempt::ShellAvailability::Unavailable
+            }) =>
+        {
+            run_sftp_only_session(&session_id, command_rx, &event_queue).await;
+        }
         Err(error) => {
             send_session_error(&event_queue, &session_id, error);
+        }
+    }
+}
+
+async fn run_sftp_only_session(
+    session_id: &str,
+    mut commands: tokio_mpsc::UnboundedReceiver<SshCommand>,
+    events: &SessionEventQueue,
+) {
+    events.push(SessionEvent::Output {
+        session_id: session_id.to_owned(),
+        data:
+            b"\r\nThis server does not provide a shell. SFTP file operations remain available.\r\n"
+                .to_vec(),
+    });
+    // The caller retains the multiplexed SSH connection. Writes queued before
+    // capability detection are discarded, never replayed as shell commands.
+    while let Some(command) = commands.recv().await {
+        if matches!(command, SshCommand::Close) {
+            break;
         }
     }
 }
@@ -2388,6 +2528,34 @@ async fn open_pending_ssh_shell(
     })
 }
 
+/// Requests sharing a channel must consume their own acknowledgement, otherwise
+/// an X11 reply can be mistaken for acceptance of the shell request.
+async fn wait_ssh_request_reply(
+    channel: &mut russh::Channel<client::Msg>,
+    early_output: &mut Vec<u8>,
+) -> Result<(), russh::Error> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return Ok(()),
+                Some(ChannelMsg::Failure) => return Err(russh::Error::RequestDenied),
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                    if early_output.len().saturating_add(data.len()) > 1024 * 1024 {
+                        return Err(russh::Error::Disconnect);
+                    }
+                    early_output.extend_from_slice(&data);
+                }
+                Some(ChannelMsg::Close | ChannelMsg::Eof) | None => {
+                    return Err(russh::Error::Disconnect);
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| russh::Error::ConnectionTimeout)?
+}
+
 async fn open_ssh_shell_from_pending(
     session_id: &str,
     config: &SshSessionConfig,
@@ -2406,7 +2574,13 @@ async fn open_ssh_shell_from_pending(
     } = pending;
     let ready_marker = build_ssh_ready_marker(session_id);
     let legacy_ready_marker = build_legacy_ssh_ready_marker(&ready_marker);
-    let channel = match &mut handle {
+    let attempt = multiplex
+        .as_ref()
+        .map(|m| &m.inner.attempt)
+        .unwrap_or(&config.attempt);
+    attempt.ensure_shell_available()?;
+    let mut early_output = Vec::new();
+    let mut channel = match &mut handle {
         SshShellHandle::Dedicated(handle) => handle.channel_open_session().await?,
         SshShellHandle::Multiplexed(handle) => handle.lock().await.channel_open_session().await?,
     };
@@ -2423,7 +2597,7 @@ async fn open_ssh_shell_from_pending(
         profile = ?config.profile,
         "opened SSH session channel"
     );
-    let (x11_forwarder, x11_multiplex_registration, local_notice) =
+    let (x11_forwarder, x11_multiplex_registration, mut local_notice) =
         if let (Some(config), Some(rx)) = (x11_config, x11_rx) {
             if let Some(multiplex) = multiplex.as_ref() {
                 let Some(tx) = x11_tx.clone() else {
@@ -2435,14 +2609,24 @@ async fn open_ssh_shell_from_pending(
                     return Err(error);
                 }
             }
-            match channel
-                .request_x11(true, false, MIT_MAGIC_COOKIE, &config.fake_cookie_hex, 0)
-                .await
-            {
+            let request = async {
+                channel
+                    .request_x11(true, false, MIT_MAGIC_COOKIE, &config.fake_cookie_hex, 0)
+                    .await?;
+                wait_ssh_request_reply(&mut channel, &mut early_output).await
+            }
+            .await;
+            match request {
                 Ok(()) => (Some(X11Forwarder { rx, config }), multiplex.clone(), None),
-                Err(_) => {
+                Err(error) => {
                     if let Some(multiplex) = multiplex.as_ref() {
                         multiplex.unregister_x11_sender(session_id).await;
+                    }
+                    // Only an explicit denial consumes a definite request reply.
+                    // A timed-out reply could otherwise be mistaken for shell acceptance.
+                    if !matches!(error, russh::Error::RequestDenied) {
+                        let _ = channel.close().await;
+                        return Err(error.into());
                     }
                     (None, None, Some(enable_x11_failed_message().into_bytes()))
                 }
@@ -2478,14 +2662,28 @@ async fn open_ssh_shell_from_pending(
         rows = dimensions.rows,
         "SSH PTY accepted"
     );
-    if let Err(error) = channel.request_shell(true).await {
+    let shell_reply = async {
+        channel.request_shell(true).await?;
+        wait_ssh_request_reply(&mut channel, &mut early_output).await
+    }
+    .await;
+    if let Err(error) = shell_reply {
+        if matches!(error, russh::Error::RequestDenied) {
+            attempt.record_shell_reply(false);
+        }
         if let Some(multiplex) = x11_multiplex_registration.as_ref() {
             multiplex.unregister_x11_sender(session_id).await;
         }
         let _ = channel.close().await;
         return Err(error.into());
     }
-    // `request_shell` waited for the server's reply, so `sshd` has already run
+    attempt.record_shell_reply(true);
+    if !early_output.is_empty() {
+        local_notice
+            .get_or_insert_with(Vec::new)
+            .extend(early_output);
+    }
+    // The explicit reply wait completed, so `sshd` has already run
     // `do_exec` for this channel and flushed the login banner into it. Anything
     // else on this connection is free to open its own channel now.
     drop(primary_claim);
@@ -3387,7 +3585,15 @@ fn open_serial_port(config: &SerialSessionConfig) -> serialport::Result<Box<dyn 
         .data_bits(parse_data_bits(config.data_bits))
         .parity(parse_parity(&config.parity))
         .stop_bits(parse_stop_bits(&config.stop_bits))
-        .flow_control(FlowControl::None)
+        .flow_control(match config.flow_control {
+            zzclawterm_core::models::connection::SerialFlowControl::None => FlowControl::None,
+            zzclawterm_core::models::connection::SerialFlowControl::Software => {
+                FlowControl::Software
+            }
+            zzclawterm_core::models::connection::SerialFlowControl::Hardware => {
+                FlowControl::Hardware
+            }
+        })
         .timeout(Duration::from_millis(10))
         .open()
 }

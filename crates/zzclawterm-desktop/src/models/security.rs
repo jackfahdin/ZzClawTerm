@@ -62,7 +62,8 @@ pub(crate) struct SecurityKeyEditorState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SecurityCredentialDropTarget {
+pub(crate) struct SecurityDropTarget {
+    pub(crate) tab: SecurityAuthTab,
     pub(crate) id: String,
     pub(crate) after: bool,
 }

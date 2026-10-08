@@ -47,6 +47,13 @@ impl ZzClawTermApp {
         self.save_recording_settings(cx);
     }
 
+    pub(in crate::features) fn toggle_recording_input(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_recording_input();
+        self.recording
+            .set_history_include_input(self.settings.summary().recording_include_input);
+        self.save_recording_settings(cx);
+    }
+
     pub(in crate::features) fn toggle_recording_io_labels(&mut self, cx: &mut Context<Self>) {
         self.settings.toggle_recording_io_labels();
         self.save_recording_settings(cx);
@@ -252,9 +259,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_transfer_default_editor(text);
-        self.shell
-            .set_status("transfer editor command edited".to_string());
-        cx.notify();
+        self.save_transfer_settings("transfer editor command saved", cx);
     }
 
     /// Apply an edit from the download path box.

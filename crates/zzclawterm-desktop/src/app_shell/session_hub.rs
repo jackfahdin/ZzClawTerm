@@ -2,20 +2,30 @@ use std::sync::Arc;
 
 use zzclawterm_transport::SessionManager;
 
+pub(crate) mod ssh_connections;
+use self::ssh_connections::SshConnectionPool;
+
 /// Process-level owner for transport runtimes shared by every workspace window.
 ///
 /// Presentation, focus and prompt state remain window-local. The manager is
 /// shared so moving a tab only changes ownership and never tears down its PTY,
 /// SSH, Telnet or serial transport.
+#[derive(Clone)]
 pub struct SessionHub {
     manager: Arc<SessionManager>,
+    ssh_connections: SshConnectionPool,
 }
 
 impl SessionHub {
     pub fn new() -> Self {
         Self {
             manager: Arc::new(SessionManager::new()),
+            ssh_connections: SshConnectionPool::default(),
         }
+    }
+
+    pub(crate) fn ssh_connections(&self) -> SshConnectionPool {
+        self.ssh_connections.clone()
     }
 
     pub fn manager(&self) -> Arc<SessionManager> {

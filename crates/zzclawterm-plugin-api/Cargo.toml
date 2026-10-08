@@ -1,0 +1,15 @@
+[package]
+name = "zzclawterm-plugin-api"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+license.workspace = true
+repository.workspace = true
+description = "Rust guest SDK and WIT for ZzClawTerm plugins"
+
+[features]
+default = ["guest"]
+guest = ["dep:wit-bindgen"]
+
+[dependencies]
+wit-bindgen = { workspace = true, optional = true }

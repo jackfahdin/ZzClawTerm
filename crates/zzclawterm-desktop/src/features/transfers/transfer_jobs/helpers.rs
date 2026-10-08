@@ -41,33 +41,47 @@ pub(in crate::features) fn submit_transfer_blocking_job(
     }
 }
 
-pub(super) struct TransferProgressEventSender {
+pub(in crate::features::transfers) struct TransferProgressEventSender {
     id: String,
     tx: UnboundedSender<TransferJobResult>,
     last_sent_at: Option<Instant>,
+    final_sent: bool,
 }
 
 impl TransferProgressEventSender {
-    pub(super) fn new(id: String, tx: UnboundedSender<TransferJobResult>) -> Self {
+    pub(in crate::features::transfers) fn new(
+        id: String,
+        tx: UnboundedSender<TransferJobResult>,
+    ) -> Self {
         Self {
             id,
             tx,
             last_sent_at: None,
+            final_sent: false,
         }
     }
 
-    pub(super) fn send(&mut self, progress: SftpTransferProgress) {
+    pub(in crate::features::transfers) fn send(&mut self, progress: SftpTransferProgress) {
         let now = Instant::now();
         let completed = progress
             .total_bytes
-            .is_some_and(|total| progress.bytes_transferred >= total);
+            .is_some_and(|total| progress.bytes_transferred >= total)
+            && progress.item_count_total.is_none_or(|total| {
+                progress
+                    .item_count_completed
+                    .is_some_and(|completed| completed >= total)
+            });
         let due = self.last_sent_at.is_none_or(|last_sent_at| {
             now.duration_since(last_sent_at) >= TRANSFER_PROGRESS_EVENT_INTERVAL
         });
+        if completed && self.final_sent {
+            return;
+        }
         if !completed && !due {
             return;
         }
 
+        self.final_sent |= completed;
         self.last_sent_at = Some(now);
         let _ = self.tx.unbounded_send(TransferJobResult {
             id: self.id.clone(),
@@ -99,4 +113,32 @@ pub(super) fn transfer_job_local_target_path(job: &TransferJobState) -> Option<P
             | TransferJobKind::OpenExternal { local_path, .. } => Some(local_path.clone()),
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TransferProgressEventSender;
+    use zzclawterm_transport::SftpTransferProgress;
+    #[test]
+    fn final_progress_is_emitted_once_and_directory_completion_waits_for_all_items() {
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let mut sender = TransferProgressEventSender::new("job".into(), sender);
+        let mut progress = SftpTransferProgress {
+            remote_path: "/folder".into(),
+            local_path: Default::default(),
+            bytes_transferred: 10,
+            total_bytes: Some(10),
+            item_count_completed: Some(0),
+            item_count_total: Some(1),
+        };
+        sender.send(progress.clone());
+        assert!(receiver.try_recv().is_ok());
+        assert!(!sender.final_sent);
+        progress.item_count_completed = Some(1);
+        for _ in 0..100 {
+            sender.send(progress.clone());
+        }
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
+    }
 }

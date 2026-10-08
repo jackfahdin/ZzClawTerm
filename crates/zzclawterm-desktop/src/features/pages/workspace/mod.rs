@@ -2,43 +2,12 @@ use gpui::{Context, IntoElement, div, prelude::*};
 use rust_i18n::t;
 
 use super::super::ZzClawTermApp;
-use crate::models::{WorkspacePaneNode, WorkspaceSplitDirection};
+use crate::models::WorkspacePaneNode;
 
+#[cfg(test)]
+mod group_tests;
 mod panes;
 mod terminal_windows;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PaneBorderEdges {
-    top: bool,
-    right: bool,
-    bottom: bool,
-    left: bool,
-}
-
-impl PaneBorderEdges {
-    const ALL: Self = Self {
-        top: true,
-        right: true,
-        bottom: true,
-        left: true,
-    };
-
-    fn split(self, direction: WorkspaceSplitDirection) -> (Self, Self) {
-        let mut first = self;
-        let mut second = self;
-        match direction {
-            WorkspaceSplitDirection::Horizontal => {
-                first.bottom = false;
-                second.top = false;
-            }
-            WorkspaceSplitDirection::Vertical => {
-                first.right = false;
-                second.left = false;
-            }
-        }
-        (first, second)
-    }
-}
 
 impl ZzClawTermApp {
     pub(in crate::features) fn workspace_view(
@@ -49,7 +18,7 @@ impl ZzClawTermApp {
         // Match the Tauri shell: tab strip sits directly above the terminal surface.
         // Do not reconcile/prune layout here — paint must stay pure. Session
         // register/close/idle already keep terminal_windows coherent.
-        let multi_leaf = self.terminal_windows_is_multi_leaf();
+        let multi_leaf = self.terminal.terminal_window_tree_is_some();
         let has_connect_failure = self.session.start_has_failed()
             || (self.shell.last_connect_failure_name().is_some()
                 && self.shell.last_connect_failure_error().is_some());
@@ -57,8 +26,23 @@ impl ZzClawTermApp {
             && (self.ordered_tab_session_count() > 0
                 || self.session.start_has_pending()
                 || has_connect_failure);
+        let app = cx.weak_entity();
+        let measurement = gpui::canvas(
+            move |bounds, _, cx| {
+                let app = app.clone();
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |this, _| {
+                        this.terminal.record_terminal_workspace_bounds(bounds)
+                    });
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         let mut workspace = div()
             .flex_1()
+            .min_h_0()
             .min_w_0()
             .flex()
             .flex_col()
@@ -79,24 +63,56 @@ impl ZzClawTermApp {
                             .child(t!("settings.shortcutLabels.togglePaneFocus"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.shell.set_pane_focus_mode(false);
+                                this.sync_terminal_frame_snapshot_priority();
                                 cx.notify();
                             })),
                     ),
             );
-            return workspace.child(self.workspace_terminal_area(cx));
+            return workspace.child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .child(measurement)
+                    .child(self.workspace_terminal_area(cx)),
+            );
         }
         if show_tab_strip {
             workspace = workspace.child(self.session_tab_strip(cx));
         }
 
         workspace
-            .child(self.workspace_terminal_area(cx))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .child(measurement)
+                    .child(self.workspace_terminal_area(cx)),
+            )
             .child(self.bottom_panel_resize_handle(cx))
             .child(self.bottom_panel_view(cx))
     }
 
     fn workspace_terminal_area(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let palette = self.theme_palette();
+        if !self.shell.pane_focus_mode() {
+            // Multi-leaf tab windows (Tauri TabWindowsWorkspace) take precedence over
+            // single-tree pane splits when active.
+            if let Some(window_root) = self.terminal.terminal_window_tree() {
+                return div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .bg(self.shell_transparent_color(palette.bg))
+                    .child(self.render_terminal_window_tree(window_root, cx))
+                    .into_any_element();
+            }
+        }
         if self.session.start_has_active_pending() {
             return self.pending_workspace_state().into_any_element();
         }
@@ -118,77 +134,20 @@ impl ZzClawTermApp {
         if self.shell.pane_focus_mode() {
             return self.render_workspace_pane_node(
                 WorkspacePaneNode::leaf(self.session.active_id_owned().unwrap()),
-                false,
-                PaneBorderEdges::ALL,
                 cx,
             );
-        }
-        // Multi-leaf tab windows (Tauri TabWindowsWorkspace) take precedence over
-        // single-tree pane splits when active.
-        if let Some(window_root) = self.terminal.multi_leaf_terminal_window_tree() {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .bg(self.shell_transparent_color(palette.bg))
-                .child(self.render_terminal_window_tree(window_root, PaneBorderEdges::ALL, cx))
-                .into_any_element();
         }
         let root =
             self.shell.workspace_split().cloned().unwrap_or_else(|| {
                 WorkspacePaneNode::leaf(self.session.active_id_owned().unwrap())
             });
 
-        let show_chrome = root.is_split();
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .bg(self.shell_transparent_color(palette.bg))
-            .child(self.render_workspace_pane_node(root, show_chrome, PaneBorderEdges::ALL, cx))
+            .child(self.render_workspace_pane_node(root, cx))
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PaneBorderEdges;
-    use crate::models::WorkspaceSplitDirection;
-
-    #[test]
-    fn vertical_split_only_suppresses_the_shared_edges() {
-        let (first, second) = PaneBorderEdges::ALL.split(WorkspaceSplitDirection::Vertical);
-
-        assert_eq!(
-            first,
-            PaneBorderEdges {
-                top: true,
-                right: false,
-                bottom: true,
-                left: true,
-            }
-        );
-        assert_eq!(
-            second,
-            PaneBorderEdges {
-                top: true,
-                right: true,
-                bottom: true,
-                left: false,
-            }
-        );
-    }
-
-    #[test]
-    fn nested_split_preserves_already_suppressed_outer_edges() {
-        let (left, _) = PaneBorderEdges::ALL.split(WorkspaceSplitDirection::Vertical);
-        let (top, bottom) = left.split(WorkspaceSplitDirection::Horizontal);
-
-        assert!(!top.right);
-        assert!(!bottom.right);
-        assert!(!top.bottom);
-        assert!(!bottom.top);
-        assert!(top.top && top.left);
-        assert!(bottom.bottom && bottom.left);
     }
 }

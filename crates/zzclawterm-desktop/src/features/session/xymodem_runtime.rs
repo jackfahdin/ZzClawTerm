@@ -253,6 +253,13 @@ impl ZzClawTermApp {
         files: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        if !self.session.manager().supports_modem_transfer(&session_id) {
+            self.shell.set_status(
+                rust_i18n::t!("dialog.serialSoftwareFlowControlModemDisabled").to_string(),
+            );
+            cx.notify();
+            return;
+        }
         if files.is_empty() {
             return;
         }

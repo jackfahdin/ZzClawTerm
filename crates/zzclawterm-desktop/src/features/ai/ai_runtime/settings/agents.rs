@@ -5,6 +5,15 @@ use crate::features::ZzClawTermApp;
 use crate::features::ai::agent_management::AgentCommand;
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn refresh_codex_models(&mut self, cx: &mut Context<Self>) {
+        self.submit_ai_agent_command(
+            AgentCommand::Models {
+                codex: self.ai.settings_config().codex.executable_path.clone(),
+            },
+            cx,
+        );
+    }
+
     pub(in crate::features) fn refresh_ai_agents(&mut self, cx: &mut Context<Self>) {
         let settings = self.ai.settings_config();
         let command = AgentCommand::Refresh {

@@ -1,4 +1,4 @@
-use gpui::Context;
+use gpui::{Context, Window};
 use std::sync::atomic::Ordering;
 use zzclawterm_core::AiSessionScopeType;
 use zzclawterm_store::StoreDomain;
@@ -8,6 +8,45 @@ use crate::features::{ZzClawTermApp, formatting::compact_id, runtime_jobs::await
 use super::super::super::ai_jobs::{ai_active_profile_drafts, ai_usage_counts};
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn toggle_ai_history(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ai.history_is_open() {
+            self.close_ai_history(window, cx);
+        } else {
+            self.ai.remember_history_focus(window.focused(cx));
+            self.ai.toggle_history();
+            self.refresh_ai_session_list(cx);
+            let query = self.ai.history_query().to_string();
+            self.reset_text_input("ai.history-search", &query, cx);
+            let field = self.text_input(
+                "ai.history-search",
+                &query,
+                crate::features::text_inputs::TextInputSetup::placeholder(rust_i18n::t!(
+                    "ai.historySearchPlaceholder"
+                )),
+                cx,
+            );
+            window.focus(&field.read(cx).focus_handle(), cx);
+        }
+        self.defer_ai_panel_snapshot_flush(cx);
+    }
+
+    pub(in crate::features) fn close_ai_history(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ai.close_history();
+        let focus = self.ai.take_history_focus();
+        if let Some(focus) = focus {
+            window.focus(&focus, cx);
+        }
+        self.forget_text_inputs("ai.history-search");
+        self.defer_ai_panel_snapshot_flush(cx);
+    }
     pub(in crate::features) fn sync_ai_drafts_from_active_profile(&mut self) {
         let (model, base_url) = ai_active_profile_drafts(self.ai.settings_config());
         self.ai.sync_settings_active_profile_drafts(model, base_url);
@@ -50,7 +89,11 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) {
-        self.sync_ai_active_scope(cx);
+        if self.ai.chat_session_id() == session_id {
+            self.ai.close_history();
+            self.defer_ai_panel_snapshot_flush(cx);
+            return;
+        }
         if self.ai.ai_session_is_running(&session_id) || self.ai.chat_or_agent_is_running() {
             self.ai.set_panel_status("AI session is in use".to_string());
             self.defer_ai_panel_snapshot_flush(cx);
@@ -89,9 +132,9 @@ impl ZzClawTermApp {
             let mut result = await_blocking_job(task).await.and_then(|result| result);
             let still_current = this
                 .update(cx, |this, _| {
-                    this.ai.active_scope_key() == source_scope
-                        && this.ai.chat_session_id() == source_session_id
-                        && !this.ai.chat_or_agent_is_running()
+                    this.ai
+                        .history_load_is_current(job_id, &source_scope, &source_session_id)
+                        && scope_epoch.load(Ordering::Acquire) == expected_epoch
                 })
                 .unwrap_or(false);
             if !still_current {
@@ -100,12 +143,13 @@ impl ZzClawTermApp {
             let rebound = if result.is_ok() && should_rebind {
                 let target_session_id = session_id.clone();
                 let binding_store = store.clone();
+                let binding_epoch = std::sync::Arc::clone(&scope_epoch);
                 let binding_task = this.update(cx, |this, _| {
                     this.blocking_jobs
                         .submit_task("ai-history-rebind", move |_| {
                             binding_store
                                 .request_fn(StoreDomain::Ai, move |store| {
-                                    if scope_epoch.load(Ordering::Acquire) != expected_epoch {
+                                    if binding_epoch.load(Ordering::Acquire) != expected_epoch {
                                         return Err(zzclawterm_store::StorageError::InvalidData(
                                             "AI session load cancelled after switching terminal"
                                                 .to_string(),
@@ -133,11 +177,13 @@ impl ZzClawTermApp {
                 None
             };
             let _ = this.update(cx, |this, cx| {
-                let visible_scope = this.ai.active_scope_key().to_string();
-                let loaded = result.is_ok() && visible_scope == source_scope;
-                this.ai.switch_scope(&source_scope);
+                let valid =
+                    this.ai
+                        .history_load_is_current(job_id, &source_scope, &source_session_id)
+                        && scope_epoch.load(Ordering::Acquire) == expected_epoch;
+                let loaded = valid && result.is_ok();
                 let loaded_status = format!("loaded AI session {}", compact_id(&session_id));
-                if result.is_ok() {
+                if loaded {
                     this.ai.release_ai_session(&session_id);
                 }
                 let target_session_id = session_id.clone();
@@ -145,14 +191,14 @@ impl ZzClawTermApp {
                     job_id,
                     &source_session_id,
                     session_id,
-                    if loaded {
+                    if valid {
                         result
                     } else {
                         Err("AI session load cancelled after switching terminal".to_string())
                     },
                     loaded_status,
                 ) {
-                    if let Some(rebound) = rebound {
+                    if loaded && let Some(rebound) = rebound {
                         this.ai.replace_history_session(rebound);
                     }
                     if loaded
@@ -161,9 +207,12 @@ impl ZzClawTermApp {
                     {
                         this.ai.apply_loaded_session_kind(kind);
                     }
+                    if loaded {
+                        let draft = this.ai.chat_prompt_draft().to_string();
+                        this.reset_text_input("ai.chat.prompt", &draft, cx);
+                    }
                     this.defer_ai_panel_snapshot_flush(cx);
                 }
-                this.ai.switch_scope(&visible_scope);
             });
         })
         .detach();

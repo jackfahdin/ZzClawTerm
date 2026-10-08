@@ -190,9 +190,7 @@ impl ZzClawTermApp {
             return;
         };
         let existing_multiplex_key = metadata.ssh_multiplex_key.clone();
-        let existing_multiplex = self
-            .session
-            .ssh_multiplex_handle_for_session(&source_session_id);
+        let existing_multiplex = self.session.ssh_connection_for_session(&source_session_id);
         let custom_name = self
             .session
             .custom_name(&source_session_id)
@@ -279,6 +277,7 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        self.terminal.invalidate_shell_editing_session(session_id);
         self.clear_terminal_mouse_report_for_session(session_id);
         self.transfer.clear_file_clipboard_for_session(session_id);
         self.session.remove_remote_file_service(session_id);
@@ -288,15 +287,6 @@ impl ZzClawTermApp {
         if update.already_disconnected {
             return;
         }
-        // Drop multiplex handle association for this session key if unused.
-        if let Some(multiplex_key) = update.multiplex_key
-            && let Some(handle) = self
-                .session
-                .take_multiplex_handle_if_no_other_live_reference(session_id, &multiplex_key)
-        {
-            self.session.disconnect_multiplex_handle(handle);
-        }
-
         let banner = "\r\n\x1b[31m[Session disconnected]\x1b[0m\r\n\x1b[33m[Press Enter to reconnect]\x1b[0m\r\n";
         let encoding = self
             .session
@@ -339,6 +329,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        self.remote_ops.clear_stats_sample(&session_id);
         self.session.begin_reconnect_action(session_id.clone());
         self.session.start.clear_active_selection();
         let old_id = session_id;
@@ -495,7 +486,7 @@ impl ZzClawTermApp {
         if self.session.active_id() == Some(new_id)
             && self.transfer.has_browser_session_cache(new_id)
         {
-            self.restore_transfer_browser_session_cache(new_id);
+            self.restore_transfer_browser_session_cache(new_id, cx);
         }
         self.sync_workspace_split_from_active_tab();
     }

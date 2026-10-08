@@ -28,6 +28,7 @@ pub struct ZzClawHoverCard {
     open_delay: Duration,
     close_delay: Duration,
     appearance: bool,
+    flexible_trigger: bool,
 }
 
 impl ZzClawHoverCard {
@@ -47,6 +48,7 @@ impl ZzClawHoverCard {
             open_delay: Duration::from_millis(700),
             close_delay: Duration::from_millis(250),
             appearance: true,
+            flexible_trigger: false,
         }
     }
 
@@ -62,6 +64,13 @@ impl ZzClawHoverCard {
     /// instead of covering the rows below it.
     pub fn placement(mut self, placement: ZzClawPopoverPlacement) -> Self {
         self.placement = Some(placement);
+        self
+    }
+
+    /// Let a side-placed trigger fill and shrink within its parent's flex row.
+    /// This keeps truncated text constrained by the available column width.
+    pub fn flexible_trigger(mut self) -> Self {
+        self.flexible_trigger = true;
         self
     }
 
@@ -230,15 +239,15 @@ impl RenderOnce for ZzClawHoverCard {
             ZzClawHoverCardAnchorState::default()
         });
 
-        // The trigger host stays layout-neutral: it is a row that neither grows
-        // nor shrinks and lets the cross axis stretch, so a trigger asking for
-        // `h_full` still resolves against the real parent rather than against
-        // this wrapper's text height.
+        // By default the trigger host neither grows nor shrinks. Text in a flex
+        // row can opt into the available width; the cross axis still stretches
+        // so `h_full` resolves against the parent, not the wrapper's text height.
         let root = div()
             .id(id)
             .relative()
             .flex()
             .flex_none()
+            .when(self.flexible_trigger, |this| this.flex_1().min_w_0())
             .items_stretch()
             .child(self.trigger)
             .on_hover(window.listener_for(&state, |state, hovered, _, cx| {
@@ -385,6 +394,31 @@ mod tests {
     /// Same card, but with the trigger pinned against the right edge so the
     /// preferred side cannot fit.
     struct FlippedSideHarness;
+
+    struct FilenameHarness;
+
+    impl Render for FilenameHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(120.)).flex().gap(px(8.)).child(div().w(px(16.)).flex_none()).child(
+                ZzClawHoverCard::new(
+                    "filename-hover-card",
+                    div().debug_selector(|| "filename-trigger".into())
+                        .min_w_0().flex_1().truncate()
+                        .child("a-very-long-filename-that-must-fit-in-the-remaining-column-width.txt"),
+                    div(),
+                ).placement(ZzClawPopoverPlacement::Top).flexible_trigger(),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn flexible_filename_trigger_is_constrained_to_remaining_column_width(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| FilenameHarness);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("filename-trigger").unwrap();
+        assert_eq!(trigger.size.width, px(96.));
+        assert_eq!(trigger.right(), px(120.));
+    }
 
     impl Render for FlippedSideHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

@@ -3,8 +3,7 @@ use std::{ops::Range, sync::Arc};
 use gpui::{
     AnyElement, App, Bounds, Context, FontWeight, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, Pixels, Point, Rgba, ScrollHandle, SharedString, StatefulInteractiveElement,
-    UniformListDecoration, WeakEntity, Window, canvas, div, prelude::*, px, rgb, rgba,
-    uniform_list,
+    UniformListDecoration, WeakEntity, Window, canvas, div, prelude::*, px, rgb, uniform_list,
 };
 use rust_i18n::t;
 use zzclawterm_core::{
@@ -23,6 +22,7 @@ use crate::features::assets::{
 };
 use crate::features::formatting::format_last_used_ms;
 use crate::features::icons::resolve_connection_icon;
+use crate::features::shell::SessionTabDragPayload;
 use crate::features::view_widgets::connection_type_icon;
 
 const ASSET_CARD_MIN_WIDTH: f32 = 300.;
@@ -190,7 +190,13 @@ impl ZzClawTermApp {
             StartWorkspaceMode::Assets => self.asset_workspace_state(cx),
         };
         let palette = self.theme_palette();
+        // Asset controls and text use the application palette, including their background.
+        let background = match mode {
+            StartWorkspaceMode::Workbench => self.terminal_theme_palette().terminal_bg,
+            StartWorkspaceMode::Assets => palette.bg,
+        };
         div()
+            .id("empty-workspace-tab-drop")
             .relative()
             .flex_1()
             .min_h_0()
@@ -198,7 +204,25 @@ impl ZzClawTermApp {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(self.shell_surface_color(self.terminal_theme_palette().terminal_bg))
+            .bg(match mode {
+                StartWorkspaceMode::Workbench => self.shell_terminal_surface_color(background),
+                StartWorkspaceMode::Assets => self.shell_surface_color(background),
+            })
+            // Empty workspaces hide the tab strip, so the surface must receive
+            // tab drops before the outside-release fallback creates a window.
+            .drag_over::<SessionTabDragPayload>(move |this, _, _, _| {
+                this.border_2().border_color(rgb(palette.focus_ring))
+            })
+            .on_drop(cx.listener(|this, payload: &SessionTabDragPayload, _, cx| {
+                this.accept_session_tab_drop(payload, cx);
+                if payload.source_workspace_id != this.workspace_id {
+                    this.request_tab_tree_move(
+                        payload,
+                        zzclawterm_core::MoveTabPlacement::Append,
+                        cx,
+                    );
+                }
+            }))
             .child(content)
             .child(
                 div()
@@ -279,22 +303,23 @@ impl ZzClawTermApp {
 
     fn asset_workspace_state(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.theme_palette();
-        let groups = self.connection_state.groups().to_vec();
-        self.start_workspace.sync_group_options(&groups, cx);
+        self.start_workspace.sync_group_options_for_catalog(
+            self.connection_state.catalog_revisions().1,
+            self.connection_state.groups(),
+            cx,
+        );
         let labels = AssetDisplayLabels {
             none: t!("assets.none").to_string(),
             not_applicable: t!("assets.notApplicable").to_string(),
             local_machine: t!("assets.localMachine").to_string(),
         };
-        let records: Arc<[AssetRecord]> = self
-            .start_workspace
-            .records(
-                self.connection_state.connections(),
-                self.connection_state.groups(),
-                &labels,
-                &t!("assets.title"),
-            )
-            .into();
+        let records: Arc<[AssetRecord]> = self.start_workspace.records(
+            self.connection_state.catalog_revisions(),
+            self.connection_state.connections(),
+            self.connection_state.groups(),
+            &labels,
+            &t!("assets.title"),
+        );
         let search = self.start_workspace.search_field();
         let group_select = self.start_workspace.group_select();
         let list_mode = self.start_workspace.view_mode() == AssetViewMode::List;
@@ -325,6 +350,7 @@ impl ZzClawTermApp {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .text_color(rgb(palette.text))
             .child(
                 div()
                     .flex_none()
@@ -537,7 +563,7 @@ impl ZzClawTermApp {
         let min_table_width = self.start_workspace.table_width();
         let horizontal_scroll = self.start_workspace.table_horizontal_scroll().clone();
         let scroll = self.start_workspace.list_scroll().clone();
-        let action_background = rgba((self.terminal_theme_palette().terminal_bg << 8) | 0xff);
+        let action_background = rgb(palette.bg);
         let mut header = div()
             .h(px(34.))
             .w_full()

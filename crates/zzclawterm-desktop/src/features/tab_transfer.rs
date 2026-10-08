@@ -9,6 +9,9 @@ use super::terminal::TerminalSessionTransferBundle;
 use super::transfers::TransferSessionTransferBundle;
 use crate::models::{TabDockEdge, TabDockZone, TerminalWindowNode, WorkspacePaneNode};
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) struct WorkspaceTabTransferBundle {
     root_tab_id: String,
     session_ids: Vec<String>,
@@ -28,6 +31,16 @@ impl ZzClawTermApp {
     }
     pub(crate) fn live_session_count(&self) -> usize {
         self.session.ordered_sessions().len()
+    }
+
+    pub(crate) fn can_close_failed_tab_workspace(&self) -> bool {
+        !self.has_live_sessions() && !self.session.start_has_pending()
+    }
+
+    pub(crate) fn report_tab_move_failure(&mut self, error: String, cx: &mut Context<Self>) {
+        self.shell
+            .set_status(format!("Could not move tab: {error}"));
+        cx.notify();
     }
     pub(in crate::features) fn request_tab_tree_move(
         &mut self,
@@ -93,17 +106,22 @@ impl ZzClawTermApp {
         };
         let source_workspace_id = self.workspace_id;
         let source_revision = self.workspace_revision;
+        let source_app = cx.entity().downgrade();
         cx.defer(move |cx| {
-            if let Err(error) = controller.update(cx, |controller, cx| {
+            let result = controller.update(cx, |controller, cx| {
                 controller.open_workspace_for_tab(
                     source_workspace_id,
                     root_tab_id,
                     source_revision,
                     cx,
                 )
-            }) {
-                tracing::warn!(%error, "could not open window for tab move");
-            }
+            });
+            let error = match result {
+                Ok(Ok(_)) => return,
+                Ok(Err(error)) => error.to_string(),
+                Err(error) => error.to_string(),
+            };
+            let _ = source_app.update(cx, |app, cx| app.report_tab_move_failure(error, cx));
         });
     }
 
@@ -307,6 +325,9 @@ impl ZzClawTermApp {
             let _ = self
                 .terminal
                 .place_tab_before_in_terminal_windows(&root_tab_id, tab_id);
+        }
+        if let MoveTabPlacement::AfterTab(tab_id) = placement {
+            self.reorder_session_relative(root_tab_id.clone(), tab_id.clone(), true, cx);
         }
         if let MoveTabPlacement::TerminalLeaf { leaf_id, edge } = placement {
             let zone = edge.map_or(TabDockZone::Center, |edge| {

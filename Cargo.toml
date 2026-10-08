@@ -22,6 +22,8 @@ members = [
     "crates/zzclawterm-transport",
     "crates/zzclawterm-ui",
     "crates/zzclawterm-vnc-helper",
+    "crates/zzclawterm-plugin-api",
+    "crates/zzclawterm-plugin-host",
 ]
 resolver = "3"
 # `temp/` is untracked and holds local reference checkouts, including the
@@ -30,7 +32,7 @@ resolver = "3"
 # revision below. Editing anything under `temp/` has no effect on what is
 # compiled. The exclude entry only stops cargo from claiming those manifests
 # belong to this workspace, so they can still be built on their own.
-exclude = ["temp"]
+exclude = ["temp", "examples/plugins/guests"]
 
 [workspace.package]
 version = "0.1.1"
@@ -51,11 +53,13 @@ digest = "0.11.0-rc.5"
 dirs = "6"
 encoding_rs = "0.8"
 futures = "0.3"
+same-file = "1"
+tempfile = "3"
 glob = "0.3.4"
-gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "4ba16e3a20a9403b2d0266626f5c435bb1204223" }
-gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "5064df453df0f160f9eee08e4a236ad17c3bb86e" }
-gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "5064df453df0f160f9eee08e4a236ad17c3bb86e" }
-gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "4ba16e3a20a9403b2d0266626f5c435bb1204223" }
+gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "400d43cd62b6499c77a1400d6f83116d9845e187" }
+gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "ce64cc87aa1dfe31585ffecc7c7cce8bd81718d0" }
+gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "ce64cc87aa1dfe31585ffecc7c7cce8bd81718d0" }
+gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "400d43cd62b6499c77a1400d6f83116d9845e187" }
 # Pure-Rust, `#![forbid(unsafe)]` PDF rasterizer (MIT OR Apache-2.0). Pinned
 # exactly: the crate is pre-1.0 and explicitly experimental, so a caret range
 # could pull in a breaking 0.8 without review. `embed-fonts` bundles the 14
@@ -83,6 +87,8 @@ zzclawterm-terminal = { path = "crates/zzclawterm-terminal" }
 zzclawterm-terminal-gpui = { path = "crates/zzclawterm-terminal-gpui" }
 zzclawterm-transport = { path = "crates/zzclawterm-transport" }
 zzclawterm-ui = { path = "crates/zzclawterm-ui" }
+zzclawterm-plugin-api = { path = "crates/zzclawterm-plugin-api" }
+zzclawterm-plugin-host = { path = "crates/zzclawterm-plugin-host" }
 percent-encoding = "=2.3.2"
 portable-pty = "0.9"
 quick-xml = "0.40"
@@ -91,8 +97,8 @@ redb = "4.1.0"
 regex = "1.11.1"
 rmcp = "=3.1.4"
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std"] }
-russh = { git = "https://gitcode.com/JackfahdinImport/russh", rev = "20e3c6f2d8d86ec2ea9c5975024f3804d34eeef1", features = ["des", "dsa"] }
-russh-sftp = { git = "https://gitcode.com/JackfahdinImport/russh-sftp", rev = "d24a126c95ea3e6698f16156ff797c3f40fa84c6" }
+russh = { git = "https://gitcode.com/JackfahdinImport/russh", rev = "5ed33bde6e9f0288b7f0d54394d29f436849582b", features = ["des", "dsa"] }
+russh-sftp = { git = "https://gitcode.com/JackfahdinImport/russh-sftp", rev = "aba3096b600dbbecbe7172dd4dec946667346c6b" }
 rusty-leveldb = "4.0"
 rust-embed = { version = "8.11", features = ["include-exclude", "debug-embed"] }
 rust-i18n = "4.2"
@@ -115,21 +121,26 @@ tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Test-only. Feature set must mirror gpui's own usvg dependency (default-features
 # = false) so asset tests cannot pass under capabilities the app does not build.
-usvg = { version = "0.45", default-features = false }
+usvg = { version = "0.46", default-features = false }
 url = "=2.5.8"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
 uuid = { version = "1", features = ["v4", "serde"] }
-vnc = { package = "vnc-rs", git = "https://gitcode.com/JackfahdinImport/vnc-rs", rev = "d855f22e301835cdf63a7aa1520877e3153ec66a" }
+vnc = { package = "vnc-rs", git = "https://gitcode.com/JackfahdinImport/vnc-rs", rev = "689a65166d6440946529b2696314386a70d71d86" }
 vte = "0.14"
 zeroize = "1"
-zmodem2 = { git = "https://gitcode.com/JackfahdinImport/zmodem2", rev = "b2f669a78ad0e1108115f1c4d9558e2663943a48" }
+zmodem2 = { git = "https://gitcode.com/JackfahdinImport/zmodem2", rev = "372662d9fef892ba36d628107bf8152ab46ba4ca" }
 zed_reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = [
     "blocking",
     "json",
     "rustls-tls-native-roots",
+    "socks",
 ] }
 zip = { version = "8.2.0", default-features = false, features = ["deflate"] }
+toml = "0.9"
+wasmtime = { version = "=39.0.1", default-features = false, features = ["std", "runtime", "cranelift", "component-model"] }
+wasmparser = "=0.240.0"
+wit-bindgen = { version = "=0.49.0", default-features = false, features = ["macros", "realloc", "std"] }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -157,9 +168,9 @@ debug = "full"
 
 [patch.crates-io]
 alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "e3d2ce97748039dedcd9316778d61d65c7b8ff2e" }
-ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "91483f8f6211835bf74be4f614088cb19516a51a" }
+ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "37afc5f400193a219fdd1cf4c9d83f1fedac650c" }
 # The published ironrdp-client and ironrdp-connector packages declare their
 # sibling crates as registry dependencies, but in the IronRDP repository those
 # are path dependencies, so patching the two above to git pulls the siblings
@@ -168,13 +179,13 @@ sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "91483f8f62
 # are identical on both sides. `ironrdp-tls` is here for the same reason:
 # `zzclawterm-rdp-helper` names its certificate-validation types directly, because
 # ironrdp-client does not re-export them.
-ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
-ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "21e59c9c83fd02ecdb7404c18b98583f0c7ae365" }
+ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
+ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "e6cae7c73bbaf093af96bd985e36261efc706038" }
 
 # gpui-kit takes zed-reqwest from git while this workspace uses the
 # published crate; without this both end up in the graph.

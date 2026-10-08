@@ -333,18 +333,6 @@ impl ZzClawTermApp {
                     .invalidate_tree_path(session, &RemoteFilePath::new(parent), false);
                 seed(self, parent_path, entries);
             }
-            TransferJobOutput::Deleted {
-                remote_path,
-                parent_path,
-                entries,
-            } => {
-                self.transfer.invalidate_tree_path(
-                    session,
-                    &RemoteFilePath::new(remote_path),
-                    true,
-                );
-                seed(self, parent_path, entries);
-            }
             TransferJobOutput::CreatedDirectory {
                 remote_path,
                 parent_path,

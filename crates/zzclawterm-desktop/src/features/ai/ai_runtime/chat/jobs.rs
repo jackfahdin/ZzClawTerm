@@ -18,7 +18,19 @@ use super::super::super::state::AiAgentBackgroundEffect;
 impl ZzClawTermApp {
     pub(in crate::features) fn cancel_ai_chat(&mut self, cx: &mut Context<Self>) {
         let before = self.ai_header_presentation();
+        if self.ai.native_pending_call().is_some_and(|call| {
+            call.tool == zzclawterm_core::ai::harness::AgentTool::RequestUserInput
+        }) {
+            self.record_native_control_audit("request_user_input", false, cx);
+        }
+        if let Some(view) = self.ai.native_run_view() {
+            self.forget_text_inputs(&format!("ai.agent-answer.{}.", view.run_id));
+        }
+        let native_owner = self.ai.native_owner();
         self.ai.cancel_chat_and_agent();
+        if let Some(owner) = native_owner {
+            self.clear_capability_owner(&owner, cx);
+        }
         self.sync_session_event_bridge_policy();
         self.settings
             .set_store_message(self.ai.panel_status().to_string());
@@ -28,6 +40,9 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn start_ai_ask(&mut self, cx: &mut Context<Self>) {
+        if self.ai.history_is_pending() {
+            return;
+        }
         self.sync_ai_active_scope(cx);
         if self.ai.chat_or_agent_is_running() {
             self.ai
@@ -106,7 +121,7 @@ impl ZzClawTermApp {
             .as_ref()
             .map(|request| request.source_label.clone());
         let session_id = self.ai.chat_session_id().to_string();
-        let request = AiChatRequest {
+        let mut request = AiChatRequest {
             stream_id: None,
             session_id: Some(session_id.clone()),
             connection_id,
@@ -173,6 +188,12 @@ impl ZzClawTermApp {
             self.ai
                 .begin_chat_request(request_prompt, mode.clone(), source_label.as_deref());
         self.reset_text_input("ai.chat.prompt", "", cx);
+        let mut agent_history = None;
+        if request.mode == AiMode::Agent && request.agent_kind == AiAgentKind::Zzclawterm {
+            self.ai.begin_native_run(request.clone());
+            request.options.agent_context = self.ai.native_request_context();
+            agent_history = self.ai.native_initial_history();
+        }
         let job_id = launch.job_id;
         let cancel = launch.cancel;
         let tx = launch.tx;
@@ -193,7 +214,8 @@ impl ZzClawTermApp {
                             stream_tx: Some(tx.clone()),
                             cancel,
                             job_id,
-                            agent_history: None,
+                            agent_history,
+                            persist_user_message: true,
                         },
                     )
                 };
@@ -292,11 +314,41 @@ impl ZzClawTermApp {
             .iter()
             .position(|(model, _)| model.id == selected_model_id)
             .unwrap_or(0)
+            + self.ai_filtered_reasoning_choices().len()
+    }
+
+    pub(in crate::features) fn ai_filtered_reasoning_choices(
+        &self,
+    ) -> Vec<zzclawterm_core::AiReasoningEffort> {
+        let models = self.ai_enabled_models();
+        let selected_id = self.ai_selected_model_id();
+        let model = models
+            .iter()
+            .find(|model| Some(&model.id) == selected_id.as_ref());
+        let query = self.ai.discovery_query().trim().to_lowercase();
+        zzclawterm_core::ai::provider_settings::model_reasoning_options(model)
+            .into_iter()
+            .filter(|effort| {
+                query.is_empty()
+                    || format!(
+                        "{} {effort:?}",
+                        crate::features::ai::reasoning_effort_label(effort)
+                    )
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect()
     }
 
     pub(in crate::features) fn select_ai_model_choice(&mut self, cx: &mut Context<Self>) {
+        let reasoning = self.ai_filtered_reasoning_choices();
+        let index = self.ai.discovery_index();
+        if let Some(effort) = reasoning.get(index) {
+            self.set_ai_reasoning_effort(effort.clone(), cx);
+            return;
+        }
         let choices = self.ai_filtered_model_choices();
-        let Some((model, _)) = choices.get(self.ai.discovery_index()).cloned() else {
+        let Some((model, _)) = choices.get(index.saturating_sub(reasoning.len())).cloned() else {
             self.defer_ai_panel_snapshot_flush(cx);
             return;
         };
@@ -319,7 +371,8 @@ impl ZzClawTermApp {
         }
 
         // The box owns the text; the menu owns the keys that walk and pick.
-        let choice_count = self.ai_filtered_model_choices().len();
+        let choice_count =
+            self.ai_filtered_reasoning_choices().len() + self.ai_filtered_model_choices().len();
         match keystroke.key.as_str() {
             "escape" => {
                 let selected_index = self.ai_selected_model_index();
@@ -682,6 +735,10 @@ impl ZzClawTermApp {
         };
         cx.spawn(async move |this, cx| {
             while let Some(event) = rx.next().await {
+                let stream_event = matches!(
+                    &event,
+                    AiChatWorkerEvent::Delta { .. } | AiChatWorkerEvent::AgentToolCallDelta { .. }
+                );
                 if this
                     .update(cx, |this, cx| {
                         let before = this.ai_header_presentation();
@@ -693,8 +750,12 @@ impl ZzClawTermApp {
                         let dirty =
                             this.ai.chat_event_is_wanted() && this.apply_ai_chat_event(event, cx);
                         this.ai.switch_scope(&visible_scope);
-                        if dirty {
-                            this.flush_ai_panel_snapshot(cx);
+                        if dirty && scope == visible_scope {
+                            if stream_event {
+                                this.schedule_ai_stream_refresh(cx);
+                            } else {
+                                this.flush_ai_panel_snapshot(cx);
+                            }
                             this.notify_root_if_ai_header_changed(before, cx);
                         }
                     })
@@ -703,6 +764,24 @@ impl ZzClawTermApp {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    pub(in crate::features) fn schedule_ai_stream_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(generation) = self.ai.request_stream_refresh() else {
+            return;
+        };
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(33));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ai.take_stream_refresh(generation) {
+                    this.flush_ai_panel_snapshot(cx);
+                }
+            });
         })
         .detach();
     }
@@ -771,11 +850,21 @@ impl ZzClawTermApp {
                 }
             }
             AiChatWorkerEvent::Finished(event) => {
+                let native_call = event
+                    .result
+                    .as_ref()
+                    .ok()
+                    .and_then(|output| output.native_call.clone());
                 if let Some(effect) =
                     self.ai
                         .finish_chat_job(event.job_id, event.session_id, event.result)
                 {
                     dirty = true;
+                    if let Some(call) = native_call {
+                        self.dispatch_native_agent_call(call, cx);
+                    } else if let Some(owner) = self.ai.ended_native_owner() {
+                        self.clear_capability_owner(&owner, cx);
+                    }
                     self.settings.update_store_status(
                         if effect.succeeded {
                             format!("AI session {} updated", effect.session_id)

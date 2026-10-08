@@ -277,7 +277,12 @@ impl ConnectionStore {
             ui_quick_cmd_height: json_u32(&value, &["ui", "quick_cmd_height"], 180).clamp(36, 520),
             ui_quick_cmd_visible: json_bool(&value, &["ui", "show_quick_cmd_bar"], true),
             ui_serial_send_height: json_u32(&value, &["ui", "serial_send_height"], 180)
-                .clamp(60, 520),
+                .clamp(120, 520),
+            ui_serial_send_clear_after_send: json_bool(
+                &value,
+                &["ui", "serial_send_clear_after_send"],
+                false,
+            ),
             ui_serial_send_visible: json_bool(&value, &["ui", "show_serial_send_panel"], false),
             ui_active_left_panel: json_optional_string(&value, &["ui", "active_left_panel"]),
             ui_active_right_panel: json_optional_string(&value, &["ui", "active_right_panel"]),
@@ -498,6 +503,7 @@ impl ConnectionStore {
                 &["recording", "include_io_labels"],
                 true,
             ),
+            recording_include_input: json_bool(&value, &["recording", "include_input"], false),
             recording_include_timestamps: json_bool(
                 &value,
                 &["recording", "include_timestamps"],
@@ -664,6 +670,11 @@ impl ConnectionStore {
             &mut value,
             &["recording", "include_io_labels"],
             serde_json::Value::Bool(settings.recording_include_io_labels),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["recording", "include_input"],
+            serde_json::Value::Bool(settings.recording_include_input),
         );
         set_nested_json_value(
             &mut value,
@@ -873,7 +884,12 @@ impl ConnectionStore {
         set_nested_json_value(
             &mut value,
             &["ui", "serial_send_height"],
-            serde_json::Value::from(settings.ui_serial_send_height.clamp(60, 520)),
+            serde_json::Value::from(settings.ui_serial_send_height.clamp(120, 520)),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["ui", "serial_send_clear_after_send"],
+            serde_json::Value::Bool(settings.ui_serial_send_clear_after_send),
         );
         set_nested_json_value(
             &mut value,
@@ -1682,7 +1698,7 @@ impl ConnectionStore {
             set_nested_json_value(
                 &mut value,
                 &["ui", "serial_send_height"],
-                serde_json::Value::from(workspace.ui.serial_send_panel_height),
+                serde_json::Value::from(workspace.ui.serial_send_panel_height.clamp(120, 520)),
             );
             set_nested_json_value(
                 &mut value,
@@ -1796,7 +1812,11 @@ impl ConnectionStore {
 }
 
 fn default_activity_left_bottom() -> Vec<String> {
-    vec!["syncBackupHistory".to_string(), "settings".to_string()]
+    vec![
+        "syncBackupHistory".to_string(),
+        "plugins".to_string(),
+        "settings".to_string(),
+    ]
 }
 
 fn default_activity_left_top() -> Vec<String> {

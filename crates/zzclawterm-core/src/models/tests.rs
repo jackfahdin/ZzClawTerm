@@ -26,6 +26,7 @@ fn secret_bearing_model_debug_output_is_redacted() {
         format!(
             "{:?}",
             SshKey {
+                sort_order: 0,
                 id: "key-1".to_string(),
                 name: "Test key".to_string(),
                 key: Some(secret.to_string().into()),
@@ -1253,5 +1254,52 @@ fn sftp_pipeline_depth_preserves_legacy_range_and_unknown_settings() {
         if expected.is_none() {
             assert!(output.get("pipeline_depth").is_none());
         }
+    }
+}
+
+#[test]
+fn serial_flow_control_preserves_legacy_and_round_trips_supported_values() {
+    use crate::models::connection::{ConnectionType, SerialFlowControl};
+    let legacy = serde_json::json!({"type":"serial", "port_name":"COM3"});
+    let connection: ConnectionType = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(
+        connection,
+        ConnectionType::Serial {
+            flow_control: SerialFlowControl::None,
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(connection)
+            .unwrap()
+            .get("flow_control")
+            .is_none()
+    );
+    for value in ["none", "software", "hardware"] {
+        let mut input = legacy.clone();
+        input["flow_control"] = value.into();
+        let decoded: ConnectionType = serde_json::from_value(input).unwrap();
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ConnectionType>(encoded).unwrap(),
+            decoded
+        );
+    }
+    let mut invalid = legacy;
+    invalid["flow_control"] = "rtscts".into();
+    assert!(serde_json::from_value::<ConnectionType>(invalid).is_err());
+}
+
+#[test]
+fn encoding_aliases_and_unknown_labels_survive_saved_connection_round_trips() {
+    for label in ["GB2312", "CP936", "sjis", "euckr", "future-encoding"] {
+        let value = serde_json::json!({"id":"compat", "name":"compat", "type":"ssh", "host":"localhost", "port":22, "username":"user", "encoding":label, "sftp":{"filename_encoding":label,"future_option":true}});
+        let connection: SavedConnection = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(&connection).unwrap();
+        assert_eq!(saved["encoding"], label);
+        assert_eq!(saved["sftp"]["filename_encoding"], label);
+        assert_eq!(saved["sftp"]["future_option"], true);
+        let reloaded: SavedConnection = serde_json::from_value(saved).unwrap();
+        assert_eq!(reloaded, connection);
     }
 }

@@ -18,6 +18,7 @@ encoding_rs.workspace = true
 futures.workspace = true
 glob.workspace = true
 zzclawterm-mcp-protocol.workspace = true
+zzclawterm-plugin-api = { path = "../zzclawterm-plugin-api", default-features = false }
 hex.workspace = true
 hmac.workspace = true
 md5.workspace = true
@@ -34,6 +35,7 @@ sha2.workspace = true
 ssh-key.workspace = true
 thiserror.workspace = true
 time.workspace = true
+toml.workspace = true
 url.workspace = true
 unicode-normalization.workspace = true
 unicode-segmentation.workspace = true

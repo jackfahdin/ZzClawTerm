@@ -203,30 +203,42 @@ struct SchedulerInner {
 }
 
 impl SchedulerInner {
-    fn shutdown(&self) {
-        if self.shared.stopping.swap(true, Ordering::AcqRel) {
-            return;
-        }
+    fn begin_shutdown(&self) -> impl FnOnce() + Send + 'static {
+        let shared = Arc::clone(&self.shared);
         let started_at = Instant::now();
+        let workers = self.take_shutdown_workers();
+        move || {
+            if workers.is_empty() {
+                return;
+            }
+            for worker in workers {
+                if worker.join().is_err() {
+                    shared.panicked.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let elapsed = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            shared.shutdown_millis.store(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    fn take_shutdown_workers(&self) -> Vec<JoinHandle<()>> {
+        if self.shared.stopping.swap(true, Ordering::AcqRel) {
+            return Vec::new();
+        }
         self.sender
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        let workers = std::mem::take(
+        std::mem::take(
             &mut *self
                 .workers
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        for worker in workers {
-            if worker.join().is_err() {
-                self.shared.panicked.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let elapsed = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        self.shared
-            .shutdown_millis
-            .store(elapsed, Ordering::Relaxed);
+        )
+    }
+
+    fn shutdown(&self) {
+        self.begin_shutdown()();
     }
 }
 
@@ -410,6 +422,12 @@ impl BlockingJobScheduler {
     pub fn shutdown(&self) {
         self.inner.shutdown();
     }
+
+    /// Cancel queued/running jobs now, then wait on a background executor.
+    #[must_use = "the returned cleanup must run before releasing workspace resources"]
+    pub(crate) fn begin_shutdown(&self) -> impl FnOnce() + Send + 'static {
+        self.inner.begin_shutdown()
+    }
 }
 
 impl Default for BlockingJobScheduler {
@@ -561,6 +579,30 @@ mod tests {
             Err(JobExecutionError::Failed(JobFailure::Panicked))
         );
         scheduler.shutdown();
+    }
+
+    #[test]
+    fn beginning_shutdown_cancels_jobs_without_waiting_on_the_caller() {
+        let scheduler = BlockingJobScheduler::with_limits(1, 1).expect("scheduler");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let job = scheduler
+            .submit("held-http-request", move |cancel| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                assert!(cancel.is_cancelled());
+            })
+            .unwrap();
+        started_rx.recv().unwrap();
+        let cleanup = scheduler.begin_shutdown();
+        assert!(matches!(
+            scheduler.submit("after-shutdown", |_| {}),
+            Err(JobRejected::ShuttingDown)
+        ));
+        // The caller can continue serving UI events while an in-flight request finishes.
+        release_tx.send(()).unwrap();
+        std::thread::spawn(cleanup).join().unwrap();
+        assert_eq!(job.wait(), JobOutcome::Cancelled);
     }
 
     #[test]

@@ -687,6 +687,35 @@ fn keyword_highlight_request_key_tracks_wrapped_row_context() {
 }
 
 #[test]
+fn keyword_highlight_request_key_tracks_osc133_without_text_changes() {
+    let mut screen = TerminalScreen::new(40, 2);
+    screen.advance(b"ERROR");
+    let output = screen.snapshot();
+    let before = terminal_keyword_highlight_request_key(&output, 7, 0..1);
+    screen.advance(b"\r\x1b]133;B\x07");
+    let input = screen.snapshot();
+    assert_eq!(
+        output.row(0).unwrap().signature,
+        input.row(0).unwrap().signature
+    );
+    assert_eq!(
+        output.row(0).unwrap().revision,
+        input.row(0).unwrap().revision
+    );
+    assert_ne!(
+        before,
+        terminal_keyword_highlight_request_key(&input, 7, 0..1)
+    );
+    let mut shifted = input.clone();
+    let rows = Arc::make_mut(&mut shifted.row_data);
+    Arc::make_mut(&mut rows[0]).shell_input_columns = Some((2, 40));
+    assert_ne!(
+        terminal_keyword_highlight_request_key(&input, 7, 0..1),
+        terminal_keyword_highlight_request_key(&shifted, 7, 0..1)
+    );
+}
+
+#[test]
 fn keyword_highlight_visible_rows_bound_retained_scroll_work() {
     let mut screen = TerminalScreen::new(80, 24);
     screen.advance_decoded_text(&terminal_test_output_lines(240));

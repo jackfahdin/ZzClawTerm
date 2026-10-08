@@ -183,6 +183,7 @@ impl WorkspacePaneNode {
 
     /// Split the leaf holding `target_session_id` by replacing it with
     /// Split(leaf(target), leaf(new_session_id)).
+    #[cfg(test)]
     pub(crate) fn split_leaf(
         &mut self,
         target_session_id: &str,
@@ -340,16 +341,20 @@ impl WorkspacePaneNode {
                 first,
                 second,
             } => {
+                let direction = match direction.to_ascii_lowercase().as_str() {
+                    "horizontal" | "row" => WorkspaceSplitDirection::Horizontal,
+                    "vertical" | "column" => WorkspaceSplitDirection::Vertical,
+                    _ => return None,
+                };
+                if !ratio.is_finite() {
+                    return None;
+                }
                 let first = Self::restore_layout_inner(first, ordered_tab_ids, used);
                 let second = Self::restore_layout_inner(second, ordered_tab_ids, used);
                 match (first, second) {
                     (None, None) => None,
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (Some(first), Some(second)) => {
-                        let direction = match direction.to_ascii_lowercase().as_str() {
-                            "horizontal" | "row" => WorkspaceSplitDirection::Horizontal,
-                            _ => WorkspaceSplitDirection::Vertical,
-                        };
                         let ratio_percent = ((*ratio * 100.0).round() as u8)
                             .clamp(Self::MIN_RATIO_PERCENT, Self::MAX_RATIO_PERCENT);
                         let split_id = if id.trim().is_empty() {

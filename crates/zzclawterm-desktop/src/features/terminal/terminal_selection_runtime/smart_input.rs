@@ -1,34 +1,130 @@
-use gpui::{App, Context, KeyDownEvent, MouseUpEvent, Pixels, Point};
-use zzclawterm_core::{
-    InputSelectionRange, TerminalInputState, apply_terminal_input_data,
-    build_move_input_cursor_data, can_suggest_from_tracker, delete_terminal_input_range,
+use gpui::{
+    App, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseUpEvent, Pixels, Point,
+};
+use zzclawterm_core::terminal::editing::{EditIntent, EditPhase, EditPlan, plan_edit};
+use zzclawterm_core::terminal::input_tracker::InputSelectionRange;
+use zzclawterm_terminal::editing::resolve_input;
+use zzclawterm_terminal::navigation::{NavigationKey, navigation_key_bytes};
+use zzclawterm_terminal_gpui::{
+    TerminalKeyMode, terminal_key_bytes_with_mode, terminal_key_release_bytes_with_mode,
 };
 
-use crate::features::ZzClawTermApp;
-use crate::terminal::{TerminalTextCell, terminal_text_cells};
-
 use super::helpers::SmartSelectionEdge;
+use super::metrics::{
+    terminal_cell_for_visual_geometry, terminal_snapshot_row_for_visual_geometry,
+};
+use crate::features::ZzClawTermApp;
+use crate::features::terminal::editing_state::SnapshotEvidence;
+use crate::features::terminal::terminal_surface::terminal_absolute_line_for_snapshot_row;
+use crate::models::{TerminalBufferCellPos, TerminalSelection};
+
+fn shell_edit_payload(
+    plan: &EditPlan,
+    mode: TerminalKeyMode,
+    insertion_wire: Vec<u8>,
+) -> (Vec<u8>, Vec<u8>) {
+    let key = if plan.move_right {
+        NavigationKey::Right
+    } else {
+        NavigationKey::Left
+    };
+    // Recording/tracking consumes legacy logical intents. The wire uses exactly
+    // the same press/release encoder as physical input, including Kitty flags.
+    let mut logical = navigation_key_bytes(key, mode.application_cursor).repeat(plan.move_steps);
+    logical.extend(std::iter::repeat_n(0x7f, plan.delete_steps));
+    let mut wire = shell_edit_key_bytes(if plan.move_right { "right" } else { "left" }, mode)
+        .repeat(plan.move_steps);
+    wire.extend(shell_edit_key_bytes("backspace", mode).repeat(plan.delete_steps));
+    wire.extend(insertion_wire);
+    logical.extend_from_slice(plan.insert_text.as_bytes());
+    (wire, logical)
+}
+
+fn shell_edit_key_bytes(key: &str, mode: TerminalKeyMode) -> Vec<u8> {
+    let keystroke = Keystroke {
+        key: key.into(),
+        key_char: None,
+        modifiers: Modifiers::default(),
+    };
+    let mut bytes = terminal_key_bytes_with_mode(
+        &KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        },
+        mode,
+    )
+    .expect("shell editing keys have a terminal encoding");
+    if let Some(release) = terminal_key_release_bytes_with_mode(&KeyUpEvent { keystroke }, mode) {
+        bytes.extend(release);
+    }
+    bytes
+}
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn smart_input_line_selection_at_mouse(
+        &self,
+        position: Point<Pixels>,
+        cx: &App,
+    ) -> Option<TerminalSelection> {
+        self.input_index_at_mouse(position, cx)?;
+        let state = self.terminal.editing.state()?;
+        if state.model.phase != EditPhase::Ready {
+            return None;
+        }
+        let mapping = state.mapping.as_ref()?;
+        let first = mapping.cells.first()?;
+        let last = mapping.cells.last()?;
+        let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), 0);
+        Some(TerminalSelection::from_range(
+            TerminalBufferCellPos::new(
+                terminal_absolute_line_for_snapshot_row(&snapshot, first.row)?,
+                first.col,
+            ),
+            TerminalBufferCellPos::new(
+                terminal_absolute_line_for_snapshot_row(&snapshot, last.row)?,
+                last.col + last.width - 1,
+            ),
+        ))
+    }
+
     pub(in crate::features) fn handle_smart_input_click(
         &mut self,
         event: &MouseUpEvent,
         cx: &mut Context<Self>,
     ) {
-        if event.modifiers.control
-            || event.modifiers.platform
-            || event.modifiers.alt
-            || event.modifiers.shift
-        {
+        if event.modifiers.modified() {
             return;
         }
-        if !self.can_use_smart_cursor_selection() {
-            return;
+        if let Some(id) = self.session.active_id_owned() {
+            self.reconcile_shell_editing(&id, cx);
         }
-        let Some(target) = self.input_index_at_mouse(event.position, cx) else {
-            return;
+        if let Some(target) = self.input_index_at_mouse(event.position, cx) {
+            self.move_smart_input_cursor(target, cx);
+        }
+    }
+
+    pub(in crate::features) fn can_use_smart_cursor_selection(&self) -> bool {
+        let Some(id) = self.session.active_id() else {
+            return false;
         };
-        let _ = self.move_smart_input_cursor(target, cx);
+        !self.security.screen_locked()
+            && !self.session.is_disconnected(id)
+            && !self.active_terminal_uses_alternate_screen()
+            && !self.terminal_protocol_state_for_session(id).mouse_reporting
+            && !self.is_credential_prompt_input_mode()
+            && self.terminal.assist.credential_suggestions.is_none()
+            && !self.sync_input.may_fan_out_from(id)
+            && self.active_terminal_display_offset() == 0
+            && self.terminal.editing.state().is_some_and(|state| {
+                !state.awaiting_snapshot
+                    && state.allows_editing()
+                    && !state.model.input.desynced
+                    && !state.model.input.line_rewrite_required
+                    && !state.model.input.multiline
+                    && !state.model.input.paste_mode
+                    && state.mapping.is_some()
+            })
     }
 
     pub(in crate::features) fn input_index_at_mouse(
@@ -39,181 +135,192 @@ impl ZzClawTermApp {
         if !self.can_use_smart_cursor_selection() {
             return None;
         }
-        let state = &self.terminal.assist.command_input_tracker;
-        if state.value.is_empty() {
+        let geometry = self.terminal_hit_test_geometry_for_session(self.session.active_id(), cx)?;
+        if geometry.display_offset != 0 {
             return None;
         }
-        let cell = self.point_to_terminal_cell(position, cx)?;
-        let offset = self.active_terminal_display_offset();
-        if offset != 0 {
-            return None;
-        }
+        let cell = terminal_cell_for_visual_geometry(position, &geometry);
+        let painted_row = terminal_snapshot_row_for_visual_geometry(position, &geometry);
+        let painted_id = geometry.snapshot.row(painted_row)?.line_id?;
+        let state = self.terminal.editing.state()?;
         let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), 0);
-        let snapshot_row = self.terminal_snapshot_row_for_session_viewport_row(
-            self.session.active_id(),
-            snapshot.as_ref(),
-            0,
-            cell.row,
-        )?;
-        if snapshot_row != snapshot.cursor.row {
+        let snapshot_row = snapshot
+            .rows()
+            .iter()
+            .position(|row| row.line_id == Some(painted_id))?;
+        for (id, revision) in &state.mapping.as_ref()?.row_revisions {
+            if !geometry
+                .snapshot
+                .rows()
+                .iter()
+                .any(|row| row.line_id == Some(*id) && row.revision == *revision)
+            {
+                return None;
+            }
+        }
+        let mapping = state.mapping.as_ref()?;
+        // While awaiting echo, the confirmed mapping still gives logical targets
+        // for consecutive clicks. Only the latest target is retained.
+        if state.model.phase != EditPhase::Pending
+            && resolve_input(
+                &snapshot,
+                &state.model.input.value,
+                state.model.input.cursor,
+            )
+            .as_ref()
+                != Some(mapping)
+        {
             return None;
         }
-        let line = snapshot.line(snapshot_row).unwrap_or("");
-        let line_cells = smart_input_cells(line);
-        let value_cells = smart_input_cells(&state.value);
-        if value_cells.is_empty() || value_cells.len() > line_cells.len() {
-            return None;
-        }
-        let input_start_col =
-            find_smart_input_start_col(&line_cells, &value_cells, snapshot.cursor.col)?;
-        let input_end_col = input_start_col + value_cells.len();
-        if cell.col < input_start_col {
-            return None;
-        }
-        let cell_index = if cell.col >= input_end_col {
-            value_cells.len()
-        } else {
-            cell.col - input_start_col
-        };
-        Some(byte_for_smart_input_cell_index(&value_cells, cell_index))
+        mapping.byte_at(snapshot_row, cell.col)
     }
 
     pub(in crate::features) fn move_smart_input_cursor(
         &mut self,
-        target_cursor: usize,
+        target: usize,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.can_use_smart_cursor_selection() {
             return false;
         }
-        let mut state = self.terminal.assist.command_input_tracker.clone();
-        let next_cursor = target_cursor.min(state.value.len());
-        let payload = build_move_input_cursor_data(&state.value, state.cursor, next_cursor);
-        if payload.is_empty() && next_cursor == state.cursor {
+        let state = self.terminal.editing.state_mut();
+        if state.model.phase == EditPhase::Pending {
+            state.model.queued_cursor = Some(target);
+            return true;
+        }
+        if state.model.phase != EditPhase::Ready {
             return false;
         }
-        state.cursor = next_cursor;
-        self.terminal.assist.command_input_tracker = state;
-        if !payload.is_empty() {
-            self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
-        } else {
-            cx.notify();
-        }
-        true
+        self.send_shell_edit(EditIntent::Move(target), false, cx)
     }
 
-    pub(in crate::features) fn can_use_smart_cursor_selection(&self) -> bool {
-        if self.session.active_id().is_none() {
-            return false;
-        }
-        if self.is_credential_prompt_input_mode() {
-            return false;
-        }
-        let state = &self.terminal.assist.command_input_tracker;
-        if state.desynced || state.line_rewrite_required || state.paste_mode || state.multiline {
-            return false;
-        }
-        if let Some(session_id) = self.session.active_id()
-            && !self.sync_peer_session_ids(session_id).is_empty()
-        {
-            return false;
-        }
-        true
+    pub(in crate::features) fn begin_smart_input_selection(&mut self) {
+        let eligible = self.can_use_smart_cursor_selection();
+        let state = self.terminal.editing.state_mut();
+        state.model.queued_cursor = None;
+        state.selection_origin_version =
+            (eligible && state.model.phase == EditPhase::Ready).then_some(state.model.version);
+        state.selection = None;
     }
 
-    /// Map the painted terminal selection onto the tracked input line when it is fully contained.
+    pub(in crate::features) fn commit_smart_input_selection(&mut self) {
+        if !self.can_use_smart_cursor_selection() {
+            return;
+        }
+        if let Some(selection) = self.terminal.selection.selection {
+            let state = self.terminal.editing.state_mut();
+            if state.model.phase == EditPhase::Ready
+                && state.selection_origin_version == Some(state.model.version)
+            {
+                state.selection = Some((selection, state.model.version));
+            }
+        }
+    }
+
     pub(in crate::features) fn smart_cursor_selected_input_range(
         &self,
     ) -> Option<InputSelectionRange> {
         if !self.can_use_smart_cursor_selection() {
             return None;
         }
-        let state = &self.terminal.assist.command_input_tracker;
-        if state.value.is_empty() {
+        if self.terminal.selection.session_id.as_deref() != self.session.active_id() {
             return None;
         }
         let selection = self.terminal.selection.selection.as_ref()?;
         if selection.is_empty() || selection.all_buffer {
             return None;
         }
-        // Only single-row selections can map to a single-line tracked input.
-        let (start, end) = selection.ordered();
-        if start.line != end.line {
-            return None;
-        }
-
-        let offset = self.active_terminal_display_offset();
-        if offset != 0 {
-            // Selection in history is not the live input line.
+        let state = self.terminal.editing.state()?;
+        if state.model.phase != EditPhase::Ready
+            || state.selection != Some((*selection, state.model.version))
+        {
             return None;
         }
         let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), 0);
-
-        let snapshot_row =
-            crate::features::terminal::terminal_surface::terminal_absolute_line_for_snapshot_row(
-                snapshot.as_ref(),
-                snapshot.cursor.row,
-            )
-            .filter(|line| *line == start.line)
-            .map(|_| snapshot.cursor.row)?;
-        if snapshot_row != snapshot.cursor.row {
+        let mapping = resolve_input(
+            &snapshot,
+            &state.model.input.value,
+            state.model.input.cursor,
+        )?;
+        if state.mapping.as_ref() != Some(&mapping) {
             return None;
         }
-
-        let line = snapshot.line(snapshot_row).unwrap_or("");
-        let line_cells = smart_input_cells(line);
-        let (col_start, col_end_excl) = selection.cols_for_absolute_line(start.line)?;
-        let col_end = col_end_excl.min(line_cells.len().max(col_start));
-        let col_start = col_start.min(col_end);
-        if col_end <= col_start {
-            return None;
-        }
-
-        // Find tracked value as a suffix of the cursor line (prompt + input).
-        let value = &state.value;
-        if value.is_empty() {
-            return None;
-        }
-        let value_cells = smart_input_cells(value);
-        if value_cells.len() > line_cells.len() {
-            return None;
-        }
-        // Prefer alignment ending at cursor_col (input ends at cursor when typing at end).
-        // Fall back to last occurrence of value as a contiguous span on the line.
-        let input_start_col =
-            find_smart_input_start_col(&line_cells, &value_cells, snapshot.cursor.col)?;
-        let input_end_col = input_start_col + value_cells.len();
-
-        if col_start < input_start_col || col_end > input_end_col {
-            return None;
-        }
-
-        let sel_start_char = col_start - input_start_col;
-        let sel_end_char = col_end - input_start_col;
-        if sel_end_char <= sel_start_char || sel_end_char > value_cells.len() {
-            return None;
-        }
-
-        let byte_start = byte_for_smart_input_cell_index(&value_cells, sel_start_char);
-        let byte_end = byte_end_for_smart_input_cell_index(&value_cells, sel_end_char);
-        InputSelectionRange::new(byte_start, byte_end)
+        let (start, end) = selection.ordered();
+        let start_row = snapshot.rows().iter().enumerate().find_map(|(row, _)| {
+            (terminal_absolute_line_for_snapshot_row(&snapshot, row) == Some(start.line))
+                .then_some(row)
+        })?;
+        let end_row = snapshot.rows().iter().enumerate().find_map(|(row, _)| {
+            (terminal_absolute_line_for_snapshot_row(&snapshot, row) == Some(end.line))
+                .then_some(row)
+        })?;
+        let range = mapping.selected_range((start_row, start.col), (end_row, end.col))?;
+        InputSelectionRange::new(range.start, range.end)
     }
 
-    pub(in crate::features) fn send_smart_selection_payload(
+    fn send_shell_edit(
         &mut self,
-        next_state: TerminalInputState,
-        payload: String,
+        intent: EditIntent<'_>,
+        paste: bool,
         cx: &mut Context<Self>,
-    ) {
-        self.terminal.assist.command_input_tracker = next_state;
-        self.clear_terminal_selection(cx);
-        // Don't double-track via note_command_suggestion_input; state is already updated.
-        self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
-        if can_suggest_from_tracker(&self.terminal.assist.command_input_tracker) {
-            self.schedule_command_suggestion_refresh(cx);
-        } else if self.terminal.assist.command_suggestions.take().is_some() {
-            cx.notify();
+    ) -> bool {
+        if !self.can_use_smart_cursor_selection() {
+            return false;
         }
+        let Some(id) = self.session.active_id_owned() else {
+            return false;
+        };
+        let state = self.terminal.editing.state_mut();
+        if state.model.phase != EditPhase::Ready {
+            return false;
+        }
+        let Some(plan) = plan_edit(&state.model.input, state.model.version, intent) else {
+            return false;
+        };
+        if plan.move_steps == 0 && plan.delete_steps == 0 && plan.insert_text.is_empty() {
+            return true;
+        }
+        let changes_text = plan.delete_steps > 0 || !plan.insert_text.is_empty();
+        let mode = self.terminal_key_mode_for_session(Some(&id));
+        let insertion_wire = if paste {
+            self.wrap_terminal_paste_bytes_for_session(&id, &plan.insert_text)
+        } else {
+            self.encode_session_outgoing(&id, plan.insert_text.as_bytes())
+        };
+        let insertion_wire = match insertion_wire {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.set_terminal_status_if_changed(format!("input failed: {error}"));
+                cx.notify();
+                return true;
+            }
+        };
+        let (wire, logical) = shell_edit_payload(&plan, mode, insertion_wire);
+        let snapshot = self.terminal_snapshot_for_session(Some(&id), 0);
+        self.terminal.view.frame_pipeline.arm_output_event_wake();
+        if let Err(error) = self.write_session_wire_input_recorded_as(&id, &wire, &logical) {
+            // No state was committed before the synchronous write returned.
+            if self.set_terminal_status_if_changed(format!("input failed: {error}")) {
+                cx.notify();
+            }
+            return true;
+        }
+        self.terminal
+            .editing
+            .state_mut()
+            .model
+            .accept_plan(plan, std::time::Instant::now());
+        self.terminal.editing.state_mut().pending_evidence =
+            Some(SnapshotEvidence::from_snapshot(&snapshot));
+        self.terminal.editing.state_mut().selection = None;
+        if changes_text {
+            self.terminal.editing.state_mut().mapping = None;
+        }
+        self.clear_terminal_selection(cx);
+        self.dismiss_command_suggestions(cx);
+        self.arm_terminal_input_wake(cx);
+        self.schedule_shell_edit_confirmation_timeout(cx);
+        true
     }
 
     pub(in crate::features) fn delete_smart_input_selection(
@@ -221,20 +328,7 @@ impl ZzClawTermApp {
         selected: InputSelectionRange,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.can_use_smart_cursor_selection() {
-            return false;
-        }
-        let state = self.terminal.assist.command_input_tracker.clone();
-        let move_to_end = build_move_input_cursor_data(&state.value, state.cursor, selected.end);
-        let delete_count = selected.len_chars(&state.value);
-        if delete_count == 0 {
-            return false;
-        }
-        let delete_bytes = "\u{007f}".repeat(delete_count);
-        let next = delete_terminal_input_range(&state, selected.start, selected.end);
-        let payload = format!("{move_to_end}{delete_bytes}");
-        self.send_smart_selection_payload(next, payload, cx);
-        true
+        self.send_shell_edit(EditIntent::Delete(selected.start..selected.end), false, cx)
     }
 
     pub(in crate::features) fn replace_smart_input_selection(
@@ -243,18 +337,30 @@ impl ZzClawTermApp {
         data: &str,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.can_use_smart_cursor_selection() || data.is_empty() {
-            return false;
-        }
-        let state = self.terminal.assist.command_input_tracker.clone();
-        let move_to_end = build_move_input_cursor_data(&state.value, state.cursor, selected.end);
-        let delete_count = selected.len_chars(&state.value);
-        let delete_bytes = "\u{007f}".repeat(delete_count);
-        let after_delete = delete_terminal_input_range(&state, selected.start, selected.end);
-        let next = apply_terminal_input_data(&after_delete, data);
-        let payload = format!("{move_to_end}{delete_bytes}{data}");
-        self.send_smart_selection_payload(next, payload, cx);
-        true
+        self.send_shell_edit(
+            EditIntent::Replace {
+                range: selected.start..selected.end,
+                text: data,
+            },
+            false,
+            cx,
+        )
+    }
+
+    pub(in crate::features) fn replace_smart_input_selection_with_paste(
+        &mut self,
+        selected: InputSelectionRange,
+        data: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send_shell_edit(
+            EditIntent::Replace {
+                range: selected.start..selected.end,
+                text: data,
+            },
+            true,
+            cx,
+        )
     }
 
     pub(in crate::features) fn collapse_smart_input_selection(
@@ -263,29 +369,17 @@ impl ZzClawTermApp {
         edge: SmartSelectionEdge,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.can_use_smart_cursor_selection() {
-            return false;
-        }
-        let state = self.terminal.assist.command_input_tracker.clone();
         let target = match edge {
             SmartSelectionEdge::Start => selected.start,
             SmartSelectionEdge::End => selected.end,
         };
-        let payload = build_move_input_cursor_data(&state.value, state.cursor, target);
-        let mut next = state;
-        next.cursor = target.min(next.value.len());
-        self.terminal.assist.command_input_tracker = next;
-        self.clear_terminal_selection(cx);
-        if !payload.is_empty() {
-            self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
-        } else {
-            cx.notify();
+        let handled = self.move_smart_input_cursor(target, cx);
+        if handled {
+            self.clear_terminal_selection(cx);
         }
-        true
+        handled
     }
 
-    /// Handle Backspace/Delete/arrows/plain text against a smart input selection.
-    /// Returns true when the key was consumed.
     pub(in crate::features) fn handle_smart_input_selection_key(
         &mut self,
         event: &KeyDownEvent,
@@ -294,195 +388,107 @@ impl ZzClawTermApp {
         let Some(selected) = self.smart_cursor_selected_input_range() else {
             return false;
         };
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control
-            || keystroke.modifiers.platform
-            || keystroke.modifiers.alt
-            || keystroke.modifiers.function
+        let key = &event.keystroke;
+        if key.modifiers.control
+            || key.modifiers.platform
+            || key.modifiers.alt
+            || key.modifiers.function
         {
             return false;
         }
-
-        match keystroke.key.as_str() {
-            "left" if !keystroke.modifiers.shift => {
-                return self.collapse_smart_input_selection(
-                    selected,
-                    SmartSelectionEdge::Start,
-                    cx,
-                );
+        match key.key.as_str() {
+            "left" if !key.modifiers.shift => {
+                self.collapse_smart_input_selection(selected, SmartSelectionEdge::Start, cx)
             }
-            "right" if !keystroke.modifiers.shift => {
-                return self.collapse_smart_input_selection(selected, SmartSelectionEdge::End, cx);
+            "right" if !key.modifiers.shift => {
+                self.collapse_smart_input_selection(selected, SmartSelectionEdge::End, cx)
             }
-            "backspace" | "delete" => {
-                return self.delete_smart_input_selection(selected, cx);
-            }
-            _ => {}
+            "backspace" | "delete" => self.delete_smart_input_selection(selected, cx),
+            _ => false,
         }
+    }
 
-        if let Some(ch) = keystroke.key_char.as_deref()
-            && ch.chars().count() == 1
-            && !ch.chars().any(|c| c.is_control())
+    pub(in crate::features) fn commit_terminal_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(selected) = self.smart_cursor_selected_input_range()
+            && self.replace_smart_input_selection(selected, text, cx)
         {
-            return self.replace_smart_input_selection(selected, ch, cx);
+            return;
         }
-        false
-    }
-}
-
-type SmartInputCell = TerminalTextCell;
-
-fn smart_input_cells(text: &str) -> Vec<SmartInputCell> {
-    terminal_text_cells(text)
-}
-
-fn find_smart_input_start_col(
-    line_cells: &[SmartInputCell],
-    value_cells: &[SmartInputCell],
-    cursor_col: usize,
-) -> Option<usize> {
-    if value_cells.is_empty() || value_cells.len() > line_cells.len() {
-        return None;
-    }
-    if cursor_col >= value_cells.len() {
-        let candidate = cursor_col - value_cells.len();
-        if smart_input_cells_match(line_cells, value_cells, candidate) {
-            return Some(candidate);
-        }
-    }
-    let max_start = line_cells.len().saturating_sub(value_cells.len());
-    (0..=max_start)
-        .rev()
-        .find(|start_col| smart_input_cells_match(line_cells, value_cells, *start_col))
-}
-
-fn smart_input_cells_match(
-    line_cells: &[SmartInputCell],
-    value_cells: &[SmartInputCell],
-    start_col: usize,
-) -> bool {
-    line_cells
-        .get(start_col..start_col + value_cells.len())
-        .map(|slice| {
-            slice
-                .iter()
-                .zip(value_cells)
-                .all(|(line, value)| line.text == value.text)
-        })
-        .unwrap_or(false)
-}
-
-fn byte_for_smart_input_cell_index(cells: &[SmartInputCell], cell_index: usize) -> usize {
-    if cell_index == 0 {
-        0
-    } else {
-        cells
-            .get(cell_index)
-            .map(|cell| cell.byte_start)
-            .or_else(|| cells.last().map(|cell| cell.byte_end))
-            .unwrap_or(0)
-    }
-}
-
-fn byte_end_for_smart_input_cell_index(cells: &[SmartInputCell], cell_index: usize) -> usize {
-    if cell_index == 0 {
-        0
-    } else {
-        cells
-            .get(cell_index.saturating_sub(1))
-            .map(|cell| cell.byte_end)
-            .or_else(|| cells.last().map(|cell| cell.byte_end))
-            .unwrap_or(0)
+        self.send_terminal_input(text.as_bytes().to_vec(), cx);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        byte_end_for_smart_input_cell_index, byte_for_smart_input_cell_index,
-        find_smart_input_start_col, smart_input_cells,
-    };
+    use crate::features::ZzClawTermApp;
+    use zzclawterm_core::terminal::editing::{EditIntent, plan_edit};
+    use zzclawterm_core::terminal::input_tracker::TerminalInputState;
+
+    use super::shell_edit_payload;
+    use zzclawterm_terminal_gpui::TerminalKeyMode;
 
     #[test]
-    fn smart_input_cells_keep_combining_mark_with_previous_cell() {
-        let cells = smart_input_cells("e\u{301}x");
-
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].text, "e\u{301}");
-        assert_eq!(byte_for_smart_input_cell_index(&cells, 1), "e\u{301}".len());
-        assert_eq!(
-            byte_for_smart_input_cell_index(&cells, 2),
-            "e\u{301}x".len()
+    fn replacement_paste_frames_only_inserted_encoded_text() {
+        let input = TerminalInputState {
+            value: "abcdef".into(),
+            cursor: 6,
+            ..TerminalInputState::default()
+        };
+        let plan = plan_edit(
+            &input,
+            0,
+            EditIntent::Replace {
+                range: 1..4,
+                text: "中文",
+            },
+        )
+        .unwrap();
+        let encoded = [0xd6, 0xd0, 0xce, 0xc4];
+        let body = ZzClawTermApp::wrap_terminal_paste_wire_bytes_for_bracketed(&encoded, true);
+        let (wire, logical) = shell_edit_payload(
+            &plan,
+            TerminalKeyMode {
+                application_cursor: true,
+                ..TerminalKeyMode::default()
+            },
+            body,
         );
+        assert_eq!(
+            wire,
+            b"\x1bOD\x1bOD\x7f\x7f\x7f\x1b[200~\xd6\xd0\xce\xc4\x1b[201~"
+        );
+        assert_eq!(logical, "\x1bOD\x1bOD\x7f\x7f\x7f中文".as_bytes());
     }
 
     #[test]
-    fn smart_input_start_prefers_cursor_aligned_combining_cells() {
-        let line_cells = smart_input_cells("$ e\u{301}x");
-        let value_cells = smart_input_cells("e\u{301}x");
-
-        assert_eq!(
-            find_smart_input_start_col(&line_cells, &value_cells, 4),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn smart_input_cells_count_wide_char_as_two_terminal_cells() {
-        let cells = smart_input_cells("界x");
-
-        assert_eq!(cells.len(), 3);
-        assert_eq!(cells[0].text, "界");
-        assert_eq!(cells[1].text, "界");
-        assert_eq!(cells[0].byte_start, cells[1].byte_start);
-        assert_eq!(cells[0].byte_end, cells[1].byte_end);
-        assert_eq!(byte_for_smart_input_cell_index(&cells, 1), 0);
-        assert_eq!(byte_end_for_smart_input_cell_index(&cells, 1), "界".len());
-        assert_eq!(byte_for_smart_input_cell_index(&cells, 2), "界".len());
-        assert_eq!(byte_for_smart_input_cell_index(&cells, 3), "界x".len());
-    }
-
-    #[test]
-    fn smart_input_start_prefers_cursor_aligned_wide_cells() {
-        let line_cells = smart_input_cells("$ 界x");
-        let value_cells = smart_input_cells("界x");
-
-        assert_eq!(
-            find_smart_input_start_col(&line_cells, &value_cells, 5),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn smart_input_cells_attach_combining_mark_to_all_wide_halves() {
-        let cells = smart_input_cells("界\u{301}x");
-
-        assert_eq!(cells.len(), 3);
-        assert_eq!(cells[0].text, "界\u{301}");
-        assert_eq!(cells[1].text, "界\u{301}");
-        assert_eq!(cells[0].byte_end, "界\u{301}".len());
-        assert_eq!(cells[1].byte_end, "界\u{301}".len());
-        assert_eq!(byte_for_smart_input_cell_index(&cells, 1), 0);
-        assert_eq!(
-            byte_end_for_smart_input_cell_index(&cells, 1),
-            "界\u{301}".len()
-        );
-    }
-
-    #[test]
-    fn smart_input_cells_attach_variation_selector_to_previous_cell() {
-        let cells = smart_input_cells("a\u{fe0f}x");
-
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].text, "a\u{fe0f}");
-        assert_eq!(cells[0].byte_end, "a\u{fe0f}".len());
-        assert_eq!(
-            byte_end_for_smart_input_cell_index(&cells, 1),
-            "a\u{fe0f}".len()
-        );
-        assert_eq!(
-            byte_for_smart_input_cell_index(&cells, 1),
-            "a\u{fe0f}".len()
-        );
+    fn kitty_replacement_encodes_backspace_press_and_release_without_polluting_prediction() {
+        let input = TerminalInputState {
+            value: "abc".into(),
+            cursor: 3,
+            ..TerminalInputState::default()
+        };
+        let plan = plan_edit(
+            &input,
+            0,
+            EditIntent::Replace {
+                range: 1..2,
+                text: "X",
+            },
+        )
+        .unwrap();
+        let mode = TerminalKeyMode {
+            application_cursor: true,
+            kitty_keyboard_disambiguate: true,
+            kitty_keyboard_report_event_types: true,
+            kitty_keyboard_report_all_keys_as_esc: true,
+            ..TerminalKeyMode::default()
+        };
+        let (wire, logical) = shell_edit_payload(&plan, mode, b"X".to_vec());
+        assert_eq!(wire, b"\x1bOD\x1b[127;1:1u\x1b[127;1:3uX");
+        assert_eq!(logical, b"\x1bOD\x7fX");
+        assert_eq!(plan.predicted.value, "aXc");
     }
 }

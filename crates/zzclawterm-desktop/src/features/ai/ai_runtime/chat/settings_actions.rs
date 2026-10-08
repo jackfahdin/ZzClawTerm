@@ -1,8 +1,6 @@
-use rust_i18n::t;
+use gpui::{Context, Window};
 
-use gpui::{Context, KeyDownEvent, Window};
-
-use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
+use crate::features::ZzClawTermApp;
 use crate::models::{AiActionEditorField, AiActionListKind};
 use zzclawterm_core::AiSettings;
 use zzclawterm_store::StoreDomain;
@@ -85,26 +83,6 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    pub(in crate::features) fn focus_ai_action_field(
-        &mut self,
-        kind: AiActionListKind,
-        action_id: String,
-        field: AiActionEditorField,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = self.ai.settings_action_value(kind, &action_id, field);
-        let setup = match field {
-            AiActionEditorField::Name => TextInputSetup::placeholder(t!("ai.actionName")),
-            AiActionEditorField::Prompt => TextInputSetup::multi_line(t!("ai.actionPrompt")),
-        };
-        let input_id = Self::ai_action_text_input_id(kind, &action_id, field);
-        let input = self.text_input(input_id, &value, setup, cx);
-        self.ai.focus_settings_action(kind, action_id, field);
-        window.focus(&input.read(cx).focus_handle(), cx);
-        self.request_settings_panel_refresh(cx);
-    }
-
     pub(in crate::features) fn toggle_ai_action_enabled(
         &mut self,
         kind: AiActionListKind,
@@ -149,38 +127,6 @@ impl ZzClawTermApp {
             kind.input_key()
         ));
         self.persist_ai_settings_now(cx);
-    }
-
-    pub(in crate::features) fn handle_ai_action_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some((kind, action_id, field)) = self.ai.settings_action_edit() else {
-            return false;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                let focus = self.ai.cancel_settings_action_edit();
-                window.focus(&focus, cx);
-                self.request_settings_panel_refresh(cx);
-            }
-            "tab" => {
-                self.focus_ai_action_field(kind, action_id, field.next(), window, cx);
-            }
-            "enter" if field == AiActionEditorField::Name => {
-                self.focus_ai_action_field(
-                    kind,
-                    action_id,
-                    AiActionEditorField::Prompt,
-                    window,
-                    cx,
-                );
-            }
-            _ => return false,
-        }
-        true
     }
 
     pub(in crate::features) fn apply_ai_action_input(
@@ -230,9 +176,9 @@ fn parse_ai_action_text_input_id(
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{AiActionEditorField, AiActionListKind};
 
     use super::parse_ai_action_text_input_id;
+    use crate::models::{AiActionEditorField, AiActionListKind};
 
     #[test]
     fn parses_ai_action_text_input_id() {

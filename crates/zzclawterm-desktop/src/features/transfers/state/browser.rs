@@ -80,6 +80,7 @@ impl TransferFeatureState {
             context_target: &self.browser.context_target,
             favorites_menu: &self.browser.favorites_menu,
             path_menu: &self.browser.path_menu,
+            path_menu_scroll: &self.browser.path_menu_scroll,
             upload_menu: &self.browser.upload_menu,
             focus: &self.browser.focus,
         }
@@ -156,6 +157,7 @@ impl TransferFeatureState {
     pub(in crate::features) fn remove_browser_session_cache(&mut self, session_id: &str) {
         self.tree.remove_session(session_id);
         self.browser.session_cache.remove(session_id);
+        self.file_ops.delete_refresh_pending.remove(session_id);
     }
 
     pub(in crate::features) fn has_browser_session_cache(&self, session_id: &str) -> bool {
@@ -280,6 +282,9 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn begin_browser_path_edit(&mut self, path: String) {
+        self.browser.path_menu = None;
+        self.browser.favorites_menu = None;
+        self.browser.upload_menu = None;
         self.browser.path_draft = path;
         self.browser.path_editing = true;
         self.browser.status = "editing remote directory path".to_string();
@@ -334,6 +339,7 @@ impl TransferFeatureState {
     ) {
         self.browser.favorites_menu = None;
         self.browser.upload_menu = None;
+        self.browser.path_menu_scroll.set_offset(Default::default());
         self.browser.path_menu = Some(menu);
     }
 

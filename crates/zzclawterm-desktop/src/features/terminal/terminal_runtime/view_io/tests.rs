@@ -1,5 +1,8 @@
+use std::io::Read as _;
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use zzclawterm_transport::TelnetSessionConfig;
 
 use gpui::{AppContext as _, KeyDownEvent, MouseButton, TestAppContext};
 use zzclawterm_terminal::TerminalScreen;
@@ -7,7 +10,8 @@ use zzclawterm_terminal::TerminalScreen;
 use crate::features::terminal::terminal_surface_entity::terminal_snapshot_anchor_row_for_display_offset;
 use crate::features::test_support::app_with_visible_local_session;
 use crate::models::{
-    TerminalBufferCellPos, TerminalFrameActionLinks, TerminalSelection, TerminalViewState,
+    SessionLaunchConfig, TerminalBufferCellPos, TerminalFrameActionLinks, TerminalSelection,
+    TerminalViewState,
 };
 use crate::terminal::{TerminalBufferMatch, TerminalKeyMode};
 use crate::test_support::TestConfigDir;
@@ -1034,4 +1038,479 @@ fn ime_defer_keeps_non_ascii_text_for_input_handler() {
 fn terminal_status_changed_detects_identical_text() {
     assert!(!terminal_status_changed("sent 1 byte(s)", "sent 1 byte(s)"));
     assert!(terminal_status_changed("idle", "sent 1 byte(s)"));
+}
+
+#[test]
+fn rejected_input_and_paste_leave_recording_empty_and_preserve_session_encoding() {
+    use crate::models::SessionLaunchConfig;
+    let root = TestConfigDir::new("zzclawterm-rejected-encoding-input");
+    let mut cx = TestAppContext::single();
+    let app = app_with_visible_local_session(&mut cx, root.path(), "encoded");
+    cx.update_entity(&app, |app, cx| {
+        let mut metadata = app
+            .session
+            .metadata_entries()
+            .find(|(id, _)| *id == "encoded")
+            .unwrap()
+            .1
+            .clone();
+        if let SessionLaunchConfig::Local(config) = &mut metadata.launch_config {
+            config.encoding = "CP936".into();
+        }
+        app.session.register_session_metadata("encoded", metadata);
+        assert_eq!(app.effective_session_encoding("encoded"), "CP936");
+        assert_eq!(
+            app.encode_session_outgoing("encoded", "测试".as_bytes())
+                .unwrap(),
+            [0xb2, 0xe2, 0xca, 0xd4]
+        );
+        let mut summary = app.settings.summary().clone();
+        summary.interaction_default_encoding = "UTF-8".into();
+        app.settings.replace_summary(summary);
+        app.sync_terminal_encodings_from_settings();
+        assert_eq!(
+            app.terminal.view.views["encoded"].screen.encoding_label(),
+            "GBK"
+        );
+        assert!(
+            app.write_session_input_recorded("encoded", "secret😀".as_bytes())
+                .is_err()
+        );
+        assert!(
+            app.write_session_sensitive_input("encoded", "secret😀".as_bytes())
+                .is_err()
+        );
+        assert!(
+            app.wrap_terminal_paste_bytes_for_session("encoded", "secret😀")
+                .is_err()
+        );
+        app.send_terminal_paste_input("secret😀", cx);
+        let path = root.path().join("transcript.txt");
+        let result = app.recording.writer().save_transcript(
+            "encoded".into(),
+            path.to_string_lossy().into_owned(),
+            false,
+            false,
+            1024 * 1024,
+        );
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
+        assert_eq!(
+            app.terminal.view.views["encoded"].screen.encoding_label(),
+            "GBK"
+        );
+    });
+}
+
+#[test]
+fn paste_targets_use_their_own_charset_and_bracketed_mode() {
+    let root = TestConfigDir::new("zzclawterm-paste-charset-targets");
+    let mut cx = TestAppContext::single();
+    let app = app_with_visible_local_session(&mut cx, root.path(), "gbk");
+    cx.update_entity(&app, |app, _| {
+        let mut metadata = app
+            .session
+            .metadata_entries()
+            .find(|(id, _)| *id == "gbk")
+            .unwrap()
+            .1
+            .clone();
+        if let SessionLaunchConfig::Local(config) = &mut metadata.launch_config {
+            config.encoding = "GBK".into();
+        }
+        app.session
+            .register_session_metadata("gbk", metadata.clone());
+        if let SessionLaunchConfig::Local(config) = &mut metadata.launch_config {
+            config.encoding = "UTF-8".into();
+        }
+        app.session.register_session_metadata("utf8", metadata);
+        app.terminal
+            .seed_session_view("utf8".into(), String::new(), "UTF-8");
+        app.terminal
+            .view
+            .views
+            .get_mut("gbk")
+            .unwrap()
+            .protocol_state
+            .bracketed_paste = true;
+        assert_eq!(
+            app.wrap_terminal_paste_bytes_for_session("gbk", "测试")
+                .unwrap(),
+            b"\x1b[200~\xb2\xe2\xca\xd4\x1b[201~"
+        );
+        assert_eq!(
+            app.wrap_terminal_paste_bytes_for_session("utf8", "测试😀")
+                .unwrap(),
+            "测试😀".as_bytes()
+        );
+        assert!(
+            app.wrap_terminal_paste_bytes_for_session("gbk", "😀")
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn encoding_failures_write_nothing_and_mouse_and_protocol_bytes_bypass_charset() {
+    use crate::features::terminal::terminal_runtime::view_io::TerminalMouseReportRequest;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use zzclawterm_core::terminal::editing::{EditCapability, EditPhase};
+    use zzclawterm_core::terminal::input_tracker::InputSelectionRange;
+    use zzclawterm_terminal::editing::InputMapping;
+    use zzclawterm_transport::TelnetSessionConfig;
+
+    let root = TestConfigDir::new("zzclawterm-encoding-wire");
+    let mut cx = TestAppContext::single();
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (manager, id) = cx.update_entity(&app, |app, _| {
+        let config = TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port,
+            raw_tcp: true,
+            encoding: "GBK".into(),
+            ..TelnetSessionConfig::default()
+        };
+        let manager = app.session.manager_handle();
+        let info = manager.create_telnet_session(config.clone()).unwrap();
+        let mut metadata = app
+            .session
+            .metadata_entries()
+            .find(|(id, _)| *id == "fixture")
+            .unwrap()
+            .1
+            .clone();
+        metadata.launch_config = SessionLaunchConfig::Telnet(config);
+        app.session.register_session_metadata(&info.id, metadata);
+        app.session.select_active_session(&info.id);
+        app.terminal
+            .seed_session_view(info.id.clone(), String::new(), "GBK");
+        app.terminal.editing.activate(&info.id);
+        (manager, info.id)
+    });
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let expected = cx.update_entity(&app, |app, cx| {
+        let state = app.terminal.editing.state_mut();
+        state.model.input.value = "abcdef".into();
+        state.model.input.cursor = 6;
+        state.model.phase = EditPhase::Ready;
+        state.capability = EditCapability::MarkedShell;
+        state.awaiting_snapshot = false;
+        state.mapping = Some(InputMapping {
+            cells: vec![],
+            end: (0, 0),
+            row_revisions: vec![],
+            anchor: None,
+        });
+        let version = state.model.version;
+        let mapping = state.mapping.clone();
+        assert!(app.can_use_smart_cursor_selection());
+        assert!(!app.send_terminal_input("secret😀".as_bytes().to_vec(), cx));
+        assert!(
+            app.write_session_sensitive_input(&id, "secret😀".as_bytes())
+                .is_err()
+        );
+        assert!(app.write_session_input_recorded(&id, &[0xff]).is_err());
+        app.send_terminal_paste_input("secret😀", cx);
+        for paste in [false, true] {
+            let range = InputSelectionRange::new(1, 4).unwrap();
+            assert!(if paste {
+                app.replace_smart_input_selection_with_paste(range, "😀", cx)
+            } else {
+                app.replace_smart_input_selection(range, "😀", cx)
+            });
+            let state = app.terminal.editing.state().unwrap();
+            assert_eq!(state.model.input.value, "abcdef");
+            assert_eq!(state.model.input.cursor, 6);
+            assert_eq!(state.model.phase, EditPhase::Ready);
+            assert_eq!(state.model.version, version);
+            assert_eq!(state.mapping, mapping);
+            assert!(state.pending_evidence.is_none());
+        }
+        app.recording.write_output(id.clone(), "baseline");
+        let recording_path = root.path().join("rejected.txt");
+        app.recording
+            .writer()
+            .save_transcript(
+                id.clone(),
+                recording_path.to_string_lossy().into_owned(),
+                false,
+                false,
+                1024 * 1024,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(recording_path).unwrap(),
+            "baseline\n"
+        );
+        let mut settings = app.settings.summary().clone();
+        settings.interaction_mouse_events_require_alt = false;
+        app.settings.replace_summary(settings);
+        let mut expected = Vec::new();
+        // Exercise the actual mouse UI adapter, including invalid UTF-8 X10 bytes.
+        for (sgr, utf8, col, row, wire) in [
+            (true, false, 100, 110, b"\x1b[<0;101;111M".as_slice()),
+            (false, false, 100, 110, b"\x1b[M \x85\x8f".as_slice()),
+            (false, true, 100, 110, b"\x1b[M \xc2\x85\xc2\x8f".as_slice()),
+        ] {
+            let protocol = &mut app.terminal.view.views.get_mut(&id).unwrap().protocol_state;
+            protocol.mouse_reporting = true;
+            protocol.mouse_sgr = sgr;
+            protocol.mouse_utf8 = utf8;
+            assert!(app.maybe_send_mouse_report_for_session(
+                TerminalMouseReportRequest {
+                    session_id: &id,
+                    button: 0,
+                    col,
+                    row,
+                    press: true,
+                    motion: false,
+                    modifiers: gpui::Modifiers::default(),
+                },
+                cx
+            ));
+            expected.extend_from_slice(wire);
+        }
+        for reply in [
+            b"\x1b[2;3R".as_slice(),
+            b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\".as_slice(),
+            b"\x1b_Gi=7;OK\x1b\\".as_slice(),
+        ] {
+            app.write_session_protocol_response(&id, reply).unwrap();
+            expected.extend_from_slice(reply);
+        }
+        app.terminal
+            .view
+            .views
+            .get_mut(&id)
+            .unwrap()
+            .protocol_state
+            .bracketed_paste = true;
+        app.send_terminal_paste_input("测试", cx);
+        expected.extend_from_slice(b"\x1b[200~\xb2\xe2\xca\xd4\x1b[201~");
+        app.write_session_protocol_response(&id, b"END").unwrap();
+        expected.extend_from_slice(b"END");
+        expected
+    });
+    let mut actual = vec![0; expected.len()];
+    stream.read_exact(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    manager.close(&id).unwrap();
+}
+
+#[test]
+fn sync_paste_encodes_each_live_target_and_stops_when_primary_cannot_encode() {
+    let root = TestConfigDir::new("zzclawterm-sync-paste-wire");
+    let mut cx = TestAppContext::single();
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (manager, ids) = cx.update_entity(&app, |app, _| {
+        let manager = app.session.manager_handle();
+        let metadata = app
+            .session
+            .metadata_entries()
+            .find(|(id, _)| *id == "fixture")
+            .unwrap()
+            .1
+            .clone();
+        let mut ids = Vec::new();
+        app.sync_input.create_group();
+        for encoding in ["GB18030", "UTF-8", "GBK"] {
+            let config = TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port,
+                raw_tcp: true,
+                encoding: encoding.into(),
+                ..TelnetSessionConfig::default()
+            };
+            let info = manager.create_telnet_session(config.clone()).unwrap();
+            let mut metadata = metadata.clone();
+            metadata.launch_config = SessionLaunchConfig::Telnet(config);
+            app.session.register_session_metadata(&info.id, metadata);
+            app.terminal
+                .seed_session_view(info.id.clone(), String::new(), encoding);
+            app.sync_input.toggle_selected_session(info.id.clone());
+            ids.push(info.id);
+        }
+        app.terminal
+            .view
+            .views
+            .get_mut(&ids[1])
+            .unwrap()
+            .protocol_state
+            .bracketed_paste = true;
+        app.session.select_active_session(&ids[0]);
+        (manager, ids)
+    });
+    let mut streams = (0..3)
+        .map(|_| {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+        })
+        .collect::<Vec<_>>();
+    cx.update_entity(&app, |app, cx| {
+        assert_eq!(app.sync_peer_session_ids(&ids[0]).len(), 2);
+        app.send_terminal_paste_input("测试😀", cx);
+        assert_eq!(
+            app.shell.status(),
+            zzclawterm_core::terminal_input_fanout_status("pasted", 8, 1, 1)
+        );
+        // A failed primary must stop fanout before either successful peer sees text.
+        app.session.select_active_session(&ids[2]);
+        app.send_terminal_paste_input("😀", cx);
+        for id in &ids {
+            app.write_session_protocol_response(id, b"END").unwrap();
+        }
+        let path = root.path().join("failed-peer.txt");
+        app.recording
+            .writer()
+            .save_transcript(
+                ids[2].clone(),
+                path.to_string_lossy().into_owned(),
+                false,
+                false,
+                1024 * 1024,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
+    });
+    let mut gb18030 = zzclawterm_core::character_encoding::CharacterEncoding::Gb18030
+        .encode("测试😀")
+        .unwrap();
+    gb18030.extend_from_slice(b"END");
+    let mut utf8 = b"\x1b[200~".to_vec();
+    utf8.extend_from_slice("测试😀".as_bytes());
+    utf8.extend_from_slice(b"\x1b[201~END");
+    for (stream, expected) in streams.iter_mut().zip([gb18030, utf8, b"END".to_vec()]) {
+        let mut actual = vec![0; expected.len()];
+        stream.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+    for id in ids {
+        manager.close(&id).unwrap();
+    }
+}
+
+#[test]
+fn recording_sensitive_prompts_are_session_local_for_sync_keyboard_paste_and_raw_input() {
+    use zzclawterm_transport::{
+        ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
+        RecordingRotationPolicy, TelnetSessionConfig,
+    };
+
+    let root = TestConfigDir::new("zzclawterm-sensitive-recording-wire");
+    let mut cx = TestAppContext::single();
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (manager, ids) = cx.update_entity(&app, |app, _| {
+        let manager = app.session.manager_handle();
+        let metadata = app.session.metadata("fixture").unwrap().clone();
+        let mut ids = Vec::new();
+        app.sync_input.create_group();
+        for index in 0..2 {
+            let config = TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port,
+                raw_tcp: true,
+                encoding: "GBK".into(),
+                ..Default::default()
+            };
+            let info = manager.create_telnet_session(config.clone()).unwrap();
+            let mut metadata = metadata.clone();
+            metadata.launch_config = SessionLaunchConfig::Telnet(config);
+            app.session.register_session_metadata(&info.id, metadata);
+            app.terminal
+                .seed_session_view(info.id.clone(), String::new(), "GBK");
+            app.sync_input.toggle_selected_session(info.id.clone());
+            let path = root.path().join(format!("{index}.bin"));
+            app.recording
+                .writer()
+                .start(
+                    info.id.clone(),
+                    RecordingContext {
+                        session_id: info.id.clone(),
+                        session_name: "synthetic".into(),
+                        connection_id: None,
+                        connection_name: None,
+                        group_path: None,
+                        protocol: "telnet".into(),
+                        host: None,
+                        port: None,
+                        username: None,
+                        started_at: time::OffsetDateTime::now_utc(),
+                    },
+                    RecordingProfile {
+                        mode: RecordingMode::Raw,
+                        base_path: root.path().into(),
+                        path_template: "unused.log".into(),
+                        include_timestamps: false,
+                        include_io_labels: false,
+                        include_session_metadata: false,
+                        rotation: RecordingRotationPolicy::Session,
+                        existing_file_behavior: ExistingFileBehavior::Unique,
+                        include_binary_transfer_payloads: false,
+                        include_input: true,
+                    },
+                    Some(path),
+                    4096,
+                )
+                .unwrap();
+            ids.push(info.id);
+        }
+        app.session.select_active_session(&ids[0]);
+        (manager, ids)
+    });
+    let mut streams = (0..2)
+        .map(|_| listener.accept().unwrap().0)
+        .collect::<Vec<_>>();
+    for stream in &streams {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+    }
+    cx.update_entity(&app, |app, cx| {
+        app.observe_recording_prompt_output(&ids[0], "Password: ");
+        app.observe_recording_prompt_output(&ids[1], "$ ");
+        assert!(app.send_terminal_input_without_suggestion_track(b"a".to_vec(), cx));
+        app.send_terminal_paste_input("测试", cx);
+        app.write_session_raw_input_recorded(&ids[0], b"r").unwrap();
+        app.write_session_raw_input_recorded(&ids[1], b"r").unwrap();
+        app.observe_recording_prompt_output(&ids[0], "\n$ ");
+        app.observe_recording_prompt_output(&ids[1], "\nOTP: ");
+        assert!(app.send_terminal_input_without_suggestion_track(b"b".to_vec(), cx));
+        for id in &ids {
+            app.write_session_sensitive_input(id, b"dedicated").unwrap();
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let completion = app.recording.writer().stop_complete(id.clone()).unwrap();
+            assert!(completion.error.is_none());
+            let data = std::fs::read(completion.input_file_path.unwrap()).unwrap();
+            assert_eq!(
+                data,
+                if index == 0 {
+                    b"b".as_slice()
+                } else {
+                    b"a\xb2\xe2\xca\xd4r".as_slice()
+                }
+            );
+        }
+    });
+    for stream in &mut streams {
+        let mut data = vec![0; 1 + 4 + 1 + 1 + 9];
+        stream.read_exact(&mut data).unwrap();
+        assert_eq!(data, b"a\xb2\xe2\xca\xd4rbdedicated");
+    }
+    for id in ids {
+        manager.close(&id).unwrap();
+    }
 }

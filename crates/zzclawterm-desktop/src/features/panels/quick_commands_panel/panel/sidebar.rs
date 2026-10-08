@@ -201,7 +201,25 @@ impl ZzClawTermApp {
             category_sidebar =
                 category_sidebar.child(ZzClawContextMenu::new(row, menu_items).into_any_element());
         }
-        category_sidebar.into_any_element()
+        // This sibling fills only the unused space, so its menu never overlaps a row.
+        category_sidebar
+            .child(
+                ZzClawContextMenu::new(
+                    div()
+                        .id("quick-command-category-blank")
+                        .debug_selector(|| "quick-command-category-blank".to_string())
+                        .w_full()
+                        .min_h(px(32.))
+                        .flex_1(),
+                    [ZzClawMenuItem::action(t!("quickCommands.addCategory"))
+                        .icon("icons/fe/new-folder.svg")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_new_quick_command_category(None, window, cx);
+                        }))],
+                )
+                .into_any_element(),
+            )
+            .into_any_element()
     }
 
     /// Group menu for a real category, mirroring Tauri's `QuickCommands.tsx`

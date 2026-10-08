@@ -11,6 +11,7 @@ use crate::models::{NavItem, PanelSide, SecurityAuthTab};
 use crate::theme::ThemePalette;
 
 mod credentials;
+mod drag;
 mod keys;
 mod known_hosts;
 mod otp;

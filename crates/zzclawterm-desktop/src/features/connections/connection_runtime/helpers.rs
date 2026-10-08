@@ -29,6 +29,7 @@ pub(super) enum ConnectionEditorValidationError {
     RdpReconnectAttemptsInvalid,
     VncReconnectAttemptsInvalid,
     VncPasswordTooLong,
+    VncUsernameTooLong,
     PostLoginCommandRequired,
     PostLoginDelayInvalid,
     SftpShellDetectionTimeoutInvalid,
@@ -135,7 +136,7 @@ pub(super) fn connection_editor_from_saved(
         agent_preview: None,
         agent_preview_loading: false,
         backspace_mode: "del".to_string(),
-        encoding: "global".to_string(),
+        encoding: String::new(),
         ssh_profile: connection.ssh_profile,
         terminal_type: connection.terminal_type,
         sftp_enabled: sftp.enabled,
@@ -144,11 +145,7 @@ pub(super) fn connection_editor_from_saved(
         sftp_shell_detection_timeout_ms: sftp.shell_detection_timeout_ms.to_string(),
         sftp_pipeline_depth: sftp.pipeline_depth,
         sftp_extra: sftp.extra.clone(),
-        sftp_filename_encoding: if sftp.filename_encoding.is_empty() {
-            "terminal".to_string()
-        } else {
-            sftp.filename_encoding
-        },
+        sftp_filename_encoding: sftp.filename_encoding,
         ssh_algorithm_mode: ssh_algorithm_mode_value(ssh_algorithms.mode),
         ssh_algorithm_kex: ssh_algorithms.kex,
         ssh_algorithm_ciphers: ssh_algorithms.ciphers,
@@ -162,6 +159,7 @@ pub(super) fn connection_editor_from_saved(
         baud_rate: "115200".to_string(),
         data_bits: "8".to_string(),
         parity: "none".to_string(),
+        flow_control: Default::default(),
         stop_bits: "1".to_string(),
         raw_tcp_cli: false,
         telnet_enter_mode: "cr".to_string(),
@@ -275,6 +273,7 @@ pub(super) fn connection_editor_from_saved(
             baud_rate,
             data_bits,
             parity,
+            flow_control,
             stop_bits,
             backspace_mode,
             encoding,
@@ -284,6 +283,7 @@ pub(super) fn connection_editor_from_saved(
             editor.baud_rate = baud_rate.to_string();
             editor.data_bits = data_bits.to_string();
             editor.parity = parity;
+            editor.flow_control = flow_control;
             editor.stop_bits = stop_bits;
             editor.backspace_mode = backspace_mode;
             editor.encoding = encoding_to_editor_value(&encoding);
@@ -308,6 +308,7 @@ pub(super) fn connection_editor_from_saved(
             editor.rdp_reconnect = reconnect;
         }
         ConnectionType::Vnc {
+            username,
             host,
             port,
             security,
@@ -317,6 +318,7 @@ pub(super) fn connection_editor_from_saved(
             shared,
             view_only,
         } => {
+            editor.username = username;
             editor.host = host;
             editor.port = port.to_string();
             editor.vnc_security = security;
@@ -330,19 +332,13 @@ pub(super) fn connection_editor_from_saved(
     editor
 }
 
+// Keep the raw stored label until the user explicitly changes this field.
 fn encoding_to_editor_value(value: &str) -> String {
-    if value.trim().is_empty() {
-        "global".to_string()
-    } else {
-        value.trim().to_string()
-    }
+    value.to_string()
 }
 
 fn editor_encoding_to_saved(value: &str) -> String {
-    match value.trim() {
-        "" | "global" => String::new(),
-        value => value.to_string(),
-    }
+    value.to_string()
 }
 
 fn sftp_cwd_follow_mode_value(value: SftpCwdFollowMode) -> String {
@@ -505,6 +501,7 @@ pub(super) fn build_saved_connection_from_editor(
                 baud_rate,
                 data_bits,
                 parity: non_empty_or(editor.parity.clone(), "none"),
+                flow_control: editor.flow_control,
                 stop_bits: non_empty_or(editor.stop_bits.clone(), "1"),
                 ai_execution_profile: AiExecutionProfile::Auto,
                 backspace_mode: zzclawterm_core::terminal::connection_input::BackspaceMode::parse(
@@ -550,16 +547,25 @@ pub(super) fn build_saved_connection_from_editor(
                 return Err(ConnectionEditorValidationError::HostRequired);
             }
             let port = parse_port(&editor.port)?;
+            if editor.username.trim().len() > 255 {
+                return Err(ConnectionEditorValidationError::VncUsernameTooLong);
+            }
             if editor.vnc_reconnect.max_attempts > 20 {
                 return Err(ConnectionEditorValidationError::VncReconnectAttemptsInvalid);
             }
             if editor.auth_mode == "password"
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
-                && editor.password.trim().len() > 8
+                && editor.password.trim().len()
+                    > if editor.vnc_security.mode == "vnc_auth" {
+                        8
+                    } else {
+                        255
+                    }
             {
                 return Err(ConnectionEditorValidationError::VncPasswordTooLong);
             }
             ConnectionType::Vnc {
+                username: editor.username.trim().to_owned(),
                 host,
                 port,
                 security: editor.vnc_security.clone(),
@@ -783,10 +789,7 @@ pub(super) fn build_saved_connection_from_editor(
                 .parse::<u64>()
                 .unwrap_or(3000)
                 .clamp(100, 60_000),
-            filename_encoding: match editor.sftp_filename_encoding.trim() {
-                "" | "terminal" | "global" => String::new(),
-                value => value.to_string(),
-            },
+            filename_encoding: editor.sftp_filename_encoding.clone(),
         }
     } else {
         SftpSettings::default()
@@ -1171,6 +1174,19 @@ mod tests {
             last_used_at_ms: None,
         };
 
+        for label in [
+            "", "global", " GLOBAL ", " CP936 ", "GB2312", "sjis", "euckr", "unknown",
+        ] {
+            let mut legacy = connection.clone();
+            if let ConnectionType::Ssh { encoding, .. } = &mut legacy.config {
+                *encoding = label.into();
+            }
+            legacy.sftp.filename_encoding = label.into();
+            let editor = connection_editor_from_saved(legacy.clone(), false);
+            let saved = build_saved_connection_from_editor(&editor).unwrap();
+            assert_eq!(saved.config, legacy.config);
+            assert_eq!(saved.sftp, legacy.sftp);
+        }
         let editor = connection_editor_from_saved(connection.clone(), false);
         let saved = build_saved_connection_from_editor(&editor).expect("valid connection");
 
@@ -1409,6 +1425,7 @@ mod tests {
             id: "connection-vnc".to_string(),
             name: "VNC".to_string(),
             config: ConnectionType::Vnc {
+                username: String::new(),
                 host: "desktop.example.com".to_string(),
                 port: 5901,
                 security: expected_security.clone(),
@@ -1458,6 +1475,7 @@ mod tests {
 
         let mut password_boundary = editor.clone();
         password_boundary.password_source = ConnectionEditorPasswordSource::Direct;
+        password_boundary.vnc_security.mode = "vnc_auth".to_string();
         password_boundary.password = "12345678".to_string().into();
         assert!(build_saved_connection_from_editor(&password_boundary).is_ok());
         password_boundary.password = "密码密码密".to_string().into();
@@ -1468,6 +1486,7 @@ mod tests {
 
         let saved = build_saved_connection_from_editor(&editor).expect("valid connection");
         let ConnectionType::Vnc {
+            username,
             host,
             port,
             security,
@@ -1481,6 +1500,7 @@ mod tests {
             panic!("expected VNC connection");
         };
 
+        assert!(username.is_empty());
         assert_eq!(host, "desktop.example.com");
         assert_eq!(port, 5901);
         assert_eq!(security, expected_security);

@@ -22,6 +22,7 @@ use crate::features::{
 pub(super) struct RemoteFileEditorWindow {
     app: Entity<ZzClawTermApp>,
     editors: HashMap<String, Entity<RemoteTextEditor>>,
+    editor_observations: HashMap<String, Subscription>,
     active_editor_id: Option<String>,
     shell_focus: FocusHandle,
     chrome: ChildWindowChrome,
@@ -34,6 +35,7 @@ impl RemoteFileEditorWindow {
         Self {
             app,
             editors: HashMap::new(),
+            editor_observations: HashMap::new(),
             active_editor_id: None,
             shell_focus: cx.focus_handle(),
             chrome,
@@ -91,9 +93,15 @@ impl Render for RemoteFileEditorWindow {
                 )
             });
         self.editors.retain(|tab_id, _| tab_ids.contains(tab_id));
+        self.editor_observations
+            .retain(|tab_id, _| tab_ids.contains(tab_id));
         if !self.editors.contains_key(&active_tab.id) {
             let editor =
                 cx.new(|cx| RemoteTextEditor::new(self.app.clone(), &active_tab, window, cx));
+            self.editor_observations.insert(
+                active_tab.id.clone(),
+                cx.observe(&editor, |_, _, cx| cx.notify()),
+            );
             self.editors.insert(active_tab.id.clone(), editor);
         }
         let editor = self

@@ -277,6 +277,18 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
+    pub(in crate::features) fn set_all_connection_groups_expanded(
+        &mut self,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state
+            .set_all_catalog_groups_expanded(expanded);
+        self.persist_ui_layout();
+        self.defer_connection_panel_snapshot_flush(cx);
+        cx.notify();
+    }
+
     /// Move the keyboard-active row through the filtered results, wrapping around.
     ///
     /// Returns whether the key was consumed, so the caller does not also feed it

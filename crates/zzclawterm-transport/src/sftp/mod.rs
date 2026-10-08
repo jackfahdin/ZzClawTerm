@@ -31,6 +31,10 @@ use crate::remote_file::{
     metadata_is_stable,
 };
 
+mod delete;
+mod drag_inventory;
+mod export_reader;
+pub(crate) use export_reader::spawn_export_reader;
 mod path_codec;
 pub use path_codec::SftpPathCodec;
 mod contracts;
@@ -83,6 +87,7 @@ pub struct SftpService {
     multiplex: Option<SshMultiplexHandle>,
     compatibility: Option<Arc<SftpCompatibilityState>>,
     session_id: u64,
+    export_budget: Arc<tokio::sync::Semaphore>,
 }
 
 tokio::task_local! {
@@ -177,6 +182,19 @@ impl SftpCompatibilityState {
                 force_close_sftp_session(session).await;
                 Ok(())
             });
+        }
+    }
+
+    // Async controlled operations retain the gate until bounded cleanup completes.
+    async fn evict_failed_session(&self) {
+        let session = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(session) = session {
+            let _ = tokio::time::timeout(Duration::from_secs(5), force_close_sftp_session(session))
+                .await;
         }
     }
 
@@ -647,6 +665,9 @@ impl SftpService {
         options.with_transfer_options(transfer)
     }
     pub fn new(config: SshSessionConfig) -> Self {
+        let export_budget = Arc::new(tokio::sync::Semaphore::new(
+            if config.sftp.compatibility_mode { 1 } else { 3 },
+        ));
         let compatibility = config
             .sftp
             .compatibility_mode
@@ -656,6 +677,7 @@ impl SftpService {
             multiplex: None,
             compatibility,
             session_id: NEXT_SFTP_COMPATIBILITY_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            export_budget,
         }
     }
 
@@ -664,6 +686,9 @@ impl SftpService {
         multiplex: SshMultiplexHandle,
     ) -> anyhow::Result<Self> {
         multiplex.ensure_matches_config(&config)?;
+        let export_budget = Arc::new(tokio::sync::Semaphore::new(
+            if config.sftp.compatibility_mode { 1 } else { 3 },
+        ));
         let compatibility = config
             .sftp
             .compatibility_mode
@@ -673,7 +698,62 @@ impl SftpService {
             multiplex: Some(multiplex),
             compatibility,
             session_id: NEXT_SFTP_COMPATIBILITY_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            export_budget,
         })
+    }
+
+    pub(crate) fn export_runtime(&self) -> anyhow::Result<tokio::runtime::Handle> {
+        Ok(if let Some(multiplex) = &self.multiplex {
+            multiplex.inner.runtime.handle().clone()
+        } else {
+            compatibility_runtime()?.handle().clone()
+        })
+    }
+
+    fn run_controlled_operation<T, F>(
+        &self,
+        control: SftpTransferControl,
+        export: bool,
+        operation: F,
+    ) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = anyhow::Result<T>> + Send + 'static,
+    {
+        anyhow::ensure!(
+            self.config.remote_file_browser_enabled(),
+            "SFTP is disabled for this SSH profile"
+        );
+        let compatibility = self.compatibility.clone();
+        let budget = self.export_budget.clone();
+        let operation = async move {
+            let _permit = if export {
+                Some(control.until_cancelled(budget.acquire_owned()).await??)
+            } else {
+                None
+            };
+            let _guard = if let Some(state) = &compatibility {
+                Some(control.until_cancelled(state.gate.lock()).await?)
+            } else {
+                None
+            };
+            let cache = compatibility.as_ref().map(|state| state.cache.clone());
+            let result = SFTP_COMPATIBILITY_CACHE.scope(cache, operation).await;
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(sftp_error_invalidates_compatibility_session)
+                && let Some(state) = &compatibility
+            {
+                state.evict_failed_session().await;
+            }
+            result
+        };
+        if let Some(multiplex) = &self.multiplex {
+            multiplex.block_on(operation)
+        } else {
+            compatibility_runtime()?.block_on(operation)
+        }
     }
 
     fn run_operation<T, F>(&self, operation_name: &'static str, operation: F) -> anyhow::Result<T>
@@ -979,11 +1059,9 @@ impl SftpService {
         let multiplex = self.multiplex.clone();
         self.run_operation("delete", async move {
             let codec = SftpPathCodec::from_ssh_config(&config)?;
-            let session = open_sftp_session(&config, multiplex.as_ref()).await?;
             let raw_path = remote_file_path_bytes(&codec, &remote_path)?;
-            let result = delete_remote_path_recursive_bytes(&session.sftp, raw_path).await;
-            close_sftp_session(session).await;
-            result
+            delete::delete_remote_path(&config, multiplex.as_ref(), &codec, &remote_path, raw_path)
+                .await
         })
     }
 
@@ -1873,6 +1951,7 @@ impl SftpService {
                         &options,
                         &mut progress,
                         download_root,
+                        None,
                     )
                     .await?;
                     close_sftp_session(session).await;
@@ -2012,81 +2091,107 @@ impl SftpService {
         let local_path = local_path.into();
         let config = self.config.clone();
         let multiplex = self.multiplex.clone();
-        self.run_operation("download_path", async move {
-            let mut last_error = None;
-            let download_root = crate::download_path::root_for_target(&local_path);
-            for _attempt in 0..=path_options.transfer_options().max_retries() {
-                control.check_cancelled()?;
-                let result = async {
-                    let codec = SftpPathCodec::from_ssh_config(&config)?;
-                    let session = open_sftp_session(&config, multiplex.as_ref()).await?;
-                    let sftp = &session.sftp;
-                    control.wait_if_paused().await?;
-                    let raw_path = remote_file_path_bytes(&codec, &remote_path)?;
-                    let source_metadata = sftp.symlink_metadata_bytes(raw_path.clone()).await?;
-                    ensure_remote_download_source(source_metadata.file_type())?;
-                    let is_directory =
-                        source_metadata.file_type() == russh_sftp::protocol::FileType::Dir;
-                    let Some(local_target) =
-                        resolve_local_download_target(SftpLocalDownloadTargetContext {
-                            remote_path: &remote_path.display_path,
-                            remote_path_raw: &raw_path,
-                            local_path: &local_path,
-                            is_directory,
-                            path_options: &path_options,
-                        })?
-                    else {
-                        close_sftp_session(session).await;
-                        return Ok(SftpTransferSummary {
-                            remote_path: remote_path.display_path.clone(),
-                            local_path: local_path.clone(),
-                            bytes: 0,
-                            skipped: true,
-                        });
-                    };
-                    let bytes = if is_directory {
-                        download_remote_directory_bytes(
-                            sftp,
-                            &codec,
-                            raw_path,
-                            &remote_path.display_path,
-                            &local_target,
+        self.run_controlled_operation(
+            control.clone(),
+            path_options.is_promised_download(),
+            async move {
+                let mut last_error = None;
+                let download_root = crate::download_path::root_for_target(&local_path);
+                for _attempt in 0..=path_options.transfer_options().max_retries() {
+                    control.check_cancelled()?;
+                    let result = async {
+                        let codec = SftpPathCodec::from_ssh_config(&config)?;
+                        let session = await_sftp_request(
                             &control,
-                            &path_options,
-                            &mut progress,
-                            download_root,
+                            open_sftp_session(&config, multiplex.as_ref()),
                         )
-                        .await?
-                    } else {
-                        download_remote_file_bytes(
-                            sftp,
-                            raw_path,
-                            &remote_path.display_path,
-                            &local_target,
-                            &control,
-                            path_options.transfer_options(),
-                            &mut progress,
-                            download_root,
+                        .await?;
+                        let result = async {
+                            let sftp = &session.sftp;
+                            control.wait_if_paused().await?;
+                            let raw_path = remote_file_path_bytes(&codec, &remote_path)?;
+                            let source_metadata = await_sftp_request(
+                                &control,
+                                sftp.symlink_metadata_bytes(raw_path.clone()),
+                            )
+                            .await?;
+                            ensure_remote_download_source(source_metadata.file_type())?;
+                            if let Some(expected) = path_options.expected_source_type() {
+                                anyhow::ensure!(
+                                    attrs_to_sftp_file_type(&source_metadata) == expected,
+                                    "remote drag source changed type"
+                                );
+                            }
+                            let is_directory =
+                                source_metadata.file_type() == russh_sftp::protocol::FileType::Dir;
+                            let Some(local_target) =
+                                resolve_local_download_target(SftpLocalDownloadTargetContext {
+                                    remote_path: &remote_path.display_path,
+                                    remote_path_raw: &raw_path,
+                                    local_path: &local_path,
+                                    is_directory,
+                                    path_options: &path_options,
+                                })?
+                            else {
+                                return Ok(SftpTransferSummary {
+                                    remote_path: remote_path.display_path.clone(),
+                                    local_path: local_path.clone(),
+                                    bytes: 0,
+                                    skipped: true,
+                                });
+                            };
+                            let bytes = if is_directory {
+                                download_remote_directory_bytes(
+                                    sftp,
+                                    &codec,
+                                    raw_path,
+                                    &remote_path.display_path,
+                                    &local_target,
+                                    &control,
+                                    &path_options,
+                                    &mut progress,
+                                    download_root,
+                                )
+                                .await?
+                            } else {
+                                download_remote_file_bytes(
+                                    sftp,
+                                    raw_path,
+                                    &remote_path.display_path,
+                                    &local_target,
+                                    &control,
+                                    path_options.transfer_options(),
+                                    &mut progress,
+                                    download_root,
+                                    Some(&path_options),
+                                )
+                                .await?
+                            };
+                            Ok(SftpTransferSummary {
+                                remote_path: remote_path.display_path.clone(),
+                                local_path: local_target,
+                                bytes,
+                                skipped: false,
+                            })
+                        }
+                        .await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            close_sftp_session(session),
                         )
-                        .await?
-                    };
-                    close_sftp_session(session).await;
-                    Ok(SftpTransferSummary {
-                        remote_path: remote_path.display_path.clone(),
-                        local_path: local_target,
-                        bytes,
-                        skipped: false,
-                    })
+                        .await;
+                        result
+                    }
+                    .await;
+                    match result {
+                        Ok(summary) => return Ok(summary),
+                        Err(error) if is_sftp_transfer_cancelled(&error) => return Err(error),
+                        Err(error) => last_error = Some(error),
+                    }
                 }
-                .await;
-                match result {
-                    Ok(summary) => return Ok(summary),
-                    Err(error) if is_sftp_transfer_cancelled(&error) => return Err(error),
-                    Err(error) => last_error = Some(error),
-                }
-            }
-            Err(last_sftp_retry_error(last_error))
-        })
+                Err(last_sftp_retry_error(last_error))
+            },
+        )
     }
 
     pub fn upload_file(
@@ -2152,20 +2257,21 @@ impl SftpService {
         let attempts = options.max_retries().saturating_add(1);
         self.run_upload_operation("upload_file", attempts, async move {
             let remote_path = resolve_remote_upload_target(&local_path, &remote_path)?;
+            let codec = SftpPathCodec::from_ssh_config(&config)?;
+            let raw_path = codec.encode_path(&remote_path)?;
             let mut last_error = None;
             for _attempt in 0..=options.max_retries() {
                 control.check_cancelled()?;
                 let result = async {
-                    let codec = SftpPathCodec::from_ssh_config(&config)?;
                     let session = open_sftp_session_with_client_config(
                         &config,
                         multiplex.as_ref(),
                         sftp_client_config_for_options(&options),
                     )
                     .await?;
-                    let bytes = upload_local_file(
+                    let bytes = upload_local_file_bytes(
                         &session.sftp,
-                        &codec,
+                        raw_path.clone(),
                         &local_path,
                         &remote_path,
                         &control,
@@ -2210,11 +2316,12 @@ impl SftpService {
         let multiplex = self.multiplex.clone();
         let attempts = options.max_retries().saturating_add(1);
         self.run_upload_operation("upload_remote_file", attempts, async move {
+            let codec = SftpPathCodec::from_ssh_config(&config)?;
+            let raw_path = remote_file_path_bytes(&codec, &remote_path)?;
             let mut last_error = None;
             for _attempt in 0..=options.max_retries() {
                 control.check_cancelled()?;
                 let result = async {
-                    let codec = SftpPathCodec::from_ssh_config(&config)?;
                     let session = open_sftp_session_with_client_config(
                         &config,
                         multiplex.as_ref(),
@@ -2223,7 +2330,7 @@ impl SftpService {
                     .await?;
                     let bytes = upload_local_file_bytes(
                         &session.sftp,
-                        remote_file_path_bytes(&codec, &remote_path)?,
+                        raw_path.clone(),
                         &local_path,
                         &remote_path.display_path,
                         &control,
@@ -2355,11 +2462,12 @@ impl SftpService {
         self.run_upload_operation("upload_path", attempts, async move {
             let metadata = tokio::fs::metadata(&local_path).await?;
             let remote_path = resolve_remote_upload_target(&local_path, &remote_path)?;
+            let codec = SftpPathCodec::from_ssh_config(&config)?;
+            codec.encode_path(&remote_path)?;
             let mut last_error = None;
             for _attempt in 0..=path_options.transfer_options().max_retries() {
                 control.check_cancelled()?;
                 let result = async {
-                    let codec = SftpPathCodec::from_ssh_config(&config)?;
                     let session = open_sftp_session_with_client_config(
                         &config,
                         multiplex.as_ref(),
@@ -2454,40 +2562,6 @@ async fn collect_sftp_recursive_paths_bytes(
         }
     }
     Ok(paths)
-}
-
-async fn delete_remote_path_recursive_bytes(
-    sftp: &SftpSession,
-    remote_path: Vec<u8>,
-) -> anyhow::Result<()> {
-    let metadata = match sftp.symlink_metadata_bytes(remote_path.clone()).await {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            let message = error.to_string().to_ascii_lowercase();
-            if message.contains("no such")
-                || message.contains("not found")
-                || message.contains("does not exist")
-            {
-                return Ok(());
-            }
-            return Err(error.into());
-        }
-    };
-    if metadata.file_type() == russh_sftp::protocol::FileType::Dir {
-        let children = sftp
-            .read_dir_bytes(remote_path.clone())
-            .await?
-            .filter(|entry| !matches!(entry.file_name_bytes(), b"." | b".."))
-            .map(|entry| entry.path_bytes())
-            .collect::<Vec<_>>();
-        for child in children {
-            Box::pin(delete_remote_path_recursive_bytes(sftp, child)).await?;
-        }
-        sftp.remove_dir_bytes(remote_path).await?;
-    } else {
-        sftp.remove_file_bytes(remote_path).await?;
-    }
-    Ok(())
 }
 
 async fn copy_remote_path_between_sftp(
@@ -2702,7 +2776,9 @@ fn sftp_error_is_timeout(error: &anyhow::Error) -> bool {
         matches!(
             cause.downcast_ref::<russh_sftp::client::error::Error>(),
             Some(russh_sftp::client::error::Error::Timeout)
-        )
+        ) || cause
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some()
     })
 }
 
@@ -2745,6 +2821,8 @@ fn sftp_error_is_stream_closed(error: &anyhow::Error) -> bool {
 mod compatibility_tests;
 #[cfg(test)]
 mod editor_save_tests;
+#[cfg(test)]
+mod filename_tests;
 
 fn last_sftp_retry_error(last_error: Option<anyhow::Error>) -> anyhow::Error {
     last_error.unwrap_or_else(|| anyhow::anyhow!("SFTP transfer failed before starting"))
@@ -2769,16 +2847,6 @@ async fn apply_remote_upload_file_mode_bytes(
 
 fn remote_upload_file_mode(existing_mode: Option<u32>, default_mode: Option<u32>) -> Option<u32> {
     default_mode.or_else(|| existing_mode.map(|mode| mode & 0o777))
-}
-
-fn preserve_local_modified_time(local_path: &Path, remote_mtime: Option<u32>) {
-    let Some(remote_mtime) = remote_mtime.filter(|mtime| *mtime > 0) else {
-        return;
-    };
-    let modified = UNIX_EPOCH + Duration::from_secs(u64::from(remote_mtime));
-    if let Ok(file) = std::fs::File::open(local_path) {
-        let _ = file.set_modified(modified);
-    }
 }
 
 async fn preserve_remote_modified_time_bytes(
@@ -2847,6 +2915,37 @@ fn ensure_remote_download_source(file_type: russh_sftp::protocol::FileType) -> a
     }
 }
 
+/// Pause and cancellation apply to metadata as well as content requests.
+async fn await_sftp_request<T, E: Into<anyhow::Error>>(
+    control: &SftpTransferControl,
+    operation: impl Future<Output = Result<T, E>>,
+) -> anyhow::Result<T> {
+    control.wait_if_paused().await?;
+    control
+        .until_cancelled(tokio::time::timeout(Duration::from_secs(60), operation))
+        .await?
+        .map_err(|error| anyhow::Error::new(error).context("SFTP request stalled"))?
+        .map_err(Into::into)
+}
+
+/// Shared bounded range read for destination downloads and native consumers.
+async fn read_transfer_range(
+    remote: &russh_sftp::client::fs::File,
+    control: &SftpTransferControl,
+    offset: u64,
+    length: usize,
+) -> anyhow::Result<Vec<u8>> {
+    control.wait_if_paused().await?;
+    control
+        .until_cancelled(tokio::time::timeout(
+            Duration::from_secs(60),
+            remote.read_at(offset, length),
+        ))
+        .await?
+        .map_err(|error| anyhow::Error::new(error).context("SFTP download stalled"))?
+        .map_err(anyhow::Error::from)
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn download_remote_file_bytes<F>(
     sftp: &SftpSession,
@@ -2857,13 +2956,47 @@ async fn download_remote_file_bytes<F>(
     options: &SftpTransferOptions,
     progress: &mut F,
     download_root: &Path,
+    path_options: Option<&SftpPathTransferOptions>,
 ) -> anyhow::Result<u64>
 where
     F: FnMut(SftpTransferProgress) + Send,
 {
     control.wait_if_paused().await?;
-    let source_metadata = sftp.symlink_metadata_bytes(raw_path.clone()).await?;
+    let promised = path_options.is_some_and(SftpPathTransferOptions::is_promised_download);
+    let access = if let Some(path_options) = path_options {
+        path_options
+            .download_runtime()?
+            .access(local_path, promised)?
+    } else {
+        crate::download_path::DownloadTargetAccess::capture(download_root, local_path)?
+    };
+    let source_metadata =
+        await_sftp_request(control, sftp.symlink_metadata_bytes(raw_path.clone())).await?;
     ensure_remote_download_source(source_metadata.file_type())?;
+    anyhow::ensure!(
+        source_metadata.file_type() == russh_sftp::protocol::FileType::File,
+        "download source is not a regular file"
+    );
+    if promised
+        && let Some(path_options) = path_options
+        && path_options.download_runtime()?.reusable(
+            local_path,
+            &raw_path,
+            source_metadata.size,
+            source_metadata.mtime,
+        )?
+    {
+        let bytes = source_metadata.size.unwrap_or(0);
+        progress(SftpTransferProgress {
+            remote_path: remote_path.to_string(),
+            local_path: local_path.to_path_buf(),
+            bytes_transferred: bytes,
+            total_bytes: Some(bytes),
+            item_count_completed: None,
+            item_count_total: None,
+        });
+        return Ok(bytes);
+    }
     if let Some(parent) = local_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -2871,115 +3004,157 @@ where
         tokio::fs::create_dir_all(parent).await?;
     }
     crate::download_path::writable_file_permissions(download_root, local_path)?;
-    let mut remote = sftp.open_bytes(raw_path).await?;
-    let remote_metadata = remote.metadata().await?;
-    let total_bytes = remote_metadata.size;
-    let resume_offset = transfer_resume_offset(local_path, total_bytes, options);
-    let (temporary, mut local) = crate::download_path::DownloadTemporary::prepare_async(
-        download_root,
-        local_path,
-        resume_offset,
-    )
-    .await?;
-    let result = async {
-        let mut buffer = vec![0_u8; options.buffer_size_bytes()];
-        let mut bytes = resume_offset;
-        progress(SftpTransferProgress {
-            remote_path: remote_path.to_string(),
-            local_path: local_path.to_path_buf(),
-            bytes_transferred: bytes,
-            total_bytes,
-            item_count_completed: None,
-            item_count_total: None,
-        });
-        if let Some(total) = total_bytes {
-            use futures::{StreamExt as _, TryStreamExt as _};
-            let chunk_size = options.buffer_size_bytes() as u64;
-            let remote_ref = &remote;
-            let mut chunks =
-                futures::stream::iter((resume_offset..total).step_by(chunk_size as usize))
-                    .map(|offset| async move {
-                        let length = (total - offset).min(chunk_size) as usize;
-                        let mut data = Vec::with_capacity(length);
-                        while data.len() < length {
-                            control.wait_if_paused().await?;
-                            let read = control
-                                .until_cancelled(tokio::time::timeout(
-                                    Duration::from_secs(60),
-                                    remote_ref
-                                        .read_at(offset + data.len() as u64, length - data.len()),
-                                ))
-                                .await?
-                                .map_err(|_| anyhow::anyhow!("SFTP download stalled"))??;
-                            if read.is_empty() {
-                                anyhow::bail!("remote file ended before its advertised size");
-                            }
-                            data.extend_from_slice(&read);
-                        }
-                        Ok::<_, anyhow::Error>(data)
-                    })
-                    .buffered(options.download_threads());
-            // Commit in offset order: a cancelled transfer leaves a valid contiguous prefix
-            // that the existing resume contract can safely use on the next attempt.
-            while let Some(data) = chunks.try_next().await? {
-                control.wait_if_paused().await?;
-                local.write_all(&data).await?;
-                bytes += data.len() as u64;
-                progress(SftpTransferProgress {
-                    remote_path: remote_path.to_string(),
-                    local_path: local_path.to_path_buf(),
-                    bytes_transferred: bytes,
-                    total_bytes,
-                    item_count_completed: None,
-                    item_count_total: None,
-                });
-            }
+    let mut remote = await_sftp_request(control, sftp.open_bytes(raw_path.clone())).await?;
+    let outcome = async {
+        let remote_metadata = await_sftp_request(control, remote.metadata()).await?;
+        anyhow::ensure!(
+            remote_metadata.file_type() == russh_sftp::protocol::FileType::File,
+            "opened download source is not a regular file"
+        );
+        let total_bytes = remote_metadata.size;
+        let resume_offset = if promised {
+            0
         } else {
-            loop {
-                control.wait_if_paused().await?;
-                let read = tokio::time::timeout(Duration::from_secs(60), remote.read(&mut buffer))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("SFTP download stalled"))??;
-                if read == 0 {
-                    break;
+            transfer_resume_offset(local_path, total_bytes, options)
+        };
+        let (temporary, mut local) = crate::download_path::DownloadTemporary::prepare_with_access(
+            download_root,
+            local_path,
+            resume_offset,
+            access,
+        )
+        .await?;
+        let result = async {
+            let mut buffer = vec![0_u8; options.buffer_size_bytes()];
+            let mut bytes = resume_offset;
+            progress(SftpTransferProgress {
+                remote_path: remote_path.to_string(),
+                local_path: local_path.to_path_buf(),
+                bytes_transferred: bytes,
+                total_bytes,
+                item_count_completed: None,
+                item_count_total: None,
+            });
+            if let Some(total) = total_bytes {
+                use futures::{StreamExt as _, TryStreamExt as _};
+                let chunk_size = options.buffer_size_bytes() as u64;
+                let remote_ref = &remote;
+                let mut chunks =
+                    futures::stream::iter((resume_offset..total).step_by(chunk_size as usize))
+                        .map(|offset| async move {
+                            let length = (total - offset).min(chunk_size) as usize;
+                            let mut data = Vec::with_capacity(length);
+                            while data.len() < length {
+                                control.wait_if_paused().await?;
+                                let read = read_transfer_range(
+                                    remote_ref,
+                                    control,
+                                    offset + data.len() as u64,
+                                    length - data.len(),
+                                )
+                                .await?;
+                                if read.is_empty() {
+                                    anyhow::bail!("remote file ended before its advertised size");
+                                }
+                                data.extend_from_slice(&read);
+                            }
+                            Ok::<_, anyhow::Error>(data)
+                        })
+                        .buffered(options.download_threads());
+                // Commit in offset order: a cancelled transfer leaves a valid contiguous prefix
+                // that the existing resume contract can safely use on the next attempt.
+                while let Some(data) = chunks.try_next().await? {
+                    control.wait_if_paused().await?;
+                    local.write_all(&data).await?;
+                    bytes += data.len() as u64;
+                    progress(SftpTransferProgress {
+                        remote_path: remote_path.to_string(),
+                        local_path: local_path.to_path_buf(),
+                        bytes_transferred: bytes,
+                        total_bytes,
+                        item_count_completed: None,
+                        item_count_total: None,
+                    });
                 }
-                local.write_all(&buffer[..read]).await?;
-                bytes += read as u64;
-                progress(SftpTransferProgress {
-                    remote_path: remote_path.to_string(),
-                    local_path: local_path.to_path_buf(),
-                    bytes_transferred: bytes,
-                    total_bytes,
-                    item_count_completed: None,
-                    item_count_total: None,
-                });
+            } else {
+                loop {
+                    control.wait_if_paused().await?;
+                    let read = await_sftp_request(control, remote.read(&mut buffer)).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    local.write_all(&buffer[..read]).await?;
+                    bytes += read as u64;
+                    progress(SftpTransferProgress {
+                        remote_path: remote_path.to_string(),
+                        local_path: local_path.to_path_buf(),
+                        bytes_transferred: bytes,
+                        total_bytes,
+                        item_count_completed: None,
+                        item_count_total: None,
+                    });
+                }
+            }
+            local.flush().await?;
+            await_sftp_request(control, remote.shutdown()).await?;
+            Ok::<_, anyhow::Error>(bytes)
+        }
+        .await;
+        // Finish local writes even on error before committing a valid resume prefix or cleaning up.
+        let flushed = local.flush().await;
+        drop(local);
+        let (bytes, identity) = match result {
+            Ok(bytes) => {
+                flushed?;
+                control.check_cancelled()?;
+                if promised && let Some(path_options) = path_options {
+                    path_options
+                        .download_runtime()?
+                        .validate_ancestors(local_path)?;
+                }
+                let identity = temporary.commit_async(download_root, local_path).await?;
+                (bytes, identity)
+            }
+            Err(error) => {
+                if !promised && options.resume_broken_transfer && flushed.is_ok() {
+                    let identity = temporary.commit_async(download_root, local_path).await?;
+                    if let Some(path_options) = path_options {
+                        path_options.download_runtime()?.completed(
+                            local_path,
+                            identity,
+                            raw_path.clone(),
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if options.preserve_timestamps {
+            let file = crate::download_path::open_without_following(local_path, false, false)?;
+            anyhow::ensure!(
+                crate::download_path::FileIdentity::from_file(&file)? == identity,
+                "download target was replaced before setting timestamps"
+            );
+            if let Some(mtime) = remote_metadata.mtime.filter(|mtime| *mtime > 0) {
+                let _ = file.set_modified(UNIX_EPOCH + Duration::from_secs(u64::from(mtime)));
             }
         }
-        local.flush().await?;
-        remote.shutdown().await?;
-        Ok::<_, anyhow::Error>(bytes)
+        if let Some(path_options) = path_options {
+            path_options.download_runtime()?.completed(
+                local_path,
+                identity,
+                raw_path,
+                remote_metadata.size,
+                remote_metadata.mtime,
+            )?;
+        }
+        Ok(bytes)
     }
     .await;
-    // Finish local writes even on error before committing a valid resume prefix or cleaning up.
-    let flushed = local.flush().await;
-    drop(local);
-    let bytes = match result {
-        Ok(bytes) => {
-            flushed?;
-            temporary.commit_async(download_root, local_path).await?;
-            bytes
-        }
-        Err(error) => {
-            if options.resume_broken_transfer && flushed.is_ok() {
-                temporary.commit_async(download_root, local_path).await?;
-            }
-            return Err(error);
-        }
-    };
-    if options.preserve_timestamps {
-        preserve_local_modified_time(local_path, remote_metadata.mtime);
-    }
-    Ok(bytes)
+    let _ = tokio::time::timeout(Duration::from_secs(5), remote.shutdown()).await;
+    outcome
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -2999,7 +3174,11 @@ where
 {
     control.wait_if_paused().await?;
     crate::download_path::ensure_no_symlink(download_root, local_path)?;
-    tokio::fs::create_dir_all(local_path).await?;
+    path_options.download_runtime()?.ensure_directory(
+        download_root,
+        local_path,
+        path_options.is_promised_download(),
+    )?;
     crate::download_path::ensure_no_symlink(download_root, local_path)?;
     let (expected_bytes, item_count_total) =
         remote_directory_transfer_totals_bytes(sftp, raw_path.clone(), control).await?;
@@ -3008,9 +3187,13 @@ where
     let mut pending = vec![(raw_path, remote_path.to_string(), local_path.to_path_buf())];
     while let Some((remote_dir_raw, remote_dir, local_dir)) = pending.pop() {
         control.wait_if_paused().await?;
-        tokio::fs::create_dir_all(&local_dir).await?;
+        path_options.download_runtime()?.ensure_directory(
+            download_root,
+            &local_dir,
+            path_options.is_promised_download(),
+        )?;
         crate::download_path::ensure_no_symlink(download_root, &local_dir)?;
-        for entry in sftp.read_dir_bytes(remote_dir_raw).await? {
+        for entry in await_sftp_request(control, sftp.read_dir_bytes(remote_dir_raw)).await? {
             control.wait_if_paused().await?;
             let file_type = entry.file_type();
             let name = codec.decode_path_lossy(entry.file_name_bytes());
@@ -3094,6 +3277,7 @@ where
                     options,
                     &mut report,
                     download_root,
+                    Some(path_options),
                 )
                 .await?;
                 let finished = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -3805,7 +3989,7 @@ async fn remote_directory_transfer_totals_bytes(
     let mut pending = vec![raw_path];
     while let Some(remote_dir) = pending.pop() {
         control.wait_if_paused().await?;
-        for entry in sftp.read_dir_bytes(remote_dir).await? {
+        for entry in await_sftp_request(control, sftp.read_dir_bytes(remote_dir)).await? {
             if entry.file_name_bytes() == b"." || entry.file_name_bytes() == b".." {
                 continue;
             }
@@ -4025,11 +4209,7 @@ mod tests {
         assert_eq!(codec.encoding_name(), "GBK");
 
         let error = SftpPathCodec::from_encoding_name("KOI8-R").expect_err("unknown encoding");
-        assert!(
-            error
-                .to_string()
-                .contains("Unsupported SFTP filename encoding")
-        );
+        assert!(error.to_string().contains("Unsupported character encoding"));
     }
 
     #[test]

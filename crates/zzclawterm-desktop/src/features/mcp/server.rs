@@ -12,12 +12,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use zzclawterm_core::{AiPermissionMode, CapabilityScope, OutputStore};
+use zzclawterm_core::{AiPermissionMode, CapabilityScope};
 use zzclawterm_mcp_protocol::{
     AuthParams, CapabilityExecuteParams, ClientIdentifyParams, DiscoveryDocument,
-    MAX_INLINE_OUTPUT_BYTES, MAX_RPC_LINE_BYTES, OutputReadArgs, RequestCancelParams, RpcError,
-    RpcRequest, RpcResponse, definition_for_tool, tool, validate_tool_arguments,
-    validate_tool_result,
+    MAX_RPC_LINE_BYTES, RequestCancelParams, RpcError, RpcRequest, RpcResponse,
 };
 
 use crate::thread_owner::spawn_joinable;
@@ -27,20 +25,8 @@ use super::discovery::DiscoveryStore;
 const REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(305);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(in crate::features) struct McpHostRequest {
-    pub connection_id: String,
-    pub request_id: String,
-    pub generation: String,
-    pub client: String,
-    pub permission_mode: AiPermissionMode,
-    pub scope: CapabilityScope,
-    pub tool: String,
-    pub arguments: Value,
-    pub cancellation: CancellationToken,
-    pub approved: bool,
-    pub approval_decision: Option<String>,
-    pub reply: oneshot::Sender<Result<Value, RpcError>>,
-}
+use crate::features::capability_runtime::CapabilityCaller;
+pub(in crate::features) use crate::features::capability_runtime::CapabilityRequest as McpHostRequest;
 
 #[derive(Clone)]
 struct HostCredential {
@@ -71,6 +57,7 @@ pub(in crate::features) enum McpHostEvent {
     Execute(Box<McpHostRequest>),
     Cancelled { request_id: String },
     Disconnected { connection_id: String },
+    GenerationExpired { generation: String },
 }
 
 impl std::fmt::Debug for McpHostEndpoint {
@@ -265,7 +252,6 @@ async fn handle_connection(
 
     let mut client = "external MCP client".to_string();
     let connection_id = uuid::Uuid::new_v4().to_string();
-    let mut outputs = OutputStore::default();
     loop {
         let line = match read_rpc_line(&mut reader).await {
             Ok(Some(line)) => line,
@@ -327,7 +313,6 @@ async fn handle_connection(
                     &credentials,
                     &requests,
                     &cancellations,
-                    &mut outputs,
                 )
                 .await
             }
@@ -354,7 +339,9 @@ async fn handle_cancel(
     let key = (generation.to_string(), request_id.clone());
     let cancelled = if let Some(token) = cancellations.lock().await.get(&key) {
         token.cancel();
-        let _ = requests.unbounded_send(McpHostEvent::Cancelled { request_id });
+        let _ = requests.unbounded_send(McpHostEvent::Cancelled {
+            request_id: format!("mcp:{generation}:{request_id}"),
+        });
         true
     } else {
         false
@@ -372,33 +359,10 @@ async fn handle_execute(
     credentials: &Arc<Mutex<HostCredential>>,
     requests: &UnboundedSender<McpHostEvent>,
     cancellations: &CancellationMap,
-    outputs: &mut OutputStore,
 ) -> RpcResponse {
     let Ok(params) = serde_json::from_value::<CapabilityExecuteParams>(params) else {
         return rpc_error(id, "invalid_argument", "Invalid capability request.");
     };
-    let Some(_definition) = definition_for_tool(&params.tool) else {
-        return rpc_error(id, "invalid_argument", "Unknown ZzClawTerm MCP tool.");
-    };
-    if let Err(error) = validate_tool_arguments(&params.tool, &params.arguments) {
-        return rpc_error(id, "invalid_argument", &error.to_string());
-    }
-    if params.tool == tool::OUTPUT_READ {
-        let args = serde_json::from_value::<OutputReadArgs>(params.arguments)
-            .expect("validated output read arguments");
-        return match outputs.read(
-            &args.output_id,
-            args.offset,
-            args.max_bytes.unwrap_or(MAX_INLINE_OUTPUT_BYTES),
-        ) {
-            Ok(chunk) => match serde_json::to_value(chunk) {
-                Ok(value) => rpc_ok(id, value),
-                Err(_) => rpc_error(id, "internal_error", "Cannot serialize output chunk."),
-            },
-            Err(error) => rpc_error(id, "output_not_found", &error.to_string()),
-        };
-    }
-
     let credential = credentials
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -413,14 +377,17 @@ async fn handle_execute(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let cancellation = CancellationToken::new();
     let key = (credential.generation.clone(), request_id.clone());
-    cancellations
-        .lock()
-        .await
-        .insert(key.clone(), cancellation.clone());
+    {
+        let mut pending = cancellations.lock().await;
+        if pending.contains_key(&key) {
+            return rpc_error(id, "invalid_argument", "Duplicate active request id.");
+        }
+        pending.insert(key.clone(), cancellation.clone());
+    }
     let (reply, result) = oneshot::channel();
     let request = McpHostRequest {
         connection_id: connection_id.to_string(),
-        request_id,
+        request_id: format!("mcp:{}:{request_id}", credential.generation),
         generation: credential.generation,
         client: client.to_string(),
         permission_mode: credential.permission_mode,
@@ -428,6 +395,7 @@ async fn handle_execute(
         tool: params.tool.clone(),
         arguments: params.arguments,
         cancellation: cancellation.clone(),
+        caller: CapabilityCaller::Mcp,
         approved: false,
         approval_decision: None,
         reply,
@@ -454,30 +422,13 @@ async fn handle_execute(
     cancellation.cancel();
     cancellations.lock().await.remove(&key);
     match result {
-        Ok(value) => {
-            if let Err(error) = validate_tool_result(&params.tool, &value) {
-                return rpc_error(id, "internal_error", &error.to_string());
-            }
-            match protect_output(outputs, value) {
-                Ok(value) => rpc_ok(id, value),
-                Err(error) => rpc_error(id, "internal_error", &error),
-            }
-        }
+        Ok(value) => rpc_ok(id, value),
         Err(error) => RpcResponse {
             id,
             result: None,
             error: Some(error),
         },
     }
-}
-
-fn protect_output(store: &mut OutputStore, value: Value) -> Result<Value, String> {
-    let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-    if text.len() <= MAX_INLINE_OUTPUT_BYTES {
-        return Ok(value);
-    }
-    serde_json::to_value(store.protect(text, MAX_INLINE_OUTPUT_BYTES))
-        .map_err(|error| error.to_string())
 }
 
 fn credential_matches(credentials: &Arc<Mutex<HostCredential>>, auth: &AuthParams) -> bool {
@@ -588,12 +539,12 @@ fn permission_mode_name(mode: &AiPermissionMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use zzclawterm_core::{AiPermissionMode, CapabilityScope};
 
     use futures::StreamExt;
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
-    use zzclawterm_core::{AiPermissionMode, CapabilityScope};
     use zzclawterm_mcp_protocol::{
         AuthParams, MAX_INLINE_OUTPUT_BYTES, MAX_RPC_LINE_BYTES, PROTOCOL_VERSION, RpcRequest,
         RpcResponse,
@@ -613,7 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_authenticates_forwards_writes_and_pages_connection_local_output() {
+    async fn host_authenticates_and_forwards_common_runtime_results_unchanged() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         let runtime = McpHostRuntime::start(
             AiPermissionMode::Auto,
@@ -683,17 +634,13 @@ mod tests {
         let McpHostEvent::Execute(request) = rx.next().await.unwrap() else {
             panic!("expected execute request");
         };
-        request
-            .reply
-            .send(Ok(json!({
-                "connections": [{
-                    "id": "c",
-                    "name": "x".repeat(MAX_INLINE_OUTPUT_BYTES),
-                    "type": "ssh",
-                    "groupPath": []
-                }]
-            })))
+        let value = json!({"connections":[{"id":"c","name":"x".repeat(MAX_INLINE_OUTPUT_BYTES),"type":"ssh","groupPath":[]}]});
+        let mut capabilities =
+            crate::features::capability_runtime::CapabilityRuntimeState::default();
+        let result = capabilities
+            .protect_output(&request.connection_id, "connection_list", value)
             .unwrap();
+        request.reply.send(Ok(result)).unwrap();
         let response = call.await.unwrap().result.unwrap();
         assert_eq!(response["truncated"], true);
         assert!(response["outputId"].as_str().unwrap().starts_with("out_"));

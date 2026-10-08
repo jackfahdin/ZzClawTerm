@@ -9,6 +9,7 @@ mod keys;
 mod known_hosts;
 mod otp;
 mod passwords;
+mod reorder;
 mod unlock;
 
 impl ZzClawTermApp {

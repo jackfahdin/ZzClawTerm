@@ -13,6 +13,7 @@ pub(super) enum TransferContextMenuAction {
     Refresh,
     Upload,
     Download,
+    DownloadToDirectory,
     SendTo,
     Move,
     AddToFavorites,
@@ -36,6 +37,7 @@ pub(super) fn transfer_context_action_visible_for_backend(
             action,
             TransferContextMenuAction::Upload
                 | TransferContextMenuAction::Download
+                | TransferContextMenuAction::DownloadToDirectory
                 | TransferContextMenuAction::NewSymlink
         )
 }
@@ -116,7 +118,12 @@ pub(super) fn transfer_entry_context_menu_policy(
     if capabilities.is_tree_view {
         items.extend([Item(Action::NewFile), Item(Action::NewFolder)]);
     }
-    items.extend([Item(Action::Upload), Item(Action::Download), Separator]);
+    items.extend([
+        Item(Action::Upload),
+        Item(Action::Download),
+        Item(Action::DownloadToDirectory),
+        Separator,
+    ]);
     if capabilities.is_tree_view {
         items.extend([Item(Action::NewSymlink), Separator]);
     }
@@ -263,7 +270,12 @@ mod tests {
     fn local_backend_hides_remote_only_actions() {
         use zzclawterm_transport::FileBrowserBackendKind::{Local, Remote};
 
-        for action in [Action::Upload, Action::Download, Action::NewSymlink] {
+        for action in [
+            Action::Upload,
+            Action::Download,
+            Action::DownloadToDirectory,
+            Action::NewSymlink,
+        ] {
             assert!(!transfer_context_action_visible_for_backend(action, Local));
             assert!(transfer_context_action_visible_for_backend(action, Remote));
         }
@@ -293,6 +305,7 @@ mod tests {
                 Node::Action(Action::Refresh),
                 Node::Action(Action::Upload),
                 Node::Action(Action::Download),
+                Node::Action(Action::DownloadToDirectory),
                 Node::Separator,
                 Node::Action(Action::Move),
                 Node::Separator,
@@ -397,10 +410,14 @@ mod tests {
             .iter()
             .position(|node| node == &Node::Action(Action::Download))
             .expect("download action present");
-        assert_eq!(items[download + 1], Node::Separator);
-        assert_eq!(items[download + 2], Node::Action(Action::SendTo));
-        assert_eq!(items[download + 3], Node::Separator);
-        assert_eq!(items[download + 4], Node::Action(Action::Move));
+        assert_eq!(
+            items[download + 1],
+            Node::Action(Action::DownloadToDirectory)
+        );
+        assert_eq!(items[download + 2], Node::Separator);
+        assert_eq!(items[download + 3], Node::Action(Action::SendTo));
+        assert_eq!(items[download + 4], Node::Separator);
+        assert_eq!(items[download + 5], Node::Action(Action::Move));
     }
 
     #[test]
@@ -413,8 +430,12 @@ mod tests {
             .iter()
             .position(|node| node == &Node::Action(Action::Download))
             .expect("download action present");
-        assert_eq!(items[download + 1], Node::Separator);
-        assert_eq!(items[download + 2], Node::Action(Action::Move));
+        assert_eq!(
+            items[download + 1],
+            Node::Action(Action::DownloadToDirectory)
+        );
+        assert_eq!(items[download + 2], Node::Separator);
+        assert_eq!(items[download + 3], Node::Action(Action::Move));
     }
 
     #[test]
@@ -446,6 +467,7 @@ mod tests {
         );
         assert!(!nodes.contains(&Node::Action(Action::Upload)));
         assert!(!nodes.contains(&Node::Action(Action::Download)));
+        assert!(!nodes.contains(&Node::Action(Action::DownloadToDirectory)));
         assert!(!nodes.contains(&Node::Action(Action::NewSymlink)));
         assert!(
             !nodes

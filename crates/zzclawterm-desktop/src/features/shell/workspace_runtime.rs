@@ -4,7 +4,6 @@ use gpui::{
     Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred,
 };
-use zzclawterm_core::uuid;
 use zzclawterm_store::{StoreDomain, store_request};
 
 use crate::features::{
@@ -123,46 +122,46 @@ impl ZzClawTermApp {
         direction: WorkspaceSplitDirection,
         primary_session_id: String,
         secondary_session_id: String,
-    ) {
-        let split_id = uuid();
-        let tab_root = self.tab_root_for_session(&primary_session_id);
-        if let Some(root) = self.shell.workspace.pane_roots.get_mut(&tab_root)
-            && root.split_leaf(
-                &primary_session_id,
-                secondary_session_id.clone(),
-                direction,
-                split_id.clone(),
-            )
-        {
-            self.rebuild_session_tab_owners();
-            self.activate_session_id(&secondary_session_id, cx);
-            self.sync_workspace_split_from_active_tab();
-            self.shell.navigation.selected_nav = NavItem::Workspace;
-            self.shell.navigation.main_mode = MainMode::Workspace;
-            self.persist_workspace_pane_layout();
-            if self.session.restore_is_complete() {
-                self.persist_open_tabs();
-            }
-            return;
-        }
-        // Create a new per-tab dual split rooted at the primary session tab.
-        let root = WorkspacePaneNode::Split {
-            id: split_id,
-            direction,
-            ratio_percent: WorkspacePaneNode::DEFAULT_RATIO_PERCENT,
-            first: Box::new(WorkspacePaneNode::leaf(primary_session_id.clone())),
-            second: Box::new(WorkspacePaneNode::leaf(secondary_session_id.clone())),
+    ) -> bool {
+        self.normalize_legacy_terminal_groups();
+        self.ensure_terminal_windows_root();
+        let original_group = self
+            .session
+            .session_start_tab_placement(&secondary_session_id)
+            .and_then(|p| {
+                self.terminal
+                    .terminal_start_group(p.request_sequence)
+                    .map(str::to_string)
+            })
+            .or_else(|| self.terminal.terminal_group_for_tab(&primary_session_id));
+        let Some(group) =
+            original_group.filter(|group| self.terminal.terminal_window_has_leaf(group))
+        else {
+            return false;
         };
-        self.shell.workspace.pane_roots.insert(tab_root, root);
-        self.rebuild_session_tab_owners();
-        self.activate_session_id(&secondary_session_id, cx);
-        self.sync_workspace_split_from_active_tab();
-        self.shell.navigation.selected_nav = NavItem::Workspace;
-        self.shell.navigation.main_mode = MainMode::Workspace;
-        self.persist_workspace_pane_layout();
-        if self.session.restore_is_complete() {
-            self.persist_open_tabs();
+        if !self.session.has_session(&primary_session_id) {
+            return false;
         }
+        if !self.terminal_group_can_split(&group, direction) {
+            return false;
+        }
+        let zone = crate::models::TabDockZone::Edge(match direction {
+            WorkspaceSplitDirection::Horizontal => crate::models::TabDockEdge::Bottom,
+            WorkspaceSplitDirection::Vertical => crate::models::TabDockEdge::Right,
+        });
+        // Session-start completion already decided whether to change focus.
+        // Docking its result must preserve that decision for background requests.
+        if !matches!(
+            self.terminal
+                .dock_tab_on_terminal_window_leaf(&secondary_session_id, &group, zone),
+            crate::features::terminal::TerminalWindowDockResult::Docked { .. }
+        ) {
+            return false;
+        }
+        self.sync_terminal_frame_snapshot_priority();
+        self.persist_open_tabs();
+        cx.notify();
+        true
     }
 
     pub(in crate::features) fn activate_workspace_pane(
@@ -206,6 +205,15 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        self.ensure_terminal_windows_root();
+        if let Some(group) = self.current_terminal_group()
+            && !self.terminal_group_can_split(&group, direction)
+        {
+            self.shell
+                .set_status("not enough space to split this group".to_string());
+            cx.notify();
+            return;
+        }
         self.session
             .start_set_pending_workspace_split(direction, source_session_id);
         self.duplicate_active_session(window, cx);
@@ -220,57 +228,23 @@ impl ZzClawTermApp {
         let Some((direction, source_session_id)) = workspace_split else {
             return;
         };
-        self.attach_workspace_split(cx, direction, source_session_id, new_session_id.to_string());
-        self.shell.set_status(format!(
-            "split {} pane duplicated",
-            direction.label().to_lowercase()
-        ));
+        if self.attach_workspace_split(cx, direction, source_session_id, new_session_id.to_string())
+        {
+            self.shell.set_status(format!(
+                "split {} pane duplicated",
+                direction.label().to_lowercase()
+            ));
+        }
     }
 
     pub(in crate::features) fn unsplit_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(active_id) = self.session.active_id_owned() else {
-            self.shell.set_status("workspace is not split".to_string());
-            cx.notify();
-            return;
-        };
-        let tab_root = self.tab_root_for_session(&active_id);
-        let Some(root) = self.shell.workspace.pane_roots.remove(&tab_root) else {
-            self.shell.workspace.split = None;
-            self.shell.set_status("workspace is not split".to_string());
-            cx.notify();
-            return;
-        };
+        self.normalize_legacy_terminal_groups();
+        let active = self.session.active_id_owned();
+        self.terminal.merge_terminal_groups(active);
         self.shell.workspace.split_resize = None;
-
-        if let Some(collapsed) = collapse_around_session(root.clone(), &active_id) {
-            match collapsed {
-                WorkspacePaneNode::Split { .. } => {
-                    self.shell.workspace.pane_roots.insert(tab_root, collapsed);
-                    self.shell.set_status("collapsed focused split".to_string());
-                }
-                WorkspacePaneNode::Leaf { session_id } => {
-                    self.activate_session_id_with_surface_sync(&session_id, cx);
-                    self.shell.set_status("workspace split closed".to_string());
-                }
-            }
-            self.rebuild_session_tab_owners();
-            self.sync_workspace_split_from_active_tab();
-            self.persist_workspace_pane_layout();
-            if self.session.restore_is_complete() {
-                self.persist_open_tabs();
-            }
-            cx.notify();
-            return;
-        }
-
-        let _ = root;
-        self.rebuild_session_tab_owners();
-        self.sync_workspace_split_from_active_tab();
-        self.shell.set_status("workspace split closed".to_string());
-        self.persist_workspace_pane_layout();
-        if self.session.restore_is_complete() {
-            self.persist_open_tabs();
-        }
+        self.shell.set_status("workspace groups merged".to_string());
+        self.persist_open_tabs();
+        self.sync_terminal_frame_snapshot_priority();
         cx.notify();
     }
 
@@ -301,11 +275,19 @@ impl ZzClawTermApp {
             WorkspaceSplitDirection::Vertical => event.position.x,
         };
         self.shell.workspace.split_resize = Some(WorkspaceSplitResizeState {
-            split_id,
+            split_id: split_id.clone(),
             direction,
             start_pos,
             start_ratio,
-            container_size: 0.,
+            container_size: self
+                .terminal
+                .terminal_split_bounds(&split_id)
+                .map(|bounds| match direction {
+                    WorkspaceSplitDirection::Horizontal => f32::from(bounds.size.height),
+                    WorkspaceSplitDirection::Vertical => f32::from(bounds.size.width),
+                })
+                .unwrap_or(0.)
+                - 4.,
         });
         self.shell
             .set_status("resizing workspace split".to_string());
@@ -325,17 +307,29 @@ impl ZzClawTermApp {
             WorkspaceSplitDirection::Vertical => event.position.x,
         };
         let delta_px = f32::from(current - state.start_pos);
-        // Approximate container size from a stable heuristic when unknown: treat 4px ~ 1%.
-        let container = if state.container_size > 1. {
-            state.container_size
-        } else {
-            400.
-        };
+        let container = state.container_size;
+        if container <= 0. {
+            return;
+        }
         let delta_ratio = ((delta_px / container) * 100.).round() as i16;
-        let next = (state.start_ratio as i16 + delta_ratio).clamp(
-            WorkspacePaneNode::MIN_RATIO_PERCENT as i16,
-            WorkspacePaneNode::MAX_RATIO_PERCENT as i16,
-        ) as u8;
+        let minima = self
+            .terminal
+            .terminal_window_tree()
+            .and_then(|root| root.split_minimum_extents(&state.split_id))
+            .unwrap_or((80., 80.));
+        let total = minima.0 + minima.1;
+        let (lower, upper) = if total <= container {
+            (
+                (minima.0 / container * 100.).ceil() as i16,
+                (100. - minima.1 / container * 100.).floor() as i16,
+            )
+        } else {
+            let ratio = (minima.0 / total * 100.).round() as i16;
+            (ratio, ratio)
+        };
+        let next = (state.start_ratio as i16 + delta_ratio)
+            .clamp(lower.clamp(1, 99), upper.clamp(lower.clamp(1, 99), 99))
+            as u8;
         let mut applied = self
             .terminal
             .set_terminal_window_split_ratio(&state.split_id, next);
@@ -417,7 +411,14 @@ impl ZzClawTermApp {
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.activate_resize_handle_immediately(drag_id.clone(), cx);
-                        this.start_workspace_split_resize(split_id.clone(), event, cx);
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.terminal.set_terminal_window_split_ratio(&split_id, 50);
+                            this.persist_terminal_window_layout();
+                            cx.notify();
+                        } else {
+                            this.start_workspace_split_resize(split_id.clone(), event, cx);
+                        }
                     }),
                 ),
             )
@@ -437,7 +438,14 @@ impl ZzClawTermApp {
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.activate_resize_handle_immediately(drag_id.clone(), cx);
-                        this.start_workspace_split_resize(split_id.clone(), event, cx);
+                        cx.stop_propagation();
+                        if event.click_count == 2 {
+                            this.terminal.set_terminal_window_split_ratio(&split_id, 50);
+                            this.persist_terminal_window_layout();
+                            cx.notify();
+                        } else {
+                            this.start_workspace_split_resize(split_id.clone(), event, cx);
+                        }
                     }),
                 ),
             )
@@ -503,6 +511,7 @@ impl ZzClawTermApp {
             self.activate_session_id(&first, cx);
         }
         self.sync_workspace_split_from_active_tab();
+        self.normalize_legacy_terminal_groups();
         true
     }
 
@@ -516,11 +525,6 @@ impl ZzClawTermApp {
         if !self.settings.summary().startup_restore
             || !self.settings.summary().startup_restore_window_layout
         {
-            self.shell.workspace.pane_layout_restored = true;
-            return;
-        }
-        // Multi-leaf tab windows take visual precedence; skip pane restore when active.
-        if self.terminal_windows_is_multi_leaf() {
             self.shell.workspace.pane_layout_restored = true;
             return;
         }
@@ -548,6 +552,7 @@ impl ZzClawTermApp {
                 return;
             };
             let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
+                self.terminal.preserve_unread_terminal_layout();
                 return;
             };
             if self.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {
@@ -559,16 +564,23 @@ impl ZzClawTermApp {
             }
             return;
         }
+        self.shell.workspace.pane_layout_loading = true;
+        let restore_revision = self.workspace_revision;
         self.submit_store_request(
             0,
             store_request(StoreDomain::Sessions, |store| {
                 store.load_workspace_pane_layout()
             }),
             move |this, event, cx| {
+                this.shell.workspace.pane_layout_loading = false;
+                if this.workspace_revision != restore_revision {
+                    return;
+                }
                 let layout = match event.outcome {
                     Ok(Some(layout)) => layout,
                     Ok(None) => return,
                     Err(error) => {
+                        this.terminal.preserve_unread_terminal_layout();
                         this.shell
                             .set_status(format!("failed to restore pane layout: {error}"));
                         cx.notify();
@@ -576,6 +588,7 @@ impl ZzClawTermApp {
                     }
                 };
                 let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
+                    this.terminal.preserve_unread_terminal_layout();
                     return;
                 };
                 if !this.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {
@@ -589,34 +602,6 @@ impl ZzClawTermApp {
             },
             cx,
         );
-    }
-}
-
-/// Keep only the branch that contains `session_id`, collapsing every split on the path
-/// into that single branch (closes the sibling panes of the active leaf).
-fn collapse_around_session(node: WorkspacePaneNode, session_id: &str) -> Option<WorkspacePaneNode> {
-    match node {
-        WorkspacePaneNode::Leaf { session_id: id } => {
-            if id == session_id {
-                Some(WorkspacePaneNode::Leaf { session_id: id })
-            } else {
-                None
-            }
-        }
-        WorkspacePaneNode::Split { first, second, .. } => {
-            let in_first = first.contains_session(session_id);
-            let in_second = second.contains_session(session_id);
-            if in_first && !in_second {
-                collapse_around_session(*first, session_id)
-            } else if in_second && !in_first {
-                collapse_around_session(*second, session_id)
-            } else if in_first && in_second {
-                // Should not happen for unique session leaves; keep first match.
-                collapse_around_session(*first, session_id)
-            } else {
-                None
-            }
-        }
     }
 }
 

@@ -170,6 +170,7 @@ impl ZzClawTermApp {
             return;
         }
         let entry = SavedPassword {
+            sort_order: 0,
             id: editor.id.clone().unwrap_or_default(),
             name,
             username: editor.username.trim().to_string(),
