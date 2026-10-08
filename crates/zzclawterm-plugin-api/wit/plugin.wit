@@ -1,4 +1,4 @@
-package nyaterm:plugin@1.0.0;
+package zzclawterm:plugin@1.0.0;
 
 interface types {
     record version { major: u32, minor: u32, patch: u32 }

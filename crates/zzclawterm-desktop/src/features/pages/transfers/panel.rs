@@ -421,7 +421,10 @@ mod tests {
 
     #[test]
     fn file_row_starts_visible_export_from_first_press_and_preserves_multiselection() {
-        for remote in [false, true] {
+        // Remote drag export needs native virtual-file or file-promise drags,
+        // which only exist off Linux (`transfer_drag_supported`); local drags
+        // are exercised on every platform.
+        for remote in [false, !cfg!(target_os = "linux")] {
             let test_dir = TestConfigDir::new("zzclawterm-file-drag");
             let mut cx = TestAppContext::single();
             let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());

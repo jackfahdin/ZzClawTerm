@@ -22,7 +22,7 @@ use zzclawterm_core::plugins::{
 mod bindings {
     wasmtime::component::bindgen!({ path: "../zzclawterm-plugin-api/wit", world: "plugin" });
 }
-use bindings::nyaterm::plugin::types as wit;
+use bindings::zzclawterm::plugin::types as wit;
 
 #[cfg(test)]
 type CallEpochHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -348,7 +348,7 @@ pub fn validate_api_marker(bytes: &[u8]) -> PluginResult<()> {
             .map_err(|_| PluginError::new(ErrorCode::Incompatible, "Invalid Wasm component"))?
         {
             wasmparser::Payload::CustomSection(section)
-                if section.name() == "nyaterm:plugin-api" =>
+                if section.name() == "zzclawterm:plugin-api" =>
             {
                 markers += 1;
                 if section.data() != API_VERSION.as_bytes() {

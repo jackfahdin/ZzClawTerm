@@ -33,7 +33,7 @@ fn fixture(root: &TestTempDir, id: &str) -> std::path::PathBuf {
     fs::write(
         source.join("plugin.toml"),
         format!(
-            "schema_version = 1\nid = \"{id}\"\nname = \"Service fixture\"\nversion = \"1.0.0\"\nauthors = []\ndescription = \"SDK guest\"\nhost_version = \">=2.0.0-preview.4\"\napi_version = \"1.0.0\"\ncomponent = \"plugin.wasm\"\n\n[[actions]]\nid = \"count\"\nname = \"Count\"\ndescription = \"Count calls\"\nresult = \"text\"\n\n[[actions]]\nid = \"loop\"\nname = \"Loop\"\ndescription = \"Infinite loop\"\nresult = \"text\"\n"
+            "schema_version = 1\nid = \"{id}\"\nname = \"Service fixture\"\nversion = \"1.0.0\"\nauthors = []\ndescription = \"SDK guest\"\nhost_version = \">=0.1.0\"\napi_version = \"1.0.0\"\ncomponent = \"plugin.wasm\"\n\n[[actions]]\nid = \"count\"\nname = \"Count\"\ndescription = \"Count calls\"\nresult = \"text\"\n\n[[actions]]\nid = \"loop\"\nname = \"Loop\"\ndescription = \"Infinite loop\"\nresult = \"text\"\n"
         ),
     )
     .unwrap();

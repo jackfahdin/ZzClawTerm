@@ -9,7 +9,7 @@ pub mod bindings {
 }
 
 #[cfg(feature = "guest")]
-pub use bindings::nyaterm::plugin::types::{
+pub use bindings::zzclawterm::plugin::types::{
     ActionInput, ActionResult, Argument, CommandDraft, ErrorKind, Identity, PluginError, Value,
     Version,
 };
@@ -37,7 +37,7 @@ macro_rules! register_plugin {
     ($plugin:ty) => {
         #[cfg(target_arch = "wasm32")]
         #[used]
-        #[unsafe(link_section = "nyaterm:plugin-api")]
+        #[unsafe(link_section = "zzclawterm:plugin-api")]
         static ZZCLAWTERM_PLUGIN_API_VERSION: [u8; $crate::abi::API_VERSION_BYTES.len()] =
             $crate::abi::API_VERSION_BYTES;
 

@@ -8,7 +8,7 @@ fn main() {
         .lines()
         .find_map(|line| {
             line.trim()
-                .strip_prefix("package nyaterm:plugin@")?
+                .strip_prefix("package zzclawterm:plugin@")?
                 .strip_suffix(';')
         })
         .expect("versioned plugin WIT package");

@@ -533,12 +533,8 @@ mod tests {
         )
         .unwrap();
         let host_root = root.join("host");
-        let mut manager = PluginManager::open(
-            host_root.clone(),
-            "2.0.0-preview.4",
-            RuntimeLimits::default(),
-        )
-        .unwrap();
+        let mut manager =
+            PluginManager::open(host_root.clone(), "0.1.2", RuntimeLimits::default()).unwrap();
         manager.install(&source, false).unwrap();
         let candidate = manager
             .plan_update("fixture", &source)
@@ -553,8 +549,7 @@ mod tests {
         );
         assert!(manager.snapshot() == current);
         drop(manager);
-        let manager =
-            PluginManager::open(host_root, "2.0.0-preview.4", RuntimeLimits::default()).unwrap();
+        let manager = PluginManager::open(host_root, "0.1.2", RuntimeLimits::default()).unwrap();
         assert!(!manager.snapshot().plugins[0].enabled);
     }
 
@@ -576,7 +571,7 @@ mod tests {
         .unwrap();
         let mut manager = PluginManager::open(
             root.join("host"),
-            "2.0.0-preview.4",
+            "0.1.2",
             RuntimeLimits {
                 queue_capacity: 0,
                 ..RuntimeLimits::default()

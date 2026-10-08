@@ -9,7 +9,7 @@ use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_plugin_host::manager::PluginManager;
 use zzclawterm_plugin_host::runtime::{RuntimeLimits, validate_api_marker};
 
-const HOST: &str = "2.0.0-preview.4";
+const HOST: &str = "0.1.2";
 const FIXTURE: &[u8] = include_bytes!("fixtures/lifecycle.wasm");
 
 fn root() -> TestTempDir {
@@ -24,7 +24,7 @@ fn fixture(root: &Path, id: &str) -> std::path::PathBuf {
     let source = root.join(id);
     fs::create_dir_all(&source).unwrap();
     let mut manifest = format!(
-        "schema_version = 1\nid = \"{id}\"\nname = \"Lifecycle fixture\"\nversion = \"1.0.0\"\nauthors = []\ndescription = \"SDK-built fixture\"\nhost_version = \">=2.0.0-preview.4\"\napi_version = \"1.0.0\"\ncomponent = \"plugin.wasm\"\n"
+        "schema_version = 1\nid = \"{id}\"\nname = \"Lifecycle fixture\"\nversion = \"1.0.0\"\nauthors = []\ndescription = \"SDK-built fixture\"\nhost_version = \">=0.1.0\"\napi_version = \"1.0.0\"\ncomponent = \"plugin.wasm\"\n"
     );
     for action in ["count", "loop", "memory", "trap", "oversize", "controls"] {
         manifest.push_str(&format!("\n[[actions]]\nid = \"{action}\"\nname = \"{action}\"\ndescription = \"fixture\"\nresult = \"text\"\n"));
@@ -449,8 +449,8 @@ fn initialization_failures_abi_forgery_and_input_limits_are_rejected() {
     let source = fixture(&root, "forged");
     let mut bytes = FIXTURE.to_vec();
     let start = bytes
-        .windows(b"nyaterm:plugin-api".len())
-        .position(|w| w == b"nyaterm:plugin-api")
+        .windows(b"zzclawterm:plugin-api".len())
+        .position(|w| w == b"zzclawterm:plugin-api")
         .unwrap();
     bytes[start] = b'x';
     fs::write(source.join("plugin.wasm"), &bytes).unwrap();
