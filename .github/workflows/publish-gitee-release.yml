@@ -1,0 +1,350 @@
+name: Publish Gitee Release
+
+on:
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.2
+        required: true
+        type: string
+      upload_small_assets:
+        description: Upload assets within the configured Gitee size limit
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: gitee-release-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch) || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  GITEE_API_BASE: ${{ vars.GITEE_API_BASE || 'https://gitee.com/api/v5' }}
+  GITEE_OWNER: ${{ vars.GITEE_OWNER }}
+  GITEE_REPO: ${{ vars.GITEE_REPO }}
+  MAX_GITEE_ASSET_MB: ${{ vars.MAX_GITEE_ASSET_MB || '99' }}
+  GITEE_UPLOAD_WORKERS: ${{ vars.GITEE_UPLOAD_WORKERS || '4' }}
+
+jobs:
+  publish:
+    name: Mirror GitHub release to Gitee
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            tag="${INPUT_TAG}"
+            [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+              echo "invalid release tag: ${tag}" >&2
+              exit 1
+            }
+            publish='true'
+          elif [[ "${RUN_EVENT}" == 'push' ]]; then
+            tag="${RUN_BRANCH}"
+            [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || tag=''
+            publish='true'
+            [[ -n "${tag}" ]] || publish='false'
+          else
+            tag="$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" 'refs/tags/v*' | awk -v sha="${HEAD_SHA}" '$1 == sha {sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2}' | sort -V | tail -n 1)"
+            publish='true'
+            [[ -n "${tag}" ]] || publish='false'
+          fi
+          {
+            echo "publish=${publish}"
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Skip run without a release tag
+        if: steps.release.outputs.publish != 'true'
+        run: echo 'The completed Release run did not publish a version tag.'
+
+      - name: Confirm GitHub published and verified this tag
+        if: steps.release.outputs.publish == 'true'
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          args=(release --repo "${GITHUB_REPOSITORY}" --tag "${TAG}")
+          [[ -z "${HEAD_SHA}" ]] || args+=(--sha "${HEAD_SHA}")
+          [[ -z "${RUN_ID}" ]] || args+=(--run-id "${RUN_ID}")
+          # 门禁脚本只做"GitHub 已发布且校验过"的通用检查，GitCode/Gitee 共用。
+          python3 scripts/ci/gitcode_mirror_gate.py "${args[@]}"
+
+      - name: Check mirror configuration
+        if: steps.gate.outputs.ready == 'true'
+        id: config
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          configured='true'
+          for name in GITEE_OWNER GITEE_REPO GITEE_API_BASE GITEE_TOKEN; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::notice::${name} is not configured; skipping the Gitee mirror."
+              configured='false'
+            fi
+          done
+          if [[ "${configured}" == 'true' && ! "${MAX_GITEE_ASSET_MB}" =~ ^[0-9]+$ ]]; then
+            echo 'MAX_GITEE_ASSET_MB must be an integer' >&2
+            exit 1
+          fi
+          echo "configured=${configured}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download and verify GitHub assets
+        if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir release-assets
+          for _ in {1..12}; do
+            if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName,name,body,isDraft,isPrerelease,targetCommitish > github-release.json && \
+               gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir release-assets --clobber; then
+              break
+            fi
+            sleep 10
+          done
+          [[ "$(jq -r '.isDraft' github-release.json)" == 'false' ]]
+          test -f release-assets/SHA256SUMS
+          (cd release-assets && sha256sum --check SHA256SUMS)
+
+      - name: Synchronize the verified tag to Gitee
+        if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ steps.gate.outputs.sha }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          public_remote="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          old_sha="$(git ls-remote "${public_remote}" "refs/tags/${TAG}" | awk '{print $1}')"
+          work="${RUNNER_TEMP}/gitee-tag"
+          git init -q "${work}"
+          git -C "${work}" fetch -q "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}:refs/tags/${TAG}"
+          new_sha="$(git -C "${work}" rev-parse "refs/tags/${TAG}")"
+          target_sha="$(git -C "${work}" rev-parse "refs/tags/${TAG}^{}")"
+          [[ "${target_sha}" == "${EXPECTED_SHA}" ]] || {
+            echo "tag ${TAG} moved after GitHub CI verification" >&2
+            exit 1
+          }
+          if [[ "${old_sha}" != "${new_sha}" ]]; then
+            lease=()
+            [[ -z "${old_sha}" ]] || lease=("--force-with-lease=refs/tags/${TAG}:${old_sha}")
+            git -C "${work}" push -q "${lease[@]}" \
+              "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
+              "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
+          rm -rf "${work}"
+          echo "synchronized tag ${TAG} to Gitee"
+
+      - name: Install Python dependencies
+        if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/gitee-release-venv"
+          "${RUNNER_TEMP}/gitee-release-venv/bin/pip" install --disable-pip-version-check 'requests==2.32.5'
+
+      - name: Create or update Gitee release
+        if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ steps.gate.outputs.sha }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          UPLOAD_SMALL_ASSETS: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_small_assets || github.event_name != 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          current_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}^{}" | awk '{print $1}')"
+          [[ -n "${current_sha}" ]] || current_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}" | awk '{print $1}')"
+          [[ "${current_sha}" == "${EXPECTED_SHA}" ]] || {
+            echo "tag ${TAG} moved after GitHub CI verification" >&2
+            exit 1
+          }
+          "${RUNNER_TEMP}/gitee-release-venv/bin/python" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          import time
+          import urllib.parse
+
+          import requests
+          from concurrent.futures import ThreadPoolExecutor
+          from scripts.ci.gitee_release_upload import (
+              attachment_ids_named,
+              delete_attachments,
+              release_id_of,
+              upload_attachment_with_watchdog,
+          )
+
+          tag = os.environ["TAG"]
+          owner = os.environ["GITEE_OWNER"]
+          repo = os.environ["GITEE_REPO"]
+          api = os.environ["GITEE_API_BASE"].rstrip("/")
+          token = os.environ["GITEE_TOKEN"]
+          max_bytes = int(os.environ["MAX_GITEE_ASSET_MB"]) * 1024 * 1024
+          upload_small = os.environ.get("UPLOAD_SMALL_ASSETS", "true").lower() == "true"
+          github = json.loads(pathlib.Path("github-release.json").read_text(encoding="utf-8"))
+          assets = sorted(pathlib.Path("release-assets").iterdir(), key=lambda path: path.name.lower())
+          session = requests.Session()
+
+          def make_request(session):
+              def request(method, path, *, expected=(200, 201), allow_404=False, **kwargs):
+                  params = kwargs.pop("params", {})
+                  params["access_token"] = token
+                  response = session.request(method, f"{api}{path}", params=params, timeout=300, **kwargs)
+                  if allow_404 and response.status_code == 404:
+                      return None
+                  if response.status_code not in expected:
+                      raise RuntimeError(
+                          f"Gitee API {method} {path}: HTTP {response.status_code}"
+                      )
+                  if method == "DELETE":
+                      return None
+                  return response.json() if response.text.strip() else None
+              return request
+
+          request = make_request(session)
+
+          owner_q = urllib.parse.quote(owner, safe="")
+          repo_q = urllib.parse.quote(repo, safe="")
+          tag_q = urllib.parse.quote(tag, safe="")
+          releases_path = f"/repos/{owner_q}/{repo_q}/releases"
+          # Gitee 的 Release 有数值 id，附件与 PATCH 都按 id 寻址（与 GitCode 按 tag 不同）。
+          existing = request("GET", f"{releases_path}/tags/{tag_q}", expected=(200,), allow_404=True)
+          payload = {
+              "tag_name": tag,
+              "name": github.get("name") or tag,
+              "body": (github.get("body") or "") + "\n\n---\n\n正在同步发行版附件。\n",
+              "prerelease": str(bool(github.get("isPrerelease"))).lower(),
+          }
+          if existing:
+              release = existing
+          else:
+              payload["target_commitish"] = github.get("targetCommitish") or ""
+              release = request("POST", releases_path, data=payload)
+          release_id = release_id_of(release)
+          attach_path = f"{releases_path}/{release_id}/attach_files"
+
+          github_repo = os.environ["GITHUB_REPOSITORY"]
+
+          def github_asset_url(name):
+              return (
+                  f"https://github.com/{github_repo}/releases/download/"
+                  f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name)}"
+              )
+
+          uploaded = []
+          fallbacks = []
+          failed = []
+
+          def process_asset(asset):
+              if not upload_small or asset.stat().st_size > max_bytes:
+                  return asset.name, "too_big", "附件过大，从 GitHub Releases 下载"
+              # requests.Session 不是线程安全的，每个 worker 自带一个，互不共享。
+              worker = requests.Session()
+              worker_request = make_request(worker)
+              try:
+                  current = worker_request("GET", attach_path) or []
+                  delete_attachments(
+                      worker_request, attach_path,
+                      attachment_ids_named(current, asset.name),
+                  )
+                  # 看门狗每次重试都自建 Session，worker 这个只用于列表/删除。
+                  success, reason = upload_attachment_with_watchdog(
+                      requests.Session, f"{api}{attach_path}", token, asset,
+                  )
+              except Exception as error:
+                  return asset.name, "failed", f"{type(error).__name__} while replacing the old attachment"
+              if success:
+                  return asset.name, "uploaded", ""
+              return asset.name, "failed", reason
+
+          # Gitee 跨境链路慢但不该挂死：少量 worker 并行抬吞吐，
+          # 停滞由 upload_attachment_with_watchdog 的看门狗兜底
+          # （可用 GITEE_UPLOAD_WORKERS 覆盖并行度）。
+          max_workers = max(1, int(os.environ.get("GITEE_UPLOAD_WORKERS", "4")))
+          results = []
+          with ThreadPoolExecutor(max_workers=max_workers) as pool:
+              for result in pool.map(process_asset, assets):
+                  results.append(result)
+          for name, outcome, reason in sorted(results):
+              if outcome == "too_big":
+                  fallbacks.append((name, github_asset_url(name), reason))
+              elif outcome == "uploaded":
+                  print(f"Synchronized Gitee attachment {name}")
+                  uploaded.append(name)
+              else:
+                  print(f"::warning::Gitee attachment failed for {name}: {reason}")
+                  failed.append(name)
+                  fallbacks.append((name, github_asset_url(name), "Gitee 附件同步失败"))
+
+          if not failed:
+              current = request("GET", attach_path) or []
+              expected_names = {asset.name for asset in assets}
+              stale = [
+                  item["id"] for item in current
+                  if isinstance(item.get("id"), int)
+                  and item.get("name") not in expected_names
+              ]
+              delete_attachments(request, attach_path, stale)
+
+          body = (github.get("body") or "").rstrip() + "\n\n---\n\n## 下载\n\n"
+          if uploaded:
+              body += "> 小于 Gitee 限制的安装包已同步到本页附件区。\n"
+          if fallbacks:
+              body += "\n### GitHub 备用下载\n\n"
+              for name, url, reason in fallbacks:
+                  body += f"- [{name}]({url})（{reason}）\n"
+          for attempt in range(20):
+              current = request("GET", attach_path) or []
+              present = {item["name"] for item in current}
+              if set(uploaded).issubset(present):
+                  break
+              if attempt < 19:
+                  time.sleep(3)
+          else:
+              sys.exit(f"Gitee did not register the expected attachments: {sorted(set(uploaded) - present)}")
+          payload["body"] = body
+          request("PATCH", f"{releases_path}/{release_id}", data=payload)
+          print(f"Gitee release {tag}: {len(uploaded)} attachments, {len(fallbacks)} GitHub links")
+          if failed:
+              sys.exit(f"{len(failed)} Gitee attachments failed to upload")
+          PY
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf release-assets github-release.json "${RUNNER_TEMP}/gitee-release-venv"
