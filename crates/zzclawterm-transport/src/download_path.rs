@@ -43,6 +43,7 @@ impl FileIdentity {
     pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             let metadata = fs::symlink_metadata(path)?;
             if metadata.file_type().is_symlink() {
                 return Err(io::Error::other("download target is a symbolic link"));
@@ -394,6 +395,7 @@ impl DownloadTemporary {
             options.read(true).write(true).create_new(true);
             #[cfg(unix)]
             {
+                use std::os::unix::fs::OpenOptionsExt as _;
                 options.mode(0o600);
             }
             options.open(&temporary.path)?
