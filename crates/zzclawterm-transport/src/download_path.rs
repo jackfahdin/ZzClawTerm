@@ -694,6 +694,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn new_downloads_use_normal_creation_permissions() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let root =
             std::env::temp_dir().join(format!("zzclawterm-final-mode-{}", zzclawterm_core::uuid()));
         std::fs::create_dir(&root)?;
@@ -791,6 +793,7 @@ mod tests {
         assert_eq!(path.parent(), Some(root.as_path()));
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt as _;
             assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o077, 0);
         }
         assert_eq!(std::fs::read(&path)?, b"prefix");
@@ -883,12 +886,16 @@ mod tests {
         file.write_all(b"new")?;
         drop(file);
         #[cfg(unix)]
-        let inode_before = { std::fs::metadata(&target)?.ino() };
+        let inode_before = {
+            use std::os::unix::fs::MetadataExt as _;
+            std::fs::metadata(&target)?.ino()
+        };
 
         temporary.commit_async(&root, &target).await?;
         assert_eq!(std::fs::read(&target)?, b"new");
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             assert_eq!(std::fs::metadata(&target)?.ino(), inode_before);
         }
         assert!(!temporary_path.exists());
@@ -979,6 +986,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn staged_write_never_follows_a_target_symlink() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
         let root = std::env::temp_dir().join(format!(
             "zzclawterm-atomic-link-{}",
             zzclawterm_core::uuid()

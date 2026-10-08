@@ -1,7 +1,6 @@
 pub mod connection_attempt;
 pub mod download_path;
 pub mod drag_export;
-#[cfg(windows)]
 pub mod network_route;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
