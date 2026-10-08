@@ -1,0 +1,55 @@
+name: Sync to Gitee
+
+on:
+  workflow_run:
+    workflows: ['Rust', 'Docs']
+    types: [completed]
+    branches: [master]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: gitee-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror refs to Gitee
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm Rust and Docs passed for the current master commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 scripts/ci/gitcode_mirror_gate.py master
+          --repo "${GITHUB_REPOSITORY}" --sha "${HEAD_SHA}"
+
+      - name: Push refs to Gitee
+        if: steps.gate.outputs.ready == 'true'
+        shell: bash
+        env:
+          GITEE_OWNER: ${{ vars.GITEE_OWNER }}
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITEE_OWNER:-}" || -z "${GITEE_REPO:-}" || -z "${GITEE_TOKEN:-}" ]]; then
+            echo "::notice::GITEE_OWNER/GITEE_REPO/GITEE_TOKEN not configured; skipping Gitee mirror."
+            exit 0
+          fi
+          remote="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
+          git push "${remote}" "${HEAD_SHA}:refs/heads/master"
