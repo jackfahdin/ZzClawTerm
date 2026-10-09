@@ -19,7 +19,9 @@ jobs:
     name: Mirror refs to Gitee
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 首次推送要携带全部历史（约百 MB 级跨境传输），给足余量；
+    # 后续增量推送几十秒内完成。
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -52,4 +54,5 @@ jobs:
             exit 0
           fi
           remote="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
-          git push "${remote}" "${HEAD_SHA}:refs/heads/master"
+          echo "pushing ${HEAD_SHA} to Gitee master"
+          git push --progress "${remote}" "${HEAD_SHA}:refs/heads/master"
