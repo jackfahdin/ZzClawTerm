@@ -150,7 +150,8 @@ jobs:
               "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git" \
               "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
-          rm -rf "${work}"
+          # git 后台的 commit-graph 写入可能还没收尾，清理失败不应判死整步
+          rm -rf "${work}" 2>/dev/null || true
           echo "synchronized tag ${TAG} to Gitee"
 
       - name: Create or update Gitee release
