@@ -87,7 +87,7 @@ def main() -> int:
             delete_attachments(request, attach_path, ids)
         ok, reason = upload_attachment_with_watchdog(
             requests.Session,
-            attach_path,
+            f"{API}{attach_path}",
             token,
             asset,
         )
