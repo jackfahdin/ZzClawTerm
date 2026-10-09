@@ -10,11 +10,6 @@ on:
         description: Release tag, for example v0.0.1
         required: true
         type: string
-      upload_small_assets:
-        description: Upload assets within the configured GitCode size limit
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   actions: read
@@ -28,14 +23,13 @@ env:
   GITCODE_API_BASE: ${{ vars.GITCODE_API_BASE || 'https://gitcode.com/api/v5' }}
   GITCODE_OWNER: ${{ vars.GITCODE_OWNER }}
   GITCODE_REPO: ${{ vars.GITCODE_REPO }}
-  MAX_GITCODE_ASSET_MB: ${{ vars.MAX_GITCODE_ASSET_MB || '99' }}
 
 jobs:
   publish:
     name: Mirror GitHub release to GitCode
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -110,13 +104,9 @@ jobs:
               configured='false'
             fi
           done
-          if [[ "${configured}" == 'true' && ! "${MAX_GITCODE_ASSET_MB}" =~ ^[0-9]+$ ]]; then
-            echo 'MAX_GITCODE_ASSET_MB must be an integer' >&2
-            exit 1
-          fi
           echo "configured=${configured}" >> "${GITHUB_OUTPUT}"
 
-      - name: Download and verify GitHub assets
+      - name: Fetch GitHub release metadata
         if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
         env:
@@ -124,18 +114,13 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          rm -rf release-assets
-          mkdir release-assets
           for _ in {1..12}; do
-            if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName,name,body,isDraft,isPrerelease,targetCommitish > github-release.json && \
-               gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir release-assets --clobber; then
+            if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName,name,body,isDraft,isPrerelease,targetCommitish,assets > github-release.json; then
               break
             fi
             sleep 10
           done
           [[ "$(jq -r '.isDraft' github-release.json)" == 'false' ]]
-          test -f release-assets/SHA256SUMS
-          (cd release-assets && sha256sum --check SHA256SUMS)
 
       - name: Synchronize the verified tag to GitCode
         if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
@@ -167,14 +152,6 @@ jobs:
           rm -rf "${work}"
           echo "synchronized tag ${TAG} to GitCode"
 
-      - name: Install Python dependencies
-        if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m venv "${RUNNER_TEMP}/gitcode-release-venv"
-          "${RUNNER_TEMP}/gitcode-release-venv/bin/pip" install --disable-pip-version-check 'requests==2.32.5'
-
       - name: Create or update GitCode release
         if: steps.gate.outputs.ready == 'true' && steps.config.outputs.configured == 'true'
         shell: bash
@@ -182,7 +159,6 @@ jobs:
           EXPECTED_SHA: ${{ steps.gate.outputs.sha }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           TAG: ${{ steps.release.outputs.tag }}
-          UPLOAD_SMALL_ASSETS: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_small_assets || github.event_name != 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           current_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}^{}" | awk '{print $1}')"
@@ -191,184 +167,46 @@ jobs:
             echo "tag ${TAG} moved after GitHub CI verification" >&2
             exit 1
           }
-          "${RUNNER_TEMP}/gitcode-release-venv/bin/python" <<'PY'
-          import json
-          import os
-          import pathlib
-          import sys
-          import time
-          import urllib.parse
-
-          import requests
-          from concurrent.futures import ThreadPoolExecutor
-          from scripts.ci.gitcode_release_upload import (
-              replace_asset_with_backup,
-              replace_release_assets,
-              upload_asset,
+          # 附件不再由 CI 上传（人工手动传），release 页面只列出 GitHub 下载链接。
+          api="${GITCODE_API_BASE%/}"
+          tag_q="$(jq -rn --arg v "${TAG}" '$v|@uri')"
+          name="$(jq -r '.name // empty' github-release.json)"
+          [[ -n "${name}" ]] || name="${TAG}"
+          prerelease="$(jq -r '.isPrerelease' github-release.json)"
+          {
+            jq -r '.body // ""' github-release.json
+            printf '\n---\n\n## 下载\n\n安装包请从 GitHub Releases 下载：\n\n'
+            jq -r '.assets[].name' github-release.json | while read -r asset; do
+              asset_q="$(jq -rn --arg v "${asset}" '$v|@uri')"
+              printf -- '- [%s](https://github.com/%s/releases/download/%s/%s)\n' \
+                "${asset}" "${GITHUB_REPOSITORY}" "${tag_q}" "${asset_q}"
+            done
+          } > "${RUNNER_TEMP}/gitcode-release-body.md"
+          args=(
+            --data-urlencode "tag_name=${TAG}"
+            --data-urlencode "name=${name}"
+            --data-urlencode "body@${RUNNER_TEMP}/gitcode-release-body.md"
+            --data-urlencode "prerelease=${prerelease}"
           )
-
-          tag = os.environ["TAG"]
-          owner = os.environ["GITCODE_OWNER"]
-          repo = os.environ["GITCODE_REPO"]
-          api = os.environ["GITCODE_API_BASE"].rstrip("/")
-          token = os.environ["GITCODE_TOKEN"]
-          max_bytes = int(os.environ["MAX_GITCODE_ASSET_MB"]) * 1024 * 1024
-          upload_small = os.environ.get("UPLOAD_SMALL_ASSETS", "true").lower() == "true"
-          github = json.loads(pathlib.Path("github-release.json").read_text(encoding="utf-8"))
-          assets = sorted(pathlib.Path("release-assets").iterdir(), key=lambda path: path.name.lower())
-          session = requests.Session()
-
-          def make_request(session):
-              def request(method, path, *, expected=(200, 201), allow_404=False, **kwargs):
-                  params = kwargs.pop("params", {})
-                  params["access_token"] = token
-                  response = session.request(method, f"{api}{path}", params=params, timeout=300, **kwargs)
-                  if allow_404 and response.status_code == 404:
-                      return None
-                  if response.status_code not in expected:
-                      raise RuntimeError(
-                          f"GitCode API {method} {path}: HTTP {response.status_code}"
-                      )
-                  if method == "DELETE":
-                      return None
-                  return response.json() if response.text.strip() else None
-              return request
-
-          request = make_request(session)
-
-          owner_q = urllib.parse.quote(owner, safe="")
-          repo_q = urllib.parse.quote(repo, safe="")
-          tag_q = urllib.parse.quote(tag, safe="")
-          releases_path = f"/repos/{owner_q}/{repo_q}/releases"
-          # GitCode 的 Release 对象没有数值 id，全部按 tag 寻址（与 Gitee 不同）。
-          release_path = f"{releases_path}/{tag_q}"
-          existing = request("GET", f"{releases_path}/tags/{tag_q}", expected=(200,), allow_404=True)
-          payload = {
-              "tag_name": tag,
-              "name": github.get("name") or tag,
-              "body": (github.get("body") or "") + "\n\n---\n\n正在同步发行版附件。\n",
-              "prerelease": str(bool(github.get("isPrerelease"))).lower(),
-          }
-          if not existing:
-              payload["target_commitish"] = github.get("targetCommitish") or ""
-              request("POST", releases_path, data=payload)
-
-          github_repo = os.environ["GITHUB_REPOSITORY"]
-
-          def github_asset_url(name):
-              return (
-                  f"https://github.com/{github_repo}/releases/download/"
-                  f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(name)}"
-              )
-
-          uploaded = []
-          fallbacks = []
-          failed = []
-          old_assets = {
-              item["name"]: item for item in (existing or {}).get("assets", [])
-              if item.get("type") == "attach"
-          }
-          backup_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gitcode-release-backup"
-
-          def process_asset(asset):
-              if not upload_small or asset.stat().st_size > max_bytes:
-                  return asset.name, "too_big", "附件过大，从 GitHub Releases 下载", False
-              # requests.Session 不是线程安全的，每个 worker 自带一个，互不共享。
-              worker = requests.Session()
-              request = make_request(worker)
-              previous = old_assets.get(asset.name)
-              backup = backup_dir / asset.name if previous else None
-              restored = False
-              if previous:
-                  success, reason, restored = replace_asset_with_backup(
-                      worker, request, release_path, previous, asset, backup,
-                  )
-              else:
-                  success = False
-                  reason = ""
-                  for attempt in range(1, 4):
-                      try:
-                          success, reason = upload_asset(worker, request, release_path, asset)
-                          if success:
-                              for poll in range(20):
-                                  current = request("GET", f"{releases_path}/tags/{tag_q}")
-                                  if any(
-                                      item.get("type") == "attach" and item.get("name") == asset.name
-                                      for item in current.get("assets", [])
-                                  ):
-                                      break
-                                  if poll < 19:
-                                      time.sleep(3)
-                              else:
-                                  success = False
-                                  reason = "GitCode did not register the uploaded attachment"
-                              if success:
-                                  break
-                      except Exception as error:
-                          reason = f"{type(error).__name__} while requesting a GitCode upload URL"
-                      if attempt < 3:
-                          time.sleep(5 * attempt)
-              if success:
-                  return asset.name, "uploaded", "", restored
-              return asset.name, "failed", reason, restored
-
-          # GitCode 按连接限速，单个 60MB 安装包就能吃掉整个 120 分钟 job 超时；
-          # 用少量 worker 并行上传把吞吐抬上来（可由 GITCODE_UPLOAD_WORKERS 覆盖）。
-          max_workers = max(1, int(os.environ.get("GITCODE_UPLOAD_WORKERS", "4")))
-          results = []
-          with ThreadPoolExecutor(max_workers=max_workers) as pool:
-              for result in pool.map(process_asset, assets):
-                  results.append(result)
-          for name, outcome, reason, restored in sorted(results):
-              if outcome == "too_big":
-                  fallbacks.append((name, github_asset_url(name), reason))
-              elif outcome == "uploaded":
-                  print(f"Synchronized GitCode attachment {name}")
-                  uploaded.append(name)
-              else:
-                  if name in old_assets and not restored:
-                      print(f"::error::Could not restore the previous GitCode attachment {name}")
-                  print(f"::warning::GitCode attachment failed for {name}: {reason}")
-                  failed.append(name)
-                  fallbacks.append((name, github_asset_url(name), "GitCode 附件同步失败"))
-
-          if not failed:
-              current = request("GET", f"{releases_path}/tags/{tag_q}")
-              stale = {
-                  item["name"] for item in current.get("assets", [])
-                  if item.get("type") == "attach" and item.get("name") not in uploaded
-              }
-              replace_release_assets(request, release_path, current, names=stale)
-
-          body = (github.get("body") or "").rstrip() + "\n\n---\n\n## 下载\n\n"
-          if uploaded:
-              body += "> 小于 GitCode 限制的安装包已同步到本页附件区。\n"
-          if fallbacks:
-              body += "\n### GitHub 备用下载\n\n"
-              for name, url, reason in fallbacks:
-                  body += f"- [{name}]({url})（{reason}）\n"
-          for attempt in range(20):
-              current = request("GET", f"{releases_path}/tags/{tag_q}")
-              present = {
-                  asset["name"] for asset in current.get("assets", [])
-                  if asset.get("type") == "attach"
-              }
-              if set(uploaded).issubset(present) and (failed or present == set(uploaded)):
-                  break
-              if attempt < 19:
-                  time.sleep(3)
-          else:
-              sys.exit(f"GitCode did not register the expected attachments: {sorted(set(uploaded) - present)}")
-          payload["body"] = body
-          request("PATCH", release_path, data=payload)
-          print(f"GitCode release {tag}: {len(uploaded)} attachments, {len(fallbacks)} GitHub links")
-          if failed:
-              sys.exit(f"{len(failed)} GitCode attachments failed to upload")
-          PY
+          existing_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            "${api}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/releases/tags/${tag_q}?access_token=${GITCODE_TOKEN}")"
+          if [[ "${existing_code}" == '404' ]]; then
+            curl -sfS -X POST "${args[@]}" \
+              --data-urlencode "target_commitish=$(jq -r '.targetCommitish // empty' github-release.json)" \
+              "${api}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/releases?access_token=${GITCODE_TOKEN}" > /dev/null
+            echo "created GitCode release ${TAG}"
+          elif [[ "${existing_code}" == '200' ]]; then
+            curl -sfS -X PATCH "${args[@]}" \
+              "${api}/repos/${GITCODE_OWNER}/${GITCODE_REPO}/releases/${tag_q}?access_token=${GITCODE_TOKEN}" > /dev/null
+            echo "updated GitCode release ${TAG}"
+          else
+            echo "GitCode release lookup failed: HTTP ${existing_code}" >&2
+            exit 1
+          fi
 
       - name: Cleanup
         if: always()
-        run: rm -rf release-assets github-release.json "${RUNNER_TEMP}/gitcode-release-venv" "${RUNNER_TEMP}/gitcode-release-backup"
+        run: rm -f github-release.json "${RUNNER_TEMP}/gitcode-release-body.md"
 
   stable:
     name: Publish GitCode stable update channel
