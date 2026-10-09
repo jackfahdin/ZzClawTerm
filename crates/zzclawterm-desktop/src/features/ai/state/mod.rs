@@ -527,10 +527,10 @@ impl AiFeatureState {
     }
 
     fn restore_archived_session(&mut self, session_id: &str) -> bool {
-        if !self
+        if self
             .archived_sessions
             .get(session_id)
-            .is_some_and(|(scope, _)| scope == &self.active_scope_key)
+            .is_none_or(|(scope, _)| scope != &self.active_scope_key)
         {
             return false;
         }
@@ -1996,11 +1996,11 @@ impl AiFeatureState {
         &mut self,
         marker_id: &str,
     ) -> Option<AiAgentLoopState> {
-        if !self
+        if self
             .agent
             .loop_state
             .as_ref()
-            .is_some_and(|state| state.marker_id.as_deref() == Some(marker_id))
+            .is_none_or(|state| state.marker_id.as_deref() != Some(marker_id))
         {
             return None;
         }
@@ -2011,11 +2011,11 @@ impl AiFeatureState {
         &mut self,
         session_id: &str,
     ) -> Option<AiAgentLoopState> {
-        if !self
+        if self
             .agent
             .loop_state
             .as_ref()
-            .is_some_and(|state| state.terminal_session_id == session_id)
+            .is_none_or(|state| state.terminal_session_id != session_id)
         {
             return None;
         }

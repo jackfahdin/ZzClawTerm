@@ -107,10 +107,10 @@ fn download_attempts(
             attempts.push((url, candidate));
         }
     }
-    if let Some(fallback) = selected.fallback_url.clone() {
-        if !attempts.iter().any(|(url, _)| url == &fallback) {
-            attempts.push((fallback, UpdateRepository::GitHub));
-        }
+    if let Some(fallback) = selected.fallback_url.clone()
+        && !attempts.iter().any(|(url, _)| url == &fallback)
+    {
+        attempts.push((fallback, UpdateRepository::GitHub));
     }
     attempts
 }

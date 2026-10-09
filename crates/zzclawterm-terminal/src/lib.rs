@@ -2097,9 +2097,9 @@ fn snapshot_window_from_term(
         let shell_input = line_state.shell_input_kind(line_id.map(|id| id.logical_line));
         let shell_input_columns = shell_input.and_then(|kind| {
             if kind == ShellInputLineKind::Active
-                && !active_input_highlight_end
+                && active_input_highlight_end
                     .zip(line_id)
-                    .is_some_and(|(end, id)| id.logical_line <= end)
+                    .is_none_or(|(end, id)| id.logical_line > end)
             {
                 return None;
             }

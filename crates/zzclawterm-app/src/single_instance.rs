@@ -182,6 +182,16 @@ fn handle_connection(mut stream: TcpStream, auth_token: [u8; 16], activation_tx:
         let _ = stream.write_all(&ack);
         let _ = stream.flush();
     }
+    // Close gracefully: dropping a socket that still holds unread inbound data
+    // sends RST to the peer (ECONNRESET on macOS), which can swallow the ACK we
+    // just wrote. Signal our end first, then briefly drain whatever the peer
+    // still had in flight before the socket is dropped.
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut drain = Vec::new();
+    let _ = (&mut stream)
+        .take((MAX_ACTIVATION_FRAME_BYTES + 1) as u64)
+        .read_to_end(&mut drain);
 }
 
 #[derive(Clone, Copy)]
