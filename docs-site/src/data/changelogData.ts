@@ -10,6 +10,30 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.1.3] - 2026-10-09',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**update:** New Gitee update source; automatic mode checks and downloads in Gitee → GitCode → GitHub order.',
+          '**sync:** Sync upstream NyaTerm (15 commits): quick command category drag-and-drop with the "all" category as drop target, terminal rendering performance (glyph support, styled-span rendering rework), held `*`/`**` flush after 50ms output idle, session text scrollback limit, whitespace preservation for connection passwords, cloud sync snapshot secret decryption rework, restored v1 icon palette and server glyph, non-ASCII font family name rendering fixes, and more.',
+        ],
+      },
+      {
+        title: 'Changed',
+        items: [
+          '**ci:** GitCode/Gitee release attachments are no longer uploaded by CI (unstable cross-border path); only code and tags are mirrored. Attachments are mirrored from a domestic network with `scripts/release/mirror_gitee.py`.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**app:** Close single-instance activation connections gracefully after answering so the peer (notably on macOS) reliably receives the ACK.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.1.2] - 2026-10-08',
     sections: [
       {
@@ -44,6 +68,30 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.1.3] - 2026-10-09',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**update:** 新增 Gitee 更新来源，自动模式按 Gitee → GitCode → GitHub 顺序检查更新与下载安装包。',
+          '**sync:** 同步上游 NyaTerm（15 个提交）：快捷命令分类拖拽与「全部」分类落点、终端渲染性能优化（glyph 支持、样式 span 渲染重构）、终端输出 `*`/`**` 空闲 50ms 自动补写、会话文本滚动缓冲限制、连接密码保存/读取保留空白字符、云同步快照密钥解密重构、v1 图标调色板与服务器图标恢复、非 ASCII 字体名渲染修复等。',
+        ],
+      },
+      {
+        title: '变更',
+        items: [
+          '**ci:** 取消 GitCode/Gitee 的 CI 大附件上传（跨境链路不稳定），仅保留代码与 tag 同步；Release 附件改由本机脚本 `scripts/release/mirror_gitee.py` 在国内网络镜像。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**app:** 单实例激活连接在应答后优雅关闭，避免对端（尤其是 macOS）偶发收不到 ACK。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.1.2] - 2026-10-08',
     sections: [
