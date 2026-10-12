@@ -1411,6 +1411,34 @@ fn apply_connection_editor_paths_update_field_and_clear_error() {
 }
 
 #[test]
+fn connection_editor_password_can_be_revealed_and_is_masked_again_when_reopened() {
+    let mut cx = TestAppContext::single();
+    let app = cache_test_app(&mut cx);
+    cx.update_entity(&app, |app, cx| {
+        let draft = connection_editor_state_with_secret_draft();
+        app.connection_state.begin_editor(draft.clone());
+        app.connection_state.build_editor_fields(cx);
+        let field = app.connection_state.editor_fields()[&ConnectionEditorField::Password].clone();
+        assert!(field.read(cx).is_masked());
+        assert_eq!(field.read(cx).value(cx), draft.password.expose_secret());
+
+        app.toggle_connection_editor_password_visibility(cx);
+        assert!(!field.read(cx).is_masked());
+        assert_eq!(field.read(cx).value(cx), draft.password.expose_secret());
+        app.toggle_connection_editor_password_visibility(cx);
+        assert!(field.read(cx).is_masked());
+        app.toggle_connection_editor_password_visibility(cx);
+
+        app.close_connection_editor(cx);
+        app.connection_state.begin_editor(draft.clone());
+        app.connection_state.build_editor_fields(cx);
+        let reopened = &app.connection_state.editor_fields()[&ConnectionEditorField::Password];
+        assert!(reopened.read(cx).is_masked());
+        assert_eq!(reopened.read(cx).value(cx), draft.password.expose_secret());
+    });
+}
+
+#[test]
 fn connection_path_pickers_update_existing_inputs_and_preserve_them_on_cancel() {
     let mut cx = TestAppContext::single();
     let app = cache_test_app(&mut cx);

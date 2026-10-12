@@ -66,8 +66,8 @@ impl IconDef {
         }
     }
 
-    /// Tint for a monochrome icon, lifted so it stays legible on the current
-    /// surface. Full-color icons return `None` — they are painted as authored.
+    /// Tint for a monochrome icon, lifted off dark surfaces when needed.
+    /// Full-color icons return `None` — they are painted as authored.
     ///
     /// Several published brand colors are near-black (`rust` is literally
     /// `#000000`, `github` `#181717`), which disappears on a dark surface. The old
@@ -111,8 +111,13 @@ fn blend(from: u32, to: u32, amount: f32) -> u32 {
 const MIN_CONTRAST_RATIO: f32 = 1.6;
 
 fn legible_on(color: u32, palette: ThemePalette) -> u32 {
-    let icon = relative_luminance(color);
     let surface = relative_luminance(palette.surface);
+    // Only lift colors on dark themes. Blending bright icons toward dark text
+    // on light themes turns the Tauri folder yellow into an olive brown.
+    if relative_luminance(palette.text) <= surface {
+        return color;
+    }
+    let icon = relative_luminance(color);
     let (lighter, darker) = if icon > surface {
         (icon, surface)
     } else {
@@ -129,7 +134,10 @@ fn legible_on(color: u32, palette: ThemePalette) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IconDef, ThemePalette, legible_on, relative_luminance};
+    use super::{
+        IconDef, ThemePalette, file_entry_icon, legible_on, relative_luminance,
+        resolve_connection_icon,
+    };
 
     fn dark() -> ThemePalette {
         crate::theme::theme_palette("github-dark")
@@ -153,6 +161,30 @@ mod tests {
                 color,
                 "{color:#08x} reads fine and must keep its published value"
             );
+        }
+    }
+
+    #[test]
+    fn light_themes_preserve_tauri_folder_and_brand_colors() {
+        for theme in [
+            "nya-high-contrast-white",
+            "solarized-light",
+            "github-light",
+            "catppuccin-latte",
+            "rose-pine-dawn",
+            "nord-light",
+            "one-light",
+        ] {
+            let palette = crate::theme::theme_palette(theme);
+            for def in [
+                file_entry_icon("directory", true, false, palette),
+                resolve_connection_icon(Some("folder"), "SSH"),
+            ] {
+                assert_eq!(def.tint(palette), Some(0xfbbf24), "{theme} folder");
+            }
+            for color in [0x000000, 0x181717, 0xfcc624, 0x67e8f9] {
+                assert_eq!(legible_on(color, palette), color, "{theme} {color:#08x}");
+            }
         }
     }
 

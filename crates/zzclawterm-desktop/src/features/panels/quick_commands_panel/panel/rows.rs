@@ -441,7 +441,21 @@ impl ZzClawTermApp {
                     )
                     .on_drag_move(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<QuickCommandDragPayload>, _, cx| {
-                            let _ = event.drag(cx);
+                            let payload = event.drag(cx);
+                            if payload.kind != QuickCommandDragKind::Command
+                                || payload.id == move_target_id
+                                || !event.bounds.contains(&event.event.position)
+                            {
+                                if this
+                                    .commands
+                                    .quick_drop_target()
+                                    .is_some_and(|target| target.id == move_target_id)
+                                {
+                                    this.commands.clear_quick_drop_target();
+                                    cx.notify();
+                                }
+                                return;
+                            }
                             let after = event.event.position.y
                                 >= event.bounds.origin.y + event.bounds.size.height / 2.;
                             if this.commands.set_quick_drop_target(QuickCommandDropTarget {
@@ -452,6 +466,7 @@ impl ZzClawTermApp {
                                     QuickCommandDropPosition::Before
                                 },
                             }) {
+                                this.ensure_drop_hover_clock(cx);
                                 cx.notify();
                             }
                         },

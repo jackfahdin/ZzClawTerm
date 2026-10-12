@@ -9,17 +9,19 @@ use zzclawterm_terminal::{ShellInputLineKind, TerminalScreen, TerminalSnapshot};
 use super::{
     TERMINAL_LAYOUT_CACHE_ROW_CAP, TERMINAL_LAYOUT_CACHE_ROW_ORDER_MIN_COMPACT,
     TerminalGridSelection, TerminalKeywordLayoutState, TerminalLineDecorations,
-    TerminalRowBackgroundRange, TerminalRowUnderlineRange, ZzClawTerminalElement,
-    ZzClawTerminalLayoutCache, append_padded_wide_cells, hash_styled_spans, pad_wide_cells,
+    TerminalRowBackgroundRange, TerminalRowDecorationRange, TerminalRowTextDecorations,
+    ZzClawTerminalElement, ZzClawTerminalLayoutCache, append_padded_wide_cells,
+    append_terminal_glyph_span, hash_styled_spans, pad_wide_cells,
     push_dynamic_decoration_backgrounds, push_dynamic_link_underlines,
     push_dynamic_selection_background, push_terminal_zebra_stripes,
-    terminal_background_ranges_for_spans, terminal_cursor_cell_hidden,
-    terminal_glyph_decorations_needed, terminal_layout_height_px, terminal_layout_prefetch_row,
-    terminal_link_underline_color, terminal_plain_row_fast_path, terminal_row_layout_key,
-    terminal_selection_cols_for_snapshot_row, terminal_text_run_for_span,
+    terminal_background_ranges_for_cells, terminal_background_ranges_for_spans,
+    terminal_cursor_cell_hidden, terminal_glyph_decorations_needed, terminal_layout_height_px,
+    terminal_layout_prefetch_row, terminal_link_underline_color, terminal_plain_row_fast_path,
+    terminal_row_layout_key, terminal_selection_cols_for_snapshot_row, terminal_text_run_for_span,
     terminal_underline_bounds, terminal_underline_ranges_for_spans,
     terminal_visible_rows_for_bounds, terminal_visible_rows_for_clipped_bounds,
 };
+use crate::glyphs::CellGlyph;
 use crate::keywords::{
     TerminalKeywordHighlightLookup, compile_terminal_keyword_highlighter,
     precompute_terminal_keyword_highlights, terminal_keyword_row_reuse_keys,
@@ -77,6 +79,118 @@ fn append_padded_wide_cells_matches_allocating_padding() {
 
     assert_eq!(&output[before..], expected);
     assert_eq!(added, expected.len());
+}
+
+#[test]
+fn trimmed_row_decorations_retain_ansi_tail_and_highlight_colors() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(24, 2);
+    screen.advance(b"\x1b[4;9mTEXT\x1b[31m        \x1b[0m");
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    assert_eq!(row.text, "TEXT");
+    let mut spans = terminal_highlight_spans_with_keyword_ranges(
+        &row.text,
+        Some(&row.styled_spans),
+        None,
+        &[],
+        palette,
+    );
+    spans[0].color = Some(0x123456);
+    let decorations =
+        super::terminal_text_decorations_for_row(&spans, Some(&row.cells), palette, false);
+    let expected = vec![(0x123456, 0, 4), (palette.terminal_ansi_color(1), 4, 12)];
+    assert_eq!(
+        underline_ranges_as_tuples(&decorations.underlines),
+        expected
+    );
+    assert_eq!(
+        underline_ranges_as_tuples(&decorations.strikethroughs),
+        expected
+    );
+}
+
+#[test]
+fn struck_cell_graphics_cache_decorations_outside_shaped_text() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(16, 2);
+    screen.advance("\x1b[9m█▀──\x1b[0m".as_bytes());
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    let spans = terminal_highlight_spans_with_keyword_ranges(
+        &row.text,
+        Some(&row.styled_spans),
+        None,
+        &[],
+        palette,
+    );
+    let decorations =
+        super::terminal_text_decorations_for_row(&spans, Some(&row.cells), palette, false);
+    assert_eq!(
+        underline_ranges_as_tuples(&decorations.strikethroughs),
+        vec![(palette.terminal_fg, 0, 4)]
+    );
+    let mut text = String::new();
+    let mut glyphs = Vec::new();
+    let mut col = 0;
+    for span in &spans {
+        let len = append_terminal_glyph_span(
+            &mut text,
+            span,
+            &mut col,
+            &mut glyphs,
+            Some(&row.cells),
+            palette.terminal_fg,
+        );
+        let run = terminal_text_run_for_span(span, len, font("Consolas"), 400., 700., palette);
+        assert!(run.strikethrough.is_none());
+    }
+    assert_eq!(text, "    ");
+    assert_eq!(glyphs.len(), 4);
+}
+
+#[test]
+fn cell_graphics_with_attached_marks_preserve_font_base_and_cursor() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(24, 2);
+    screen.advance("█\u{301}▀\u{fe0f}─中X█".as_bytes());
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    let mut span = highlight_span(&row.text, Some(0x123456), None, false);
+    let mut text = String::new();
+    let mut glyphs = Vec::new();
+    let mut col = 0;
+    append_terminal_glyph_span(
+        &mut text,
+        &span,
+        &mut col,
+        &mut glyphs,
+        Some(&row.cells),
+        palette.terminal_fg,
+    );
+    assert_eq!(text, "█\u{301}▀\u{fe0f} 中 X ");
+    assert_eq!(
+        glyphs.iter().map(|glyph| glyph.col).collect::<Vec<_>>(),
+        vec![2, 6]
+    );
+    assert_eq!(col, 7);
+    assert_eq!(super::cursor_cell_glyph("█"), Some('█'));
+    assert_eq!(super::cursor_cell_glyph("█\u{301}"), None);
+    // A span split before the combining mark must still preserve the base.
+    text.clear();
+    glyphs.clear();
+    col = 0;
+    span.text = "█".into();
+    append_terminal_glyph_span(
+        &mut text,
+        &span,
+        &mut col,
+        &mut glyphs,
+        Some(&row.cells),
+        palette.terminal_fg,
+    );
+    assert_eq!(text, "█");
+    assert!(glyphs.is_empty());
 }
 
 #[test]
@@ -152,7 +266,7 @@ fn underline_ranges_from_flatten_reference(
     out
 }
 
-fn underline_ranges_as_tuples(ranges: &[TerminalRowUnderlineRange]) -> Vec<(u32, usize, usize)> {
+fn underline_ranges_as_tuples(ranges: &[TerminalRowDecorationRange]) -> Vec<(u32, usize, usize)> {
     ranges
         .iter()
         .map(|range| (range.color, range.start, range.end))
@@ -289,6 +403,7 @@ fn row_cache_evicts_incrementally_when_full() {
                 std::time::Duration::ZERO,
                 1,
                 Vec::new(),
+                TerminalRowTextDecorations::default(),
                 Vec::new(),
             )
         });
@@ -524,6 +639,7 @@ fn zebra_state_does_not_invalidate_row_shaping() {
             std::time::Duration::ZERO,
             1,
             Vec::new(),
+            TerminalRowTextDecorations::default(),
             Vec::new(),
         )
     });
@@ -626,10 +742,22 @@ fn paint_row_cache_reuses_full_row_payload() {
                 start: 2,
                 end: 4,
             }],
-            vec![TerminalRowUnderlineRange {
-                color: 0x00ffff,
-                start: 1,
-                end: 3,
+            TerminalRowTextDecorations {
+                underlines: vec![TerminalRowDecorationRange {
+                    color: 0x00ffff,
+                    start: 1,
+                    end: 3,
+                }],
+                strikethroughs: vec![TerminalRowDecorationRange {
+                    color: 0xabcdef,
+                    start: 2,
+                    end: 3,
+                }],
+            },
+            vec![CellGlyph {
+                col: 2,
+                ch: '█',
+                color: 0xabcdef,
             }],
         )
     });
@@ -639,7 +767,7 @@ fn paint_row_cache_reuses_full_row_payload() {
     assert_eq!(build_calls, 1);
     assert_eq!(row.text_run_count, 3);
     assert_eq!(row.background_ranges.len(), 1);
-    assert_eq!(row.underline_ranges.len(), 1);
+    assert_eq!(row.text_decorations.underlines.len(), 1);
 
     let (cached, did_shape, duration) = cache.paint_row(0, 42, || {
         panic!("cached row should not rebuild");
@@ -652,9 +780,98 @@ fn paint_row_cache_reuses_full_row_payload() {
     assert_eq!(cached.background_ranges[0].bg, 0xff00ff);
     assert_eq!(cached.background_ranges[0].start, 2);
     assert_eq!(cached.background_ranges[0].end, 4);
-    assert_eq!(cached.underline_ranges[0].color, 0x00ffff);
-    assert_eq!(cached.underline_ranges[0].start, 1);
-    assert_eq!(cached.underline_ranges[0].end, 3);
+    assert_eq!(cached.text_decorations.underlines[0].color, 0x00ffff);
+    assert_eq!(cached.text_decorations.underlines[0].start, 1);
+    assert_eq!(cached.text_decorations.underlines[0].end, 3);
+    assert_eq!(
+        underline_ranges_as_tuples(&cached.text_decorations.strikethroughs),
+        vec![(0xabcdef, 2, 3)]
+    );
+    assert_eq!(
+        cached.cell_glyphs,
+        vec![CellGlyph {
+            col: 2,
+            ch: '█',
+            color: 0xabcdef
+        }]
+    );
+}
+
+#[test]
+fn cell_backgrounds_cover_trailing_blanks_wide_spacers_and_reverse_video() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(24, 3);
+    screen.advance("\x1b[41m中TEXT\x1b[44m        \x1b[0m\r\n\x1b[7m    \x1b[0m".as_bytes());
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    assert_eq!(row.text, "中TEXT");
+    let ranges = terminal_background_ranges_for_cells(&row.cells, palette);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!((ranges[0].start, ranges[0].end), (0, 6));
+    assert_eq!((ranges[1].start, ranges[1].end), (6, 14));
+    assert_eq!(ranges[1].bg, palette.terminal_ansi_color(4));
+    let ranges = terminal_background_ranges_for_cells(&snapshot.row(1).unwrap().cells, palette);
+    assert_eq!(
+        (ranges[0].start, ranges[0].end, ranges[0].bg),
+        (0, 4, palette.terminal_fg)
+    );
+}
+
+#[test]
+fn custom_glyphs_preserve_columns_after_wide_text_and_combining_marks() {
+    let mut span = highlight_span("中e\u{301}█▀A", Some(0x123456), None, false);
+    span.bold = true;
+    span.italic = true;
+    let mut text = String::new();
+    let mut col = 0;
+    let mut glyphs = Vec::new();
+    let len = append_terminal_glyph_span(&mut text, &span, &mut col, &mut glyphs, None, 0);
+    assert_eq!(text, "中 e\u{301}  A");
+    assert_eq!(len, text.len());
+    assert_eq!(col, 6);
+    assert_eq!(
+        glyphs,
+        vec![
+            CellGlyph {
+                col: 3,
+                ch: '█',
+                color: 0x123456
+            },
+            CellGlyph {
+                col: 4,
+                ch: '▀',
+                color: 0x123456
+            }
+        ]
+    );
+}
+
+#[test]
+fn hidden_custom_glyphs_do_not_paint_over_selection() {
+    let mut screen = TerminalScreen::new(8, 2);
+    screen.advance("\x1b[8m█\x1b[0m▀".as_bytes());
+    let snapshot = screen.snapshot();
+    let mut text = String::new();
+    let mut col = 0;
+    let mut glyphs = Vec::new();
+    let span = highlight_span("█▀", Some(0x123456), None, false);
+    append_terminal_glyph_span(
+        &mut text,
+        &span,
+        &mut col,
+        &mut glyphs,
+        Some(&snapshot.row(0).unwrap().cells),
+        0,
+    );
+    assert_eq!(text, "  ");
+    assert_eq!(
+        glyphs,
+        vec![CellGlyph {
+            col: 1,
+            ch: '▀',
+            color: 0x123456
+        }]
+    );
 }
 
 #[test]
@@ -667,6 +884,7 @@ fn paint_row_cache_promotes_equivalent_keyword_result() {
             std::time::Duration::ZERO,
             1,
             Vec::new(),
+            TerminalRowTextDecorations::default(),
             Vec::new(),
         )
     });
@@ -694,6 +912,7 @@ fn paint_row_cache_promotion_does_not_accumulate_stale_order_keys() {
             std::time::Duration::ZERO,
             1,
             Vec::new(),
+            TerminalRowTextDecorations::default(),
             Vec::new(),
         )
     });
@@ -768,6 +987,7 @@ fn cached_keyword_rows_reuse_without_surface_background() {
             std::time::Duration::ZERO,
             1,
             background_ranges,
+            TerminalRowTextDecorations::default(),
             Vec::new(),
         )
     });

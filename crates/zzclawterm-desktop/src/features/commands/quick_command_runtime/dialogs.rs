@@ -400,6 +400,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
+        self.reset_text_input("quick-command.category-rename", &category.name, cx);
         self.commands
             .request_quick_category_rename(QuickCommandCategoryRenameState {
                 id: category.id,
@@ -429,6 +430,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.commands.clear_quick_category_rename();
+        self.forget_text_inputs("quick-command.category-rename");
         self.shell
             .set_status("quick command category rename cancelled".to_string());
         cx.notify();
@@ -464,6 +466,10 @@ impl ZzClawTermApp {
 
         let request_rename = rename.clone();
         let request_name = name.clone();
+        // The form closes as soon as the request is accepted. Retire its input
+        // now; a late store response must not clear a newly opened rename form.
+        self.commands.clear_quick_category_rename();
+        self.forget_text_inputs("quick-command.category-rename");
         self.submit_store_request(
             0,
             zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
@@ -495,7 +501,6 @@ impl ZzClawTermApp {
                     Ok((config, renamed, duplicated)) => {
                         this.replace_quick_command_catalog(config.commands, config.categories, cx);
                         if renamed {
-                            this.commands.clear_quick_category_rename();
                             this.settings.update_store_status(
                                 format!(
                                     "quick command category '{}' renamed to '{}'",
@@ -509,14 +514,10 @@ impl ZzClawTermApp {
                             } else {
                                 t!("quickCommands.categoryUnavailable").to_string()
                             };
-                            this.commands
-                                .set_quick_category_rename_error(message.clone());
                             this.settings.update_store_status(message, false);
                         }
                     }
                     Err(error) => {
-                        this.commands
-                            .set_quick_category_rename_error(error.to_string());
                         this.settings.update_store_status(
                             format!("quick command category rename failed: {error}"),
                             false,

@@ -14,12 +14,15 @@ use zzclawterm_terminal::{
     terminal_char_cell_width, terminal_is_zero_width_mark,
 };
 
+use crate::glyphs::{
+    CellGlyph, CellGlyphPaintPlan, is_cell_glyph, push_cell_background, push_cell_glyphs,
+};
 use crate::keywords::{
     TerminalKeywordHighlightLookup, TerminalKeywordHighlightSnapshot, TerminalKeywordRowReuseKey,
     terminal_keyword_row_reuse_key, terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
 };
 use crate::paint::{
-    apply_search_ranges, flush_bg, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
+    apply_search_ranges, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
     terminal_highlight_spans_compiled, terminal_highlight_spans_with_keyword_ranges_and_options,
     terminal_keyword_exclusion_ranges, terminal_run_font,
 };
@@ -127,8 +130,9 @@ impl TerminalGridSelection {
 struct CachedTerminalPaintRow {
     line: Arc<ShapedLine>,
     background_ranges: Vec<TerminalRowBackgroundRange>,
-    underline_ranges: Vec<TerminalRowUnderlineRange>,
+    text_decorations: TerminalRowTextDecorations,
     text_run_count: usize,
+    cell_glyphs: Vec<CellGlyph>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,10 +143,16 @@ struct TerminalRowBackgroundRange {
 }
 
 #[derive(Debug, Clone)]
-struct TerminalRowUnderlineRange {
+struct TerminalRowDecorationRange {
     color: u32,
     start: usize,
     end: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TerminalRowTextDecorations {
+    underlines: Vec<TerminalRowDecorationRange>,
+    strikethroughs: Vec<TerminalRowDecorationRange>,
 }
 
 #[cfg(test)]
@@ -247,7 +257,14 @@ impl ZzClawTerminalLayoutCache {
     ) -> (Arc<ShapedLine>, bool, std::time::Duration) {
         let (row, did_shape, duration) = self.paint_row(_row, key, || {
             let (line, duration) = shape();
-            (line, duration, 0, Vec::new(), Vec::new())
+            (
+                line,
+                duration,
+                0,
+                Vec::new(),
+                TerminalRowTextDecorations::default(),
+                Vec::new(),
+            )
         });
         (Arc::clone(&row.line), did_shape, duration)
     }
@@ -262,7 +279,8 @@ impl ZzClawTerminalLayoutCache {
             std::time::Duration,
             usize,
             Vec<TerminalRowBackgroundRange>,
-            Vec<TerminalRowUnderlineRange>,
+            TerminalRowTextDecorations,
+            Vec<CellGlyph>,
         ),
     ) -> (Arc<CachedTerminalPaintRow>, bool, std::time::Duration) {
         self.paint_row_reusing(_row, key, None, build)
@@ -279,7 +297,8 @@ impl ZzClawTerminalLayoutCache {
             std::time::Duration,
             usize,
             Vec<TerminalRowBackgroundRange>,
-            Vec<TerminalRowUnderlineRange>,
+            TerminalRowTextDecorations,
+            Vec<CellGlyph>,
         ),
     ) -> (Arc<CachedTerminalPaintRow>, bool, std::time::Duration) {
         if let Some(cached) = self.rows.get(&key) {
@@ -299,7 +318,8 @@ impl ZzClawTerminalLayoutCache {
         if self.rows.len() >= TERMINAL_LAYOUT_CACHE_ROW_CAP {
             self.evict_oldest_row();
         }
-        let (line, duration, text_run_count, background_ranges, underline_ranges) = build();
+        let (line, duration, text_run_count, background_ranges, text_decorations, cell_glyphs) =
+            build();
         self.shape_calls = self.shape_calls.saturating_add(1);
         self.shape_duration_us = self
             .shape_duration_us
@@ -307,8 +327,9 @@ impl ZzClawTerminalLayoutCache {
         let row = Arc::new(CachedTerminalPaintRow {
             line: Arc::clone(&line),
             background_ranges,
-            underline_ranges,
+            text_decorations,
             text_run_count,
+            cell_glyphs,
         });
         self.rows.insert(key, Arc::clone(&row));
         self.row_order.push_back(key);
@@ -405,11 +426,19 @@ pub struct ZzClawTerminalElement {
     fill_height: bool,
     zebra_stripes_enabled: bool,
     target_line: Option<TerminalLineId>,
+    #[cfg(feature = "renderer-bench")]
+    cell_glyph_rendering: bool,
 }
 
 struct TerminalPaintRow {
     y: Pixels,
     line: Arc<ShapedLine>,
+}
+
+struct TerminalStrikethroughPaint {
+    origin: gpui::Point<Pixels>,
+    width: Pixels,
+    color: u32,
 }
 
 pub struct TerminalImagePaint {
@@ -437,14 +466,17 @@ pub struct ZzClawTerminalPaintPlan {
     /// Active-search gutter marks (under glyphs).
     active_markers: Vec<PaintQuad>,
     rows: Vec<TerminalPaintRow>,
+    cell_glyphs: CellGlyphPaintPlan,
     /// Terminal underline decorations painted with current scroll geometry.
     underlines: Vec<PaintQuad>,
+    strikethroughs: Vec<TerminalStrikethroughPaint>,
     /// Decoded graphics with Kitty z>0, painted above terminal text.
     images_above: Vec<TerminalImagePaint>,
     /// Accent placeholders for undecodable above-text images.
     placeholders_above: Vec<PaintQuad>,
     cursor_background: Option<PaintQuad>,
     cursor_glyph: Option<TerminalCursorGlyphPaint>,
+    cursor_cell_glyphs: CellGlyphPaintPlan,
     shape_line_count: usize,
     shape_line_duration: std::time::Duration,
     prefetched_row_count: usize,
@@ -490,12 +522,32 @@ impl ZzClawTerminalElement {
             fill_height: false,
             zebra_stripes_enabled: false,
             target_line: None,
+            #[cfg(feature = "renderer-bench")]
+            cell_glyph_rendering: true,
         }
     }
 
     pub fn with_layout_cache(mut self, cache: Arc<Mutex<ZzClawTerminalLayoutCache>>) -> Self {
         self.layout_cache = Some(cache);
         self
+    }
+
+    /// Diagnostic control for comparing font glyphs with the cell graphics layer.
+    #[cfg(feature = "renderer-bench")]
+    pub fn with_cell_glyph_rendering(mut self, enabled: bool) -> Self {
+        self.cell_glyph_rendering = enabled;
+        self
+    }
+
+    fn cell_glyph_rendering_enabled(&self) -> bool {
+        #[cfg(feature = "renderer-bench")]
+        {
+            self.cell_glyph_rendering
+        }
+        #[cfg(not(feature = "renderer-bench"))]
+        {
+            true
+        }
     }
 
     pub fn with_bold_default_foreground(mut self, enabled: bool) -> Self {
@@ -630,6 +682,8 @@ impl ZzClawTerminalElement {
         self.bold_weight.to_bits().hash(&mut hasher);
         self.bold_default_foreground.hash(&mut hasher);
         self.cell_width.max(1.0).to_bits().hash(&mut hasher);
+        #[cfg(feature = "renderer-bench")]
+        self.cell_glyph_rendering.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -856,6 +910,63 @@ fn append_padded_wide_cells(output: &mut String, input: &str) -> usize {
     output.len().saturating_sub(start_len)
 }
 
+fn append_terminal_glyph_span(
+    output: &mut String,
+    span: &TerminalHighlightSpan,
+    col: &mut usize,
+    glyphs: &mut Vec<CellGlyph>,
+    cells: Option<&[zzclawterm_terminal::RenderCell]>,
+    default_fg: u32,
+) -> usize {
+    if !span.text.chars().any(is_cell_glyph) {
+        *col += terminal_cell_count(&span.text);
+        return append_padded_wide_cells(output, &span.text);
+    }
+    let start = output.len();
+    let mut chars = span.text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // Keep the original base glyph for attached marks, even if highlighting
+        // splits the mark into another span. Shaping a space changes its anchor.
+        let has_attached_mark = is_cell_glyph(ch)
+            && (chars
+                .peek()
+                .is_some_and(|ch| terminal_is_zero_width_mark(*ch))
+                || cells.and_then(|cells| cells.get(*col)).is_some_and(|cell| {
+                    cell.text.chars().skip(1).any(terminal_is_zero_width_mark)
+                }));
+        if is_cell_glyph(ch) && !has_attached_mark {
+            if !cells
+                .and_then(|cells| cells.get(*col))
+                .is_some_and(|cell| cell.style.hidden)
+            {
+                glyphs.push(CellGlyph {
+                    col: *col,
+                    ch,
+                    color: span.color.unwrap_or(default_fg),
+                });
+            }
+            output.push(' ');
+        } else {
+            output.push(ch);
+        }
+        if terminal_is_zero_width_mark(ch) {
+            continue;
+        }
+        let width = terminal_char_cell_width(ch);
+        for _ in 1..width {
+            output.push(' ');
+        }
+        *col += width;
+    }
+    output.len() - start
+}
+
+fn cursor_cell_glyph(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    (is_cell_glyph(ch) && chars.next().is_none()).then_some(ch)
+}
+
 fn terminal_text_run_for_span(
     span: &TerminalHighlightSpan,
     len: usize,
@@ -880,14 +991,8 @@ fn terminal_text_run_for_span(
             .into(),
         background_color: None,
         underline: None,
-        strikethrough: span.strikeout.then(|| {
-            line_strike_color(
-                span.color
-                    .map(rgb)
-                    .unwrap_or_else(|| rgb(palette.terminal_fg))
-                    .into(),
-            )
-        }),
+        // Cell graphics must be below decorations, so strikes paint separately.
+        strikethrough: None,
     }
 }
 
@@ -954,42 +1059,101 @@ fn terminal_background_ranges_for_spans(
     out
 }
 
+fn terminal_background_ranges_for_cells(
+    cells: &[zzclawterm_terminal::RenderCell],
+    palette: zzclawterm_ui::ThemePalette,
+) -> Vec<TerminalRowBackgroundRange> {
+    let mut out: Vec<TerminalRowBackgroundRange> = Vec::new();
+    // Include spacer cells and trailing blanks: text length is not a paint boundary.
+    for (col, cell) in cells.iter().enumerate() {
+        let Some(bg) = crate::resolve_cell_bg(palette, cell.style) else {
+            continue;
+        };
+        if let Some(last) = out
+            .last_mut()
+            .filter(|last| last.bg == bg && last.end == col)
+        {
+            last.end = col + 1;
+        } else {
+            out.push(TerminalRowBackgroundRange {
+                bg,
+                start: col,
+                end: col + 1,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn terminal_underline_ranges_for_spans(
     spans: &[TerminalHighlightSpan],
     palette: zzclawterm_ui::ThemePalette,
-) -> Vec<TerminalRowUnderlineRange> {
-    let mut out = Vec::new();
-    let mut pending: Option<TerminalRowUnderlineRange> = None;
+) -> Vec<TerminalRowDecorationRange> {
+    terminal_text_decorations_for_row(spans, None, palette, false).underlines
+}
+
+fn append_terminal_decoration_range(
+    out: &mut Vec<TerminalRowDecorationRange>,
+    color: u32,
+    start: usize,
+    end: usize,
+) {
+    if end <= start {
+        return;
+    }
+    if let Some(last) = out
+        .last_mut()
+        .filter(|last| last.color == color && last.end == start)
+    {
+        last.end = end;
+    } else {
+        out.push(TerminalRowDecorationRange { color, start, end });
+    }
+}
+
+fn terminal_text_decorations_for_row(
+    spans: &[TerminalHighlightSpan],
+    cells: Option<&[zzclawterm_terminal::RenderCell]>,
+    palette: zzclawterm_ui::ThemePalette,
+    bold_default_foreground: bool,
+) -> TerminalRowTextDecorations {
+    let mut out = TerminalRowTextDecorations::default();
     let mut col = 0usize;
     for span in spans {
         let span_cols = terminal_cell_count(&span.text);
-        if span_cols == 0 {
-            continue;
-        }
         if span.underline {
-            let color = span.color.unwrap_or(palette.accent);
-            match pending.as_mut() {
-                Some(current) if current.color == color && current.end == col => {
-                    current.end = col + span_cols;
-                }
-                _ => {
-                    if let Some(range) = pending.take() {
-                        out.push(range);
-                    }
-                    pending = Some(TerminalRowUnderlineRange {
-                        color,
-                        start: col,
-                        end: col + span_cols,
-                    });
-                }
-            }
-        } else if let Some(range) = pending.take() {
-            out.push(range);
+            append_terminal_decoration_range(
+                &mut out.underlines,
+                span.color.unwrap_or(palette.accent),
+                col,
+                col + span_cols,
+            );
+        }
+        if span.strikeout {
+            append_terminal_decoration_range(
+                &mut out.strikethroughs,
+                span.color.unwrap_or(palette.terminal_fg),
+                col,
+                col + span_cols,
+            );
         }
         col += span_cols;
     }
-    if let Some(range) = pending.take() {
-        out.push(range);
+    // Highlight/search colors apply within shaped text. Full cells remain the
+    // authority for decorated blanks beyond that trimmed text boundary.
+    for (col, cell) in cells.unwrap_or_default().iter().enumerate().skip(col) {
+        let color = if cell.style.hidden {
+            crate::resolve_cell_bg(palette, cell.style).unwrap_or(palette.terminal_bg)
+        } else {
+            crate::resolve_cell_fg(palette, cell.style, bold_default_foreground)
+        };
+        if cell.style.underline {
+            append_terminal_decoration_range(&mut out.underlines, color, col, col + 1);
+        }
+        if cell.style.strikeout {
+            append_terminal_decoration_range(&mut out.strikethroughs, color, col, col + 1);
+        }
     }
     out
 }
@@ -998,18 +1162,11 @@ fn push_terminal_background_ranges(
     row: usize,
     ranges: &[TerminalRowBackgroundRange],
     geometry: TerminalPaintGeometry,
+    scale: f32,
     out: &mut Vec<PaintQuad>,
 ) {
     for range in ranges {
-        flush_bg(
-            Some((range.bg, range.start, range.end)),
-            row,
-            geometry.bounds,
-            geometry.visual_y_offset,
-            geometry.cell_width,
-            geometry.cell_height,
-            out,
-        );
+        push_cell_background(range.start, range.end, range.bg, row, geometry, scale, out);
     }
 }
 
@@ -1098,7 +1255,7 @@ fn terminal_underline_bounds(
 
 fn push_terminal_underline_ranges(
     row: usize,
-    ranges: &[TerminalRowUnderlineRange],
+    ranges: &[TerminalRowDecorationRange],
     geometry: TerminalPaintGeometry,
     out: &mut Vec<PaintQuad>,
 ) {
@@ -1519,6 +1676,7 @@ impl Element for ZzClawTerminalElement {
                     };
                 if keyword_ranges.is_none()
                     && terminal_plain_row_fast_path(ansi, row_keyword_rules, decorations)
+                    && !display_line.chars().any(is_cell_glyph)
                 {
                     let text = pad_wide_cells(display_line);
                     let text_runs = vec![TextRun {
@@ -1547,6 +1705,7 @@ impl Element for ZzClawTerminalElement {
                         line_started_at.elapsed(),
                         text_runs.len(),
                         Vec::new(),
+                        TerminalRowTextDecorations::default(),
                         Vec::new(),
                     );
                 }
@@ -1592,15 +1751,34 @@ impl Element for ZzClawTerminalElement {
                     );
                     glyph_spans_storage.as_slice()
                 };
-                let background_ranges = terminal_background_ranges_for_spans(&background_spans);
-                let underline_ranges =
-                    terminal_underline_ranges_for_spans(glyph_spans, self.palette);
+                let background_ranges = snapshot_row
+                    .map(|row| terminal_background_ranges_for_cells(&row.cells, self.palette))
+                    .unwrap_or_else(|| terminal_background_ranges_for_spans(&background_spans));
+                let text_decorations = terminal_text_decorations_for_row(
+                    glyph_spans,
+                    snapshot_row.map(|row| row.cells.as_ref()),
+                    self.palette,
+                    self.bold_default_foreground,
+                );
 
                 let mut text =
                     String::with_capacity(display_line.len().saturating_add(glyph_spans.len()));
                 let mut text_runs = Vec::with_capacity(glyph_spans.len());
+                let mut cell_glyphs = Vec::new();
+                let mut col = 0;
                 for span in glyph_spans {
-                    let run_len = append_padded_wide_cells(&mut text, &span.text);
+                    let run_len = if self.cell_glyph_rendering_enabled() {
+                        append_terminal_glyph_span(
+                            &mut text,
+                            span,
+                            &mut col,
+                            &mut cell_glyphs,
+                            snapshot_row.map(|row| row.cells.as_ref()),
+                            self.palette.terminal_fg,
+                        )
+                    } else {
+                        append_padded_wide_cells(&mut text, &span.text)
+                    };
                     if run_len > 0 {
                         text_runs.push(terminal_text_run_for_span(
                             span,
@@ -1642,7 +1820,8 @@ impl Element for ZzClawTerminalElement {
                     line_started_at.elapsed(),
                     text_runs.len(),
                     background_ranges,
-                    underline_ranges,
+                    text_decorations,
+                    cell_glyphs,
                 )
             };
             let (painted_row, did_shape, shape_duration) = if let Some(cache) =
@@ -1650,14 +1829,21 @@ impl Element for ZzClawTerminalElement {
             {
                 cache.paint_row_reusing(row, row_key, pending_keyword_row_key, || build_row(window))
             } else {
-                let (line, duration, text_run_count, background_ranges, underline_ranges) =
-                    build_row(window);
+                let (
+                    line,
+                    duration,
+                    text_run_count,
+                    background_ranges,
+                    text_decorations,
+                    cell_glyphs,
+                ) = build_row(window);
                 (
                     Arc::new(CachedTerminalPaintRow {
                         line,
                         background_ranges,
-                        underline_ranges,
+                        text_decorations,
                         text_run_count,
+                        cell_glyphs,
                     }),
                     true,
                     duration,
@@ -1672,7 +1858,15 @@ impl Element for ZzClawTerminalElement {
                     row,
                     &painted_row.background_ranges,
                     paint_geometry,
+                    scale_factor,
                     &mut plan.backgrounds,
+                );
+                push_cell_glyphs(
+                    &painted_row.cell_glyphs,
+                    row,
+                    paint_geometry,
+                    scale_factor,
+                    &mut plan.cell_glyphs,
                 );
                 plan.text_run_count = plan
                     .text_run_count
@@ -1683,10 +1877,22 @@ impl Element for ZzClawTerminalElement {
                 });
                 push_terminal_underline_ranges(
                     row,
-                    &painted_row.underline_ranges,
+                    &painted_row.text_decorations.underlines,
                     paint_geometry,
                     &mut plan.underlines,
                 );
+                // Match GPUI's font-metric strike position, including its
+                // vertical centering, while painting above custom cell glyphs.
+                let ascent = painted_row.line.ascent;
+                let baseline = (px(cell_h) - ascent - painted_row.line.descent) / 2. + ascent;
+                let strike_y = y + (ascent * 0.5 + baseline) * 0.5;
+                for range in &painted_row.text_decorations.strikethroughs {
+                    plan.strikethroughs.push(TerminalStrikethroughPaint {
+                        origin: point(bounds.left() + px(range.start as f32 * cell_w), strike_y),
+                        width: px((range.end - range.start) as f32 * cell_w),
+                        color: range.color,
+                    });
+                }
             } else {
                 plan.prefetched_row_count = plan.prefetched_row_count.saturating_add(1);
             }
@@ -1821,54 +2027,72 @@ impl Element for ZzClawTerminalElement {
             {
                 let cursor_line = self.snapshot.line(self.snapshot.cursor.row).unwrap_or("");
                 let cursor_text = terminal_cell_text_at_col(cursor_line, self.snapshot.cursor.col);
-                let cursor_runs = vec![TextRun {
-                    len: cursor_text.len().max(1),
-                    font: terminal_run_font(
-                        base_font,
-                        false,
-                        false,
-                        self.normal_weight,
-                        self.bold_weight,
-                    ),
-                    color: rgb(self.palette.terminal_bg).into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }];
-                let cursor_key = self.cursor_glyph_layout_key(&cursor_text);
-                let build_cursor_glyph = |window: &mut Window| {
-                    let started_at = Instant::now();
-                    let line = Arc::new(window.text_system().shape_line(
-                        SharedString::from(cursor_text),
-                        font_size,
-                        &cursor_runs,
-                        Some(px(cell_w)),
-                    ));
-                    (line, started_at.elapsed())
-                };
-                let cursor_layout_cache = self.layout_cache.clone();
-                let mut cursor_layout_cache = cursor_layout_cache
-                    .as_ref()
-                    .and_then(|cache| cache.lock().ok());
-                let (line, did_shape, shape_duration) =
-                    if let Some(cache) = cursor_layout_cache.as_deref_mut() {
-                        cache.cursor_glyph(cursor_key, || build_cursor_glyph(window))
-                    } else {
-                        let (line, duration) = build_cursor_glyph(window);
-                        (line, true, duration)
+                if let Some(ch) =
+                    cursor_cell_glyph(&cursor_text).filter(|_| self.cell_glyph_rendering_enabled())
+                {
+                    push_cell_glyphs(
+                        &[CellGlyph {
+                            col: self.snapshot.cursor.col,
+                            ch,
+                            color: self.palette.terminal_bg,
+                        }],
+                        self.snapshot.cursor.row,
+                        paint_geometry,
+                        scale_factor,
+                        &mut plan.cursor_cell_glyphs,
+                    );
+                } else {
+                    let cursor_runs = vec![TextRun {
+                        len: cursor_text.len().max(1),
+                        font: terminal_run_font(
+                            base_font,
+                            false,
+                            false,
+                            self.normal_weight,
+                            self.bold_weight,
+                        ),
+                        color: rgb(self.palette.terminal_bg).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }];
+                    let cursor_key = self.cursor_glyph_layout_key(&cursor_text);
+                    let build_cursor_glyph = |window: &mut Window| {
+                        let started_at = Instant::now();
+                        let line = Arc::new(window.text_system().shape_line(
+                            SharedString::from(cursor_text),
+                            font_size,
+                            &cursor_runs,
+                            Some(px(cell_w)),
+                        ));
+                        (line, started_at.elapsed())
                     };
-                if did_shape {
-                    plan.shape_line_count = plan.shape_line_count.saturating_add(1);
-                    plan.shape_line_duration += shape_duration;
+                    let cursor_layout_cache = self.layout_cache.clone();
+                    let mut cursor_layout_cache = cursor_layout_cache
+                        .as_ref()
+                        .and_then(|cache| cache.lock().ok());
+                    let (line, did_shape, shape_duration) =
+                        if let Some(cache) = cursor_layout_cache.as_deref_mut() {
+                            cache.cursor_glyph(cursor_key, || build_cursor_glyph(window))
+                        } else {
+                            let (line, duration) = build_cursor_glyph(window);
+                            (line, true, duration)
+                        };
+                    if did_shape {
+                        plan.shape_line_count = plan.shape_line_count.saturating_add(1);
+                        plan.shape_line_duration += shape_duration;
+                    }
+                    plan.text_run_count = plan.text_run_count.saturating_add(cursor_runs.len());
+                    plan.cursor_glyph = Some(TerminalCursorGlyphPaint {
+                        origin: point(x, y),
+                        line,
+                    });
                 }
-                plan.text_run_count = plan.text_run_count.saturating_add(cursor_runs.len());
-                plan.cursor_glyph = Some(TerminalCursorGlyphPaint {
-                    origin: point(x, y),
-                    line,
-                });
             }
         }
 
+        plan.cell_glyphs.finish();
+        plan.cursor_cell_glyphs.finish();
         let cache_stats_after = self
             .layout_cache
             .as_ref()
@@ -1952,6 +2176,7 @@ impl Element for ZzClawTerminalElement {
                 keyword_rules = self.keyword_rules.len(),
                 images = self.snapshot.images.len(),
                 backgrounds = plan.backgrounds.len(),
+                cell_glyph_primitives = plan.cell_glyphs.primitive_count(),
                 underlines = plan.underlines.len(),
                 decoration_backgrounds = plan.decoration_backgrounds.len(),
                 active_markers = plan.active_markers.len(),
@@ -1990,6 +2215,7 @@ impl Element for ZzClawTerminalElement {
             zzclawterm_core::terminal_snapped_cell_height(self.cell_height, window.scale_factor());
         let zebra_stripes = prepaint.zebra_stripes.len();
         let backgrounds = prepaint.backgrounds.len();
+        let cell_glyph_primitives = prepaint.cell_glyphs.primitive_count();
         let images_under = prepaint.images_under.len();
         let placeholders_under = prepaint.placeholders_under.len();
         let decoration_backgrounds = prepaint.decoration_backgrounds.len();
@@ -2043,6 +2269,14 @@ impl Element for ZzClawTerminalElement {
                     cx,
                 );
             }
+            prepaint.cell_glyphs.paint(window, cx);
+            for strike in prepaint.strikethroughs.drain(..) {
+                window.paint_strikethrough(
+                    strike.origin,
+                    strike.width,
+                    &line_strike_color(rgb(strike.color).into()),
+                );
+            }
             for quad in prepaint.underlines.drain(..) {
                 window.paint_quad(quad);
             }
@@ -2062,6 +2296,7 @@ impl Element for ZzClawTerminalElement {
             if let Some(cursor) = prepaint.cursor_background.take() {
                 window.paint_quad(cursor);
             }
+            prepaint.cursor_cell_glyphs.paint(window, cx);
             if let Some(cursor_glyph) = prepaint.cursor_glyph.take() {
                 let _ = cursor_glyph.line.paint(
                     cursor_glyph.origin,
@@ -2082,6 +2317,7 @@ impl Element for ZzClawTerminalElement {
                 snapshot_cols = self.snapshot.cols,
                 zebra_stripes,
                 backgrounds,
+                cell_glyph_primitives,
                 decoration_backgrounds,
                 active_markers,
                 shaped_rows,

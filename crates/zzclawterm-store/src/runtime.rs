@@ -655,11 +655,13 @@ impl zzclawterm_core::CloudLocalStore for StoreBlockingClient {
         let safety_backup_path = cloud_store_response(self.request(
             0,
             store_mutation(StoreDomain::CloudSync, move |store| {
-                store.apply_cloud_sync_snapshot(
+                let backup = store.apply_cloud_sync_snapshot(
                     &config_dir,
                     &snapshot,
                     snapshot_password.expose_secret(),
-                )
+                )?;
+                LoadBootstrap.execute(store)?;
+                Ok(backup)
             }),
         ))?;
         Ok(zzclawterm_core::CloudSyncBackupInfo {

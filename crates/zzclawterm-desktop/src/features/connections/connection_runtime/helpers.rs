@@ -81,6 +81,14 @@ pub(super) fn connection_editor_from_saved(
     } else {
         ConnectionEditorPasswordSource::Ask
     };
+    let password = if auth.mode == "password"
+        && password_source == ConnectionEditorPasswordSource::Direct
+        && !auth.has_password
+    {
+        auth.password.clone().unwrap_or_default()
+    } else {
+        zzclawterm_core::SecretString::default()
+    };
     let icon_auto_detect = connection.icon_auto_detect_enabled();
     let mut editor = ConnectionEditorState {
         id: Some(connection.id),
@@ -118,7 +126,7 @@ pub(super) fn connection_editor_from_saved(
             auth.account_id.clone()
         },
         password_id: auth.password_id,
-        password: zzclawterm_core::SecretString::default(),
+        password,
         existing_password: auth.password.filter(|value| !value.is_empty()),
         existing_password_locked: auth.has_password,
         key_id: auth.key_id,
@@ -555,7 +563,7 @@ pub(super) fn build_saved_connection_from_editor(
             }
             if editor.auth_mode == "password"
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
-                && editor.password.trim().len()
+                && editor.password.len()
                     > if editor.vnc_security.mode == "vnc_auth" {
                         8
                     } else {
@@ -628,7 +636,8 @@ pub(super) fn build_saved_connection_from_editor(
         | ConnectionKindTab::Telnet
         | ConnectionKindTab::Rdp
         | ConnectionKindTab::Vnc => {
-            let entered_password = editor.password.trim().to_string();
+            // Whitespace is part of the secret, including at either end.
+            let entered_password = editor.password.clone();
             let existing = editor.existing_password.clone();
             let mode = match editor.auth_mode.as_str() {
                 "password" => "password".to_string(),
@@ -651,7 +660,7 @@ pub(super) fn build_saved_connection_from_editor(
                     let has_password = existing.is_some() && editor.existing_password_locked;
                     (existing, has_password)
                 } else {
-                    (Some(entered_password.into()), false)
+                    (Some(entered_password), false)
                 }
             } else {
                 (None, false)
@@ -974,6 +983,54 @@ mod tests {
     }
 
     #[test]
+    fn connection_editor_preserves_direct_password_whitespace_when_saving_and_reopening() {
+        for kind in ["ssh", "telnet", "rdp", "vnc"] {
+            let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+                "id": "password-whitespace", "name": "Password whitespace", "type": kind,
+                "host": "example.com", "username": "non-root",
+                "auth": {"mode": "password"}
+            }))
+            .expect("connection");
+            for password in [" abc123", "abc123 ", " abc123 ", "\tabc123\t", "  "] {
+                let mut editor = connection_editor_from_saved(connection.clone(), false);
+                editor.password_source = ConnectionEditorPasswordSource::Direct;
+                editor.password = password.into();
+                let saved = build_saved_connection_from_editor(&editor).expect("valid password");
+                let auth = saved.auth.as_ref().expect("auth");
+                assert_eq!(auth.password.as_deref(), Some(password), "{kind}");
+                assert!(!auth.has_password);
+
+                let reopened = connection_editor_from_saved(saved, false);
+                assert_eq!(reopened.password.expose_secret(), password);
+                assert_eq!(reopened.existing_password.as_deref(), Some(password));
+                let saved =
+                    build_saved_connection_from_editor(&reopened).expect("unchanged password");
+                assert_eq!(
+                    saved.auth.expect("auth").password.as_deref(),
+                    Some(password)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn connection_editor_only_prefills_password_for_direct_password_authentication() {
+        for auth in [
+            serde_json::json!({"mode": "password", "password_source": "account", "account_id": "account", "password": "fixture-secret"}),
+            serde_json::json!({"mode": "key", "password": "fixture-secret"}),
+            serde_json::json!({"mode": "none", "password": "fixture-secret"}),
+        ] {
+            let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+                "id": "password-prefill", "name": "Password prefill", "type": "ssh",
+                "host": "example.com", "username": "non-root", "auth": auth
+            }))
+            .expect("connection");
+            let editor = connection_editor_from_saved(connection, false);
+            assert!(editor.password.is_empty());
+        }
+    }
+
+    #[test]
     fn connection_editor_preserves_locked_ciphertext_until_password_is_replaced() {
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id": "locked-editor", "name": "Locked SSH", "type": "ssh",
@@ -983,6 +1040,7 @@ mod tests {
         .expect("connection");
         let editor = connection_editor_from_saved(connection.clone(), false);
         assert!(editor.existing_password_locked);
+        assert!(editor.password.is_empty());
         let saved = build_saved_connection_from_editor(&editor).expect("unchanged password");
         let auth = saved.auth.expect("auth");
         assert_eq!(auth.password.as_deref(), Some("locked-ciphertext"));
@@ -1478,6 +1536,13 @@ mod tests {
         password_boundary.vnc_security.mode = "vnc_auth".to_string();
         password_boundary.password = "12345678".to_string().into();
         assert!(build_saved_connection_from_editor(&password_boundary).is_ok());
+        for password in [" 12345678", "12345678 ", "\t12345678\t"] {
+            password_boundary.password = password.into();
+            assert_eq!(
+                build_saved_connection_from_editor(&password_boundary).unwrap_err(),
+                ConnectionEditorValidationError::VncPasswordTooLong
+            );
+        }
         password_boundary.password = "密码密码密".to_string().into();
         assert_eq!(
             build_saved_connection_from_editor(&password_boundary).unwrap_err(),

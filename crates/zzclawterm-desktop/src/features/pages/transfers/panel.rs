@@ -421,10 +421,7 @@ mod tests {
 
     #[test]
     fn file_row_starts_visible_export_from_first_press_and_preserves_multiselection() {
-        // Remote drag export needs native virtual-file or file-promise drags,
-        // which only exist off Linux (`transfer_drag_supported`); local drags
-        // are exercised on every platform.
-        for remote in [false, !cfg!(target_os = "linux")] {
+        for remote in [false, true] {
             let test_dir = TestConfigDir::new("zzclawterm-file-drag");
             let mut cx = TestAppContext::single();
             let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
@@ -476,6 +473,14 @@ mod tests {
                 Modifiers::none(),
             );
             draw_path_fixture(vcx);
+            if remote && cfg!(target_os = "linux") {
+                // Linux deliberately has no remote file drag export; the local
+                // case must still exercise the first-press drag gesture.
+                vcx.update(|_, cx| assert!(!cx.has_active_drag()));
+                assert!(vcx.debug_bounds("transfer-file-drag-preview").is_none());
+                vcx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+                continue;
+            }
             vcx.update(|_, cx| {
                 assert!(
                     cx.has_active_drag(),

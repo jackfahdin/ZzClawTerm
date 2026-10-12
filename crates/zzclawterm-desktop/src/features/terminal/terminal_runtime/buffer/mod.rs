@@ -1509,79 +1509,43 @@ impl ZzClawTermApp {
             return;
         }
         let text = terminal_local_log_text(text);
-        let mut shell_started = false;
-        let mut shell_finished = false;
-        let mut shell_running = false;
-        let mut pending_cwd: Option<String> = None;
-        let mut pending_pty_writes: Vec<Vec<u8>>;
-        let mut clipboard_store: Option<String>;
-        let mut clipboard_loads;
-
         if let Some(session_id) = session_id {
             let is_active = self.session.active_id() == Some(session_id);
             let encoding = self.effective_session_encoding(session_id);
-            let view = self
-                .terminal
-                .view
-                .views
-                .entry(session_id.to_string())
-                .or_insert_with(TerminalViewState::new);
-            view.set_encoding(&encoding);
-            view.append_text(text.as_ref());
+            let scrollback_limit = self.terminal_scrollback_line_limit();
+            self.terminal.append_session_text_or_create(
+                session_id,
+                &encoding,
+                scrollback_limit,
+                text.as_ref(),
+            );
             if mark_unread && !is_active {
-                view.has_unread = true;
+                self.terminal
+                    .view
+                    .views
+                    .get_mut(session_id)
+                    .expect("session view exists")
+                    .has_unread = true;
             }
-            let effects = view.screen.take_effects();
-            pending_pty_writes = effects.pty_write;
-            clipboard_store = effects.clipboard_store;
-            clipboard_loads = effects.clipboard_loads;
-            let title = effects.title;
-            let reset_title = effects.reset_title;
-            let command_running = view.screen.command_running();
-            shell_started |= effects.shell_command_started;
-            shell_finished |= effects.shell_command_finished;
-            shell_running = command_running;
-            if let Some(cwd) = effects.cwd {
-                pending_cwd = Some(cwd);
-            }
-            self.apply_terminal_title_effect(session_id, title, reset_title);
-        } else {
-            self.terminal
-                .view
-                .screen
-                .advance_decoded_text(text.as_ref());
-            self.terminal.view.output.push_str(text.as_ref());
-            let max_bytes = self.terminal_scrollback_max_bytes();
-            trim_terminal_output_to(&mut self.terminal.view.output, max_bytes);
-            let effects = self.terminal.view.screen.take_effects();
-            pending_pty_writes = effects.pty_write;
-            clipboard_store = effects.clipboard_store;
-            clipboard_loads = effects.clipboard_loads;
+            return;
         }
-
+        self.terminal
+            .view
+            .screen
+            .advance_decoded_text(text.as_ref());
+        self.terminal.view.output.push_str(text.as_ref());
+        let max_bytes = self.terminal_scrollback_max_bytes();
+        trim_terminal_output_to(&mut self.terminal.view.output, max_bytes);
+        let effects = self.terminal.view.screen.take_effects();
+        let mut pending_pty_writes = effects.pty_write;
+        let mut clipboard_store = effects.clipboard_store;
+        let mut clipboard_loads = effects.clipboard_loads;
         self.handle_terminal_clipboard_effects(
             &mut clipboard_store,
             &mut clipboard_loads,
             &mut pending_pty_writes,
             cx,
         );
-
-        if let Some(session_id) = session_id {
-            self.write_terminal_pty_responses(session_id, pending_pty_writes);
-        }
-        if (shell_started || shell_finished)
-            && let Some(session_id) = session_id
-        {
-            self.apply_shell_integration_edges(
-                session_id,
-                shell_started,
-                shell_finished,
-                shell_running,
-            );
-        }
-        if let (Some(session_id), Some(cwd)) = (session_id, pending_cwd) {
-            self.apply_session_cwd(session_id, cwd);
-        }
     }
 
     fn write_terminal_pty_responses(&mut self, session_id: &str, responses: Vec<Vec<u8>>) {

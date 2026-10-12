@@ -1274,6 +1274,443 @@ fn current_gpui_cloud_pull_rewraps_vault_key_for_local_master_password() {
 }
 
 #[test]
+fn cloud_pull_reencrypts_device_secrets_across_restart_and_second_sync() {
+    use crate::runtime::{LoadBootstrap, StoreRequest};
+
+    for version in ["2.0.0-preview.5", "1.2.10"] {
+        for legacy in [false, true] {
+            for target_password in ["shared-password", "device-password"] {
+                let source_dir = unique_temp_dir("rekey-cloud-source");
+                let target_dir = unique_temp_dir("rekey-cloud-target");
+                let source = ConnectionStore::open(&source_dir).unwrap();
+                source
+                    .save_master_password(Some("shared-password"))
+                    .unwrap();
+                source
+                    .save_password(zzclawterm_core::SavedPassword {
+                        id: "synced-account".into(),
+                        password: Some("synced-value".into()),
+                        name: "Synced account".into(),
+                        username: "user".into(),
+                        sort_order: 0,
+                        has_password: false,
+                    })
+                    .unwrap();
+                let mut snapshot = source
+                    .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", version)
+                    .unwrap();
+                snapshot.recalculate_hash().unwrap();
+                let wire =
+                    crate::encode_encrypted_raw_portable_snapshot(&snapshot, "shared-password")
+                        .unwrap();
+                let snapshot =
+                    crate::decode_encrypted_raw_portable_snapshot(&wire, "shared-password")
+                        .unwrap();
+                let target = ConnectionStore::open(&target_dir).unwrap();
+                target.save_master_password(Some(target_password)).unwrap();
+                let mut local = CloudSyncSettings {
+                    enabled: true,
+                    provider: "webdav".into(),
+                    device_name: "device-B".into(),
+                    ..CloudSyncSettings::default()
+                };
+                local.webdav.password = Some("local-webdav".into());
+                local.s3.access_key_id = Some("local-s3-id".into());
+                local.s3.secret_access_key = Some("local-s3-key".into());
+                local.s3.session_token = Some("local-s3-token".into());
+                local.google_drive.access_token = Some("local-google-access".into());
+                local.google_drive.refresh_token = Some("local-google-refresh".into());
+                local.google_drive.client_secret = Some("local-google-client".into());
+                local.onedrive.access_token = Some("local-ms-access".into());
+                local.onedrive.refresh_token = Some("local-ms-refresh".into());
+                local.onedrive.client_secret = Some("local-ms-client".into());
+                local.aliyun_drive.access_token = Some("local-aliyun-access".into());
+                local.aliyun_drive.refresh_token = Some("local-aliyun-refresh".into());
+                local.aliyun_drive.client_secret = Some("local-aliyun-client".into());
+                local.gitee_snippet.access_token = Some("local-gitee".into());
+                local.github_gist.access_token = Some("local-github".into());
+                target.save_cloud_sync_settings(local.clone()).unwrap();
+                let old_key = target.load_master_key_token().unwrap().unwrap();
+                let mut raw = target.load_settings_value().unwrap();
+                raw["cloud_sync"]["future_policy"] = serde_json::json!({"retain":true});
+                raw["cloud_sync"]["webdav"]["future_option"] = serde_json::json!(42);
+                let old_ciphertext = raw["cloud_sync"]["webdav"]["password"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                if legacy {
+                    target
+                        .save_settings_doc_value(SETTINGS_CLOUD_SYNC, &raw["cloud_sync"])
+                        .unwrap();
+                    raw.as_object_mut().unwrap().remove("cloud_sync");
+                }
+                target.save_settings_value(&raw).unwrap();
+
+                target
+                    .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-password")
+                    .unwrap();
+                assert_eq!(target.load_cloud_sync_settings().unwrap(), local);
+                assert_eq!(
+                    LoadBootstrap.execute(&target).unwrap().cloud_sync_settings,
+                    local
+                );
+                let new_key = target.load_master_key_token().unwrap().unwrap();
+                let saved = target.load_settings_value().unwrap();
+                let new_ciphertext = saved["cloud_sync"]["webdav"]["password"].as_str().unwrap();
+                assert_ne!(old_key, new_key);
+                assert_ne!(old_ciphertext, new_ciphertext);
+                assert_ne!(new_ciphertext, "local-webdav");
+                assert!(
+                    target
+                        .credential_crypto()
+                        .unwrap()
+                        .decrypt_secret(&old_key, new_ciphertext)
+                        .is_err()
+                );
+                assert_eq!(saved["cloud_sync"]["future_policy"]["retain"], true);
+                assert_eq!(saved["cloud_sync"]["webdav"]["future_option"], 42);
+                if legacy {
+                    let stored: CloudSyncSettings = target
+                        .read_json_table(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC)
+                        .unwrap()
+                        .unwrap();
+                    let mut decrypted = stored;
+                    super::cloud_sync::decrypt_cloud_sync_settings_secrets(
+                        &mut decrypted,
+                        &target.credential_crypto().unwrap(),
+                        Some(&new_key),
+                    )
+                    .unwrap();
+                    assert_eq!(decrypted, local);
+                }
+                drop(target);
+
+                let target = ConnectionStore::open(&target_dir).unwrap();
+                assert_eq!(
+                    LoadBootstrap.execute(&target).unwrap().cloud_sync_settings,
+                    local
+                );
+                target.save_cloud_sync_settings(local.clone()).unwrap();
+                target
+                    .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-password")
+                    .unwrap();
+                assert_eq!(
+                    target
+                        .load_decrypted_password_by_id("synced-account")
+                        .unwrap()
+                        .unwrap()
+                        .password
+                        .as_deref(),
+                    Some("synced-value")
+                );
+                assert!(target.verify_master_password(target_password).unwrap());
+                drop(target);
+                let restarted = ConnectionStore::open(&target_dir).unwrap();
+                assert_eq!(
+                    LoadBootstrap
+                        .execute(&restarted)
+                        .unwrap()
+                        .cloud_sync_settings,
+                    local
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cloud_pull_rejects_invalid_local_secrets_without_overwriting_database() {
+    for legacy in [false, true] {
+        let source_dir = unique_temp_dir("reject-rekey-source");
+        let target_dir = unique_temp_dir("reject-rekey-target");
+        let source = ConnectionStore::open(&source_dir).unwrap();
+        source
+            .save_master_password(Some("shared-password"))
+            .unwrap();
+        source
+            .get_or_create_master_key_token(&source.credential_crypto().unwrap())
+            .unwrap();
+        let mut snapshot = source
+            .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        let target = ConnectionStore::open(&target_dir).unwrap();
+        target
+            .save_master_password(Some("shared-password"))
+            .unwrap();
+        let mut local = CloudSyncSettings::default();
+        local.webdav.password = Some("local-webdav".into());
+        target.save_cloud_sync_settings(local).unwrap();
+        let mut raw = target.load_settings_value().unwrap();
+        raw["cloud_sync"]["webdav"]["password"] = serde_json::json!("corrupted-ciphertext");
+        if legacy {
+            target
+                .save_settings_doc_value(SETTINGS_CLOUD_SYNC, &raw["cloud_sync"])
+                .unwrap();
+            raw.as_object_mut().unwrap().remove("cloud_sync");
+        }
+        target.save_settings_value(&raw).unwrap();
+        let before = target
+            .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "target", "2.0.0")
+            .unwrap();
+        let legacy_before = target
+            .read_json_table::<serde_json::Value>(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC)
+            .unwrap();
+        assert!(
+            target
+                .apply_cloud_sync_snapshot(&target_dir, &snapshot, "wrong-password")
+                .is_err()
+        );
+        assert!(
+            target
+                .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-password")
+                .is_err()
+        );
+        let after = target
+            .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "target", "2.0.0")
+            .unwrap();
+        assert_eq!(before.entities, after.entities);
+        assert_eq!(
+            legacy_before,
+            target
+                .read_json_table::<serde_json::Value>(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn cloud_pull_store_worker_flushes_and_reopens_with_local_provider_secrets() {
+    use crate::runtime::{FlushBarrier, LoadBootstrap, StoreConfig, StoreRuntime};
+    use zzclawterm_core::{CloudLocalStore, LocalCloudSyncOptions};
+
+    let source_dir = unique_temp_dir("worker-cloud-source");
+    let target_dir = unique_temp_dir("worker-cloud-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    source
+        .save_master_password(Some("shared-password"))
+        .unwrap();
+    source
+        .get_or_create_master_key_token(&source.credential_crypto().unwrap())
+        .unwrap();
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    target
+        .save_master_password(Some("shared-password"))
+        .unwrap();
+    let mut local = CloudSyncSettings::default();
+    local.webdav.password = Some("local-webdav".into());
+    target.save_cloud_sync_settings(local.clone()).unwrap();
+    drop(target);
+    let options = LocalCloudSyncOptions {
+        config_dir: target_dir.to_path_buf(),
+        portable_key_path: None,
+        remote_dir: source_dir.to_path_buf(),
+        remote_root: "zzclawterm".into(),
+        device_id: "target".into(),
+        app_version: "2.0.0".into(),
+        master_password: "shared-password".into(),
+        enabled: true,
+    };
+    for _ in 0..2 {
+        let runtime = StoreRuntime::spawn(StoreConfig {
+            config_dir: target_dir.to_path_buf(),
+            portable_key_path: None,
+        })
+        .unwrap();
+        let client = runtime.blocking_client();
+        client.apply_sync_snapshot(&options, &snapshot).unwrap();
+        assert_eq!(
+            client
+                .request(0, LoadBootstrap)
+                .unwrap()
+                .outcome
+                .unwrap()
+                .cloud_sync_settings,
+            local
+        );
+        runtime.begin_shutdown();
+        client
+            .request_shutdown(0, FlushBarrier)
+            .unwrap()
+            .outcome
+            .unwrap();
+        drop(client);
+        drop(runtime);
+        // Dropping the runtime closes its channel; the detached worker releases
+        // redb asynchronously after receiving that closure.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let reopened = loop {
+            match ConnectionStore::open(&target_dir) {
+                Ok(store) => break store,
+                Err(StorageError::Open {
+                    source: redb::DatabaseError::DatabaseAlreadyOpen,
+                    ..
+                }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("cannot reopen the store after worker shutdown: {error}"),
+            }
+        };
+        assert_eq!(reopened.load_cloud_sync_settings().unwrap(), local);
+    }
+    let restarted = ConnectionStore::open(&target_dir).unwrap();
+    assert_eq!(restarted.load_cloud_sync_settings().unwrap(), local);
+}
+
+#[test]
+fn cloud_pull_reencrypts_secrets_retained_from_partial_settings() {
+    use crate::runtime::{LoadBootstrap, StoreRequest};
+
+    let source_dir = unique_temp_dir("partial-rekey-source");
+    let target_dir = unique_temp_dir("partial-rekey-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    source
+        .save_master_password(Some("shared-password"))
+        .unwrap();
+    source
+        .get_or_create_master_key_token(&source.credential_crypto().unwrap())
+        .unwrap();
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+        .unwrap();
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&snapshot.entities["settings"]).unwrap();
+    settings.as_object_mut().unwrap().remove("translation");
+    assert!(settings.get("ai").is_none());
+    snapshot
+        .entities
+        .insert("settings".into(), serde_json::to_string(&settings).unwrap());
+    snapshot.recalculate_hash().unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    target
+        .save_master_password(Some("shared-password"))
+        .unwrap();
+    let mut ai = target.load_ai_settings().unwrap();
+    ai.proxy.password = Some("retained-ai-password".into());
+    let ai = target.save_ai_settings(ai).unwrap();
+    let mut translation = target.load_translation_settings().unwrap();
+    translation.deepl_api_key = "retained-deepl-key".into();
+    let translation = target.save_translation_settings(translation).unwrap();
+    let mut raw = target.load_settings_value().unwrap();
+    raw["ai"]["future_option"] = serde_json::json!(42);
+    raw["translation"]["future_option"] = serde_json::json!(43);
+    target.save_settings_value(&raw).unwrap();
+    target
+        .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-password")
+        .unwrap();
+    assert_eq!(target.load_ai_settings().unwrap(), ai);
+    assert_eq!(target.load_translation_settings().unwrap(), translation);
+    let saved = target.load_settings_value().unwrap();
+    assert_eq!(saved["ai"]["future_option"], 42);
+    assert_eq!(saved["translation"]["future_option"], 43);
+    drop(target);
+    let restarted = ConnectionStore::open(&target_dir).unwrap();
+    let bootstrap = LoadBootstrap.execute(&restarted).unwrap();
+    assert_eq!(bootstrap.ai_settings, ai);
+    assert_eq!(bootstrap.translation_settings, translation);
+}
+
+#[test]
+fn cloud_pull_without_source_key_keeps_local_key_for_inline_passwords() {
+    let source_dir = unique_temp_dir("keyless-cloud-source");
+    let target_dir = unique_temp_dir("keyless-cloud-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "source", "2.0.0")
+        .unwrap();
+    let mut connection = ssh_connection_for_asset("keyless-inline-password");
+    connection.auth = Some(ConnectionAuth {
+        password: Some("imported-inline".into()),
+        mode: "password".into(),
+        ..ConnectionAuth::default()
+    });
+    let sessions = SessionsConfig {
+        connections: vec![connection],
+        ..SessionsConfig::default()
+    };
+    snapshot
+        .entities
+        .insert("sessions".into(), serde_json::to_string(&sessions).unwrap());
+    snapshot.recalculate_hash().unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    let mut local = CloudSyncSettings::default();
+    local.webdav.password = Some("local-webdav".into());
+    target.save_cloud_sync_settings(local.clone()).unwrap();
+    let key = target.load_master_key_token().unwrap();
+    target
+        .apply_cloud_sync_snapshot(&target_dir, &snapshot, "shared-password")
+        .unwrap();
+    assert_eq!(target.load_master_key_token().unwrap(), key);
+    assert_eq!(target.load_cloud_sync_settings().unwrap(), local);
+    assert_eq!(
+        target.load_sessions().unwrap().connections[0]
+            .auth
+            .as_ref()
+            .unwrap()
+            .password
+            .as_deref(),
+        Some("imported-inline")
+    );
+}
+
+#[test]
+fn encrypted_backup_import_reencrypts_retained_standalone_cloud_settings() {
+    let source_dir = unique_temp_dir("backup-rekey-source");
+    let target_dir = unique_temp_dir("backup-rekey-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    source
+        .save_master_password(Some("source-password"))
+        .unwrap();
+    let mut imported = CloudSyncSettings::default();
+    imported.webdav.password = Some("imported-webdav".into());
+    source.save_cloud_sync_settings(imported.clone()).unwrap();
+    let backup_path = source_dir.join("encrypted.nya");
+    source
+        .export_encrypted_portable_snapshot_from_open_store(
+            &backup_path,
+            "source",
+            "2.0.0",
+            "source-password",
+        )
+        .unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    target
+        .save_master_password(Some("target-password"))
+        .unwrap();
+    let mut local = CloudSyncSettings::default();
+    local.webdav.password = Some("local-webdav".into());
+    target.save_cloud_sync_settings(local.clone()).unwrap();
+    let mut raw = target.load_settings_value().unwrap();
+    raw["cloud_sync"]["future_option"] = serde_json::json!(42);
+    target
+        .save_settings_doc_value(SETTINGS_CLOUD_SYNC, &raw["cloud_sync"])
+        .unwrap();
+    raw.as_object_mut().unwrap().remove("cloud_sync");
+    target.save_settings_value(&raw).unwrap();
+    target
+        .import_encrypted_portable_snapshot_into_open_store(&backup_path, "source-password")
+        .unwrap();
+    assert_eq!(target.load_cloud_sync_settings().unwrap(), imported);
+    let retained: serde_json::Value = target
+        .read_json_table(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained["future_option"], 42);
+    let mut legacy: CloudSyncSettings = serde_json::from_value(retained).unwrap();
+    super::cloud_sync::decrypt_cloud_sync_settings_secrets(
+        &mut legacy,
+        &target.credential_crypto().unwrap(),
+        target.load_master_key_token().unwrap().as_deref(),
+    )
+    .unwrap();
+    assert_eq!(legacy, local);
+}
+
+#[test]
 fn rejects_invalid_backup_without_replacing_current_database() {
     let target_dir = unique_temp_dir("backup-reject-target");
     let invalid_dir = unique_temp_dir("backup-reject-invalid");
@@ -5574,6 +6011,39 @@ fn connection_inline_password_is_encrypted_at_rest_and_roundtrips() {
         .expect("resolve inline password");
     assert_eq!(password.as_deref(), Some("hunter2"));
 
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn connection_inline_password_whitespace_survives_storage_reopen_and_auth_resolution() {
+    let dir = unique_temp_dir("connection-password-whitespace");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let mut connection = ssh_connection_for_asset("password-whitespace");
+    let password = " \tfixture-password\u{2003} ";
+    connection.auth = Some(ConnectionAuth {
+        mode: "password".to_string(),
+        password: Some(password.into()),
+        ..ConnectionAuth::default()
+    });
+    store.save_connection(&connection).expect("save connection");
+    let record = connection_password_record(&store, &connection.id);
+    assert_ne!(record.password.expose_secret(), password);
+    drop(store);
+
+    let store = ConnectionStore::open(&dir).expect("reopen store");
+    let loaded = store
+        .get_connection(&connection.id)
+        .expect("load connection")
+        .expect("connection");
+    let auth = loaded.auth.expect("auth");
+    assert!(!auth.has_password);
+    let (username, resolved) = auth
+        .resolve_account_auth("non-root", None)
+        .expect("resolve inline password");
+    assert_eq!(username, "non-root");
+    assert_eq!(resolved.as_deref(), Some(password));
+
+    drop(store);
     std::fs::remove_dir_all(dir).ok();
 }
 

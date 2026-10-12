@@ -959,6 +959,7 @@ impl TerminalViewState {
         self.render_cache.clear();
     }
 
+    #[cfg(test)]
     pub(crate) fn append_text(&mut self, text: &str) {
         if text.is_empty() {
             return;

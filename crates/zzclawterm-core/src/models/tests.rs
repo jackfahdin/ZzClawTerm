@@ -961,6 +961,106 @@ fn category_move_rejects_descendant_cycles_and_normalizes_siblings() {
 }
 
 #[test]
+fn category_root_move_works_without_a_peer_and_preserves_the_subtree() {
+    let mut config = QuickCommandsConfig {
+        commands: vec![],
+        categories: vec![
+            quick_category("root", None, 9),
+            quick_category("child", Some("root"), 3),
+            quick_category("grandchild", Some("child"), 0),
+        ],
+    };
+    assert!(config.move_category_to_parent("child", None, usize::MAX));
+    assert_eq!(config.categories[1].parent_id, None);
+    assert_eq!(config.categories[0].sort_order, 0);
+    assert_eq!(config.categories[1].sort_order, 1);
+    assert_eq!(config.categories[2].parent_id.as_deref(), Some("child"));
+    assert!(!config.move_category_to_parent("child", None, usize::MAX));
+    let stored = serde_json::to_string(&config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<QuickCommandsConfig>(&stored).unwrap(),
+        config
+    );
+}
+
+#[test]
+fn category_outdent_moves_one_level_after_the_parent_and_normalizes_both_groups() {
+    let mut config = QuickCommandsConfig {
+        commands: vec![],
+        categories: vec![
+            quick_category("a", None, 0),
+            quick_category("b", Some("a"), 0),
+            quick_category("c", Some("b"), 4),
+            quick_category("d", Some("b"), 8),
+            quick_category("leaf", Some("c"), 0),
+        ],
+    };
+    assert!(config.outdent_category("c"));
+    assert_eq!(config.categories[2].parent_id.as_deref(), Some("a"));
+    assert_eq!(config.categories[2].sort_order, 1);
+    assert_eq!(config.categories[3].sort_order, 0);
+    assert!(config.outdent_category("c"));
+    assert_eq!(config.categories[2].parent_id, None);
+    assert_eq!(config.categories[2].sort_order, 1);
+    assert_eq!(config.categories[4].parent_id.as_deref(), Some("c"));
+    assert!(!config.outdent_category("c"));
+}
+
+#[test]
+fn category_reparent_rejects_invalid_moves_without_changing_any_data() {
+    let original = QuickCommandsConfig {
+        commands: vec![],
+        categories: vec![
+            quick_category("root", None, 0),
+            quick_category("child", Some("root"), 0),
+        ],
+    };
+    for (source, parent) in [
+        ("root", Some("root")),
+        ("root", Some("child")),
+        ("child", Some("missing")),
+        ("missing", None),
+    ] {
+        let mut config = original.clone();
+        assert!(!config.move_category_to_parent(source, parent, 0));
+        assert_eq!(config, original);
+    }
+    for position in [
+        QuickCommandCategoryPosition::Before,
+        QuickCommandCategoryPosition::After,
+        QuickCommandCategoryPosition::Inside,
+    ] {
+        let mut config = original.clone();
+        assert!(!config.move_category("root", "child", position));
+        assert_eq!(config, original);
+    }
+}
+
+#[test]
+fn category_insertion_uses_sidebar_order_and_indexes_exclude_the_source() {
+    let mut config = QuickCommandsConfig {
+        commands: vec![],
+        categories: vec![
+            quick_category("z", None, 0),
+            quick_category("a", None, 0),
+            quick_category("child", Some("z"), 0),
+        ],
+    };
+    assert!(config.move_category("child", "z", QuickCommandCategoryPosition::Before));
+    let order = |config: &QuickCommandsConfig| {
+        quick_command_category_sibling_order(&config.categories, None)
+            .into_iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&config), vec!["a", "child", "z"]);
+    assert!(config.move_category_to_parent("a", None, 1));
+    assert_eq!(order(&config), vec!["child", "a", "z"]);
+    assert!(config.move_category_to_parent("z", None, 0));
+    assert_eq!(order(&config), vec!["z", "child", "a"]);
+}
+
+#[test]
 fn saved_connection_defaults_missing_asset_to_none() {
     let connection: SavedConnection = serde_json::from_value(serde_json::json!({
         "id": "conn-1",

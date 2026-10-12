@@ -55,6 +55,7 @@ impl ZzClawTermApp {
             || self.transfer.browser_external_drop_hover_is_pending()
             || self.session.tab_drag_is_pending()
             || self.security.drop_target().is_some()
+            || self.commands.quick_drop_target().is_some()
     }
 
     /// Returns whether the clock should keep running.
@@ -77,6 +78,7 @@ impl ZzClawTermApp {
         dirty |= transfer_dirty;
         dirty |= self.session.clear_tab_drag();
         dirty |= self.security.clear_drop_target();
+        dirty |= self.commands.clear_quick_drop_target();
         if dirty {
             if transfer_dirty {
                 self.defer_transfer_panel_snapshot_flush(cx);

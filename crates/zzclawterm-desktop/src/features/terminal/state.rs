@@ -712,7 +712,7 @@ mod tests {
     fn terminal_view_owner_groups_session_and_frame_lifecycle() {
         let mut state = terminal_state();
         state.ensure_frame_session("session-a".to_string(), "UTF-8".to_string(), 1_000);
-        state.append_session_text_or_create("session-a", "UTF-8", "hello");
+        state.append_session_text_or_create("session-a", "UTF-8", 1_000, "hello");
 
         assert_eq!(state.session_output("session-a"), Some("hello"));
         assert!(!state.session_has_unread("session-a"));
@@ -727,7 +727,7 @@ mod tests {
     fn reconnect_view_rekey_preserves_scroll_and_selection() {
         let mut state = terminal_state();
         state.ensure_frame_session("old".to_string(), "UTF-8".to_string(), 1_000);
-        state.append_session_text_or_create("old", "UTF-8", "earlier output");
+        state.append_session_text_or_create("old", "UTF-8", 1_000, "earlier output");
         state.view.views.get_mut("old").unwrap().scroll_offset = 7;
         state.selection.session_id = Some("old".to_string());
         state.selection.selection = Some(crate::models::TerminalSelection::from_range(

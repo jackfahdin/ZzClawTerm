@@ -10,23 +10,26 @@ use std::path::{Path, PathBuf};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
 
-use super::cloud_sync::{cloud_sync_settings_has_secret, encrypt_cloud_sync_settings_secrets};
+use super::cloud_sync::{
+    cloud_sync_settings_has_secret, decrypt_cloud_sync_settings_secrets,
+    encrypt_cloud_sync_settings_secrets,
+};
 use super::notes::replace_notes_snapshot_in_txn;
 use super::vault::bump_ssh_key_revision;
 use super::{
     CREDENTIAL_PREFIX, CREDENTIALS_TABLE, ConfigBackupInfo, ConnectionStore, DATABASE_FILE,
     LEGACY_TEXT_MASTER_KEY, META_MASTER_KEY, META_PORTABLE_SOURCE_PAYLOAD_HASH,
     META_PORTABLE_SOURCE_SCHEMA_VERSION, META_TABLE, OTP_ACCOUNTS_TABLE, OTP_PREFIX,
-    PASSWORD_PREFIX, PORTABLE_OPAQUE_ENTITIES_TABLE, PROXIES_TABLE, PROXY_PREFIX, SETTINGS_DEFAULT,
-    SETTINGS_PROXY_GROUPS, SETTINGS_QUICK_COMMANDS, SETTINGS_TABLE, SETTINGS_TUNNEL_GROUPS,
-    SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE, TUNNEL_PREFIX, TUNNELS_TABLE,
-    VNC_KNOWN_HOSTS_TABLE, clear_prefix_in_txn, connection_inline_password_requires_encryption,
-    copy_config_database, current_time_ms, encrypt_ai_settings_secrets,
-    ensure_not_same_existing_file, ensure_parent_dir, entity_key, merge_unknown_json,
-    prepare_connections_for_storage, replace_command_history_in_txn,
-    replace_known_hosts_text_in_txn, replace_sessions_in_txn, set_nested_json_value,
-    validate_config_backup_file, validate_config_backup_source, write_json_in_txn,
-    write_portable_snapshot_file,
+    PASSWORD_PREFIX, PORTABLE_OPAQUE_ENTITIES_TABLE, PROXIES_TABLE, PROXY_PREFIX,
+    SETTINGS_CLOUD_SYNC, SETTINGS_DEFAULT, SETTINGS_PROXY_GROUPS, SETTINGS_QUICK_COMMANDS,
+    SETTINGS_TABLE, SETTINGS_TUNNEL_GROUPS, SSH_KEY_PREFIX, StorageError, TEXT_DOCS_TABLE,
+    TUNNEL_PREFIX, TUNNELS_TABLE, VNC_KNOWN_HOSTS_TABLE, clear_prefix_in_txn,
+    connection_inline_password_requires_encryption, copy_config_database, current_time_ms,
+    encrypt_ai_settings_secrets, encrypt_string_secret, ensure_not_same_existing_file,
+    ensure_parent_dir, entity_key, merge_unknown_json, prepare_connections_for_storage,
+    replace_command_history_in_txn, replace_known_hosts_text_in_txn, replace_sessions_in_txn,
+    set_nested_json_value, validate_config_backup_file, validate_config_backup_source,
+    write_json_in_txn, write_portable_snapshot_file,
 };
 use crate::{
     decode_encrypted_raw_portable_snapshot, decode_raw_portable_snapshot,
@@ -39,7 +42,7 @@ use zzclawterm_core::portable_snapshot::{
 use zzclawterm_core::{
     AiSettings, CloudSyncSettings, CommandHistoryEntry, ConnectionType, CredentialCrypto,
     NotesSnapshot, PortableSnapshotKind, RawPortableSnapshot, SessionsConfig, SshAgentEndpoint,
-    TunnelGroup, ai_settings_has_secret, migrate_legacy_ssh_agent_settings,
+    TranslationSettings, TunnelGroup, ai_settings_has_secret, migrate_legacy_ssh_agent_settings,
     ssh_agent_endpoint_supported_on_current_platform, validate_ssh_agent_endpoint,
     validate_ssh_agent_forwarding_config,
 };
@@ -535,7 +538,8 @@ impl ConnectionStore {
             })
             .transpose()?
             .unwrap_or_default();
-        let current_settings = self.load_settings_value()?;
+        let mut current_settings = self.load_settings_value()?;
+        let current_master_key_token = self.load_master_key_token()?;
         if is_legacy_tauri_snapshot(snapshot)
             && let Some(snapshot_password) = snapshot_password
         {
@@ -563,6 +567,15 @@ impl ConnectionStore {
         }
 
         let crypto = self.credential_crypto()?;
+        // Snapshots without a vault key do not replace the device's key. In
+        // particular, generating a new key for inline passwords must not strand
+        // the retained local provider credentials.
+        if master_key_token
+            .as_deref()
+            .is_none_or(|token| token.trim().is_empty())
+        {
+            master_key_token = current_master_key_token.clone();
+        }
         if master_key_token.is_none()
             && sessions
                 .connections
@@ -576,6 +589,75 @@ impl ConnectionStore {
             &crypto,
             master_key_token.as_deref(),
         )?;
+
+        // Read and decrypt retained provider secrets before installing the source
+        // vault key. Both their new ciphertext and the key are committed together.
+        // Keep the standalone compatibility document usable as well as the
+        // authoritative embedded field, preserving unknown fields in each.
+        let mut legacy_cloud_sync: Option<serde_json::Value> =
+            self.read_json_table(SETTINGS_TABLE, SETTINGS_CLOUD_SYNC)?;
+        if current_master_key_token != master_key_token {
+            // Partial/older snapshots also retain missing AI and translation
+            // fields through the unknown-field merge. Rekey the current side
+            // before merging so retained known secrets use the installed key;
+            // incoming fields still take precedence.
+            if snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync {
+                if let Some(value) = current_settings.get("ai") {
+                    let mut ai: AiSettings = serde_json::from_value(value.clone())?;
+                    self.decrypt_ai_settings(&mut ai)?;
+                    encrypt_ai_settings_secrets(&mut ai, &crypto, master_key_token.as_deref())?;
+                    replace_settings_field_preserving_unknown(&mut current_settings, "ai", &ai)?;
+                }
+                if let Some(value) = current_settings.get("translation") {
+                    let mut translation: TranslationSettings =
+                        serde_json::from_value(value.clone())?;
+                    self.decrypt_translation_settings(&mut translation)?;
+                    for secret in [
+                        &mut translation.deepl_api_key,
+                        &mut translation.baidu_app_key,
+                        &mut translation.ali_app_key,
+                        &mut translation.youdao_app_key,
+                    ] {
+                        *secret =
+                            encrypt_string_secret(&crypto, master_key_token.as_deref(), secret)?;
+                    }
+                    replace_settings_field_preserving_unknown(
+                        &mut current_settings,
+                        "translation",
+                        &translation,
+                    )?;
+                }
+            }
+            if snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync
+                && let Some(value) = current_settings.get_mut("cloud_sync")
+            {
+                reencrypt_cloud_sync_value(
+                    value,
+                    &crypto,
+                    current_master_key_token.as_deref(),
+                    master_key_token.as_deref(),
+                )?;
+            }
+            if let Some(value) = legacy_cloud_sync.as_mut() {
+                reencrypt_cloud_sync_value(
+                    value,
+                    &crypto,
+                    current_master_key_token.as_deref(),
+                    master_key_token.as_deref(),
+                )?;
+            }
+        }
+        if snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync
+            && current_settings.get("cloud_sync").is_none()
+            && let Some(value) = &legacy_cloud_sync
+        {
+            set_nested_json_value(&mut current_settings, &["cloud_sync"], value.clone());
+        }
+        let merged_settings = merge_imported_settings(
+            settings,
+            current_settings,
+            snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync,
+        );
 
         let txn = self.db.begin_write()?;
         {
@@ -664,12 +746,10 @@ impl ConnectionStore {
             })?;
         }
 
-        let merged_settings = merge_imported_settings(
-            settings,
-            current_settings,
-            snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync,
-        );
         write_json_in_txn(&txn, SETTINGS_TABLE, SETTINGS_DEFAULT, &merged_settings)?;
+        if let Some(value) = legacy_cloud_sync {
+            write_json_in_txn(&txn, SETTINGS_TABLE, SETTINGS_CLOUD_SYNC, &value)?;
+        }
         match master_key_token {
             Some(token) if !token.trim().is_empty() => {
                 txn.open_table(META_TABLE)?
@@ -744,6 +824,21 @@ impl ConnectionStore {
         }
         Ok(())
     }
+}
+
+fn reencrypt_cloud_sync_value(
+    value: &mut serde_json::Value,
+    crypto: &CredentialCrypto,
+    old_master_key_token: Option<&str>,
+    new_master_key_token: Option<&str>,
+) -> Result<(), StorageError> {
+    let mut settings: CloudSyncSettings = serde_json::from_value(value.clone())?;
+    decrypt_cloud_sync_settings_secrets(&mut settings, crypto, old_master_key_token)?;
+    encrypt_cloud_sync_settings_secrets(&mut settings, crypto, new_master_key_token)?;
+    let mut replacement = serde_json::to_value(settings)?;
+    merge_unknown_json(value, &mut replacement);
+    *value = replacement;
+    Ok(())
 }
 
 fn is_legacy_tauri_snapshot(snapshot: &RawPortableSnapshot) -> bool {

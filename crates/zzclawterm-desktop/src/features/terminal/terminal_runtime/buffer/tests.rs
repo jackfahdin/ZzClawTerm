@@ -449,3 +449,126 @@ fn terminal_local_log_text_preserves_framing_but_escapes_controls() {
     assert!(escaped.starts_with('\n'));
     assert!(escaped.ends_with("\r\n"));
 }
+
+#[test]
+fn session_exit_preserves_history_with_settled_or_pending_output_frames() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::TerminalFrameEvent;
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::ActionLinksMatcherSettings;
+    use zzclawterm_core::test_support::TestTempDir;
+    use zzclawterm_transport::SessionEvent;
+
+    for pending_output in [false, true] {
+        let root = TestTempDir::new("zzclawterm-disconnect-history");
+        let mut cx = TestAppContext::single();
+        let app = app_with_visible_local_session(&mut cx, root.path(), "old");
+        cx.update_entity(&app, |app, cx| {
+            let history = format!("HISTORY-FIRST\r\n{}HISTORY-END\r\n", "line\r\n".repeat(70));
+            app.submit_terminal_frame_output("old", history.into_bytes());
+            app.terminal.view.frame_pipeline.flush_for_test();
+            while app.terminal.view.frame_pipeline.queued_event_count() > 0
+                || !app.terminal.view.pending_frame_events.is_empty()
+            {
+                app.drain_terminal_frame_events(cx);
+            }
+            app.submit_terminal_frame_output("old", b"# exit\r\nlogout\r\n".to_vec());
+            app.terminal.view.frame_pipeline.flush_for_test();
+            if !pending_output {
+                app.drain_terminal_frame_events(cx);
+            }
+            let view = app.terminal.view.views.get("old").unwrap();
+            let previous_snapshot = view.frame_snapshot.clone().unwrap();
+            let previous_revision = view.screen_revision;
+
+            app.session.extend_pending_events([SessionEvent::Exited {
+                session_id: "old".into(),
+                reason: "SSH channel EOF".into(),
+            }]);
+            app.drain_session_events(cx);
+            assert!(app.session.is_disconnected("old"));
+            let view = app.terminal.view.views.get("old").unwrap();
+            assert_eq!(view.screen_revision, previous_revision);
+            assert!(Arc::ptr_eq(
+                view.frame_snapshot.as_ref().unwrap(),
+                &previous_snapshot
+            ));
+
+            app.terminal.view.frame_pipeline.flush_for_test();
+            while app.terminal.view.frame_pipeline.queued_event_count() > 0
+                || !app.terminal.view.pending_frame_events.is_empty()
+            {
+                app.drain_terminal_frame_events(cx);
+            }
+            let visible = app.active_terminal_visible_text();
+            for expected in [
+                "HISTORY-END",
+                "# exit",
+                "logout",
+                "SSH channel EOF",
+                "[Session disconnected]",
+                "[Press Enter to reconnect]",
+            ] {
+                assert!(
+                    visible.contains(expected),
+                    "missing {expected}; pending output: {pending_output}"
+                );
+            }
+
+            app.terminal
+                .append_existing_session_text("old", "\r\n[Reconnecting]\r\n");
+            assert!(
+                app.terminal
+                    .request_session_rekey("old", "new", "UTF-8", 1_000)
+            );
+            app.terminal.view.frame_pipeline.request_snapshot(
+                "new",
+                1_000,
+                false,
+                ActionLinksMatcherSettings::default(),
+            );
+            app.terminal.view.frame_pipeline.flush_for_test();
+            let mut events = std::collections::VecDeque::new();
+            app.terminal
+                .view
+                .frame_pipeline
+                .drain_events_into(&mut events, usize::MAX);
+            let snapshots = events
+                .into_iter()
+                .filter_map(|event| match event {
+                    TerminalFrameEvent::Snapshot(frame) if frame.session_id == "new" => Some(frame),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let oldest = snapshots.iter().find(|frame| frame.offset > 0).unwrap();
+            assert!(
+                oldest
+                    .snapshot
+                    .rows()
+                    .iter()
+                    .any(|row| row.text == "HISTORY-FIRST")
+            );
+            let live = snapshots.iter().find(|frame| frame.offset == 0).unwrap();
+            let history = live
+                .snapshot
+                .rows()
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for expected in [
+                "HISTORY-END",
+                "logout",
+                "SSH channel EOF",
+                "[Session disconnected]",
+                "[Reconnecting]",
+            ] {
+                assert_eq!(
+                    history.matches(expected).count(),
+                    1,
+                    "missing or duplicated {expected}"
+                );
+            }
+        });
+    }
+}

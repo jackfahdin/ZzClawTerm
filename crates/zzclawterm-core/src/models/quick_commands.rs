@@ -230,52 +230,28 @@ impl QuickCommandsConfig {
         target_id: &str,
         position: QuickCommandCategoryPosition,
     ) -> bool {
-        if source_id == target_id
-            || !self.categories.iter().any(|item| item.id == source_id)
-            || !self.categories.iter().any(|item| item.id == target_id)
-            || self.category_is_descendant(target_id, source_id)
-        {
+        if !self.can_move_category(source_id, target_id) {
             return false;
         }
         let target_parent = self
             .categories
             .iter()
             .find(|item| item.id == target_id)
-            .and_then(|item| item.parent_id.clone());
+            .and_then(|item| item.parent_id.as_deref())
+            .filter(|parent| self.categories.iter().any(|item| item.id == *parent))
+            .map(ToString::to_string);
         let new_parent = match position {
             QuickCommandCategoryPosition::Inside => Some(target_id.to_string()),
             QuickCommandCategoryPosition::Before | QuickCommandCategoryPosition::After => {
                 target_parent
             }
         };
-        if new_parent.as_deref() == Some(source_id) {
-            return false;
-        }
-
-        if let Some(source) = self.categories.iter_mut().find(|item| item.id == source_id) {
-            source.parent_id = new_parent.clone();
-        }
-        let mut siblings = self
-            .categories
-            .iter()
-            .filter(|item| item.id != source_id && item.parent_id == new_parent)
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
-        siblings.sort_by(|left, right| {
-            let left = self
-                .categories
-                .iter()
-                .find(|item| item.id == *left)
-                .expect("id");
-            let right = self
-                .categories
-                .iter()
-                .find(|item| item.id == *right)
-                .expect("id");
-            left.sort_order
-                .cmp(&right.sort_order)
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        let siblings =
+            quick_command_category_sibling_order(&self.categories, new_parent.as_deref())
+                .into_iter()
+                .filter(|item| item.id != source_id)
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>();
         let insert_index = match position {
             QuickCommandCategoryPosition::Inside => siblings.len(),
             QuickCommandCategoryPosition::Before | QuickCommandCategoryPosition::After => {
@@ -285,13 +261,85 @@ impl QuickCommandsConfig {
                 index + usize::from(position == QuickCommandCategoryPosition::After)
             }
         };
-        siblings.insert(insert_index, source_id.to_string());
+        self.move_category_to_parent(source_id, new_parent.as_deref(), insert_index)
+    }
+
+    pub fn can_move_category(&self, source_id: &str, target_id: &str) -> bool {
+        source_id != target_id
+            && self.categories.iter().any(|item| item.id == source_id)
+            && self.categories.iter().any(|item| item.id == target_id)
+            && !self.category_is_descendant(target_id, source_id)
+    }
+
+    /// `insertion_index` counts siblings after excluding the source; an index
+    /// beyond the end appends. Validate the whole move before changing the tree.
+    pub fn move_category_to_parent(
+        &mut self,
+        source_id: &str,
+        new_parent_id: Option<&str>,
+        insertion_index: usize,
+    ) -> bool {
+        let Some(source) = self.categories.iter().find(|item| item.id == source_id) else {
+            return false;
+        };
+        if new_parent_id.is_some_and(|parent_id| {
+            !self.categories.iter().any(|item| item.id == parent_id)
+                || self.category_is_descendant(parent_id, source_id)
+        }) {
+            return false;
+        }
+        let old_parent = source.parent_id.clone();
+        let new_parent = new_parent_id.map(ToString::to_string);
+        let original_siblings =
+            quick_command_category_sibling_order(&self.categories, new_parent_id)
+                .into_iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>();
+        let mut siblings = original_siblings
+            .iter()
+            .filter(|id| id.as_str() != source_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        siblings.insert(insertion_index.min(siblings.len()), source_id.to_string());
+        if old_parent == new_parent && siblings == original_siblings {
+            return false;
+        }
+        self.categories
+            .iter_mut()
+            .find(|item| item.id == source_id)
+            .expect("validated source")
+            .parent_id = new_parent.clone();
+        if old_parent != new_parent {
+            let old_siblings =
+                quick_command_category_sibling_order(&self.categories, old_parent.as_deref())
+                    .into_iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>();
+            self.normalize_category_siblings(old_siblings);
+        }
+        self.normalize_category_siblings(siblings);
+        true
+    }
+
+    /// Place the whole subtree immediately after its former parent.
+    pub fn outdent_category(&mut self, source_id: &str) -> bool {
+        let Some(parent_id) = self
+            .categories
+            .iter()
+            .find(|item| item.id == source_id)
+            .and_then(|item| item.parent_id.clone())
+        else {
+            return false;
+        };
+        self.move_category(source_id, &parent_id, QuickCommandCategoryPosition::After)
+    }
+
+    fn normalize_category_siblings(&mut self, siblings: Vec<String>) {
         for (order, id) in siblings.into_iter().enumerate() {
             if let Some(category) = self.categories.iter_mut().find(|item| item.id == id) {
                 category.sort_order = i32::try_from(order).unwrap_or(i32::MAX);
             }
         }
-        true
     }
 
     fn category_is_descendant(&self, candidate_id: &str, ancestor_id: &str) -> bool {

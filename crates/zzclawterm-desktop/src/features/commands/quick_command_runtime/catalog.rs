@@ -81,6 +81,15 @@ impl ZzClawTermApp {
         self.finish_quick_command_reorder(config, cx);
     }
 
+    pub(in crate::features) fn outdent_quick_command_category(
+        &mut self,
+        category_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let config = self.commands.outdent_quick_category(&category_id);
+        self.finish_quick_command_reorder(config, cx);
+    }
+
     pub(in crate::features) fn close_quick_command_toolbar_popovers(&mut self) {
         self.commands.close_quick_toolbar_popovers();
     }

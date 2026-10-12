@@ -1866,7 +1866,11 @@ mod tests {
         cx.update_entity(&app, |app, _| {
             // A full-screen program (vim, less, top) takes over the terminal.
             app.terminal
-                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .append_bytes_unprotected(b"\x1b[?1049h");
         });
 
         cx.update_entity(&app, |app, cx| {
@@ -1909,7 +1913,11 @@ mod tests {
         cx.update_entity(&app, |app, _| {
             show_surface_for_session(app, "s1");
             app.terminal
-                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .append_bytes_unprotected(b"\x1b[?1049h");
         });
 
         cx.update_entity(&app, |app, cx| {
@@ -1952,7 +1960,11 @@ mod tests {
         // The user starts a full-screen program while the search is running.
         cx.update_entity(&app, |app, _| {
             app.terminal
-                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .append_bytes_unprotected(b"\x1b[?1049h");
         });
 
         cx.update_entity(&app, |app, cx| {
@@ -1981,12 +1993,20 @@ mod tests {
 
         cx.update_entity(&app, |app, _| {
             app.terminal
-                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049h");
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .append_bytes_unprotected(b"\x1b[?1049h");
         });
         cx.update_entity(&app, |app, _| {
             assert!(app.active_terminal_uses_alternate_screen());
             app.terminal
-                .append_session_text_or_create("s1", "UTF-8", "\u{1b}[?1049l");
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .append_bytes_unprotected(b"\x1b[?1049l");
         });
 
         cx.update_entity(&app, |app, cx| {

@@ -188,6 +188,18 @@ impl CommandFeatureState {
         Some(config)
     }
 
+    pub(in crate::features) fn can_move_quick_category(
+        &self,
+        source_id: &str,
+        target_id: &str,
+    ) -> bool {
+        QuickCommandsConfig {
+            commands: Vec::new(),
+            categories: self.catalog.categories.clone(),
+        }
+        .can_move_category(source_id, target_id)
+    }
+
     /// The sibling this category would swap with, or `None` at either end of its
     /// run. The group menu uses it both to enable the item and to perform the move.
     pub(in crate::features) fn quick_category_move_neighbor(
@@ -196,6 +208,41 @@ impl CommandFeatureState {
         up: bool,
     ) -> Option<String> {
         quick_command_category_move_neighbor(&self.catalog.categories, category_id, up)
+    }
+
+    pub(in crate::features) fn move_quick_category_to_root(
+        &mut self,
+        category_id: &str,
+    ) -> Option<QuickCommandsConfig> {
+        let mut config = self.quick_command_config();
+        if !config.move_category_to_parent(category_id, None, usize::MAX) {
+            return None;
+        }
+        self.catalog
+            .replace(config.commands.clone(), config.categories.clone());
+        Some(config)
+    }
+
+    pub(in crate::features) fn outdent_quick_category(
+        &mut self,
+        category_id: &str,
+    ) -> Option<QuickCommandsConfig> {
+        let mut config = self.quick_command_config();
+        if !config.outdent_category(category_id) {
+            return None;
+        }
+        self.catalog
+            .replace(config.commands.clone(), config.categories.clone());
+        Some(config)
+    }
+
+    pub(in crate::features) fn can_outdent_quick_category(&self, category_id: &str) -> bool {
+        self.catalog
+            .categories
+            .iter()
+            .find(|item| item.id == category_id)
+            .and_then(|item| item.parent_id.as_deref())
+            .is_some_and(|parent| self.catalog.categories.iter().any(|item| item.id == parent))
     }
 
     /// Moves a category one slot within its own siblings. Reuses `move_category`,
@@ -363,8 +410,8 @@ impl CommandFeatureState {
         true
     }
 
-    pub(in crate::features) fn clear_quick_drop_target(&mut self) {
-        self.quick.list.drop_target = None;
+    pub(in crate::features) fn clear_quick_drop_target(&mut self) -> bool {
+        self.quick.list.drop_target.take().is_some()
     }
 
     pub(in crate::features) fn close_quick_toolbar_popovers(&mut self) -> bool {

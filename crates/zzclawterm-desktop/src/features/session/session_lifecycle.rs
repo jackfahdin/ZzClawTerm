@@ -294,8 +294,13 @@ impl ZzClawTermApp {
             .and_then(|metadata| metadata.launch_config.encoding())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| self.settings.summary().interaction_default_encoding.clone());
-        self.terminal
-            .append_session_text_or_create(session_id, &encoding, banner);
+        let scrollback_limit = self.terminal_scrollback_line_limit();
+        self.terminal.append_session_text_or_create(
+            session_id,
+            &encoding,
+            scrollback_limit,
+            banner,
+        );
 
         if self.session.active_id() == Some(session_id) {
             self.terminal.clear_active_session_assist();

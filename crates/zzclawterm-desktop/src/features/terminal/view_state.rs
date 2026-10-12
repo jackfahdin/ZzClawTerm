@@ -1,6 +1,5 @@
 //! Cross-domain projections and lifecycle transitions for terminal views.
 
-use std::collections::hash_map::Entry;
 use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -8,7 +7,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use super::state::TerminalFeatureState;
 use crate::models::TerminalFrameEvent;
 use crate::models::TerminalSelection;
-use crate::models::{TerminalFrameSession, TerminalViewState};
+use crate::models::{TerminalFrameSession, TerminalViewState, append_terminal_ui_output_tail};
 
 pub(in crate::features) struct TerminalSessionTransferBundle {
     entries: Vec<TerminalSessionTransferEntry>,
@@ -292,20 +291,25 @@ impl TerminalFeatureState {
         &mut self,
         session_id: &str,
         encoding: &str,
+        scrollback_limit: usize,
         text: &str,
     ) {
-        match self.view.views.entry(session_id.to_string()) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().reset_reconnect_stream(encoding);
-                entry.get_mut().append_text(text);
-            }
-            Entry::Vacant(entry) => {
-                let mut view = TerminalViewState::new();
-                view.set_encoding(encoding);
-                view.append_text(text);
-                entry.insert(view);
-            }
+        if text.is_empty() {
+            return;
         }
+        self.ensure_frame_session(
+            session_id.to_string(),
+            encoding.to_string(),
+            scrollback_limit,
+        );
+        let view = self
+            .view
+            .views
+            .get_mut(session_id)
+            .expect("session view exists");
+        // The UI screen mirrors geometry, not worker output. Keep the last
+        // authoritative snapshot and revision until the worker appends the notice.
+        append_terminal_ui_output_tail(&mut view.output, text);
         self.view
             .frame_pipeline
             .append_local_text(session_id.to_string(), text.to_string());
@@ -317,10 +321,7 @@ impl TerminalFeatureState {
         text: &str,
     ) {
         if let Some(view) = self.view.views.get_mut(session_id) {
-            view.screen.reset_stream_state();
-            view.output_decoder.reset_decoder();
-            view.recording_decoder.reset_decoder();
-            view.append_text(text);
+            append_terminal_ui_output_tail(&mut view.output, text);
             self.view
                 .frame_pipeline
                 .append_local_text(session_id.to_string(), text.to_string());
