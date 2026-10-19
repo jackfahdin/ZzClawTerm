@@ -10,6 +10,24 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.1.4] - 2026-10-19',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (82 commits): custom theme management with CSS color parsing, theme editor contrast handling, tab drag reordering and overflow scrolling, terminal wheel zoom, Telnet keep-alive configuration, remote desktop key bindings and upload resource management, cooperative cloud sync cancellation with unreadable-snapshot recovery, transfer progress reporting, editor save permission preservation, Windows Terminal settings compatibility (jsonc-parser), Alt-as-meta handling, scroll history state management, and more.',
+          '**build:** All forked dependencies (including portable-pty) now resolve to GitCode mirrors; no direct nyakang repository references remain.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**ui:** Fix connection icon popover backdrop bleed-through and list scrolling, plus assorted tab and menu interaction issues (via upstream sync).',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.1.3] - 2026-10-09',
     sections: [
       {
@@ -68,6 +86,24 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.1.4] - 2026-10-19',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 NyaTerm（82 个提交）：自定义主题管理与 CSS 颜色解析、主题编辑器对比度处理、标签页拖动排序与溢出滚动、终端滚轮缩放、Telnet 保活间隔配置、远程桌面按键绑定与上传资源管理、云同步协作取消与损坏快照诊断恢复、传输进度上报、编辑器保存权限保留、Windows Terminal 设置兼容（jsonc-parser）、Alt-as-meta 键处理、滚动历史状态管理等。',
+          '**build:** 全部 fork 依赖（含新增的 portable-pty）统一指向 GitCode 镜像，不再直接依赖 nyakang 的仓库。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**ui:** 修复连接图标弹层背景透出与列表滚动、标签页与菜单的若干交互问题（随上游同步）。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.1.3] - 2026-10-09',
     sections: [
