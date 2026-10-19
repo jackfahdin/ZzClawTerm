@@ -461,6 +461,7 @@ mod tests {
     fn every_paste_review_action_restores_terminal_focus() {
         let dir = TestConfigDir::new("zzclawterm-desktop-paste-review-focus");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "session-a");
         let host_app = app.clone();
         let (_, cx) = cx.add_window_view(move |_, _| FocusHost { app: host_app });

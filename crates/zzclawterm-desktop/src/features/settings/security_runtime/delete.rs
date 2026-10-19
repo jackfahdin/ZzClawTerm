@@ -85,6 +85,7 @@ impl ZzClawTermApp {
         let request_item_id = id.clone();
         let request_id = self.security.begin_delete_request(id.clone());
         let scheduler = self.blocking_jobs.clone();
+        let origin_window = Some(window.window_handle());
         cx.spawn_in(window, async move |this, cx| {
             let task = scheduler.submit_task("security-item-delete", move |_| {
                 let store = location.open()?;
@@ -118,8 +119,24 @@ impl ZzClawTermApp {
                         let status = format!("{label} deleted");
                         this.security.set_status(status.clone());
                         this.shell.set_status(status);
+                        this.notify_operation_at(
+                            origin_window,
+                            "security-delete",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                            t!("common.deletingSuccess").to_string(),
+                            cx,
+                        );
                     }
-                    Err(error) => this.security.set_status(error),
+                    Err(error) => {
+                        this.security.set_status(error);
+                        this.notify_operation_at(
+                            origin_window,
+                            "security-delete",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            t!("common.operationFailed").to_string(),
+                            cx,
+                        );
+                    }
                 }
                 cx.notify();
             });

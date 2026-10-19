@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use zzclawterm_core::keyword_highlight_presets::ResolvedKeywordHighlightRule;
 use zzclawterm_core::{
     ActionLinksMatcherSettings, TerminalBackendResize, terminal_backend_resize_changed,
 };
@@ -14,6 +15,10 @@ use zzclawterm_terminal::{
     TerminalEffects, TerminalGridOccurrence, TerminalLineId, TerminalOutputDecoder, TerminalScreen,
     TerminalSearchDirection, TerminalSearchQuery, TerminalSearchRangeMode, TerminalSnapshot,
     TerminalSnapshotBuildStats, terminal_cell_col_for_byte_index, terminal_cell_count,
+};
+use zzclawterm_terminal_gpui::{
+    TerminalKeywordHighlightSnapshot, TerminalKeywordHighlighter,
+    compile_terminal_keyword_highlighter, precompute_terminal_input_highlights_reusing,
 };
 
 use crate::{
@@ -700,6 +705,11 @@ pub(crate) struct TerminalViewState {
     pub(crate) max_line_number_digits: usize,
     /// Latest live viewport prepared by the background terminal frame processor.
     pub(crate) frame_snapshot: Option<Arc<TerminalSnapshot>>,
+    /// Anchor baseline while a hidden session releases its heavy frame snapshot.
+    detached_history: Option<zzclawterm_terminal::TerminalHistoryState>,
+    /// Immutable input colors paired with frame_snapshot, independent of the
+    /// input-idle output batch scheduler. Cleared whenever that snapshot changes.
+    pub(crate) frame_input_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
     pub(crate) frame_action_links: Option<TerminalFrameActionLinks>,
     pub(crate) scrollback_snapshots: HashMap<usize, Arc<TerminalSnapshot>>,
     pub(crate) scrollback_action_links: HashMap<usize, TerminalFrameActionLinks>,
@@ -764,6 +774,8 @@ impl TerminalViewState {
             screen: TerminalScreen::default(),
             max_line_number_digits: 1,
             frame_snapshot: None,
+            detached_history: None,
+            frame_input_highlights: None,
             frame_action_links: None,
             scrollback_snapshots: HashMap::new(),
             scrollback_action_links: HashMap::new(),
@@ -815,6 +827,8 @@ impl TerminalViewState {
             screen,
             max_line_number_digits: 1,
             frame_snapshot: None,
+            detached_history: None,
+            frame_input_highlights: None,
             frame_action_links: None,
             scrollback_snapshots: HashMap::new(),
             scrollback_action_links: HashMap::new(),
@@ -853,11 +867,12 @@ impl TerminalViewState {
         }
     }
 
-    fn scrollback_len_for_anchor(&self) -> usize {
+    pub(crate) fn history_state(&self) -> zzclawterm_terminal::TerminalHistoryState {
         self.frame_snapshot
             .as_ref()
-            .map(|snapshot| snapshot.scrollback_len)
-            .unwrap_or_else(|| self.screen.scrollback_len())
+            .map(|snapshot| snapshot.history)
+            .or(self.detached_history)
+            .unwrap_or_else(|| self.screen.history_state())
     }
 
     pub(crate) fn live_snapshot_with_scroll_window(&self) -> Arc<TerminalSnapshot> {
@@ -876,8 +891,10 @@ impl TerminalViewState {
     fn clone_snapshot_with_scrollback_delta(
         snapshot: &Arc<TerminalSnapshot>,
         delta: usize,
+        history: zzclawterm_terminal::TerminalHistoryState,
     ) -> Arc<TerminalSnapshot> {
         let mut snapshot = (**snapshot).clone();
+        snapshot.history = history;
         snapshot.scrollback_len = snapshot.scrollback_len.saturating_add(delta);
         snapshot.total_rows = snapshot.total_rows.saturating_add(delta);
         snapshot.display_offset = snapshot.display_offset.saturating_add(delta);
@@ -888,13 +905,14 @@ impl TerminalViewState {
         if delta == 0 {
             return;
         }
+        let history = self.history_state();
         self.scrollback_snapshots = self
             .scrollback_snapshots
             .drain()
             .map(|(offset, snapshot)| {
                 (
                     offset.saturating_add(delta),
-                    Self::clone_snapshot_with_scrollback_delta(&snapshot, delta),
+                    Self::clone_snapshot_with_scrollback_delta(&snapshot, delta, history),
                 )
             })
             .collect();
@@ -909,22 +927,21 @@ impl TerminalViewState {
         self.priority_pending_snapshot_offsets.clear();
     }
 
-    fn anchor_scrollback_after_len_change(&mut self, old_len: usize, new_len: usize) {
-        if new_len < old_len {
+    fn anchor_scrollback_after_history_change(
+        &mut self,
+        previous: zzclawterm_terminal::TerminalHistoryState,
+    ) {
+        let current = self.history_state();
+        let scrolled = current.scrolled_since(previous);
+        if !current.preserves_coordinates_from(previous) {
             self.clear_scrollback_query_caches();
-            self.clamp_scroll_offset();
-            return;
+        } else if self.scroll_offset > 0 {
+            self.rekey_scrollback_query_caches_for_growth(scrolled.unwrap_or(0));
+        } else if scrolled.is_some_and(|rows| rows > 0) {
+            self.clear_scrollback_query_caches();
         }
-        let delta = new_len.saturating_sub(old_len);
-        if self.scroll_offset == 0 {
-            if delta > 0 {
-                self.clear_scrollback_query_caches();
-            }
-            return;
-        }
-        if delta > 0 {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta).min(new_len);
-            self.rekey_scrollback_query_caches_for_growth(delta);
+        self.scroll_offset = current.reanchor_offset(previous, self.scroll_offset);
+        if self.scroll_offset > 0 && scrolled.is_some_and(|rows| rows > 0) {
             self.has_new_while_scrolled = true;
         }
         self.clamp_scroll_offset();
@@ -964,20 +981,18 @@ impl TerminalViewState {
         if text.is_empty() {
             return;
         }
-        let old_scrollback_len = self.scrollback_len_for_anchor();
+        let previous_history = self.history_state();
         self.screen.advance_decoded_text(text);
         self.screen_revision = self.screen_revision.saturating_add(1);
         self.last_screen_change_at = Instant::now();
+        self.detached_history = None;
         self.frame_snapshot = Some(self.live_snapshot_with_scroll_window());
         self.grid_resize_pending = false;
         self.frame_action_links = None;
         self.enter_render_degraded_mode();
         self.protocol_state = TerminalProtocolState::from_screen(&self.screen);
         append_terminal_ui_output_tail(&mut self.output, text);
-        self.anchor_scrollback_after_len_change(
-            old_scrollback_len,
-            self.scrollback_len_for_anchor(),
-        );
+        self.anchor_scrollback_after_history_change(previous_history);
     }
 
     /// Feed already-protected bytes into the view (used when the caller applies
@@ -987,10 +1002,11 @@ impl TerminalViewState {
         if data.is_empty() {
             return;
         }
-        let old_scrollback_len = self.scrollback_len_for_anchor();
+        let previous_history = self.history_state();
         self.screen.advance(data);
         self.screen_revision = self.screen_revision.saturating_add(1);
         self.last_screen_change_at = Instant::now();
+        self.detached_history = None;
         self.frame_snapshot = Some(self.live_snapshot_with_scroll_window());
         self.grid_resize_pending = false;
         self.frame_action_links = None;
@@ -1000,10 +1016,7 @@ impl TerminalViewState {
             &mut self.output,
             &self.output_decoder.decode_output_text(data),
         );
-        self.anchor_scrollback_after_len_change(
-            old_scrollback_len,
-            self.scrollback_len_for_anchor(),
-        );
+        self.anchor_scrollback_after_history_change(previous_history);
     }
 
     /// Drop the oldest part of an oversized burst so the latest screen state wins
@@ -1119,6 +1132,7 @@ impl TerminalViewState {
             }
             append_terminal_ui_output_tail(&mut self.output, &row.text);
         }
+        self.frame_input_highlights = None;
         self.frame_snapshot = None;
         self.frame_action_links = None;
         self.clear_terminal_query_caches();
@@ -1131,11 +1145,7 @@ impl TerminalViewState {
     }
 
     pub(crate) fn clamp_scroll_offset(&mut self) {
-        let max = self
-            .frame_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.scrollback_len)
-            .unwrap_or_else(|| self.screen.scrollback_len());
+        let max = self.scrollback_len_for_ui();
         if self.scroll_offset > max {
             self.scroll_offset = max;
         }
@@ -1156,14 +1166,15 @@ impl TerminalViewState {
         if !visible_text.is_empty() && !self.render_degraded {
             append_terminal_ui_output_tail(&mut self.output, visible_text);
         }
-        let old_scrollback_len = self.scrollback_len_for_anchor();
-        let new_scrollback_len = snapshot.scrollback_len;
+        let previous_history = self.history_state();
         self.observe_line_number_digits(&snapshot);
         let preserved_action_links = action_links.or_else(|| {
             self.frame_action_links
                 .take()
                 .filter(|links| links.has_matching_decorated_snapshot_rows(snapshot.as_ref()))
         });
+        self.frame_input_highlights = None;
+        self.detached_history = None;
         self.frame_snapshot = Some(snapshot);
         self.frame_action_links = preserved_action_links;
         self.protocol_state = protocol_state;
@@ -1177,7 +1188,7 @@ impl TerminalViewState {
         if skipped_output_bytes > 0 {
             self.note_skipped_output(skipped_output_bytes);
         }
-        self.anchor_scrollback_after_len_change(old_scrollback_len, new_scrollback_len);
+        self.anchor_scrollback_after_history_change(previous_history);
     }
 
     pub(crate) fn apply_terminal_live_snapshot_frame(
@@ -1186,14 +1197,15 @@ impl TerminalViewState {
         action_links: Option<TerminalFrameActionLinks>,
         revision: u64,
     ) {
-        let old_scrollback_len = self.scrollback_len_for_anchor();
-        let new_scrollback_len = snapshot.scrollback_len;
+        let previous_history = self.history_state();
         self.observe_line_number_digits(&snapshot);
         let preserved_action_links = action_links.or_else(|| {
             self.frame_action_links
                 .take()
                 .filter(|links| links.has_matching_decorated_snapshot_rows(snapshot.as_ref()))
         });
+        self.frame_input_highlights = None;
+        self.detached_history = None;
         self.frame_snapshot = Some(snapshot);
         self.frame_action_links = preserved_action_links;
         self.grid_resize_pending = false;
@@ -1201,7 +1213,7 @@ impl TerminalViewState {
             self.screen_revision = revision;
             self.last_screen_change_at = Instant::now();
         }
-        self.anchor_scrollback_after_len_change(old_scrollback_len, new_scrollback_len);
+        self.anchor_scrollback_after_history_change(previous_history);
     }
 
     pub(crate) fn apply_terminal_background_frame_parts(
@@ -1212,16 +1224,23 @@ impl TerminalViewState {
         skipped_output_bytes: usize,
         revision: u64,
     ) {
+        let previous_history = self.history_state();
+        let has_snapshot = snapshot.is_some();
         // Hidden sessions keep protocol/revision current without retaining a full
         // viewport snapshot until the surface becomes visible again.
         if let Some(snapshot) = snapshot {
             self.observe_line_number_digits(&snapshot);
+            self.frame_input_highlights = None;
+            self.detached_history = None;
             self.frame_snapshot = Some(snapshot);
             self.frame_action_links = action_links;
             self.grid_resize_pending = false;
         } else {
             // Drop heavy paint state while backgrounded under pressure.
+            self.frame_input_highlights = None;
+            self.detached_history = Some(previous_history);
             self.frame_snapshot = None;
+            self.clear_scrollback_query_caches();
             self.frame_action_links = None;
         }
         self.protocol_state = protocol_state;
@@ -1230,7 +1249,9 @@ impl TerminalViewState {
         if skipped_output_bytes > 0 {
             self.note_skipped_output(skipped_output_bytes);
         }
-        self.clamp_scroll_offset();
+        if has_snapshot {
+            self.anchor_scrollback_after_history_change(previous_history);
+        }
     }
 
     pub(crate) fn backend_resize_changed(
@@ -1273,8 +1294,16 @@ impl TerminalViewState {
         offset: usize,
         snapshot: Arc<TerminalSnapshot>,
     ) {
+        if !self
+            .history_state()
+            .preserves_coordinates_from(snapshot.history)
+        {
+            return;
+        }
         self.observe_line_number_digits(&snapshot);
         if offset == 0 {
+            self.frame_input_highlights = None;
+            self.detached_history = None;
             self.frame_snapshot = Some(snapshot);
             return;
         }
@@ -1327,10 +1356,7 @@ impl TerminalViewState {
     }
 
     pub(crate) fn scrollback_len_for_ui(&self) -> usize {
-        self.frame_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.scrollback_len)
-            .unwrap_or_else(|| self.screen.scrollback_len())
+        self.history_state().scrollback_len
     }
 
     pub(crate) fn viewport_rows_for_ui(&self) -> usize {
@@ -1391,6 +1417,7 @@ impl KeywordHighlightEditorField {
 
 #[derive(Debug)]
 pub(crate) struct TerminalFramePipeline {
+    keyword_rules: Arc<Mutex<Arc<Vec<ResolvedKeywordHighlightRule>>>>,
     recording_writer: RecordingWriteHandle,
     command_tx: TerminalFrameCommandSender,
     event_queue: TerminalFrameEventQueue,
@@ -1429,6 +1456,20 @@ fn terminal_frame_output_commands(
 }
 
 impl TerminalFramePipeline {
+    pub(crate) fn set_keyword_rules(&self, rules: Arc<Vec<ResolvedKeywordHighlightRule>>) {
+        let Ok(mut current) = self.keyword_rules.lock() else {
+            return;
+        };
+        if Arc::ptr_eq(&current, &rules) || current.as_ref() == rules.as_ref() {
+            return;
+        }
+        if self.command_tx.send(TerminalFrameCommand::SetKeywordRules {
+            rules: rules.clone(),
+        }) {
+            *current = rules;
+        }
+    }
+
     pub(crate) fn take_events_for_transfer(
         &self,
         session_ids: &[String],
@@ -1453,6 +1494,7 @@ impl TerminalFramePipeline {
             })
             .expect("failed to spawn terminal frame processor");
         Self {
+            keyword_rules: Arc::new(Mutex::new(Arc::new(Vec::new()))),
             recording_writer,
             command_tx,
             event_queue,
@@ -1602,6 +1644,14 @@ impl TerminalFramePipeline {
             cols,
             rows,
         });
+    }
+
+    pub(crate) fn submit_synthetic_output(&self, session_id: String, text: String) {
+        if !text.is_empty() {
+            let _ = self
+                .command_tx
+                .send(TerminalFrameCommand::SyntheticOutput { session_id, text });
+        }
     }
 
     pub(crate) fn submit_decoded_output(&self, session_id: String, text: String) {
@@ -1836,6 +1886,7 @@ impl Clone for TerminalFramePipeline {
     fn clone(&self) -> Self {
         self.handle_count.fetch_add(1, Ordering::Relaxed);
         Self {
+            keyword_rules: self.keyword_rules.clone(),
             recording_writer: self.recording_writer.clone(),
             command_tx: self.command_tx.clone(),
             event_queue: self.event_queue.clone(),
@@ -1865,7 +1916,14 @@ impl Default for TerminalFramePipeline {
 
 #[derive(Debug)]
 enum TerminalFrameCommand {
+    SetKeywordRules {
+        rules: Arc<Vec<ResolvedKeywordHighlightRule>>,
+    },
     DecodedOutput {
+        session_id: String,
+        text: String,
+    },
+    SyntheticOutput {
         session_id: String,
         text: String,
     },
@@ -2217,6 +2275,48 @@ fn terminal_frame_event_wake_interest(event: &TerminalFrameEvent) -> u8 {
     }
 }
 
+fn prepare_terminal_frame_input_highlights(
+    event: &mut TerminalFrameEvent,
+    highlighter: &TerminalKeywordHighlighter,
+    cache: &mut HashMap<String, Arc<TerminalKeywordHighlightSnapshot>>,
+) {
+    let session_id = event.session_id().to_owned();
+    let previous = cache.get(&session_id).cloned();
+    let highlights = match event {
+        TerminalFrameEvent::Output(frame) if !frame.protocol_state.alternate_screen => {
+            let started_at = Instant::now();
+            frame.input_highlights = frame.snapshot.as_deref().and_then(|snapshot| {
+                precompute_terminal_input_highlights_reusing(
+                    snapshot,
+                    highlighter,
+                    previous.as_deref(),
+                )
+                .map(Arc::new)
+            });
+            frame.process_duration += started_at.elapsed();
+            frame.input_highlights.clone()
+        }
+        TerminalFrameEvent::Snapshot(frame) | TerminalFrameEvent::ClearExceptInput(frame) => {
+            let started_at = Instant::now();
+            frame.input_highlights = precompute_terminal_input_highlights_reusing(
+                &frame.snapshot,
+                highlighter,
+                previous.as_deref(),
+            )
+            .map(Arc::new);
+            frame.process_duration += started_at.elapsed();
+            frame.input_highlights.clone()
+        }
+        TerminalFrameEvent::Output(_) => None,
+        _ => return,
+    };
+    if let Some(highlights) = highlights {
+        cache.insert(session_id, highlights);
+    } else {
+        cache.remove(&session_id);
+    }
+}
+
 fn push_terminal_frame_worker_event(
     event_queue: &TerminalFrameEventQueue,
     event: TerminalFrameEvent,
@@ -2247,6 +2347,7 @@ pub(crate) struct TerminalFrameOutputEvent {
     pub(crate) snapshot_duration: Duration,
     pub(crate) snapshot_stats: TerminalSnapshotBuildStats,
     pub(crate) process_duration: Duration,
+    pub(crate) input_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
 }
 
 #[derive(Clone, Debug)]
@@ -2261,6 +2362,7 @@ pub(crate) struct TerminalFrameSnapshotEvent {
     pub(crate) snapshot_stats: TerminalSnapshotBuildStats,
     pub(crate) action_link_stats: TerminalActionLinkBuildStats,
     pub(crate) process_duration: Duration,
+    pub(crate) input_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
 }
 
 #[derive(Clone, Debug)]
@@ -2513,6 +2615,7 @@ impl TerminalFrameSession {
         let (snapshot, snapshot_duration, snapshot_stats) =
             terminal_frame_snapshot_with_scroll_window_and_stats(&self.screen, 0, false);
         TerminalFrameSnapshotEvent {
+            input_highlights: None,
             session_id,
             offset: 0,
             snapshot,
@@ -2585,6 +2688,7 @@ impl TerminalFrameSession {
             (None, Duration::ZERO, TerminalSnapshotBuildStats::default())
         };
         TerminalFrameOutputEvent {
+            input_highlights: None,
             session_id,
             visible_text: batch.visible_text,
             recording_text_bytes: batch.recording_text_bytes,
@@ -2644,6 +2748,7 @@ impl TerminalFrameSession {
             self.action_link_cache.clone_from(&action_links);
         }
         TerminalFrameSnapshotEvent {
+            input_highlights: None,
             session_id,
             offset: snapshot.display_offset,
             snapshot,
@@ -3453,7 +3558,8 @@ fn terminal_frame_command_priority_snapshot_insert_before(command: &TerminalFram
 fn terminal_frame_command_output_bytes(command: &TerminalFrameCommand) -> usize {
     match command {
         TerminalFrameCommand::Output { data, .. } => data.len(),
-        TerminalFrameCommand::DecodedOutput { text, .. } => text.len(),
+        TerminalFrameCommand::DecodedOutput { text, .. }
+        | TerminalFrameCommand::SyntheticOutput { text, .. } => text.len(),
         _ => 0,
     }
 }
@@ -3476,6 +3582,8 @@ fn run_terminal_frame_processor(
     event_queue: TerminalFrameEventQueue,
     recording_writer: RecordingWriteHandle,
 ) {
+    let mut input_highlighter: Option<Arc<TerminalKeywordHighlighter>> = None;
+    let mut input_highlight_cache = HashMap::new();
     let mut sessions: HashMap<String, TerminalFrameSession> = HashMap::new();
     let mut rekeyed_old_ids: HashSet<String> = HashSet::new();
     let mut rekeyed_old_order = VecDeque::new();
@@ -3510,7 +3618,42 @@ fn run_terminal_frame_processor(
             }
             continue;
         };
+        match &command {
+            TerminalFrameCommand::SetKeywordRules { .. } => input_highlight_cache.clear(),
+            TerminalFrameCommand::SeedSession { session_id, .. }
+            | TerminalFrameCommand::RemoveSession { session_id }
+            | TerminalFrameCommand::TakeSession { session_id, .. } => {
+                input_highlight_cache.remove(session_id);
+            }
+            TerminalFrameCommand::InsertSessions { sessions } => {
+                for (session_id, _) in sessions {
+                    input_highlight_cache.remove(session_id);
+                }
+            }
+            TerminalFrameCommand::RekeySession { old_id, new_id, .. } => {
+                input_highlight_cache.remove(old_id);
+                input_highlight_cache.remove(new_id);
+            }
+            _ => {}
+        }
+        // Enrich before enqueueing: consumers can never paint this input text
+        // before its colors. Compiling rules and matching both stay on this worker.
+        let frame_highlighter = input_highlighter.clone();
+        let mut push_event = |queue: &TerminalFrameEventQueue, mut event: TerminalFrameEvent| {
+            if let Some(highlighter) = frame_highlighter.as_deref() {
+                prepare_terminal_frame_input_highlights(
+                    &mut event,
+                    highlighter,
+                    &mut input_highlight_cache,
+                );
+            }
+            push_terminal_frame_worker_event(queue, event);
+        };
         match command {
+            TerminalFrameCommand::SetKeywordRules { rules } => {
+                input_highlighter = (!rules.is_empty())
+                    .then(|| Arc::new(compile_terminal_keyword_highlighter(&rules)));
+            }
             TerminalFrameCommand::EnsureSession {
                 session_id,
                 encoding,
@@ -3536,10 +3679,7 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence search was cancelled by session reset",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 let include = terminal_frame_live_snapshot_enabled(
                     !priority_initialized || snapshot_priority.contains(&session_id),
@@ -3556,10 +3696,7 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence session was removed",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 sessions.remove(&session_id);
                 snapshot_priority.remove(&session_id);
@@ -3576,10 +3713,21 @@ fn run_terminal_frame_processor(
                     ));
                     session.revision = session.revision.saturating_add(1);
                     let event = session.output_event_from_batch(session_id, batch, started_at);
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Output(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Output(event));
+                }
+            }
+            TerminalFrameCommand::SyntheticOutput { session_id, text } => {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    let started_at = Instant::now();
+                    // Application presentation is never source output: no recording,
+                    // prompt observation, credentials, or transport side effects.
+                    session.screen.reset_stream_state();
+                    session.screen.advance_decoded_text(&text);
+                    session.screen.take_effects();
+                    session.revision = session.revision.saturating_add(1);
+                    session.action_link_cache = None;
+                    let event = session.resized_live_snapshot_event(session_id, started_at);
+                    push_event(&event_queue, TerminalFrameEvent::Snapshot(event));
                 }
             }
             TerminalFrameCommand::AppendLocalText { session_id, text } => {
@@ -3592,10 +3740,7 @@ fn run_terminal_frame_processor(
                     session.revision = session.revision.saturating_add(1);
                     session.action_link_cache = None;
                     let event = session.resized_live_snapshot_event(session_id, started_at);
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Snapshot(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Snapshot(event));
                 }
             }
             TerminalFrameCommand::RekeySession {
@@ -3610,10 +3755,7 @@ fn run_terminal_frame_processor(
                         id,
                         "selected occurrence search was cancelled by reconnect",
                     ) {
-                        push_terminal_frame_worker_event(
-                            &event_queue,
-                            TerminalFrameEvent::Search(stale),
-                        );
+                        push_event(&event_queue, TerminalFrameEvent::Search(stale));
                     }
                 }
                 let success = if let Some(mut session) = sessions.remove(&old_id) {
@@ -3635,7 +3777,7 @@ fn run_terminal_frame_processor(
                 } else {
                     false
                 };
-                push_terminal_frame_worker_event(
+                push_event(
                     &event_queue,
                     TerminalFrameEvent::Rekeyed {
                         old_id,
@@ -3646,10 +3788,7 @@ fn run_terminal_frame_processor(
                 if success {
                     let session = sessions.get(&new_id).expect("rekeyed session exists");
                     let event = session.resized_live_snapshot_event(new_id, Instant::now());
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Snapshot(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Snapshot(event));
                 }
             }
             TerminalFrameCommand::CommandInput {
@@ -3667,7 +3806,7 @@ fn run_terminal_frame_processor(
                 if let Some(session) = sessions.get_mut(&session_id)
                     && let Some(result) = session.screen.navigate_command(action)
                 {
-                    push_terminal_frame_worker_event(
+                    push_event(
                         &event_queue,
                         TerminalFrameEvent::CommandNavigation { session_id, result },
                     );
@@ -3679,10 +3818,7 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence search was cancelled by terminal clear",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 if let Some(session) = sessions.get_mut(&session_id) {
                     let started_at = Instant::now();
@@ -3690,10 +3826,7 @@ fn run_terminal_frame_processor(
                     session.revision = session.revision.saturating_add(1);
                     session.action_link_cache = None;
                     let event = session.resized_live_snapshot_event(session_id, started_at);
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::ClearExceptInput(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::ClearExceptInput(event));
                 }
             }
             TerminalFrameCommand::TakeSession {
@@ -3705,10 +3838,7 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence session was moved to another workspace",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 snapshot_priority.remove(&session_id);
                 if let Err(std::sync::mpsc::SendError(Some(session))) =
@@ -3737,19 +3867,13 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence search was cancelled by terminal resize",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 if let Some(session) = sessions.get_mut(&session_id) {
                     let started_at = Instant::now();
                     session.resize(cols, rows);
                     let event = session.resized_live_snapshot_event(session_id, started_at);
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Snapshot(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Snapshot(event));
                 }
             }
             TerminalFrameCommand::Output {
@@ -3766,10 +3890,7 @@ fn run_terminal_frame_processor(
                     &session_id,
                     "selected occurrence search was cancelled by terminal output",
                 ) {
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Search(stale),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Search(stale));
                 }
                 let include_live_snapshot = terminal_frame_live_snapshot_enabled(
                     !priority_initialized || snapshot_priority.contains(&session_id),
@@ -3788,10 +3909,7 @@ fn run_terminal_frame_processor(
                     encoding,
                     scrollback_limit,
                     |event| {
-                        push_terminal_frame_worker_event(
-                            &event_queue,
-                            TerminalFrameEvent::Output(event),
-                        );
+                        push_event(&event_queue, TerminalFrameEvent::Output(event));
                     },
                 );
             }
@@ -3812,10 +3930,7 @@ fn run_terminal_frame_processor(
                         priority,
                         purpose,
                     );
-                    push_terminal_frame_worker_event(
-                        &event_queue,
-                        TerminalFrameEvent::Snapshot(event),
-                    );
+                    push_event(&event_queue, TerminalFrameEvent::Snapshot(event));
                 }
             }
             TerminalFrameCommand::RequestSearch {
@@ -3833,10 +3948,7 @@ fn run_terminal_frame_processor(
                             &mut selected_occurrence_search_jobs,
                             job,
                         ) {
-                            push_terminal_frame_worker_event(
-                                &event_queue,
-                                TerminalFrameEvent::Search(stale),
-                            );
+                            push_event(&event_queue, TerminalFrameEvent::Search(stale));
                         }
                     } else {
                         if matches!(purpose, TerminalFrameSearchPurpose::FindVisible { .. }) {
@@ -3844,10 +3956,7 @@ fn run_terminal_frame_processor(
                                 .retain(|job| job.session_id == session_id && job.key == key);
                         }
                         let event = session.search_event(session_id, purpose, key);
-                        push_terminal_frame_worker_event(
-                            &event_queue,
-                            TerminalFrameEvent::Search(event),
-                        );
+                        push_event(&event_queue, TerminalFrameEvent::Search(event));
                     }
                 }
             }

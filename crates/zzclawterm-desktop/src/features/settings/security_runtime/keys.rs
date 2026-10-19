@@ -1,8 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{
-    ClipboardItem, Context, IntoElement as _, KeyDownEvent, PathPromptOptions, SharedString, Window,
-};
+use gpui::{Context, IntoElement as _, KeyDownEvent, PathPromptOptions, SharedString, Window};
 use zzclawterm_core::SshKey;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
@@ -42,7 +40,6 @@ impl ZzClawTermApp {
                 key_content_mode: false,
                 cert_content_mode: false,
                 cert_expanded: key.has_cert_data,
-                show_passphrase: false,
                 has_key_data: key.has_key_data,
                 has_cert_data: key.has_cert_data,
                 error: None,
@@ -59,7 +56,6 @@ impl ZzClawTermApp {
                 key_content_mode: true,
                 cert_content_mode: false,
                 cert_expanded: false,
-                show_passphrase: false,
                 has_key_data: false,
                 has_cert_data: false,
                 error: None,
@@ -164,19 +160,6 @@ impl ZzClawTermApp {
         }
         if let Some(editor) = self.security.key_editor_mut() {
             editor.cert_expanded = !editor.cert_expanded;
-        }
-        cx.notify();
-    }
-
-    pub(in crate::features) fn toggle_security_key_passphrase_visibility(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.security.editor_busy() {
-            return;
-        }
-        if let Some(editor) = self.security.key_editor_mut() {
-            editor.show_passphrase = !editor.show_passphrase;
         }
         cx.notify();
     }
@@ -450,9 +433,11 @@ impl ZzClawTermApp {
         if let Some((_, value, None)) = self.security.private_key_view()
             && !value.is_empty()
         {
-            cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+            self.copy_text_with_feedback("copy-private-key", value.to_string(), cx);
             self.security.set_status(t!("common.copied").to_string());
             cx.notify();
+        } else {
+            self.copy_text_with_feedback("copy-private-key", String::new(), cx);
         }
     }
 
@@ -475,6 +460,7 @@ impl ZzClawTermApp {
         let request_key_id = key_id.clone();
         let location = SecurityStoreLocation::new(self.store_blocking_client());
         let scheduler = self.blocking_jobs.clone();
+        let origin_window = Some(window.window_handle());
         cx.spawn(async move |this, cx| {
             let task = scheduler.submit_task("ssh-public-key-copy", move |_| {
                 let store = location.open()?;
@@ -497,13 +483,25 @@ impl ZzClawTermApp {
                 }
                 match result {
                     Ok(public) => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(public));
+                        this.copy_text_with_feedback_at(
+                            origin_window,
+                            "copy-public-key",
+                            public,
+                            cx,
+                        );
                         this.security.set_status(t!("common.copied").to_string());
                         this.shell.set_status(t!("common.copied").to_string());
                     }
                     Err(error) => {
                         this.security.set_status(error.clone());
                         this.shell.set_status(error);
+                        this.notify_operation_at(
+                            origin_window,
+                            "copy-public-key",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            rust_i18n::t!("common.copyFailed").to_string(),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();

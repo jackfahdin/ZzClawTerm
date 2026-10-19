@@ -178,6 +178,15 @@ impl ZzClawTermApp {
                 move |this, event: &gpui::DragMoveEvent<SessionTabDragPayload>, _, cx| {
                     let b = event.bounds;
                     let p = event.event.position;
+                    // GPUI dispatches drag moves to every group, including those
+                    // outside the pointer. Only clear this group's old target so
+                    // a later sibling cannot erase the hovered group's preview.
+                    if !b.contains(&p) {
+                        if this.terminal.clear_terminal_window_drop_for_leaf(&move_id) {
+                            cx.notify();
+                        }
+                        return;
+                    }
                     let mut zone = TabDockZone::detect(
                         f32::from(p.x - b.origin.x),
                         f32::from(p.y - b.origin.y),
@@ -283,20 +292,24 @@ impl ZzClawTermApp {
                 zone_box.left_2().right_2().bottom_2().h(relative(0.5))
             }
         };
-        div().absolute().inset_0().child(
-            zone_box.child(
-                div()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(accent)
-                    .bg(self.shell_surface_color(palette.surface))
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .font_weight(FontWeight(600.))
-                    .text_color(rgb(palette.text))
-                    .child(label),
-            ),
-        )
+        div()
+            .debug_selector(|| "tab-dock-drop-overlay".into())
+            .absolute()
+            .inset_0()
+            .child(
+                zone_box.child(
+                    div()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(accent)
+                        .bg(self.shell_surface_color(palette.surface))
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .font_weight(FontWeight(600.))
+                        .text_color(rgb(palette.text))
+                        .child(label),
+                ),
+            )
     }
 }

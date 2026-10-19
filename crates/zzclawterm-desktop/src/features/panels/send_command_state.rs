@@ -513,6 +513,7 @@ mod tests {
     #[test]
     fn send_command_owner_keeps_data_and_mode_compatible() {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let mut state = send_command_state(&cx);
 
         assert_eq!(
@@ -540,6 +541,7 @@ mod tests {
     #[test]
     fn send_command_owner_normalizes_control_edits_and_infinity_count() {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let mut state = send_command_state(&cx);
 
         assert!(state.apply_control_input(SendCommandControlFocus::Count, "∞".to_string()));
@@ -563,6 +565,7 @@ mod tests {
     #[test]
     fn drafts_and_modes_survive_switching_and_clear_only_sent_payload() {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         cx.update(|cx| {
             let mut state = SendCommandFeatureState::new(cx);
             state.apply_draft("AT+CSQ".to_string());
@@ -592,6 +595,7 @@ mod tests {
     #[test]
     fn explicit_utf8_conversion_validates_before_replacing_text() {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         cx.update(|cx| {
             let mut state = SendCommandFeatureState::new(cx);
             state.apply_draft("中a".to_string());
@@ -620,6 +624,7 @@ mod tests {
     #[test]
     fn send_command_owner_finishes_progress_and_releases_cancel_atomically() {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let mut state = send_command_state(&cx);
 
         let run = state.begin_send(3);

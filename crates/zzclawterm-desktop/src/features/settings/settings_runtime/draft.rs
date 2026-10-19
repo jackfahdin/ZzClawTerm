@@ -245,6 +245,13 @@ impl ZzClawTermApp {
         close_after_apply: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.settings.theme_designer().dirty() {
+            self.theme_designer_action(
+                crate::features::settings::theme_designer::ThemeIntent::Apply(close_after_apply),
+                cx,
+            );
+            return;
+        }
         if !self.shell.has_settings_draft() {
             if close_after_apply {
                 self.finish_settings_page(cx);
@@ -495,6 +502,13 @@ impl ZzClawTermApp {
                     {
                         this.terminal.clear_command_tracking();
                     }
+                    if !this
+                        .settings
+                        .summary()
+                        .interaction_credential_autofill_enabled
+                    {
+                        this.cancel_credential_autofill(cx);
+                    }
                     this.invalidate_terminal_cell_metrics(cx);
                     this.refresh_visible_terminal_surfaces(cx);
                     this.shell.clear_settings_draft_snapshot();
@@ -524,6 +538,17 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn cancel_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings.theme_designer().submitting {
+            return;
+        }
+        if self.settings.theme_designer().dirty() {
+            self.theme_designer_action(
+                crate::features::settings::theme_designer::ThemeIntent::CloseSettings,
+                cx,
+            );
+            return;
+        }
+        self.settings.theme_designer_mut().reset();
         self.hide_ai_provider_secret(cx);
         if let Some(snapshot) = self.shell.take_settings_draft_snapshot() {
             self.apply_gpui_settings(snapshot.settings, cx);
@@ -566,7 +591,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn confirm_settings_draft(&mut self, cx: &mut Context<Self>) {
-        if self.settings_draft_dirty() {
+        if self.settings_draft_dirty() || self.settings.theme_designer().dirty() {
             self.apply_settings_draft(true, cx);
         } else {
             self.shell.clear_settings_draft_snapshot();
@@ -612,6 +637,9 @@ impl ZzClawTermApp {
     }
 
     fn finish_settings_page(&mut self, cx: &mut Context<Self>) {
+        self.hide_secret_inputs(cx);
+        self.settings.theme_designer_mut().reset();
+        self.forget_text_inputs("theme.designer.");
         self.cancel_github_gist_auth(cx);
         self.hide_ai_provider_secret(cx);
         self.ai.close_settings_editors();
@@ -704,6 +732,7 @@ mod tests {
     fn editing_or_clearing_external_editor_refreshes_the_draft_and_persists() {
         for next in ["", r"D:\Softwares\Microsoft VS Code\Code.exe"] {
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let app = app(&mut cx);
             let input = cx.update_entity(&app, |app, cx| {
                 let saved = app
@@ -751,6 +780,7 @@ mod tests {
     fn tray_preference_persists_without_saving_unrelated_settings_drafts() {
         for draft_open in [false, true] {
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let app = app(&mut cx);
             let baseline = cx
                 .update_entity(&app, |app, _| {
@@ -802,6 +832,7 @@ mod tests {
     #[test]
     fn applying_a_draft_persists_the_header_status_mode() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         assert_eq!(
             stored_header_status(&app, &mut cx),
@@ -832,6 +863,7 @@ mod tests {
     #[test]
     fn canceling_a_draft_restores_ui_typography_source() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
 
         cx.update_entity(&app, |app, cx| {
@@ -853,6 +885,99 @@ mod tests {
         });
     }
 
+    #[test]
+    fn native_window_material_preview_cancels_and_apply_persists_independent_opacity() {
+        use zzclawterm_core::models::window_material::WindowMaterial;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.set_window_material(WindowMaterial::Blurred, cx);
+            app.set_window_background_opacity(35, cx);
+            assert_eq!(
+                app.settings.summary().window_material,
+                WindowMaterial::Blurred
+            );
+            assert_eq!(app.settings.summary().window_background_opacity, 35);
+            assert!(app.settings_draft_dirty());
+            let stored = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap();
+            assert_eq!(stored.window_material, WindowMaterial::Opaque);
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().window_material,
+                WindowMaterial::Opaque
+            );
+            assert_eq!(app.settings.summary().window_background_opacity, 20);
+            app.begin_settings_draft(cx);
+            app.set_window_material(WindowMaterial::Transparent, cx);
+            app.set_window_background_opacity(0, cx);
+            app.apply_settings_draft(false, cx);
+        });
+        cx.run_until_parked();
+        cx.update_entity(&app, |app, cx| {
+            let stored = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap();
+            assert_eq!(stored.window_material, WindowMaterial::Transparent);
+            assert_eq!(stored.window_background_opacity, 0);
+            assert_eq!(stored.background_content_opacity, 82);
+            app.cancel_settings(cx);
+        });
+    }
+
+    #[test]
+    fn shared_native_material_settings_refresh_other_workspaces_and_respect_dirty_drafts() {
+        use crate::app_shell::{SharedStateDomain, SharedStateEvent};
+        use zzclawterm_core::models::window_material::WindowMaterial;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let first = app(&mut cx);
+        let second = app(&mut cx);
+        let mut snapshot = cx.update_entity(&first, |app, _| {
+            app.store_blocking_client()
+                .request(0, zzclawterm_store::LoadBootstrap)
+                .unwrap()
+                .outcome
+                .unwrap()
+        });
+        snapshot.settings.window_material = WindowMaterial::Blurred;
+        snapshot.settings.window_background_opacity = 48;
+        let event = SharedStateEvent {
+            domain: SharedStateDomain::Settings,
+            revision: 1,
+            changed: true,
+        };
+        cx.update_entity(&second, |app, cx| {
+            app.apply_shared_state(snapshot.clone(), event, cx);
+            assert_eq!(
+                app.settings.summary().window_material,
+                WindowMaterial::Blurred
+            );
+            assert_eq!(app.settings.summary().window_background_opacity, 48);
+            app.begin_settings_draft(cx);
+            app.set_window_material(WindowMaterial::Transparent, cx);
+            app.apply_shared_state(snapshot.clone(), event, cx);
+            assert_eq!(
+                app.settings.summary().window_material,
+                WindowMaterial::Transparent
+            );
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().window_material,
+                WindowMaterial::Blurred
+            );
+        });
+    }
+
     /// And must write a header status turned back on from hidden.
     ///
     /// This is the direction the bug was reported in: the header reads as "hidden"
@@ -862,6 +987,7 @@ mod tests {
     #[test]
     fn applying_a_draft_persists_a_header_status_turned_back_on() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             // No draft open, so this takes the immediate-persist path.
@@ -892,6 +1018,7 @@ mod tests {
     #[test]
     fn stale_draft_cannot_overwrite_settings_saved_by_another_window() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -919,6 +1046,7 @@ mod tests {
     #[test]
     fn applying_unrelated_settings_does_not_rewrite_updated_keyword_catalog() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -947,6 +1075,7 @@ mod tests {
     #[test]
     fn enabling_master_password_without_a_password_blocks_apply() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         let draft_survived = cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -984,6 +1113,7 @@ mod tests {
     #[test]
     fn enabling_master_password_with_a_password_persists() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -1016,6 +1146,7 @@ mod tests {
         use crate::models::CloudSyncInputField;
 
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -1082,6 +1213,7 @@ mod tests {
     #[test]
     fn webdav_edits_with_a_staged_master_password_report_the_missing_password() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         let draft_survived = cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -1138,6 +1270,7 @@ mod tests {
     #[test]
     fn webdav_edits_persist_without_a_master_password_while_cloud_stays_disabled() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -1180,6 +1313,7 @@ mod tests {
     #[test]
     fn flushed_panel_snapshot_reports_webdav_edits() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         let panel = cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -1208,5 +1342,265 @@ mod tests {
             "a staged master password with no stored one blocks apply, and the \
              reason must reach the panel"
         );
+    }
+    fn finish_theme_jobs(app: &gpui::Entity<ZzClawTermApp>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if !cx.update_entity(app, |app, _| app.settings.theme_designer().submitting) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "theme commit did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn theme_browsing_is_local_and_saved_themes_survive_settings_cancel() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        use zzclawterm_core::themes::management::ThemeApplyTarget;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let original = cx.update_entity(&app, |app, cx| {
+            let original = app.settings.summary().clone();
+            app.begin_settings_draft(cx);
+            app.settings.set_terminal_font_size(27);
+            app.theme_designer_action(ThemeIntent::Toggle, cx);
+            assert!(!app.settings.theme_designer().dirty());
+            app.theme_designer_action(ThemeIntent::Select("dracula".into()), cx);
+            assert_eq!(app.settings.summary().theme, original.theme);
+            app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+            app.edit_theme_designer("primary", "#123456".into(), cx);
+            assert!(app.save_theme_designer(Some(ThemeApplyTarget::BothFollowUi), cx));
+            assert_eq!(app.settings.summary().theme, original.theme);
+            original
+        });
+        finish_theme_jobs(&app, &mut cx);
+        let id = cx.update_entity(&app, |app, cx| {
+            let id = app.settings.summary().theme.clone();
+            assert_eq!(app.theme_palette().primary, 0x123456);
+            assert_eq!(app.settings.summary().terminal_theme, None);
+            assert_eq!(app.settings.summary().terminal_font_size, 27);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert_eq!(app.settings.summary().theme, id);
+            assert_eq!(
+                app.settings.summary().terminal_font_size,
+                original.terminal_font_size
+            );
+            id
+        });
+        let saved = cx.update_entity(&app, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+        });
+        assert_eq!(saved.theme, id);
+        assert_eq!(saved.terminal_font_size, original.terminal_font_size);
+        assert_eq!(
+            saved.custom_themes.resolve(&id).unwrap().colors.primary,
+            "#123456"
+        );
+    }
+
+    #[test]
+    fn saving_an_active_theme_refreshes_it_without_committing_other_settings() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        use zzclawterm_core::themes::management::ThemeApplyTarget;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            assert!(app.save_theme_designer(Some(ThemeApplyTarget::Ui), cx));
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.edit_theme_designer("primary", "#abcdef".into(), cx);
+            assert!(app.save_theme_designer(None, cx));
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            assert_eq!(app.theme_palette().primary, 0xabcdef);
+            assert_eq!(app.terminal_theme_palette().primary, 0xabcdef);
+            assert!(!app.settings_draft_dirty());
+            app.settings.set_terminal_font_size(29);
+            app.save_appearance_settings(cx);
+            app.apply_settings_draft(false, cx);
+        });
+        cx.run_until_parked();
+        let saved = cx.update_entity(&app, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+        });
+        assert_eq!(saved.terminal_font_size, 29);
+        assert_eq!(
+            saved
+                .custom_themes
+                .resolve(&saved.theme)
+                .unwrap()
+                .colors
+                .primary,
+            "#abcdef"
+        );
+    }
+
+    #[test]
+    fn theme_conflicts_preserve_edits_and_do_not_apply_the_theme() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        use zzclawterm_core::themes::management::ThemeApplyTarget;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            app.edit_theme_designer("primary", "#123456".into(), cx);
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    let mut settings = store.load_app_settings_summary()?;
+                    settings.theme = "dracula".into();
+                    store.save_appearance_settings(&settings)
+                })
+                .unwrap();
+            assert!(app.save_theme_designer(Some(ThemeApplyTarget::Ui), cx));
+            assert!(!app.save_theme_designer(Some(ThemeApplyTarget::Ui), cx));
+            app.theme_designer_action(ThemeIntent::Toggle, cx);
+            assert!(app.settings.theme_designer().open);
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, _| {
+            assert!(app.settings.theme_designer().dirty());
+            assert_eq!(
+                app.settings
+                    .theme_designer()
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .colors
+                    .primary,
+                "#123456"
+            );
+            assert!(!app.settings.theme_designer().message.is_empty());
+            assert!(app.settings.summary().custom_themes.available().is_empty());
+        });
+    }
+
+    #[test]
+    fn unsaved_theme_transition_can_continue_discard_or_save_before_leaving() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            app.theme_designer_action(ThemeIntent::Toggle, cx);
+            assert_eq!(
+                app.settings.theme_designer().pending,
+                Some(ThemeIntent::Toggle)
+            );
+            app.resolve_theme_designer_pending(None, cx);
+            assert!(app.settings.theme_designer().dirty());
+            app.theme_designer_action(ThemeIntent::Toggle, cx);
+            app.resolve_theme_designer_pending(Some(false), cx);
+            assert!(!app.settings.theme_designer().open);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            app.edit_theme_designer("primary", "#abcdef".into(), cx);
+            app.theme_designer_action(ThemeIntent::Toggle, cx);
+            app.resolve_theme_designer_pending(Some(true), cx);
+            assert!(app.settings.theme_designer().open);
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, _| {
+            assert!(!app.settings.theme_designer().open);
+            assert_eq!(
+                app.settings.summary().custom_themes.available()[0]
+                    .colors
+                    .primary,
+                "#abcdef"
+            );
+        });
+    }
+
+    #[test]
+    fn imports_are_unsaved_and_stale_import_results_cannot_replace_edits() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            let generation = app.settings.theme_designer().generation;
+            app.edit_theme_designer("primary", "#123456".into(), cx);
+            let imported = zzclawterm_core::themes::builtins()[1].copy_as_custom();
+            app.finish_theme_import(generation, Ok(Some(imported.clone())), cx);
+            assert_eq!(
+                app.settings
+                    .theme_designer()
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .colors
+                    .primary,
+                "#123456"
+            );
+            let generation = app.settings.theme_designer().generation;
+            app.finish_theme_import(generation, Ok(Some(imported)), cx);
+            assert!(app.settings.theme_designer().dirty());
+            assert!(app.settings.summary().custom_themes.available().is_empty());
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.theme_designer().pending,
+                Some(ThemeIntent::CloseSettings)
+            );
+        });
+    }
+
+    #[test]
+    fn deleting_an_active_theme_requires_confirmation_and_preserves_unrelated_drafts() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        use zzclawterm_core::themes::management::ThemeApplyTarget;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+            assert!(app.save_theme_designer(Some(ThemeApplyTarget::BothFollowUi), cx));
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            let id = app.settings.summary().theme.clone();
+            app.settings.set_terminal_font_size(28);
+            app.theme_designer_action(ThemeIntent::Delete, cx);
+            assert!(app.settings.theme_designer().delete_confirmation);
+            assert!(app.settings.summary().custom_themes.resolve(&id).is_some());
+            app.settings.theme_designer_mut().delete_confirmation = false;
+            assert!(app.settings.summary().custom_themes.resolve(&id).is_some());
+            app.theme_designer_action(ThemeIntent::Delete, cx);
+            app.confirm_theme_delete(cx);
+        });
+        finish_theme_jobs(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            assert_eq!(app.settings.summary().theme, "github-dark");
+            assert_eq!(app.settings.summary().terminal_theme, None);
+            assert!(app.settings.summary().custom_themes.available().is_empty());
+            assert_eq!(app.settings.summary().terminal_font_size, 28);
+            app.cancel_settings(cx);
+            assert!(app.settings.summary().custom_themes.available().is_empty());
+        });
     }
 }

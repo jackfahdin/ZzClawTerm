@@ -153,7 +153,7 @@ impl ZzClawTermApp {
         let Some(state) = self.transfer.active_editor_tab_mut() else {
             return;
         };
-        let matches = editor_search_matches(&state.content, &state.search_query);
+        let matches = editor_search_matches(state.content.as_str(), &state.search_query);
         if matches.is_empty() {
             state.active_match = 0;
         } else if delta >= 0 {
@@ -216,7 +216,11 @@ impl ZzClawTermApp {
         };
         let transfer_tx = self.transfer.transfer_event_sender();
         let transfer_options = self.sftp_transfer_options();
-        self.submit_transfer_blocking_job(
+        let control = self.transfer.external_editor_upload_control();
+        if let Some(job) = self.transfer.transfer_job_mut(&job_id) {
+            job.control = Some(control.clone());
+        }
+        self.submit_bulk_transfer_job(
             "sftp-external-editor-upload",
             job_id.clone(),
             transfer_tx.clone(),
@@ -224,9 +228,12 @@ impl ZzClawTermApp {
                 upload_external_editor_file(
                     service,
                     &job_id,
-                    &remote_path,
-                    raw_path_token,
+                    zzclawterm_transport::RemoteFilePath {
+                        display_path: remote_path,
+                        raw_path_token,
+                    },
                     &local_path,
+                    control,
                     transfer_options,
                     &transfer_tx,
                 );

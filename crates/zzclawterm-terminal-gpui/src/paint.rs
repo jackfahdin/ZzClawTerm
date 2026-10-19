@@ -199,7 +199,7 @@ pub(super) fn apply_selection_range(
 pub(super) fn apply_search_ranges(
     spans: Vec<TerminalHighlightSpan>,
     ranges: &[(usize, usize)],
-    active: bool,
+    _active: bool,
     palette: zzclawterm_ui::ThemePalette,
 ) -> Vec<TerminalHighlightSpan> {
     if ranges.is_empty() {
@@ -210,18 +210,8 @@ pub(super) fn apply_search_ranges(
     while flat.len() < max_end {
         flat.push(FlatTerminalCell::blank());
     }
-    // Tauri xterm find decorations: inactive selection-ish, active stronger accent.
-    let bg = if active {
-        // Mix selection with warning accent by using warning-ish selection.
-        palette.warning
-    } else {
-        palette.terminal_selection
-    };
-    let fg = if active {
-        Some(palette.terminal_bg)
-    } else {
-        None
-    };
+    // Active results use the same fill; the element paints their outline separately.
+    let bg = palette.terminal_find_bg;
     for &(start, end) in ranges {
         if start >= end {
             continue;
@@ -230,9 +220,6 @@ pub(super) fn apply_search_ranges(
         for idx in start..end {
             if let Some(cell) = flat.get_mut(idx) {
                 cell.bg = Some(bg);
-                if let Some(fg) = fg {
-                    cell.color = Some(fg);
-                }
                 cell.keyword = false;
             }
         }
@@ -445,7 +432,7 @@ fn terminal_base_style_runs(
         if end <= start {
             continue;
         }
-        let bg = crate::resolve_cell_bg(palette, span.style);
+        let bg = crate::resolve_cell_bg(palette, span.style, bold_default_foreground);
         let color = if span.style.hidden {
             bg.unwrap_or(palette.terminal_bg)
         } else {
@@ -460,6 +447,7 @@ fn terminal_base_style_runs(
             bold: span.style.bold,
             italic: span.style.italic,
             allow_keyword: !span.style.hidden
+                && !span.style.reverse
                 && span.style.fg.is_none()
                 && span.style.fg_rgb.is_none(),
         };
@@ -868,6 +856,35 @@ mod tests {
             color,
             priority: 0,
         }]
+    }
+
+    #[test]
+    fn reverse_keyword_ranges_preserve_selected_colors_and_highlight_normal_text() {
+        let palette = zzclawterm_ui::theme_palette("github-dark");
+        let mut screen = zzclawterm_terminal::TerminalScreen::new(24, 2);
+        screen.advance(b"SELECTED\x1b[7mSELECTED\x1b[27mSELECTED");
+        let snapshot = screen.snapshot();
+        let row = snapshot.row(0).unwrap();
+        let ranges = [TerminalKeywordRange {
+            start_col: 0,
+            end_col: 24,
+            color: 0xff2244,
+        }];
+        let spans = terminal_highlight_spans_with_keyword_ranges(
+            &row.text,
+            Some(&row.styled_spans),
+            Some(&ranges),
+            &[],
+            palette,
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].color, Some(0xff2244));
+        assert!(spans[0].keyword);
+        assert_eq!(spans[1].color, Some(palette.terminal_bg));
+        assert_eq!(spans[1].bg, Some(palette.terminal_fg));
+        assert!(!spans[1].keyword);
+        assert_eq!(spans[2].color, Some(0xff2244));
+        assert!(spans[2].keyword);
     }
 
     #[test]

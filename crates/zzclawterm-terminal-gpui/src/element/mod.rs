@@ -6,9 +6,13 @@ use std::time::Instant;
 use gpui::{
     App, Bounds, ContentMask, Element, ElementId, Font, FontFallbacks, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style,
-    TextRun, Window, fill, font, point, px, relative, rgb, rgba, size,
+    TextRun, Window, fill, font, outline, point, px, relative, rgb, rgba, size,
 };
 use zzclawterm_core::ResolvedKeywordHighlightRule;
+use zzclawterm_terminal::selection::{
+    TerminalBufferCellPos, TerminalCellSide, TerminalSelection, TerminalSelectionEndpoint,
+    expand_selection_range,
+};
 use zzclawterm_terminal::{
     ShellInputLineKind, TerminalLineId, TerminalSnapshot, terminal_cell_count,
     terminal_char_cell_width, terminal_is_zero_width_mark,
@@ -60,17 +64,20 @@ pub struct TerminalLineDecorations {
     pub link_ranges: Vec<(usize, usize)>,
 }
 
-/// Dynamic absolute-buffer selection. Endpoints are inclusive terminal cells.
+/// Dynamic absolute-buffer selection with half-cell endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TerminalGridSelection {
     pub anchor_line: usize,
     pub anchor_col: usize,
     pub head_line: usize,
     pub head_col: usize,
+    pub anchor_side: TerminalCellSide,
+    pub head_side: TerminalCellSide,
     pub all_buffer: bool,
 }
 
 impl TerminalGridSelection {
+    /// Compatibility constructor: inclusive cells, with identical cells empty.
     pub fn new(
         anchor_line: usize,
         anchor_col: usize,
@@ -78,51 +85,42 @@ impl TerminalGridSelection {
         head_col: usize,
         all_buffer: bool,
     ) -> Self {
+        let anchor = TerminalBufferCellPos::new(anchor_line, anchor_col);
+        let head = TerminalBufferCellPos::new(head_line, head_col);
+        let mut selection = if anchor == head {
+            TerminalSelection::with_anchor(anchor)
+        } else {
+            TerminalSelection::from_range(anchor, head)
+        };
+        selection.all_buffer = all_buffer;
+        Self::from_selection(selection)
+    }
+
+    pub fn from_selection(selection: TerminalSelection) -> Self {
         Self {
-            anchor_line,
-            anchor_col,
-            head_line,
-            head_col,
-            all_buffer,
+            anchor_line: selection.anchor.position.line,
+            anchor_col: selection.anchor.position.col,
+            head_line: selection.head.position.line,
+            head_col: selection.head.position.col,
+            anchor_side: selection.anchor.side,
+            head_side: selection.head.side,
+            all_buffer: selection.all_buffer,
         }
     }
 
     fn cols_for_absolute_line(self, line: usize) -> Option<(usize, usize)> {
-        if self.all_buffer {
-            return Some((0, usize::MAX));
+        TerminalSelection {
+            anchor: TerminalSelectionEndpoint::new(
+                TerminalBufferCellPos::new(self.anchor_line, self.anchor_col),
+                self.anchor_side,
+            ),
+            head: TerminalSelectionEndpoint::new(
+                TerminalBufferCellPos::new(self.head_line, self.head_col),
+                self.head_side,
+            ),
+            all_buffer: self.all_buffer,
         }
-        if (self.anchor_line, self.anchor_col) == (self.head_line, self.head_col) {
-            return None;
-        }
-        let (start_line, start_col, end_line, end_col) =
-            if (self.anchor_line, self.anchor_col) <= (self.head_line, self.head_col) {
-                (
-                    self.anchor_line,
-                    self.anchor_col,
-                    self.head_line,
-                    self.head_col,
-                )
-            } else {
-                (
-                    self.head_line,
-                    self.head_col,
-                    self.anchor_line,
-                    self.anchor_col,
-                )
-            };
-        if line < start_line || line > end_line {
-            return None;
-        }
-        if start_line == end_line {
-            return Some((start_col, end_col.saturating_add(1)));
-        }
-        if line == start_line {
-            return Some((start_col, usize::MAX));
-        }
-        if line == end_line {
-            return Some((0, end_col.saturating_add(1)));
-        }
-        Some((0, usize::MAX))
+        .cols_for_absolute_line(line)
     }
 }
 
@@ -136,10 +134,10 @@ struct CachedTerminalPaintRow {
 }
 
 #[derive(Debug, Clone)]
-struct TerminalRowBackgroundRange {
-    bg: u32,
-    start: usize,
-    end: usize,
+pub(super) struct TerminalRowBackgroundRange {
+    pub(super) bg: u32,
+    pub(super) start: usize,
+    pub(super) end: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +405,7 @@ pub struct ZzClawTerminalElement {
     snapshot: Arc<TerminalSnapshot>,
     keyword_rules: Arc<Vec<ResolvedKeywordHighlightRule>>,
     keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
+    input_keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
     decorations: Arc<[TerminalLineDecorations]>,
     selection: Option<TerminalGridSelection>,
     layout_cache: Option<Arc<Mutex<ZzClawTerminalLayoutCache>>>,
@@ -503,6 +502,7 @@ impl ZzClawTerminalElement {
             snapshot,
             keyword_rules,
             keyword_highlights: None,
+            input_keyword_highlights: None,
             decorations: decorations.into(),
             selection: None,
             layout_cache: None,
@@ -571,6 +571,35 @@ impl ZzClawTerminalElement {
     ) -> Self {
         self.keyword_highlights = Some(highlights);
         self
+    }
+
+    /// Exact input-row results travel with the text frame and take precedence
+    /// over output batches. A known-empty result also suppresses stale colors.
+    pub fn with_input_keyword_highlights(
+        mut self,
+        highlights: Arc<TerminalKeywordHighlightSnapshot>,
+    ) -> Self {
+        self.input_keyword_highlights = Some(highlights);
+        self
+    }
+
+    fn keyword_highlight_lookup(
+        &self,
+        row: usize,
+        reuse_key: Option<TerminalKeywordRowReuseKey>,
+    ) -> Option<TerminalKeywordHighlightLookup<'_>> {
+        self.input_keyword_highlights
+            .as_ref()
+            .and_then(|highlights| highlights.lookup_with_reuse_key(row, &self.snapshot, reuse_key))
+            .or_else(|| {
+                self.keyword_highlights.as_ref().and_then(|highlights| {
+                    highlights
+                        .lookup_with_reuse_key(row, &self.snapshot, reuse_key)
+                        .or_else(|| {
+                            highlights.stale_lookup_with_reuse_key(row, &self.snapshot, reuse_key)
+                        })
+                })
+            })
     }
 
     pub fn with_visual_y_offset(mut self, offset: f32) -> Self {
@@ -669,12 +698,7 @@ impl ZzClawTerminalElement {
     fn paint_style_key(&self, keyword_rules_key: u64) -> u64 {
         let mut hasher = DefaultHasher::new();
         keyword_rules_key.hash(&mut hasher);
-        self.palette.bg.hash(&mut hasher);
-        self.palette.accent.hash(&mut hasher);
-        self.palette.warning.hash(&mut hasher);
-        self.palette.terminal_fg.hash(&mut hasher);
-        self.palette.terminal_bg.hash(&mut hasher);
-        self.palette.terminal_ansi.hash(&mut hasher);
+        self.palette.hash(&mut hasher);
         self.font_family.hash(&mut hasher);
         self.font_fallbacks.hash(&mut hasher);
         self.font_size.to_bits().hash(&mut hasher);
@@ -696,7 +720,13 @@ impl ZzClawTerminalElement {
     }
 
     fn keyword_rules_key(&self) -> u64 {
-        terminal_keyword_rules_key(&self.keyword_rules)
+        self.input_keyword_highlights
+            .as_ref()
+            .or(self.keyword_highlights.as_ref())
+            .map_or_else(
+                || terminal_keyword_rules_key(&self.keyword_rules),
+                |highlights| highlights.rules_key(),
+            )
     }
 
     fn row_layout_cache_keys(
@@ -711,17 +741,7 @@ impl ZzClawTerminalElement {
         let display_line = if line.is_empty() { " " } else { line };
         let ansi = snapshot_row.map(|row| row.styled_spans.as_ref());
         let row_revision = snapshot_row.map(|row| row.revision);
-        let keyword_lookup = self.keyword_highlights.as_ref().and_then(|highlights| {
-            highlights
-                .lookup_with_reuse_key(row, self.snapshot.as_ref(), keyword_reuse_key)
-                .or_else(|| {
-                    highlights.stale_lookup_with_reuse_key(
-                        row,
-                        self.snapshot.as_ref(),
-                        keyword_reuse_key,
-                    )
-                })
-        });
+        let keyword_lookup = self.keyword_highlight_lookup(row, keyword_reuse_key);
         let keyword_result_known_empty = keyword_lookup
             .as_ref()
             .is_some_and(|lookup| lookup.is_known_empty());
@@ -876,11 +896,20 @@ fn terminal_ansi_spans_are_plain(ansi_spans: Option<&[zzclawterm_terminal::Style
 /// itself. The filler is a space: it advances the glyph index without painting,
 /// and the cell's own background is drawn as a rect underneath either way.
 fn pad_wide_cells(text: &str) -> String {
-    if !text.chars().any(|ch| terminal_char_cell_width(ch) > 1) {
+    // A tab glyph has no defined advance in terminal fonts, so it must be
+    // painted as a plain space; see `append_padded_wide_cells` for details.
+    if !text
+        .chars()
+        .any(|ch| terminal_char_cell_width(ch) > 1 || ch == '\t')
+    {
         return text.to_string();
     }
     let mut padded = String::with_capacity(text.len() + 4);
     for ch in text.chars() {
+        if ch == '\t' {
+            padded.push(' ');
+            continue;
+        }
         padded.push(ch);
         if terminal_is_zero_width_mark(ch) {
             continue;
@@ -894,11 +923,22 @@ fn pad_wide_cells(text: &str) -> String {
 
 fn append_padded_wide_cells(output: &mut String, input: &str) -> usize {
     let start_len = output.len();
-    if !input.chars().any(|ch| terminal_char_cell_width(ch) > 1) {
+    // A tab glyph has no defined advance in terminal fonts, so the shaper would
+    // place it at an arbitrary width and shift the rest of the run. The grid
+    // already materializes the stop as blank cells; painting the tab cell as a
+    // plain space keeps the shaped string aligned with the cell grid.
+    if !input
+        .chars()
+        .any(|ch| terminal_char_cell_width(ch) > 1 || ch == '\t')
+    {
         output.push_str(input);
         return output.len().saturating_sub(start_len);
     }
     for ch in input.chars() {
+        if ch == '\t' {
+            output.push(' ');
+            continue;
+        }
         output.push(ch);
         if terminal_is_zero_width_mark(ch) {
             continue;
@@ -945,6 +985,9 @@ fn append_terminal_glyph_span(
                     color: span.color.unwrap_or(default_fg),
                 });
             }
+            output.push(' ');
+        } else if ch == '\t' {
+            // Never feed a literal tab to the shaper; see append_padded_wide_cells.
             output.push(' ');
         } else {
             output.push(ch);
@@ -1023,7 +1066,7 @@ fn terminal_effective_keyword_rules_key(keyword_rules_key: u64, known_empty: boo
     if known_empty { 0 } else { keyword_rules_key }
 }
 
-fn terminal_background_ranges_for_spans(
+pub(super) fn terminal_background_ranges_for_spans(
     spans: &[TerminalHighlightSpan],
 ) -> Vec<TerminalRowBackgroundRange> {
     let mut out = Vec::new();
@@ -1059,14 +1102,15 @@ fn terminal_background_ranges_for_spans(
     out
 }
 
-fn terminal_background_ranges_for_cells(
+pub(super) fn terminal_background_ranges_for_cells(
     cells: &[zzclawterm_terminal::RenderCell],
     palette: zzclawterm_ui::ThemePalette,
+    bold_default_foreground: bool,
 ) -> Vec<TerminalRowBackgroundRange> {
     let mut out: Vec<TerminalRowBackgroundRange> = Vec::new();
     // Include spacer cells and trailing blanks: text length is not a paint boundary.
     for (col, cell) in cells.iter().enumerate() {
-        let Some(bg) = crate::resolve_cell_bg(palette, cell.style) else {
+        let Some(bg) = crate::resolve_cell_bg(palette, cell.style, bold_default_foreground) else {
             continue;
         };
         if let Some(last) = out
@@ -1144,7 +1188,8 @@ fn terminal_text_decorations_for_row(
     // authority for decorated blanks beyond that trimmed text boundary.
     for (col, cell) in cells.unwrap_or_default().iter().enumerate().skip(col) {
         let color = if cell.style.hidden {
-            crate::resolve_cell_bg(palette, cell.style).unwrap_or(palette.terminal_bg)
+            crate::resolve_cell_bg(palette, cell.style, bold_default_foreground)
+                .unwrap_or(palette.terminal_bg)
         } else {
             crate::resolve_cell_fg(palette, cell.style, bold_default_foreground)
         };
@@ -1200,7 +1245,7 @@ fn push_terminal_zebra_stripes(
     for row_index in visible_rows {
         let color = snapshot.row(row_index).and_then(|row| {
             if row.line_id.is_some() && row.line_id == target_line {
-                Some((palette.accent << 8) | 0x24)
+                Some((palette.terminal_line_highlight << 8) | 0xff)
             } else if matches!(
                 row.shell_input,
                 Some(ShellInputLineKind::Submitted | ShellInputLineKind::Active)
@@ -1313,10 +1358,19 @@ fn push_dynamic_decoration_backgrounds(
         push_selected_occurrence_bg(row, start, end, palette, geometry, out);
     }
     for &(start, end) in &decorations.search_ranges {
-        push_col_range_bg(row, start, end, palette.terminal_selection, geometry, out);
+        push_col_range_bg(row, start, end, palette.terminal_find_bg, geometry, out);
     }
     for &(start, end) in &decorations.active_search_ranges {
-        push_col_range_bg(row, start, end, palette.warning, geometry, out);
+        let previous_len = out.len();
+        push_col_range_bg(row, start, end, palette.terminal_find_bg, geometry, out);
+        if out.len() > previous_len {
+            let bounds = out.last().expect("range fill was pushed").bounds;
+            out.push(outline(
+                bounds,
+                rgb(palette.terminal_find_border),
+                Default::default(),
+            ));
+        }
     }
 }
 
@@ -1334,7 +1388,7 @@ fn terminal_selection_cols_for_snapshot_row(
     let (start, end) = selection?.cols_for_absolute_line(absolute_line)?;
     let start = start.min(snapshot.cols);
     let end = end.min(snapshot.cols);
-    (end > start).then_some((start, end))
+    expand_selection_range(&snapshot.row(row)?.cells, start, end)
 }
 
 fn push_dynamic_selection_background(
@@ -1474,7 +1528,11 @@ impl Element for ZzClawTerminalElement {
         let mut base_font = font(SharedString::from(self.font_family.clone()));
         base_font.fallbacks = self.font_fallbacks.clone();
         base_font.features = terminal_font_features();
-        let keyword_rules_key = if let Some(highlights) = self.keyword_highlights.as_ref() {
+        let keyword_rules_key = if let Some(highlights) = self
+            .input_keyword_highlights
+            .as_ref()
+            .or(self.keyword_highlights.as_ref())
+        {
             highlights.rules_key()
         } else if self.keyword_rules.is_empty() {
             0
@@ -1530,8 +1588,9 @@ impl Element for ZzClawTerminalElement {
             .iter()
             .any(|row| row.wrapped);
         let keyword_row_reuse_keys = self
-            .keyword_highlights
+            .input_keyword_highlights
             .as_ref()
+            .or(self.keyword_highlights.as_ref())
             .filter(|_| visible_has_wrapped_group)
             .map(|_| terminal_keyword_row_reuse_keys(self.snapshot.as_ref()));
         // Follow the editor model: once the visible viewport is entirely hot,
@@ -1573,17 +1632,7 @@ impl Element for ZzClawTerminalElement {
                 .copied()
                 .flatten()
                 .or_else(|| terminal_keyword_row_reuse_key(self.snapshot.as_ref(), row));
-            let keyword_lookup = self.keyword_highlights.as_ref().and_then(|highlights| {
-                highlights
-                    .lookup_with_reuse_key(row, self.snapshot.as_ref(), keyword_reuse_key)
-                    .or_else(|| {
-                        highlights.stale_lookup_with_reuse_key(
-                            row,
-                            self.snapshot.as_ref(),
-                            keyword_reuse_key,
-                        )
-                    })
-            });
+            let keyword_lookup = self.keyword_highlight_lookup(row, keyword_reuse_key);
             let keyword_result_known_empty = keyword_lookup
                 .as_ref()
                 .is_some_and(|lookup| lookup.is_known_empty());
@@ -1752,7 +1801,13 @@ impl Element for ZzClawTerminalElement {
                     glyph_spans_storage.as_slice()
                 };
                 let background_ranges = snapshot_row
-                    .map(|row| terminal_background_ranges_for_cells(&row.cells, self.palette))
+                    .map(|row| {
+                        terminal_background_ranges_for_cells(
+                            &row.cells,
+                            self.palette,
+                            self.bold_default_foreground,
+                        )
+                    })
                     .unwrap_or_else(|| terminal_background_ranges_for_spans(&background_spans));
                 let text_decorations = terminal_text_decorations_for_row(
                     glyph_spans,
@@ -2383,4 +2438,67 @@ fn terminal_layout_height_px(
     override_rows: Option<usize>,
 ) -> f32 {
     cell_height.max(1.0) * terminal_layout_rows(snapshot_rows, override_rows) as f32
+}
+
+#[cfg(test)]
+mod tab_paint_tests {
+    use super::{
+        TerminalHighlightSpan, append_padded_wide_cells, pad_wide_cells,
+        terminal_background_ranges_for_spans,
+    };
+
+    fn span(text: &str, bg: Option<u32>) -> TerminalHighlightSpan {
+        TerminalHighlightSpan {
+            text: text.to_string(),
+            color: None,
+            bg,
+            keyword: false,
+            underline: false,
+            strikeout: false,
+            bold: false,
+            italic: false,
+        }
+    }
+
+    #[test]
+    fn shaped_text_never_receives_literal_tab() {
+        // The grid keeps a literal `\t` in the tab cell (alacritty fork
+        // `put_tab`). Terminal fonts define no tab advance, so feeding it to
+        // the shaper shifts the rest of the run by an arbitrary width. Paint
+        // the cell as a plain space instead.
+        let mut output = String::new();
+        let len = append_padded_wide_cells(&mut output, "a\tb");
+        assert_eq!(output, "a b");
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn plain_row_fast_path_paints_tab_as_space() {
+        // `printf 'Name\tValue\n'` produces a default-styled row that takes the
+        // plain-row fast path (pad_wide_cells -> shape_line). The literal tab
+        // must never reach the shaper on this path either. The input is the
+        // materialized grid text: the tab cell plus the blank cells up to the
+        // stop (tab at col 4 jumps to col 8).
+        let padded = pad_wide_cells("Name\t   Value");
+        assert!(!padded.contains('\t'));
+        // One space for the tab cell plus the three materialized blanks puts
+        // the value at column 8.
+        assert_eq!(padded, "Name    Value");
+    }
+
+    #[test]
+    fn background_ranges_start_colored_span_at_tab_stop() {
+        // Snapshot spans carry the tab cell plus the blank cell the grid left
+        // behind, so the tab span covers two columns and the colored span
+        // starts on the stop — here col 16, matching the cell path.
+        let spans = vec![
+            span("System load:  \t ", None),
+            span("0.33", Some(0x0000_0000)),
+        ];
+        let ranges = terminal_background_ranges_for_spans(&spans);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start, 16);
+        assert_eq!(ranges[0].end, 20);
+    }
 }

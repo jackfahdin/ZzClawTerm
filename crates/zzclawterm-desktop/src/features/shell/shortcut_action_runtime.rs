@@ -69,16 +69,40 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Native menu accelerators use the same semantic actions as the keymap.
+        // Recheck lifecycle and lock state before either dispatch path executes.
+        if cfg!(target_os = "macos")
+            && self
+                .desktop_controller
+                .as_ref()
+                .and_then(|controller| controller.upgrade())
+                .is_some_and(|controller| {
+                    !controller
+                        .read(cx)
+                        .workspace_menu_commands_ready(self.workspace_id, cx)
+                })
+        {
+            return false;
+        }
+        use crate::features::layout::title_bar::definition::TitleMenuCommand;
         match invocation.id {
-            ShortcutId::TerminalCopy => self.copy_terminal_selection_or_visible(cx),
-            ShortcutId::TerminalPaste => self.paste_from_clipboard(window, cx),
+            ShortcutId::TerminalCopy => {
+                self.execute_title_menu_command(&TitleMenuCommand::TerminalCopy, window, cx)
+            }
+            ShortcutId::TerminalPaste => {
+                self.execute_title_menu_command(&TitleMenuCommand::TerminalPaste, window, cx)
+            }
             ShortcutId::TerminalPasteSelected => {
                 if let Some(text) = self.selected_terminal_text() {
                     self.paste_terminal_text(text, window, cx);
                 }
             }
-            ShortcutId::TerminalFind => self.open_terminal_search(window, cx),
-            ShortcutId::TerminalClear => self.send_terminal_clear_screen(cx),
+            ShortcutId::TerminalFind => {
+                self.execute_title_menu_command(&TitleMenuCommand::TerminalFind, window, cx)
+            }
+            ShortcutId::TerminalClear => {
+                self.execute_title_menu_command(&TitleMenuCommand::TerminalClear, window, cx)
+            }
             ShortcutId::TerminalClearAll => self.clear_terminal(cx),
             ShortcutId::TerminalCommandPrevious => self.navigate_terminal_command(
                 zzclawterm_terminal::command_navigation::CommandNavigationAction::Previous,
@@ -92,11 +116,17 @@ impl ZzClawTermApp {
                 zzclawterm_terminal::command_navigation::CommandNavigationAction::Select,
                 cx,
             ),
-            ShortcutId::TerminalSelectAll => self.select_all_terminal(cx),
-            ShortcutId::ManageSyncGroups => self.open_sync_groups(window, cx),
+            ShortcutId::TerminalSelectAll => {
+                self.execute_title_menu_command(&TitleMenuCommand::TerminalSelectAll, window, cx)
+            }
+            ShortcutId::ManageSyncGroups => {
+                self.execute_title_menu_command(&TitleMenuCommand::ManageSyncGroups, window, cx)
+            }
             ShortcutId::ShowCommandSuggestions => self.show_manual_command_suggestions(cx),
             ShortcutId::ToggleRecording => self.toggle_active_session_recording(cx),
-            ShortcutId::NewSession => self.open_connection_editor(None, None, false, window, cx),
+            ShortcutId::NewSession => {
+                self.execute_title_menu_command(&TitleMenuCommand::NewSession, window, cx)
+            }
             ShortcutId::OpenNewSessionMenu => {
                 if self.session.active_id().is_some() {
                     let anchor = self
@@ -112,7 +142,9 @@ impl ZzClawTermApp {
                 }
             }
             ShortcutId::TemporarySshLink => self.open_temporary_ssh_link_dialog(window, cx),
-            ShortcutId::QuickSwitch => self.open_quick_switch(window, cx),
+            ShortcutId::QuickSwitch => {
+                self.execute_title_menu_command(&TitleMenuCommand::QuickSwitch, window, cx)
+            }
             ShortcutId::NewLocalTerminal => self.start_local_session(window, cx),
             ShortcutId::CloseTab => self.close_active_session(cx),
             ShortcutId::NextTab | ShortcutId::PreviousTab => {
@@ -150,8 +182,12 @@ impl ZzClawTermApp {
             ShortcutId::MultiplexSshWithCommand => {
                 self.open_startup_command_dialog_for(StartupCommandAction::Multiplex, window, cx)
             }
-            ShortcutId::ToggleLeftSidebar => self.toggle_left_sidebar(cx),
-            ShortcutId::ToggleRightSidebar => self.toggle_right_inspector(cx),
+            ShortcutId::ToggleLeftSidebar => {
+                self.execute_title_menu_command(&TitleMenuCommand::ToggleLeftSidebar, window, cx)
+            }
+            ShortcutId::ToggleRightSidebar => {
+                self.execute_title_menu_command(&TitleMenuCommand::ToggleRightSidebar, window, cx)
+            }
             ShortcutId::TogglePaneFocus => {
                 if self.session.active_id().is_some() {
                     self.shell
@@ -164,13 +200,17 @@ impl ZzClawTermApp {
                 window.toggle_fullscreen();
                 cx.notify();
             }
-            ShortcutId::ZoomIn => self.zoom_terminal_in(cx),
-            ShortcutId::ZoomOut => self.zoom_terminal_out(cx),
-            ShortcutId::ResetZoom => self.reset_terminal_font_size(cx),
+            ShortcutId::ZoomIn => {
+                self.execute_title_menu_command(&TitleMenuCommand::ZoomIn, window, cx)
+            }
+            ShortcutId::ZoomOut => {
+                self.execute_title_menu_command(&TitleMenuCommand::ZoomOut, window, cx)
+            }
+            ShortcutId::ResetZoom => {
+                self.execute_title_menu_command(&TitleMenuCommand::ResetZoom, window, cx)
+            }
             ShortcutId::OpenSettings => {
-                self.open_page(NavItem::Settings, cx);
-                self.shell.set_status("settings opened".to_string());
-                cx.notify();
+                self.execute_title_menu_command(&TitleMenuCommand::OpenSettings, window, cx)
             }
             ShortcutId::OpenChat => {
                 self.ensure_panel_open(NavItem::AiAssistant);

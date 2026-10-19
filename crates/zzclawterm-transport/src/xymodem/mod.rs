@@ -61,6 +61,8 @@ pub enum XymodemError {
     OpenFailed,
     #[error("unable to read upload file")]
     ReadFailed,
+    #[error("unable to write transfer frame")]
+    WriteFailed,
     #[error("upload size exceeds the supported range")]
     SizeOverflow,
     #[error("receiver timed out")]

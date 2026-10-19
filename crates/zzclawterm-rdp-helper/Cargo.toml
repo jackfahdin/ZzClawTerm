@@ -29,3 +29,6 @@ smallvec = "1.15"
 tokio.workspace = true
 uuid.workspace = true
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }

@@ -259,7 +259,8 @@ fn validate_control_phase(message: &VncControlMessage, hello_complete: bool) -> 
             io::ErrorKind::InvalidData,
             "VNC IPC ClientHello may only be sent once",
         )),
-        VncControlMessage::ServerKeyRequest(_)
+        VncControlMessage::Pong { .. }
+        | VncControlMessage::ServerKeyRequest(_)
         | VncControlMessage::ServerKeyAuthenticated(_)
         | VncControlMessage::ServerHello { .. }
         | VncControlMessage::DesktopReset { .. }
@@ -268,7 +269,8 @@ fn validate_control_phase(message: &VncControlMessage, hello_complete: bool) -> 
             io::ErrorKind::InvalidData,
             "VNC IPC helper-only message received from application",
         )),
-        VncControlMessage::ServerKeyResponse { .. }
+        VncControlMessage::Ping { .. }
+        | VncControlMessage::ServerKeyResponse { .. }
         | VncControlMessage::Connect { .. }
         | VncControlMessage::Input { .. }
         | VncControlMessage::Clipboard { .. }
@@ -302,6 +304,9 @@ fn run() -> io::Result<()> {
         let message = decode_vnc_control(&packet)?;
         validate_control_phase(&message, hello_complete)?;
         match message {
+            VncControlMessage::Ping { sequence } => {
+                send_control(&output_tx, VncControlMessage::Pong { sequence })?;
+            }
             VncControlMessage::ClientHello { version } => {
                 if hello_complete {
                     return Err(io::Error::new(
@@ -463,7 +468,8 @@ fn run() -> io::Result<()> {
                 break;
             }
             // Messages the application never sends inbound.
-            VncControlMessage::ServerKeyRequest(_)
+            VncControlMessage::Pong { .. }
+            | VncControlMessage::ServerKeyRequest(_)
             | VncControlMessage::ServerKeyAuthenticated(_)
             | VncControlMessage::ServerHello { .. }
             | VncControlMessage::DesktopReset { .. }
@@ -831,6 +837,7 @@ async fn run_generation(
             }
         })
         .set_auth_method(async move { Ok(auth_password.to_string()) })
+        .set_credentials_available(config.password.is_some())
         .set_security_policy(security_policy(
             config.security.mode,
             config.password.is_some(),
@@ -982,7 +989,7 @@ fn handle_vnc_event(output: &mut SessionOutput, event: VncEvent) -> Result<(), V
                 height: u32::from(rect.height),
                 stride: u32::from(rect.width) * 4,
                 format: PixelFormat::Rgba8,
-                pixels,
+                pixels: pixels.into(),
             };
             output.frame(frame)?;
             output.state(VncSessionState::Connected, None)?;
@@ -1035,7 +1042,7 @@ fn handle_vnc_event(output: &mut SessionOutput, event: VncEvent) -> Result<(), V
                     x: u32::from(rect.x),
                     y: u32::from(rect.y),
                 },
-                pixels,
+                pixels: pixels.into(),
             }))?;
             output.cursor(&RemoteCursorEvent::Visibility(CursorVisibility {
                 visible: true,

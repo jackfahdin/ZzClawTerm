@@ -1,4 +1,5 @@
 use rust_i18n::t;
+use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
     ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement as _, IntoElement,
@@ -21,7 +22,6 @@ pub(in crate::features) struct SessionTabDragPayload {
     pub order_index: usize,
     pub source_group_id: Option<String>,
     pub display_name: String,
-    pub kind_label: &'static str,
     pub kind_icon: &'static str,
     pub preview_background: u32,
     pub preview_border: u32,
@@ -32,74 +32,104 @@ pub(in crate::features) struct SessionTabDragPayload {
 
 pub(in crate::features) struct SessionTabDragPreview {
     payload: SessionTabDragPayload,
-    position: gpui::Point<gpui::Pixels>,
+    width: f32,
+    icon: Option<Box<dyn Fn() -> gpui::AnyElement>>,
 }
 
 impl SessionTabDragPreview {
     pub(in crate::features) fn new(
         payload: SessionTabDragPayload,
-        position: gpui::Point<gpui::Pixels>,
+        _position: gpui::Point<gpui::Pixels>,
     ) -> Self {
-        Self { payload, position }
+        Self {
+            payload,
+            width: 188.,
+            icon: None,
+        }
+    }
+
+    pub(in crate::features) fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub(in crate::features) fn with_icon(
+        mut self,
+        icon: impl Fn() -> gpui::AnyElement + 'static,
+    ) -> Self {
+        self.icon = Some(Box::new(icon));
+        self
     }
 }
 
 impl Render for SessionTabDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // GPUI already subtracts the actual grab offset from the pointer.
         div()
-            .pl(self.position.x - px(94.))
-            .pt(self.position.y - px(18.))
+            .w(px(self.width))
+            .h(px(36.))
+            .pl_3()
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_r_1()
+            .border_color(rgb(self.payload.preview_border))
+            .bg(rgb(self.payload.preview_background))
+            .shadow_lg()
+            .relative()
             .child(
                 div()
-                    .w(px(188.))
-                    .h(px(36.))
-                    .px_3()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .bg(rgb(self.payload.preview_accent)),
+            )
+            .child(
+                div()
+                    .size(px(14.))
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .border_1()
-                    .border_color(rgb(self.payload.preview_border))
-                    .bg(rgb(self.payload.preview_background))
-                    .shadow_lg()
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(2.))
-                            .bg(rgb(self.payload.preview_accent)),
-                    )
-                    .child(
-                        svg()
-                            .size(px(13.))
-                            .path(self.payload.kind_icon)
-                            .text_color(rgb(self.payload.preview_accent)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight(700.))
-                                    .text_color(rgb(self.payload.preview_text))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(truncate_preview(&self.payload.display_name, 28)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(self.payload.preview_text_muted))
-                                    .child(self.payload.kind_label),
-                            ),
-                    ),
+                    .justify_center()
+                    .child(self.icon.as_ref().map_or_else(
+                        || {
+                            svg()
+                                .size(px(14.))
+                                .path(self.payload.kind_icon)
+                                .text_color(rgb(self.payload.preview_accent))
+                                .into_any_element()
+                        },
+                        |icon| icon(),
+                    )),
+            )
+            .child(
+                div()
+                    .min_w(px(12.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight(700.))
+                    .text_color(rgb(self.payload.preview_text_muted))
+                    .child(format!("{}", self.payload.order_index + 1)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight(600.))
+                    .text_color(rgb(self.payload.preview_text))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(truncate_preview(&self.payload.display_name, 28)),
+            )
+            .child(
+                svg()
+                    .size(px(13.))
+                    .path("icons/window/close.svg")
+                    .text_color(rgb(self.payload.preview_text_muted)),
             )
     }
 }
@@ -190,9 +220,15 @@ fn session_tab_hover_card_row(
                 ZzClawIconButton::new(id, "icons/copy.svg")
                     .icon_size(px(13.))
                     .tooltip(tooltip)
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                        window.notify_operation(
+                            "copy-tab-detail",
+                            ZzClawNotificationKind::Success,
+                            t!("common.copied").to_string(),
+                            cx,
+                        );
                     }),
             )
         })
@@ -254,11 +290,17 @@ impl Render for SessionTabTooltip {
                             .hover(|style| style.bg(rgb(0x334155)).text_color(rgb(0xe5edf7)))
                             .cursor_pointer()
                             .child(mono_icon("icons/copy.svg", rgb(0x8f98aa).into(), 11.))
-                            .on_click(cx.listener(move |_, _, _, cx| {
+                            .on_click(cx.listener(move |_, _, window, cx| {
                                 cx.stop_propagation();
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     copy_value.clone(),
                                 ));
+                                window.notify_operation(
+                                    "copy-tab-detail",
+                                    ZzClawNotificationKind::Success,
+                                    t!("common.copied").to_string(),
+                                    cx,
+                                );
                             })),
                     )
                 });
@@ -564,6 +606,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn clear_session_tab_drag(&mut self, cx: &mut Context<Self>) {
+        self.shell.finish_tab_strip_motion();
         if self.session.clear_tab_drag() {
             cx.notify();
         }

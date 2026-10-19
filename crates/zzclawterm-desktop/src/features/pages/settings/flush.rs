@@ -50,7 +50,7 @@ impl ZzClawTermApp {
                 SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
             )
         });
-        let draft_dirty = self.settings_draft_dirty();
+        let draft_dirty = self.settings_draft_dirty() || self.settings.theme_designer().dirty();
         SettingsSnapshot {
             chrome: SettingsChrome {
                 palette: self.theme_palette(),
@@ -59,6 +59,9 @@ impl ZzClawTermApp {
             active_tab,
             settings: SettingsPresentation {
                 summary: Arc::new(self.settings.summary().clone()),
+                theme_options: self.settings.theme_options(),
+                theme_diagnostics: self.settings.theme_diagnostics(),
+                theme_designer: self.settings.theme_designer().clone(),
                 keyword_config: Arc::new(self.settings.keyword_config().clone()),
                 search_engine_presentation: self.settings.search_engine_presentation(),
                 keyword_highlight_presentation: self.settings.keyword_highlight_presentation(),

@@ -177,6 +177,7 @@ mod tests {
     #[test]
     fn a_pending_ui_layout_save_is_written_without_any_runtime_tick() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_shell_persistence_debounce(cx);
@@ -213,6 +214,7 @@ mod tests {
     #[test]
     fn a_mark_arriving_while_the_task_is_parked_still_gets_written() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_shell_persistence_debounce(cx);
@@ -242,6 +244,7 @@ mod tests {
     #[test]
     fn a_burst_of_marks_collapses_into_one_debounce_window() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_shell_persistence_debounce(cx);
@@ -272,6 +275,7 @@ mod tests {
     #[test]
     fn persistence_is_held_off_during_connect_settle() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_shell_persistence_debounce(cx);
@@ -317,6 +321,7 @@ mod tests {
     #[test]
     fn shutdown_folds_in_a_ui_layout_save_still_inside_its_debounce_window() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_shell_persistence_debounce(cx);

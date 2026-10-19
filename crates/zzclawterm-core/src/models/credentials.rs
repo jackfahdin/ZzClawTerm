@@ -7,6 +7,14 @@ use super::{
     default_otp_type, default_true, uuid_v4,
 };
 
+/// An explicit edit operation, never part of the persisted account format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasswordUpdate {
+    Keep,
+    Replace(SecretString),
+    Remove,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionPasswordSource {

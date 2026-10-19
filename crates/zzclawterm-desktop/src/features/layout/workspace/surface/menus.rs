@@ -1,9 +1,7 @@
 use rust_i18n::t;
 
 use std::collections::{HashMap, HashSet};
-use zzclawterm_ui::{
-    ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement, ZzClawScrollArea, ZzClawScrollable,
-};
+use zzclawterm_ui::{ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement, ZzClawScrollArea};
 
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, MouseButton, SharedString, div, prelude::*, px,
@@ -202,10 +200,16 @@ impl ZzClawTermApp {
         let mut sessions = ordered;
         sessions.reverse();
         let active_id = self.session.active_id_owned();
-        let mut rows = div().max_h(px(320.)).overflow_y_scrollbar().py_1();
+        // The list scrolls inside a `ZzClawScrollArea`, whose `max_h` sits on the
+        // scroll container itself. The previous `overflow_y_scrollbar()` wrapper
+        // moves the cap onto an outer root and makes the inner scroll area
+        // `size_full()`; under the popover's auto-sized content that resolves to
+        // the content height, so the list stretched to full height with neither
+        // a scrollbar nor scrolling (issue #907).
+        let mut list = div().py_1();
 
         if sessions.is_empty() {
-            rows = rows.child(
+            list = list.child(
                 div()
                     .px_3()
                     .py_2()
@@ -261,10 +265,11 @@ impl ZzClawTermApp {
                     tooltip_lines.push(t!("tabCtx.locked").to_string());
                 }
                 let tooltip_title = title.clone();
-                rows = rows.child(
+                list = list.child(
                     div()
                         .id(SharedString::from(format!("open-tabs-menu-{session_id}")))
                         .h(px(32.))
+                        .flex_shrink_0()
                         .px_3()
                         .flex()
                         .items_center()
@@ -369,7 +374,11 @@ impl ZzClawTermApp {
                     .child(t!("terminal.openTabs")),
             )
             .child(div().h(px(1.)).bg(rgb(palette.border)))
-            .child(rows)
+            .child(
+                ZzClawScrollArea::new("open-tabs-menu-scroll")
+                    .max_h(px(320.))
+                    .child(list),
+            )
     }
 
     pub(in crate::features) fn render_new_session_menu(

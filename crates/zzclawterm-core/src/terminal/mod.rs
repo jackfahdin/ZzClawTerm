@@ -12,4 +12,5 @@ pub mod input_fanout;
 pub mod input_tracker;
 pub mod mouse;
 pub mod resize;
+pub mod windows_terminal;
 pub mod wire_write;

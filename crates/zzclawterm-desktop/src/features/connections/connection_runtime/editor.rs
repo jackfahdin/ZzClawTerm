@@ -9,14 +9,13 @@ use zzclawterm_store::StoreDomain;
 
 use super::helpers::{
     ConnectionEditorToggle, ConnectionEditorValidationError, build_saved_connection_from_editor,
-    connection_editor_from_saved,
+    connection_editor_from_saved, validate_editor_account,
 };
 use crate::features::ZzClawTermApp;
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorAdvancedVisibility,
-    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorPasswordSource,
-    ConnectionEditorRdpTab, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
-    ConnectionEditorState, ConnectionEditorTelnetTab, ConnectionKindTab,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorForwardingTab,
+    ConnectionEditorPasswordSource, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
+    ConnectionEditorState, ConnectionKindTab,
 };
 
 impl ZzClawTermApp {
@@ -25,6 +24,7 @@ impl ZzClawTermApp {
         editor: &ConnectionEditorState,
     ) -> Option<String> {
         build_saved_connection_from_editor(editor)
+            .and_then(|_| validate_editor_account(editor, self.security.passwords()))
             .err()
             .map(|error| self.connection_editor_validation_message(&error))
     }
@@ -42,8 +42,20 @@ impl ZzClawTermApp {
             SshAlgorithmListKind::HostKey => t!("dialog.algorithmHostKeys"),
         };
         match error {
+            ConnectionEditorValidationError::MissingAccount => {
+                t!("passwordManager.missingAccount").into()
+            }
+            ConnectionEditorValidationError::AccountPasswordMissing => {
+                t!("authForm.accountPasswordMissing").into()
+            }
+            ConnectionEditorValidationError::PasswordReplacementRequired => {
+                t!("authForm.passwordRequired").into()
+            }
             ConnectionEditorValidationError::HostRequired => t!("dialog.hostRequired").into(),
             ConnectionEditorValidationError::PortInvalid => t!("dialog.portInvalid").into(),
+            ConnectionEditorValidationError::TelnetKeepAliveIntervalInvalid => {
+                t!("dialog.telnetKeepAliveIntervalInvalid").into()
+            }
             ConnectionEditorValidationError::UsernameRequired => {
                 t!("dialog.usernameRequired").into()
             }
@@ -86,7 +98,8 @@ impl ZzClawTermApp {
                 max = "60000"
             )
             .into(),
-            ConnectionEditorValidationError::SshAgentEndpoint(error) => match error {
+            ConnectionEditorValidationError::SshAgentEndpoint(error)
+            | ConnectionEditorValidationError::SshAgentForwarding { error, .. } => match error {
                 zzclawterm_core::SshAgentEndpointValidationError::Empty => {
                     t!("dialog.sshAgentEndpointEmpty").into()
                 }
@@ -172,7 +185,7 @@ impl ZzClawTermApp {
                 rdp_display: RdpDisplaySettings::default(),
                 rdp_clipboard: RdpClipboardSettings::default(),
                 rdp_reconnect: RdpReconnectSettings::default(),
-                rdp_advanced_tab: ConnectionEditorRdpTab::Security,
+
                 vnc_security: VncSecuritySettings::default(),
                 vnc_display: VncDisplaySettings::default(),
                 vnc_clipboard: VncClipboardSettings::default(),
@@ -182,6 +195,9 @@ impl ZzClawTermApp {
                 password_source: ConnectionEditorPasswordSource::Ask,
                 password_id: None,
                 account_id: None,
+                account_source_saved: false,
+                password_edit: crate::models::ConnectionPasswordEdit::Replace,
+                field_errors: Default::default(),
                 password: zzclawterm_core::SecretString::default(),
                 existing_password: None,
                 existing_password_locked: false,
@@ -239,6 +255,9 @@ impl ZzClawTermApp {
                 send_sga: true,
                 telnet_auto_login_enabled: true,
                 telnet_auto_login_send_wake_enter: true,
+                telnet_keep_alive_interval_secs:
+                    zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
+                        .to_string(),
                 telnet_auto_login_timeout_ms: "60000".to_string(),
                 telnet_auto_login_username_prompt_regex: String::new(),
                 telnet_auto_login_password_prompt_regex: String::new(),
@@ -249,11 +268,11 @@ impl ZzClawTermApp {
                 post_login_command: String::new(),
                 post_login_delay_ms: "1000".to_string(),
                 recording: None,
-                advanced: ConnectionEditorAdvancedVisibility::default(),
-                advanced_network_tab: ConnectionEditorAdvancedTab::Network,
-                advanced_behavior_tab: ConnectionEditorAdvancedTab::PostLogin,
-                telnet_advanced_tab: ConnectionEditorTelnetTab::Input,
+
+                forwarding_tab: ConnectionEditorForwardingTab::Agent,
+
                 connect_after_save,
+                section: crate::models::ConnectionEditorSection::Basic,
                 focused_field: ConnectionEditorField::Name,
                 error: None,
             }
@@ -337,33 +356,17 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn toggle_connection_editor_password_visibility(
+    pub(in crate::features) fn edit_connection_password(
         &mut self,
+        edit: crate::models::ConnectionPasswordEdit,
         cx: &mut Context<Self>,
     ) {
-        let Some(field) = self
-            .connection_state
-            .editor_fields()
-            .get(&ConnectionEditorField::Password)
-            .cloned()
-        else {
-            return;
-        };
-        let masked = field.read(cx).is_masked();
-        field.update(cx, |field, cx| field.set_masked(!masked, cx));
+        self.connection_state.set_editor_password_edit(edit, cx);
         cx.notify();
     }
 
     pub(in crate::features) fn clear_connection_editor_password(&mut self, cx: &mut Context<Self>) {
-        if let Some(field) = self
-            .connection_state
-            .editor_fields()
-            .get(&ConnectionEditorField::Password)
-            .cloned()
-        {
-            field.update(cx, |field, cx| field.clear(cx));
-        }
-        cx.notify();
+        self.edit_connection_password(crate::models::ConnectionPasswordEdit::Remove, cx);
     }
 
     pub(in crate::features) fn set_connection_editor_baud_rate(
@@ -445,8 +448,59 @@ impl ZzClawTermApp {
         value: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if matches!(
+            select,
+            ConnectionEditorSelect::Authentication
+                | ConnectionEditorSelect::SavedPassword
+                | ConnectionEditorSelect::Account
+                | ConnectionEditorSelect::SshKey
+                | ConnectionEditorSelect::Otp
+        ) {
+            self.connection_state.hide_editor_secrets(cx);
+        }
         self.connection_state
             .set_editor_select_value(select, value.map(ToOwned::to_owned));
+        let account_selection = select == ConnectionEditorSelect::Account
+            || (select == ConnectionEditorSelect::SavedPassword
+                && self
+                    .connection_state
+                    .active_editor_draft()
+                    .is_some_and(|editor| {
+                        matches!(
+                            editor.kind,
+                            ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                        )
+                    }));
+        if account_selection
+            && let Some(editor) = self.connection_state.active_editor_draft()
+            && editor.auth_mode == "password"
+        {
+            let has_password = value
+                .and_then(|id| {
+                    self.security
+                        .passwords()
+                        .iter()
+                        .find(|entry| entry.id == id)
+                })
+                .is_some_and(|entry| entry.has_password);
+            self.connection_state
+                .set_editor_password_source(if has_password {
+                    ConnectionEditorPasswordSource::Saved
+                } else {
+                    ConnectionEditorPasswordSource::Ask
+                });
+        }
+
+        cx.notify();
+    }
+
+    pub(in crate::features) fn set_connection_account_source(
+        &mut self,
+        saved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state.hide_editor_secrets(cx);
+        self.connection_state.set_editor_account_source(saved);
         cx.notify();
     }
 
@@ -455,16 +509,8 @@ impl ZzClawTermApp {
         source: ConnectionEditorPasswordSource,
         cx: &mut Context<Self>,
     ) {
+        self.connection_state.hide_editor_secrets(cx);
         self.connection_state.set_editor_password_source(source);
-        cx.notify();
-    }
-
-    pub(in crate::features) fn set_connection_editor_advanced_tab(
-        &mut self,
-        tab: ConnectionEditorAdvancedTab,
-        cx: &mut Context<Self>,
-    ) {
-        self.connection_state.set_editor_advanced_tab(tab);
         cx.notify();
     }
 
@@ -600,24 +646,6 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn set_connection_editor_telnet_tab(
-        &mut self,
-        tab: ConnectionEditorTelnetTab,
-        cx: &mut Context<Self>,
-    ) {
-        self.connection_state.set_editor_telnet_tab(tab);
-        cx.notify();
-    }
-
-    pub(in crate::features) fn set_connection_editor_rdp_tab(
-        &mut self,
-        tab: ConnectionEditorRdpTab,
-        cx: &mut Context<Self>,
-    ) {
-        self.connection_state.set_editor_rdp_tab(tab);
-        cx.notify();
-    }
-
     /// Take an edit from a field widget into the draft.
     pub(in crate::features) fn apply_connection_editor_field_text(
         &mut self,
@@ -652,6 +680,10 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if self.connection_state.set_editor_kind(kind) {
+            self.connection_state.hide_editor_secrets(cx);
+            self.connection_state
+                .select_editor_section(crate::models::ConnectionEditorSection::Basic);
+            self.dismiss_connection_editor_menus(cx);
             // Switching kind rewrites the default port on the draft; the box has
             // to be told, or it keeps showing the other protocol's.
             self.connection_state.sync_editor_fields_from_draft(cx);
@@ -759,6 +791,29 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.connection_state.toggle_editor_flag(flag);
+        self.connection_state
+            .sync_telnet_keep_alive_field_disabled(cx);
+        cx.notify();
+    }
+
+    pub(in crate::features) fn set_connection_editor_section(
+        &mut self,
+        section: crate::models::ConnectionEditorSection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.select_editor_section(section) {
+            self.connection_state.hide_editor_secrets(cx);
+            self.dismiss_connection_editor_menus(cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_connection_editor_forwarding_tab(
+        &mut self,
+        x11: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state.select_editor_forwarding_tab(x11);
         cx.notify();
     }
 
@@ -776,6 +831,10 @@ impl ZzClawTermApp {
 
         match keystroke.key.as_str() {
             "escape" => {
+                if self.connection_state.editor_agent_identity_picker_is_open() {
+                    self.set_connection_editor_agent_identity_picker_open(false, cx);
+                    return true;
+                }
                 if let Some(overlay) = self.connection_state.editor_credential_overlay() {
                     self.connection_state.set_editor_credential_overlay(None);
                     self.refresh_connection_auth_catalog(cx);
@@ -808,6 +867,11 @@ impl ZzClawTermApp {
                 return true;
             }
             "enter" => {
+                if self.connection_state.editor_credential_overlay().is_some()
+                    || self.connection_state.editor_agent_identity_picker_is_open()
+                {
+                    return true;
+                }
                 if !keystroke.modifiers.platform
                     && !keystroke.modifiers.control
                     && self.connection_state.editor_tag_field_is_focused(cx)
@@ -827,18 +891,100 @@ impl ZzClawTermApp {
                     self.commit_connection_editor_new_group(cx);
                     return true;
                 }
-                self.save_connection_editor(window, cx);
-                return true;
+                let input_focused = self
+                    .connection_state
+                    .editor_fields()
+                    .values()
+                    .any(|field| field.read(cx).component_focus_handle(cx).is_focused(window))
+                    || self
+                        .connection_state
+                        .editor_number_fields()
+                        .values()
+                        .any(|field| field.read(cx).component_focus_handle(cx).is_focused(window));
+                if input_focused
+                    || self
+                        .connection_state
+                        .editor_focus_handle()
+                        .is_focused(window)
+                {
+                    self.save_connection_editor(window, cx);
+                    return true;
+                }
+                return false;
             }
             "tab" if !keystroke.modifiers.platform && !keystroke.modifiers.control => {
-                self.connection_state.advance_editor_focus();
-                cx.notify();
+                if keystroke.modifiers.shift {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
                 return true;
             }
             _ => {}
         }
 
         false
+    }
+
+    pub(super) fn reveal_connection_editor_validation(
+        &mut self,
+        location: super::validation::ConnectionEditorValidationLocation,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::models::ConnectionEditorFocusTarget;
+        self.set_connection_editor_section(location.section, cx);
+        self.connection_state
+            .set_editor_validation_location(location, message);
+        let token = self.connection_state.editor_token();
+        let app = cx.weak_entity();
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| {
+                let _ = app.update(cx, |this, cx| {
+                    if this.connection_state.editor_token() != token
+                        || !this
+                            .connection_state
+                            .active_editor_draft()
+                            .is_some_and(|editor| editor.section == location.section)
+                    {
+                        return;
+                    }
+                    let focus = match location.target {
+                        ConnectionEditorFocusTarget::Field(field) => this
+                            .connection_state
+                            .editor_fields()
+                            .get(&field)
+                            .map(|input| input.read(cx).component_focus_handle(cx))
+                            .or_else(|| {
+                                this.connection_state
+                                    .editor_number_fields()
+                                    .get(&field)
+                                    .map(|input| input.read(cx).component_focus_handle(cx))
+                            }),
+                        ConnectionEditorFocusTarget::Select(select) => {
+                            this.focus_connection_editor_select(select, window, cx);
+                            None
+                        }
+                        ConnectionEditorFocusTarget::ForwardingEndpoint { index, field } => this
+                            .connection_state
+                            .editor_forwarding_endpoint_fields()
+                            .get(&(index, field))
+                            .map(|input| input.read(cx).component_focus_handle(cx)),
+                        ConnectionEditorFocusTarget::Heading => {
+                            Some(this.connection_state.editor_section_focus())
+                        }
+                    };
+                    if let Some(focus) = focus {
+                        window.focus(&focus, cx);
+                    }
+                    this.connection_state
+                        .editor_anchor(location.target)
+                        .scroll_to(window, cx);
+                    cx.notify();
+                });
+            });
+        });
     }
 
     pub(in crate::features) fn save_connection_editor(
@@ -886,23 +1032,82 @@ impl ZzClawTermApp {
             editor.group_id = Some(group.id.clone());
         }
 
-        let built = match build_saved_connection_from_editor(&editor) {
+        let built = match build_saved_connection_from_editor(&editor).and_then(|built| {
+            validate_editor_account(&editor, self.security.passwords()).map(|()| built)
+        }) {
             Ok(connection) => connection,
             Err(error) => {
                 let message = self.connection_editor_validation_message(&error);
-                self.set_connection_editor_error(message, cx);
+                let location = error.location(&editor);
+                self.reveal_connection_editor_validation(location, message, window, cx);
+                cx.notify();
                 return;
             }
         };
 
+        let Some(save_generation) = self.connection_state.begin_editor_save() else {
+            return;
+        };
+        let origin_window = window.window_handle();
         let saved_id = built.id.clone();
         let persisted = built.clone();
+        let account_id = built
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.saved_account_id())
+            .map(str::to_owned);
+        let account_password = built
+            .auth
+            .as_ref()
+            .is_some_and(|auth| auth.mode == "password" && auth.uses_account_password());
+        let inspect_password =
+            !self.settings.summary().has_master_password || self.security.secrets_unlocked();
+        let ssh_username_required =
+            editor.kind == ConnectionKindTab::Ssh && editor.username.trim().is_empty();
+        let missing_account = t!("passwordManager.missingAccount").to_string();
+        let missing_password = t!("authForm.accountPasswordMissing").to_string();
+        let invalid_password = t!("authForm.accountPasswordUnreadable").to_string();
+        let missing_username = t!("dialog.usernameRequired").to_string();
         let connect_after_save = editor.connect_after_save;
         self.shell.set_status("saving connection...".to_string());
-        self.submit_store_request(
+        let submitted = self.submit_store_request(
             0,
             zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
                 let mut persisted = persisted;
+                if let Some(id) = account_id.as_deref() {
+                    let Some(account) = store.load_password_by_id(id)? else {
+                        return Ok(Err((ConnectionEditorField::Username, missing_account)));
+                    };
+                    if ssh_username_required && account.username.trim().is_empty() {
+                        return Ok(Err((ConnectionEditorField::Username, missing_username)));
+                    }
+                    if account_password {
+                        if !account.has_password {
+                            return Ok(Err((ConnectionEditorField::Password, missing_password)));
+                        }
+                        if inspect_password {
+                            match store.load_decrypted_password_by_id(id) {
+                                Ok(Some(entry))
+                                    if entry
+                                        .password
+                                        .as_deref()
+                                        .is_some_and(|value| !value.trim().is_empty()) => {}
+                                Ok(_) => {
+                                    return Ok(Err((
+                                        ConnectionEditorField::Password,
+                                        missing_password,
+                                    )));
+                                }
+                                Err(_) => {
+                                    return Ok(Err((
+                                        ConnectionEditorField::Password,
+                                        invalid_password,
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(previous) = store.get_connection(&persisted.id)? {
                     persisted.extensions = previous.extensions;
                     persisted.asset = previous.asset;
@@ -912,16 +1117,61 @@ impl ZzClawTermApp {
                 } else {
                     store.save_connection(&persisted)?;
                 }
-                store.load_sessions()
+                store.load_sessions().map(Ok)
             }),
             move |this, event, cx| match event.outcome {
-                Ok(sessions) => {
+                Ok(Err((_field, message))) => {
+                    if this
+                        .connection_state
+                        .finish_editor_save_request(save_generation)
+                    {
+                        let app = cx.weak_entity();
+                        cx.defer(move |cx| {
+                            let _ = origin_window.update(cx, |_, window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    if this.connection_state.editor_token() != Some(save_generation)
+                                    {
+                                        return;
+                                    }
+                                    let select = if this
+                                        .connection_state
+                                        .active_editor_draft()
+                                        .is_some_and(|editor| {
+                                            matches!(
+                                                editor.kind,
+                                                ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                                            )
+                                        }) {
+                                        ConnectionEditorSelect::Account
+                                    } else {
+                                        ConnectionEditorSelect::SavedPassword
+                                    };
+                                    this.reveal_connection_editor_validation(
+                                        super::validation::ConnectionEditorValidationLocation {
+                                            section: crate::models::ConnectionEditorSection::Authentication,
+                                            target: crate::models::ConnectionEditorFocusTarget::Select(select),
+                                            algorithm_tab: None,
+                                        }, message, window, cx);
+                                });
+                            });
+                        });
+                        cx.notify();
+                    }
+                }
+                Ok(Ok(sessions)) => {
                     let saved = sessions
                         .connections
                         .iter()
                         .find(|connection| connection.id == saved_id)
                         .cloned();
                     this.apply_loaded_sessions(sessions, cx);
+                    if !this
+                        .connection_state
+                        .finish_editor_save_request(save_generation)
+                    {
+                        cx.notify();
+                        return;
+                    }
                     let Some(saved) = saved else {
                         this.set_connection_editor_error(
                             "saved connection was not returned by storage".to_string(),
@@ -940,12 +1190,22 @@ impl ZzClawTermApp {
                     }
                 }
                 Err(error) => {
+                    if !this
+                        .connection_state
+                        .finish_editor_save_request(save_generation)
+                    {
+                        return;
+                    }
                     let message = t!("dialog.connectionSaveFailed", error = error).to_string();
                     this.set_connection_editor_error(message, cx);
                 }
             },
             cx,
         );
+        if !submitted {
+            self.connection_state
+                .finish_editor_save_request(save_generation);
+        }
         cx.notify();
     }
 }

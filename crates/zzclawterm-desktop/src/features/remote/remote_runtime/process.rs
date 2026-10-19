@@ -1,7 +1,7 @@
 use futures::StreamExt as _;
 use rust_i18n::t;
 
-use gpui::{ClipboardItem, Context, Window};
+use gpui::{Context, Window};
 use zzclawterm_transport::SshProcessService;
 
 use crate::features::ZzClawTermApp;
@@ -90,7 +90,7 @@ impl ZzClawTermApp {
         label: &'static str,
         cx: &mut Context<Self>,
     ) {
-        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copy_text_with_feedback("copy-remote-info", value, cx);
         self.remote_ops
             .set_process_status(format!("copied process {label}"));
         self.shell
@@ -104,7 +104,7 @@ impl ZzClawTermApp {
         label: &str,
         cx: &mut Context<Self>,
     ) {
-        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        self.copy_text_with_feedback("copy-remote-info", value, cx);
         self.remote_ops
             .set_docker_status(format!("copied Docker {label}"));
         self.shell

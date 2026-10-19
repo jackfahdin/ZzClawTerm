@@ -1,9 +1,11 @@
 //! Shared capability authorization, execution, bounded output and audit adapters.
+
+pub(in crate::features) mod terminal_execution;
+
 use super::ZzClawTermApp;
 use super::formatting::recent_terminal_output;
 use super::mcp::server::rpc_failure;
 use super::runtime_jobs::await_blocking_result;
-use crate::models::SessionLaunchConfig;
 use gpui::Context;
 use zzclawterm_core::ai::{AppendAiAuditRequest, RiskLevel, sanitize_ai_diagnostic};
 use zzclawterm_core::capabilities::{
@@ -16,29 +18,19 @@ use zzclawterm_core::models::sessions::Group;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use zzclawterm_mcp_protocol::{
     ConnectionListResult, ConnectionSummary, EnvironmentResult, MAX_INLINE_OUTPUT_BYTES,
     MutationResult, OutputReadArgs, PathArgs, RpcError, SessionArgs, SessionGetResult,
     SessionOpenArgs, SessionOpenResult, SessionSummary, SftpChmodArgs, SftpFileEntry,
     SftpHomeResult, SftpMkdirArgs, SftpReadTextArgs, SftpReadTextResult, SftpRenameArgs,
-    SftpStatResult, SftpWriteTextArgs, SftpWriteTextResult, TerminalExecuteArgs,
-    TerminalExecuteResult, TerminalRecentOutputArgs, TerminalRecentOutputResult,
-    definition_for_tool, tool, validate_tool_arguments, validate_tool_result,
+    SftpStatResult, SftpWriteTextArgs, SftpWriteTextResult, TerminalRecentOutputArgs,
+    TerminalRecentOutputResult, definition_for_tool, tool, validate_tool_arguments,
+    validate_tool_result,
 };
 use zzclawterm_store::StoreDomain;
-use zzclawterm_transport::{
-    SessionKind, SftpFileEntry as TransportFileEntry, SshProcessService, SshSessionConfig,
-    run_local_command,
-};
+use zzclawterm_transport::{SessionKind, SftpFileEntry as TransportFileEntry};
 
-enum McpCommandTarget {
-    Ssh(Box<SshSessionConfig>),
-    Local { working_dir: Option<PathBuf> },
-}
-
-#[derive(Clone)]
 struct McpAuditContext {
     source: String,
     connection_id: Option<String>,
@@ -49,6 +41,7 @@ struct McpAuditContext {
     risk_level: Option<RiskLevel>,
     approval_decision: Option<String>,
     started_at: Instant,
+    inserted_to_terminal: bool,
 }
 
 #[derive(Clone)]
@@ -115,6 +108,7 @@ pub(in crate::features) struct CapabilityRuntimeState {
     pub(in crate::features) pending_approvals: HashMap<String, PendingCapabilityApproval>,
     pub(in crate::features) approval_order: VecDeque<String>,
     pub(in crate::features) session_grants: HashSet<(String, String, String)>,
+    pub(in crate::features) terminal_executions: terminal_execution::TerminalExecutionState,
     pending_session_opens: HashMap<String, PendingCapabilitySessionOpen>,
     pub(in crate::features) outputs: HashMap<String, zzclawterm_core::OutputStore>,
     active_requests: HashMap<String, (String, tokio_util::sync::CancellationToken)>,
@@ -463,6 +457,10 @@ impl ZzClawTermApp {
         owner: &str,
         cx: &mut Context<Self>,
     ) {
+        self.mcp
+            .capabilities
+            .terminal_executions
+            .forget_owner(owner);
         self.mcp.capabilities.outputs.remove(owner);
         for request in self.mcp.capabilities.connection_disconnected(owner) {
             request.cancellation.cancel();
@@ -470,6 +468,7 @@ impl ZzClawTermApp {
                 .reply
                 .send(Err(rpc_failure("cancelled", "Capability caller ended.")));
         }
+        self.poll_terminal_executions(cx);
         cx.notify();
     }
 
@@ -558,7 +557,7 @@ impl ZzClawTermApp {
             user_input: None,
             generated_command: None,
             risk_level: audit_context.risk_level,
-            inserted_to_terminal: audit_context.capability == tool::TERMINAL_EXECUTE && success,
+            inserted_to_terminal: audit_context.inserted_to_terminal,
             executed: success,
             blocked: !success,
             source: Some(audit_context.source),
@@ -803,6 +802,7 @@ impl ZzClawTermApp {
             risk_level: assessment.as_ref().map(|risk| risk.level.clone()),
             approval_decision: approval_decision.map(ToOwned::to_owned),
             started_at: Instant::now(),
+            inserted_to_terminal: false,
         };
         let (audit_reply, audit_result) = tokio::sync::oneshot::channel();
         let original_reply = std::mem::replace(&mut request.reply, audit_reply);
@@ -848,6 +848,12 @@ impl ZzClawTermApp {
                                 .protect_output(&owner, &output_tool, value)
                         })
                     };
+                    let mut audit_context = audit_context;
+                    audit_context.inserted_to_terminal = this
+                        .mcp
+                        .capabilities
+                        .terminal_executions
+                        .take_inserted(&request_id);
                     this.record_mcp_audit_result(
                         audit_context,
                         successful && result.is_ok(),
@@ -1235,115 +1241,17 @@ impl ZzClawTermApp {
         scope: &CapabilityScopeSnapshot,
         cx: &mut Context<Self>,
     ) {
-        let args = serde_json::from_value::<TerminalExecuteArgs>(request.arguments)
-            .expect("sidecar validated terminal execute arguments");
-        let session_id = match args.session_id.or_else(|| scope.default_session_id.clone()) {
-            Some(session_id) => session_id,
-            None => {
-                let _ = request.reply.send(Err(rpc_failure(
-                    "invalid_argument",
-                    "terminal_execute requires a target session when no default is available.",
-                )));
+        let requested = request.arguments.get("sessionId").and_then(Value::as_str);
+        let session_id = match scope.resolve_session(requested) {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = request
+                    .reply
+                    .send(Err(rpc_failure("scope_denied", &error.to_string())));
                 return;
             }
         };
-        if let Err(error) = scope.require(&session_id) {
-            let _ = request
-                .reply
-                .send(Err(rpc_failure("scope_denied", &error.to_string())));
-            return;
-        }
-        let Some(session) = self
-            .session
-            .session_info(&session_id)
-            .filter(|_| !self.session.is_disconnected(&session_id))
-        else {
-            let _ = request.reply.send(Err(rpc_failure(
-                "invalid_argument",
-                "The target terminal session is unavailable.",
-            )));
-            return;
-        };
-        let target = match session.kind {
-            SessionKind::Ssh => self.session.metadata(&session_id).and_then(|metadata| {
-                match &metadata.launch_config {
-                    SessionLaunchConfig::Ssh(config) => {
-                        Some(McpCommandTarget::Ssh(Box::new(config.as_ref().clone())))
-                    }
-                    _ => None,
-                }
-            }),
-            SessionKind::LocalPty => Some(McpCommandTarget::Local {
-                working_dir: session.working_dir,
-            }),
-            _ => None,
-        };
-        let Some(target) = target else {
-            let _ = request.reply.send(Err(rpc_failure(
-                "permission_denied",
-                "Background execution is supported only for SSH and local sessions.",
-            )));
-            return;
-        };
-        let command = args.command;
-        let timeout = Duration::from_millis(args.timeout_ms.unwrap_or(30_000));
-        let cancellation = request.cancellation;
-        let task = self
-            .blocking_jobs
-            .submit_task("mcp-terminal-execute", move |_| {
-                if cancellation.is_cancelled() {
-                    return Err("The MCP request was cancelled.".to_string());
-                }
-                let started = Instant::now();
-                let result = match target {
-                    McpCommandTarget::Ssh(config) => {
-                        SshProcessService::new(*config).run_command(&command, timeout)
-                    }
-                    McpCommandTarget::Local { working_dir } => {
-                        run_local_command(&command, working_dir, timeout)
-                    }
-                };
-                let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                if cancellation.is_cancelled() {
-                    return Err("The MCP request was cancelled.".to_string());
-                }
-                match result {
-                    Ok(output) => {
-                        let mut combined = output.stdout;
-                        if !output.stderr.is_empty() {
-                            if !combined.is_empty() && !combined.ends_with('\n') {
-                                combined.push('\n');
-                            }
-                            combined.push_str(&output.stderr);
-                        }
-                        to_value_string(TerminalExecuteResult {
-                            output: combined,
-                            exit_code: output.exit_status.and_then(|code| i32::try_from(code).ok()),
-                            duration_ms,
-                            timed_out: false,
-                            source_truncated: false,
-                        })
-                    }
-                    Err(error) if error.to_string().to_ascii_lowercase().contains("timed out") => {
-                        to_value_string(TerminalExecuteResult {
-                            output: String::new(),
-                            exit_code: None,
-                            duration_ms,
-                            timed_out: true,
-                            source_truncated: false,
-                        })
-                    }
-                    Err(error) => Err(error.to_string()),
-                }
-            });
-        let reply = request.reply;
-        cx.spawn(async move |_this, _cx| {
-            let result = await_blocking_result(task)
-                .await
-                .map_err(|error| rpc_failure("execution_failed", &error));
-            let _ = reply.send(result);
-        })
-        .detach();
+        self.dispatch_shared_terminal_execute(request, session_id, cx);
     }
 
     fn dispatch_mcp_sftp_mutation(
@@ -1863,6 +1771,10 @@ mod tests {
                     vec!["s".into()],
                     Some("s".into()),
                     AiPermissionMode::FullAccess,
+                    super::terminal_execution::TerminalExecutionPolicy {
+                        background: false,
+                        max_lines: 10,
+                    },
                 )
                 .unwrap();
             let generation = credential

@@ -11,15 +11,21 @@ use crate::{
     SftpWriteTextResult, SshMultiplexHandle, SshSessionConfig,
 };
 
+pub(crate) mod copy_progress;
+#[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
+mod editor_save_tests;
 mod revision;
 mod shell;
 
+use copy_progress::CopyProgress;
 pub(crate) use revision::metadata_is_stable;
 pub use revision::{
     RemoteTextDocument, RemoteTextGeneration, RemoteTextMetadata, RemoteTextRevision,
     RemoteTextWriteResult,
 };
-use shell::{ShellRemote, shell_quote};
+use shell::{ShellRemote, shell_quote, shell_quote_path};
 
 pub const REMOTE_FILE_MANAGER_UNAVAILABLE: &str =
     "Terminal connection is working, but the remote file manager could not be initialized";
@@ -351,10 +357,8 @@ impl RemoteFileService {
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self.sftp()?.create_dir_path(path, mode),
             kind => {
-                let path = shell_quote(path.as_ref());
-                let mode = mode.map_or(String::new(), |mode| {
-                    format!(" && chmod {mode:o} -- {path}")
-                });
+                let path = shell_quote_path(path.as_ref());
+                let mode = mode.map_or(String::new(), |mode| format!(" && chmod {mode:o} {path}"));
                 self.shell(kind)
                     .exec_ok(format!("mkdir -p -- {path}{mode}"), None)?;
                 Ok(())
@@ -366,10 +370,8 @@ impl RemoteFileService {
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self.sftp()?.create_file_path(path, mode),
             kind => {
-                let path = shell_quote(path.as_ref());
-                let mode = mode.map_or(String::new(), |mode| {
-                    format!(" && chmod {mode:o} -- {path}")
-                });
+                let path = shell_quote_path(path.as_ref());
+                let mode = mode.map_or(String::new(), |mode| format!(" && chmod {mode:o} {path}"));
                 self.shell(kind)
                     .exec_ok(format!(": > {path}{mode}"), None)?;
                 Ok(())
@@ -699,7 +701,7 @@ impl RemoteFileService {
         local_path: impl Into<PathBuf>,
         control: SftpTransferControl,
         options: SftpTransferOptions,
-        mut progress: F,
+        progress: F,
     ) -> anyhow::Result<SftpTransferSummary>
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -721,24 +723,23 @@ impl RemoteFileService {
                 let download_root = crate::download_path::root_for_target(&local_path);
                 let properties = shell_properties(&self.shell(kind), &remote_path)?;
                 ensure_supported_download_source(properties.file_type)?;
-                let bytes = self.shell(kind).exec_ok(
-                    format!("cat -- {}", shell_quote(&remote_path.display_path)),
-                    None,
+                anyhow::ensure!(
+                    !properties.is_directory(),
+                    "remote source is not a regular file"
+                );
+                let bytes = download_shell_path(
+                    self,
+                    kind,
+                    &remote_path.display_path,
+                    &local_path,
+                    &control,
+                    progress,
+                    download_root,
                 )?;
-                control.wait_if_paused_blocking()?;
-                crate::download_path::staged_write_file(download_root, &local_path, &bytes)?;
-                progress(SftpTransferProgress {
-                    remote_path: remote_path.display_path.clone(),
-                    local_path: local_path.clone(),
-                    bytes_transferred: bytes.len() as u64,
-                    total_bytes: Some(bytes.len() as u64),
-                    item_count_completed: Some(1),
-                    item_count_total: Some(1),
-                });
                 Ok(SftpTransferSummary {
                     remote_path: remote_path.display_path,
                     local_path,
-                    bytes: bytes.len() as u64,
+                    bytes,
                     skipped: false,
                 })
             }
@@ -771,7 +772,7 @@ impl RemoteFileService {
         local_path: impl Into<PathBuf>,
         control: SftpTransferControl,
         options: SftpPathTransferOptions,
-        mut progress: F,
+        progress: F,
     ) -> anyhow::Result<SftpTransferSummary>
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -812,7 +813,7 @@ impl RemoteFileService {
                     &remote_path.display_path,
                     &target,
                     &control,
-                    &mut progress,
+                    progress,
                     download_root,
                 )?;
                 Ok(SftpTransferSummary {
@@ -872,7 +873,7 @@ impl RemoteFileService {
         remote_path: impl AsRef<str>,
         control: SftpTransferControl,
         options: SftpTransferOptions,
-        mut progress: F,
+        progress: F,
     ) -> anyhow::Result<SftpTransferSummary>
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -889,19 +890,26 @@ impl RemoteFileService {
                     progress,
                 )
             }
-            _ => {
-                control.wait_if_paused_blocking()?;
-                let summary = self.upload_file(&local_path, &remote_path)?;
-                control.wait_if_paused_blocking()?;
-                progress(SftpTransferProgress {
-                    remote_path: summary.remote_path.clone(),
-                    local_path: summary.local_path.clone(),
-                    bytes_transferred: summary.bytes,
-                    total_bytes: Some(summary.bytes),
-                    item_count_completed: Some(1),
-                    item_count_total: Some(1),
-                });
-                Ok(summary)
+            kind => {
+                anyhow::ensure!(
+                    fs::metadata(&local_path)?.is_file(),
+                    "upload source is not a regular file"
+                );
+                let bytes = upload_shell_path(
+                    self,
+                    kind,
+                    &local_path,
+                    &remote_path,
+                    &control,
+                    &options,
+                    progress,
+                )?;
+                Ok(SftpTransferSummary {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    bytes,
+                    skipped: false,
+                })
             }
         }
     }
@@ -912,7 +920,7 @@ impl RemoteFileService {
         remote_path: &RemoteFilePath,
         control: SftpTransferControl,
         options: SftpTransferOptions,
-        mut progress: F,
+        progress: F,
     ) -> anyhow::Result<SftpTransferSummary>
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -928,10 +936,88 @@ impl RemoteFileService {
                     options,
                     progress,
                 ),
-            _ => {
+            kind => {
+                anyhow::ensure!(
+                    fs::metadata(&local_path)?.is_file(),
+                    "upload source is not a regular file"
+                );
+                let bytes = upload_shell_path(
+                    self,
+                    kind,
+                    &local_path,
+                    &remote_path.display_path,
+                    &control,
+                    &options,
+                    progress,
+                )?;
+                Ok(SftpTransferSummary {
+                    remote_path: remote_path.display_path.to_string(),
+                    local_path,
+                    bytes,
+                    skipped: false,
+                })
+            }
+        }
+    }
+
+    /// Sync an external edit to an existing remote file. Shell backends must
+    /// restore and verify the original ownership and mode before replacing it.
+    pub fn upload_remote_edit_with_progress_and_control_options<F>(
+        &self,
+        local_path: impl Into<PathBuf>,
+        remote_path: &RemoteFilePath,
+        control: SftpTransferControl,
+        mut options: SftpTransferOptions,
+        mut progress: F,
+    ) -> anyhow::Result<SftpTransferSummary>
+    where
+        F: FnMut(SftpTransferProgress) + Send + 'static,
+    {
+        let local_path = local_path.into();
+        // A configured mode for new uploads must not change an edited file's mode.
+        options.default_file_mode = None;
+        match self.backend()? {
+            RemoteFileBackendKind::Sftp => self
+                .sftp()?
+                .upload_remote_file_with_progress_and_control_options(
+                    local_path,
+                    remote_path,
+                    control,
+                    options,
+                    progress,
+                ),
+            kind => {
                 control.wait_if_paused_blocking()?;
-                let summary = self.upload_file(&local_path, &remote_path.display_path)?;
+                let shell = self.shell(kind);
+                let bytes = fs::read(&local_path)?;
+                let properties = shell_editor_properties(&shell, remote_path)?;
+                anyhow::ensure!(
+                    properties.file_type == SftpFileType::File,
+                    "External edit sync requires an existing regular file"
+                );
+                let temporary = format!(
+                    "{}.nyaterm-edit-{}",
+                    remote_path.display_path,
+                    uuid::Uuid::new_v4().simple()
+                );
+                let command = shell_editor_upload_command(
+                    &properties,
+                    &temporary,
+                    &remote_path.display_path,
+                    bytes.len(),
+                )?;
                 control.wait_if_paused_blocking()?;
+                let byte_count = bytes.len() as u64;
+                if let Err(error) = shell.exec_ok(command, Some(bytes)) {
+                    let _ = shell.exec(format!("rm -f -- {}", shell_quote(&temporary)), None);
+                    return Err(error);
+                }
+                let summary = SftpTransferSummary {
+                    remote_path: remote_path.display_path.clone(),
+                    local_path,
+                    bytes: byte_count,
+                    skipped: false,
+                };
                 progress(SftpTransferProgress {
                     remote_path: summary.remote_path.clone(),
                     local_path: summary.local_path.clone(),
@@ -951,7 +1037,7 @@ impl RemoteFileService {
         remote_path: impl AsRef<str>,
         control: SftpTransferControl,
         options: SftpPathTransferOptions,
-        mut progress: F,
+        progress: F,
     ) -> anyhow::Result<SftpTransferSummary>
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -990,7 +1076,7 @@ impl RemoteFileService {
                     &target,
                     &control,
                     options.transfer_options(),
-                    &mut progress,
+                    progress,
                 )?;
                 Ok(SftpTransferSummary {
                     remote_path: target,
@@ -1031,11 +1117,49 @@ pub struct FileCopySummary {
 
 impl FileCopyRequest {
     pub fn execute(self) -> anyhow::Result<FileCopySummary> {
+        self.execute_with_progress(|_| {})
+    }
+
+    /// Reports cumulative work for the entire copy. Staged remote copies count
+    /// both the download and upload legs; the summary counts content bytes once.
+    pub fn execute_with_progress<F>(self, progress: F) -> anyhow::Result<FileCopySummary>
+    where
+        F: FnMut(SftpTransferProgress) + Send + 'static,
+    {
+        let staged = match (&self.source, &self.destination) {
+            (
+                FileTransferEndpoint::Remote {
+                    service: source, ..
+                },
+                FileTransferEndpoint::Remote {
+                    service: destination,
+                    ..
+                },
+            ) => {
+                source.backend()? != RemoteFileBackendKind::Sftp
+                    || destination.backend()? != RemoteFileBackendKind::Sftp
+            }
+            _ => false,
+        };
+        let progress = CopyProgress::new(
+            &self.source,
+            &self.destination,
+            if staged { 2 } else { 1 },
+            progress,
+        );
+        progress.scan(&self.source, &self.control)?;
+        let summary = self.execute_reporting(progress.clone())?;
+        if summary.copied {
+            progress.finish(summary.bytes);
+        }
+        Ok(summary)
+    }
+
+    fn execute_reporting(self, progress: CopyProgress) -> anyhow::Result<FileCopySummary> {
         let control = self.control;
         let options = self.options;
         match (self.source, self.destination) {
             (FileTransferEndpoint::Local(source), FileTransferEndpoint::Local(destination)) => {
-                ensure_local_copy_tree_supported(&source)?;
                 let Some(destination) = resolve_copy_local_target(
                     &source,
                     &destination,
@@ -1052,7 +1176,13 @@ impl FileCopyRequest {
                 };
                 control.wait_if_paused_blocking()?;
                 Ok(FileCopySummary {
-                    bytes: copy_local_path(&source, &destination, &control)?,
+                    bytes: copy_local_path(
+                        &source,
+                        &destination,
+                        &control,
+                        options.transfer_options(),
+                        &progress,
+                    )?,
                     used_local_staging: false,
                     destination_path: destination.to_string_lossy().into_owned(),
                     copied: true,
@@ -1062,7 +1192,6 @@ impl FileCopyRequest {
                 FileTransferEndpoint::Local(source),
                 FileTransferEndpoint::Remote { service, path },
             ) => {
-                ensure_local_copy_tree_supported(&source)?;
                 let Some(path) = resolve_copy_remote_target(
                     &source.to_string_lossy(),
                     source.is_dir(),
@@ -1089,7 +1218,10 @@ impl FileCopyRequest {
                             None,
                             options.transfer_options().clone(),
                         ),
-                        |_| {},
+                        {
+                            let progress = progress.clone();
+                            move |value| progress.update(value)
+                        },
                     )?
                 } else {
                     service.upload_remote_file_with_progress_and_control_options(
@@ -1097,7 +1229,10 @@ impl FileCopyRequest {
                         &path,
                         control,
                         options.transfer_options().clone(),
-                        |_| {},
+                        {
+                            let progress = progress.clone();
+                            move |value| progress.update(value)
+                        },
                     )?
                 };
                 Ok(FileCopySummary {
@@ -1116,13 +1251,16 @@ impl FileCopyRequest {
                     destination,
                     control,
                     options,
-                    |_| {},
+                    {
+                        let progress = progress.clone();
+                        move |value| progress.update(value)
+                    },
                 )?;
                 Ok(FileCopySummary {
                     bytes: summary.bytes,
                     used_local_staging: false,
                     destination_path: summary.local_path.to_string_lossy().into_owned(),
-                    copied: true,
+                    copied: !summary.skipped,
                 })
             }
             (
@@ -1162,6 +1300,7 @@ impl FileCopyRequest {
                         &destination_path,
                         control,
                         options.transfer_options().clone(),
+                        progress.clone(),
                     )?;
                     return Ok(FileCopySummary {
                         bytes,
@@ -1177,8 +1316,12 @@ impl FileCopyRequest {
                     &local,
                     control.clone(),
                     SftpPathTransferOptions::default(),
-                    |_| {},
+                    {
+                        let progress = progress.clone();
+                        move |value| progress.update(value)
+                    },
                 )?;
+                progress.next_stage(downloaded.bytes);
                 let uploaded = if downloaded.local_path.is_dir() {
                     destination.upload_path_with_progress_and_path_options(
                         &downloaded.local_path,
@@ -1189,7 +1332,10 @@ impl FileCopyRequest {
                             None,
                             options.transfer_options().clone(),
                         ),
-                        |_| {},
+                        {
+                            let progress = progress.clone();
+                            move |value| progress.update(value)
+                        },
                     )?
                 } else {
                     destination.upload_remote_file_with_progress_and_control_options(
@@ -1197,7 +1343,10 @@ impl FileCopyRequest {
                         &destination_path,
                         control,
                         options.transfer_options().clone(),
-                        |_| {},
+                        {
+                            let progress = progress.clone();
+                            move |value| progress.update(value)
+                        },
                     )?
                 };
                 Ok(FileCopySummary {
@@ -1237,39 +1386,66 @@ fn copy_local_path(
     source: &Path,
     destination: &Path,
     control: &SftpTransferControl,
+    options: &SftpTransferOptions,
+    progress: &CopyProgress,
 ) -> anyhow::Result<u64> {
+    use std::io::{Read as _, Write as _};
+
     control.wait_if_paused_blocking()?;
     let metadata = fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("copying local symbolic links is not supported");
-    }
-    if metadata.is_dir() {
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink(),
+        "copying local symbolic links is not supported"
+    );
+    let bytes = if metadata.is_dir() {
         fs::create_dir_all(destination)?;
-        let mut bytes = 0;
+        let mut bytes = 0_u64;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            bytes += copy_local_path(&entry.path(), &destination.join(entry.file_name()), control)?;
+            bytes = bytes.saturating_add(copy_local_path(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                control,
+                options,
+                progress,
+            )?);
         }
-        Ok(bytes)
+        bytes
     } else {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        Ok(fs::copy(source, destination)?)
-    }
-}
-
-fn ensure_local_copy_tree_supported(path: &Path) -> anyhow::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("copying local symbolic links is not supported");
-    }
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            ensure_local_copy_tree_supported(&entry?.path())?;
+        if destination.exists() {
+            anyhow::ensure!(
+                !same_file::is_same_file(source, destination)?,
+                "cannot copy a local file onto itself"
+            );
         }
-    }
-    Ok(())
+        let mut input = crate::download_path::open_without_following(source, false, false)?;
+        let root = crate::download_path::root_for_target(destination);
+        let (temporary, mut output) =
+            crate::download_path::DownloadTemporary::create(root, destination)?;
+        let mut buffer = vec![0_u8; options.buffer_size_bytes()];
+        let mut bytes = 0_u64;
+        loop {
+            control.wait_if_paused_blocking()?;
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read])?;
+            bytes = bytes.saturating_add(read as u64);
+            progress.add_bytes(read as u64);
+        }
+        output.sync_all()?;
+        drop(output);
+        control.wait_if_paused_blocking()?;
+        temporary.commit(root, destination)?;
+        fs::set_permissions(destination, metadata.permissions())?;
+        bytes
+    };
+    progress.finish_item();
+    Ok(bytes)
 }
 
 fn resolve_copy_local_target(
@@ -1338,61 +1514,80 @@ fn download_shell_path<F>(
     remote_path: &str,
     local_path: &Path,
     control: &SftpTransferControl,
-    progress: &mut F,
+    progress: F,
     download_root: &Path,
 ) -> anyhow::Result<u64>
 where
-    F: FnMut(SftpTransferProgress),
+    F: FnMut(SftpTransferProgress) + Send + 'static,
 {
-    control.wait_if_paused_blocking()?;
-    crate::download_path::ensure_no_symlink(download_root, local_path)?;
-    let properties = shell_properties(&service.shell(kind), &RemoteFilePath::new(remote_path))?;
-    ensure_supported_download_source(properties.file_type)?;
-    if properties.is_directory() {
-        fs::create_dir_all(local_path)?;
-        crate::download_path::ensure_no_symlink(download_root, local_path)?;
-        let mut bytes = 0;
-        let mut target_keys = HashSet::new();
-        for entry in list_shell_dir(
-            &service.shell(kind),
-            &RemoteFilePath::new(remote_path),
-            kind,
-        )? {
-            if !crate::download_path::validate_directory_entry(&entry.name, entry.file_type)? {
-                continue;
-            }
-            ensure_unique_download_name(&mut target_keys, &entry.name)?;
-            ensure_supported_download_source(entry.file_type)?;
-            bytes += download_shell_path(
-                service,
-                kind,
-                &entry.path,
-                &local_path.join(&entry.name),
-                control,
-                progress,
-                download_root,
-            )?;
-        }
-        Ok(bytes)
-    } else {
-        let bytes = service
-            .shell(kind)
-            .exec_ok(format!("cat -- {}", shell_quote(remote_path)), None)?;
+    let shell = service.shell(kind);
+    let callback = Arc::new(Mutex::new(progress));
+    let mut pending = vec![(remote_path.to_string(), local_path.to_path_buf())];
+    let mut bytes = 0_u64;
+    let mut completed = 0_u64;
+    while let Some((remote, local)) = pending.pop() {
         control.wait_if_paused_blocking()?;
-        if let Some(parent) = local_path.parent() {
-            fs::create_dir_all(parent)?;
+        crate::download_path::ensure_no_symlink(download_root, &local)?;
+        let properties = shell_properties(&shell, &RemoteFilePath::new(&remote))?;
+        ensure_supported_download_source(properties.file_type)?;
+        if properties.is_directory() {
+            fs::create_dir_all(&local)?;
+            crate::download_path::ensure_no_symlink(download_root, &local)?;
+            let mut target_keys = HashSet::new();
+            for entry in list_shell_dir(&shell, &RemoteFilePath::new(&remote), kind)? {
+                control.wait_if_paused_blocking()?;
+                if !crate::download_path::validate_directory_entry(&entry.name, entry.file_type)? {
+                    continue;
+                }
+                ensure_unique_download_name(&mut target_keys, &entry.name)?;
+                ensure_supported_download_source(entry.file_type)?;
+                pending.push((entry.path, local.join(entry.name)));
+            }
+        } else {
+            if let Some(parent) = local.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let report = callback.clone();
+            let remote_name = remote.clone();
+            let local_name = local.clone();
+            let offset = bytes;
+            bytes = bytes.saturating_add(shell.download_stream(
+                &remote,
+                &local,
+                download_root,
+                properties.size,
+                control.clone(),
+                move |current| {
+                    report.lock().expect("shell progress lock")(SftpTransferProgress {
+                        remote_path: remote_name.clone(),
+                        local_path: local_name.clone(),
+                        bytes_transferred: offset.saturating_add(current),
+                        total_bytes: None,
+                        item_count_completed: Some(completed),
+                        item_count_total: None,
+                    });
+                },
+            )?);
         }
-        crate::download_path::staged_write_file(download_root, local_path, &bytes)?;
-        progress(SftpTransferProgress {
-            remote_path: remote_path.to_string(),
-            local_path: local_path.to_path_buf(),
-            bytes_transferred: bytes.len() as u64,
-            total_bytes: Some(bytes.len() as u64),
-            item_count_completed: None,
+        completed = completed.saturating_add(1);
+        callback.lock().expect("shell progress lock")(SftpTransferProgress {
+            remote_path: remote,
+            local_path: local,
+            bytes_transferred: bytes,
+            total_bytes: None,
+            item_count_completed: Some(completed),
             item_count_total: None,
         });
-        Ok(bytes.len() as u64)
     }
+    callback.lock().expect("shell progress lock")(SftpTransferProgress {
+        remote_path: remote_path.to_string(),
+        local_path: local_path.to_path_buf(),
+        bytes_transferred: bytes,
+        total_bytes: Some(bytes),
+        item_count_completed: Some(completed),
+        item_count_total: Some(completed),
+    });
+    Ok(bytes)
 }
 
 fn ensure_supported_download_source(file_type: SftpFileType) -> anyhow::Result<()> {
@@ -1421,48 +1616,69 @@ fn upload_shell_path<F>(
     remote_path: &str,
     control: &SftpTransferControl,
     transfer_options: &SftpTransferOptions,
-    progress: &mut F,
+    progress: F,
 ) -> anyhow::Result<u64>
 where
-    F: FnMut(SftpTransferProgress),
+    F: FnMut(SftpTransferProgress) + Send + 'static,
 {
-    control.wait_if_paused_blocking()?;
-    if local_path.is_dir() {
-        service.create_dir_path(remote_path, None)?;
-        let mut bytes = 0;
-        for entry in fs::read_dir(local_path)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            bytes += upload_shell_path(
-                service,
-                kind,
-                &entry.path(),
-                &remote_join(remote_path, &name),
-                control,
-                transfer_options,
-                progress,
-            )?;
-        }
-        Ok(bytes)
-    } else {
-        let summary = service.upload_file(local_path, remote_path)?;
+    let shell = service.shell(kind);
+    let callback = Arc::new(Mutex::new(progress));
+    let mut pending = vec![(local_path.to_path_buf(), remote_path.to_string())];
+    let mut bytes = 0_u64;
+    let mut completed = 0_u64;
+    while let Some((local, remote)) = pending.pop() {
         control.wait_if_paused_blocking()?;
-        if let Some(mode) = transfer_options.default_file_mode {
-            service.shell(kind).exec_ok(
-                format!("chmod {mode:o} -- {}", shell_quote(remote_path)),
-                None,
-            )?;
+        if local.is_dir() {
+            service.create_dir_path(&remote, None)?;
+            for entry in fs::read_dir(&local)? {
+                control.wait_if_paused_blocking()?;
+                let entry = entry?;
+                pending.push((
+                    entry.path(),
+                    remote_join(&remote, &entry.file_name().to_string_lossy()),
+                ));
+            }
+        } else {
+            let report = callback.clone();
+            let remote_name = remote.clone();
+            let local_name = local.clone();
+            let offset = bytes;
+            bytes = bytes.saturating_add(shell.upload_stream(
+                &local,
+                &remote,
+                control.clone(),
+                transfer_options,
+                move |current| {
+                    report.lock().expect("shell progress lock")(SftpTransferProgress {
+                        remote_path: remote_name.clone(),
+                        local_path: local_name.clone(),
+                        bytes_transferred: offset.saturating_add(current),
+                        total_bytes: None,
+                        item_count_completed: Some(completed),
+                        item_count_total: None,
+                    });
+                },
+            )?);
         }
-        progress(SftpTransferProgress {
-            remote_path: remote_path.to_string(),
-            local_path: local_path.to_path_buf(),
-            bytes_transferred: summary.bytes,
-            total_bytes: Some(summary.bytes),
-            item_count_completed: None,
+        completed = completed.saturating_add(1);
+        callback.lock().expect("shell progress lock")(SftpTransferProgress {
+            remote_path: remote,
+            local_path: local,
+            bytes_transferred: bytes,
+            total_bytes: None,
+            item_count_completed: Some(completed),
             item_count_total: None,
         });
-        Ok(summary.bytes)
     }
+    callback.lock().expect("shell progress lock")(SftpTransferProgress {
+        remote_path: remote_path.to_string(),
+        local_path: local_path.to_path_buf(),
+        bytes_transferred: bytes,
+        total_bytes: Some(bytes),
+        item_count_completed: Some(completed),
+        item_count_total: Some(completed),
+    });
+    Ok(bytes)
 }
 
 fn resolve_shell_download_target(
@@ -1616,7 +1832,7 @@ fn list_shell_dir(
         RemoteFileBackendKind::ScpNormal => parse_normal_listing(
             path,
             &shell.exec_ok(
-                format!("LC_ALL=C ls -la -- {}", shell_quote(&path.display_path)),
+                format!("LC_ALL=C ls -la {}", shell_quote_path(&path.display_path)),
                 None,
             )?,
         ),
@@ -1775,7 +1991,7 @@ fn normal_shell_properties(
     path: &RemoteFilePath,
 ) -> anyhow::Result<SftpFileProperties> {
     let output = shell.exec_ok(
-        format!("LC_ALL=C ls -ld -- {}", shell_quote(&path.display_path)),
+        format!("LC_ALL=C ls -ld {}", shell_quote_path(&path.display_path)),
         None,
     )?;
     let line = String::from_utf8_lossy(&output)
@@ -1832,7 +2048,7 @@ fn update_shell_attributes(
     let recursive = if update.recursive { "-R " } else { "" };
     if let Some(mode) = update.mode {
         shell.exec_ok(
-            format!("chmod {recursive}{mode:o} -- {}", shell_quote(path)),
+            format!("chmod {recursive}{mode:o} {}", shell_quote_path(path)),
             None,
         )?;
     }
@@ -1843,9 +2059,9 @@ fn update_shell_attributes(
     {
         shell.exec_ok(
             format!(
-                "chown {recursive}{} -- {}",
+                "chown {recursive}-- {} {}",
                 shell_quote(owner),
-                shell_quote(path)
+                shell_quote_path(path)
             ),
             None,
         )?;
@@ -1857,9 +2073,9 @@ fn update_shell_attributes(
     {
         shell.exec_ok(
             format!(
-                "chgrp {recursive}{} -- {}",
+                "chgrp {recursive}-- {} {}",
                 shell_quote(group),
-                shell_quote(path)
+                shell_quote_path(path)
             ),
             None,
         )?;
@@ -1909,6 +2125,68 @@ fn read_shell_text_document(
         content,
         revision,
     })
+}
+
+fn shell_editor_properties(
+    shell: &ShellRemote,
+    path: &RemoteFilePath,
+) -> anyhow::Result<SftpFileProperties> {
+    let mut properties = shell_properties(shell, path)?;
+    if shell.kind() == RemoteFileBackendKind::ScpNormal {
+        // The normal backend has no stat dependency. Use numeric ls output
+        // for saving while retaining owner/group names in property views.
+        let output = shell.exec_ok(
+            format!("LC_ALL=C ls -ldn {}", shell_quote_path(&path.display_path)),
+            None,
+        )?;
+        let line = String::from_utf8_lossy(&output);
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        properties.uid = columns.get(2).and_then(|value| value.parse().ok());
+        properties.gid = columns.get(3).and_then(|value| value.parse().ok());
+    }
+    Ok(properties)
+}
+
+fn shell_editor_replace_command(
+    properties: &SftpFileProperties,
+    temporary: &str,
+    target: &str,
+) -> anyhow::Result<String> {
+    let (Some(uid), Some(gid), Some(mode)) =
+        (properties.uid, properties.gid, properties.permissions)
+    else {
+        anyhow::bail!("Remote save refused: original ownership or permissions are unavailable");
+    };
+    let temporary = shell_quote_path(temporary);
+    let target = shell_quote_path(target);
+    let mode = mode & 0o7777;
+    let symbolic = format_permissions(SftpFileType::File, mode);
+    // Skip a no-op chown, restore mode after chown clears special bits, and
+    // verify both before mv. A rejected or ignored attribute change must not
+    // replace the original. Numeric ls works in both shell backends.
+    Ok(format!(
+        "(attrs=$(LC_ALL=C ls -ldn {temporary}) && \
+         set -f && set -- $attrs && \
+         (test \"$3:$4\" = '{uid}:{gid}' || chown {uid}:{gid} {temporary})) && \
+         chmod {mode:o} {temporary} && \
+         (attrs=$(LC_ALL=C ls -ldn {temporary}) && set -f && set -- $attrs && \
+         case \"$1\" in '{symbolic}'*) test \"$3:$4\" = '{uid}:{gid}' ;; *) false ;; esac) && \
+         mv -f {temporary} {target}"
+    ))
+}
+
+fn shell_editor_upload_command(
+    properties: &SftpFileProperties,
+    temporary: &str,
+    target: &str,
+    byte_count: usize,
+) -> anyhow::Result<String> {
+    let replace = shell_editor_replace_command(properties, temporary, target)?;
+    Ok(format!(
+        "umask 077; cat > {} && test $(wc -c < {}) -eq {byte_count} && {replace}",
+        shell_quote(temporary),
+        shell_quote(temporary),
+    ))
 }
 
 fn write_shell_text_document(
@@ -1967,7 +2245,7 @@ fn write_shell_text_document(
         }
     }
 
-    let replacement_properties = match shell_properties(shell, path) {
+    let replacement_properties = match shell_editor_properties(shell, path) {
         Ok(properties) => properties,
         Err(error) => {
             cleanup_temporary();
@@ -1980,15 +2258,17 @@ fn write_shell_text_document(
         cleanup_temporary();
         return Ok(RemoteTextWriteResult::Conflict);
     }
-    let mode = replacement_properties.permissions.unwrap_or(0o600) & 0o7777;
     // POSIX shell fallback has no universal compare-and-swap primitive. Keep the
     // verified revision check adjacent to the final atomic rename.
-    let replace = format!(
-        "chmod {mode:o} -- {} && mv -f -- {} {}",
-        shell_quote(&temporary),
-        shell_quote(&temporary),
-        shell_quote(&path.display_path)
-    );
+    let replace =
+        match shell_editor_replace_command(&replacement_properties, &temporary, &path.display_path)
+        {
+            Ok(command) => command,
+            Err(error) => {
+                cleanup_temporary();
+                return Err(error);
+            }
+        };
     if let Err(error) = shell.exec_ok(replace, None) {
         cleanup_temporary();
         return Err(error);
@@ -2010,7 +2290,7 @@ fn write_shell_text(
     expected_size: Option<u64>,
     force: bool,
 ) -> anyhow::Result<SftpWriteTextResult> {
-    let properties = shell_properties(shell, path)?;
+    let properties = shell_editor_properties(shell, path)?;
     let modified_at = u64::from(properties.modified_at.unwrap_or(0));
     let size = properties.size.unwrap_or(0);
     if !force
@@ -2024,16 +2304,8 @@ fn write_shell_text(
         path.display_path,
         uuid::Uuid::new_v4().simple()
     );
-    let mode = properties.permissions.unwrap_or(0o600) & 0o7777;
-    let command = format!(
-        "umask 077; cat > {} && test $(wc -c < {}) -eq {} && chmod {mode:o} -- {} && mv -f -- {} {}",
-        shell_quote(&temporary),
-        shell_quote(&temporary),
-        content.len(),
-        shell_quote(&temporary),
-        shell_quote(&temporary),
-        shell_quote(&path.display_path)
-    );
+    let command =
+        shell_editor_upload_command(&properties, &temporary, &path.display_path, content.len())?;
     if let Err(error) = shell.exec_ok(command, Some(content.as_bytes().to_vec())) {
         let _ = shell.exec(format!("rm -f -- {}", shell_quote(&temporary)), None);
         return Err(error);

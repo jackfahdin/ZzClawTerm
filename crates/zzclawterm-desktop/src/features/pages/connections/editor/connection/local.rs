@@ -1,17 +1,15 @@
+use crate::models::ConnectionEditorSection;
 use rust_i18n::t;
 use zzclawterm_ui::ZzClawSwitch;
 
 use gpui::{
     Context, FontWeight, div,
-    prelude::{
-        FluentBuilder, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled,
-    },
-    px, rgb, rgba, svg,
+    prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled},
+    px, rgb, rgba,
 };
 
 use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
 use crate::models::{ConnectionEditorField, ConnectionEditorSelect};
-use crate::widgets::small_button;
 
 use super::super::super::list::{
     ConnectionEditorRenderContext, connection_editor_select, editor_field,
@@ -23,14 +21,30 @@ pub(super) fn connection_editor_local_section(
     section: ConnectionEditorSectionContext<'_>,
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
-    let ConnectionEditorSectionContext {
-        palette,
-        editor,
-        fields,
-        baud_popover_open: _,
-    } = section;
+    let content = match section.editor.section {
+        ConnectionEditorSection::Startup => local_startup(section, cx),
+        ConnectionEditorSection::Terminal => local_terminal(section, cx),
+        _ => div(),
+    };
     div()
         .debug_selector(|| "connection-editor-local-section".to_string())
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(content)
+}
+
+fn local_startup(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        fields,
+        narrow,
+        ..
+    } = section;
+    div()
         .flex()
         .flex_col()
         .gap_3()
@@ -49,10 +63,12 @@ pub(super) fn connection_editor_local_section(
                     div()
                         .flex()
                         .items_center()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             div()
-                                .w(px(144.))
+                                .when(!narrow, |this| this.w(px(144.)))
+                                .when(narrow, |this| this.w_full())
                                 .flex_none()
                                 .child(connection_editor_select(
                                     ConnectionEditorRenderContext {
@@ -73,25 +89,10 @@ pub(super) fn connection_editor_local_section(
                             cx,
                         )))
                         .child(
-                            div()
-                                .id("connection-editor-shell-browse")
-                                .size(px(30.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(palette.border))
-                                .bg(rgb(palette.input))
-                                .cursor_pointer()
-                                .hover(|this| this.bg(rgb(palette.hover)))
-                                .child(
-                                    svg()
-                                        .size(px(14.))
-                                        .path("icons/conn/folder.svg")
-                                        .text_color(rgb(palette.text_muted)),
-                                )
+                            zzclawterm_ui::ZzClawButton::new("connection-editor-shell-browse", "")
+                                .form_control()
+                                .icon("icons/conn/folder.svg")
+                                .tooltip(t!("settings.browse"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.prompt_connection_editor_shell_path(cx);
                                 })),
@@ -117,116 +118,99 @@ pub(super) fn connection_editor_local_section(
                     fields,
                     cx,
                 )))
-                .child(small_button(
-                    palette,
-                    "connection-editor-cwd-browse",
-                    t!("settings.browse"),
-                    cx.listener(|this, _, _, cx| {
-                        this.prompt_connection_editor_working_dir(cx);
-                    }),
-                )),
-        )
-        .child(
-            div()
-                .id("connection-editor-local-advanced-toggle")
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(palette.text_muted))
-                .cursor_pointer()
-                .hover(|this| this.text_color(rgb(palette.text)))
                 .child(
-                    svg()
-                        .size(px(14.))
-                        .path(if editor.advanced.local {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/fe/forward.svg"
-                        })
-                        .text_color(rgb(palette.text_muted)),
-                )
-                .child(t!("dialog.advancedConfig"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_connection_editor_flag(ConnectionEditorToggle::Advanced, cx);
-                })),
+                    zzclawterm_ui::ZzClawButton::new(
+                        "connection-editor-cwd-browse",
+                        t!("settings.browse"),
+                    )
+                    .form_control()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.prompt_connection_editor_working_dir(cx);
+                    })),
+                ),
         )
-        .when(editor.advanced.local, |this| {
-            this.child(
+}
+
+fn local_terminal(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(
+        div()
+            .id("connection-editor-local-terminal")
+            .debug_selector(|| "connection-editor-local-advanced".to_string())
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgba((palette.accent << 8) | 0x12))
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-local-encoding",
+                t!("connection.encoding"),
+                ConnectionEditorSelect::Encoding,
+            ))
+            .child(
                 div()
-                    .id("connection-editor-local-terminal")
-                    .debug_selector(|| "connection-editor-local-advanced".to_string())
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgba((palette.accent << 8) | 0x12))
-                    .p_3()
                     .flex()
-                    .flex_col()
+                    .items_start()
+                    .justify_between()
                     .gap_3()
-                    .child(connection_editor_select(
-                        ConnectionEditorRenderContext {
-                            palette,
-                            fields,
-                            cx,
-                        },
-                        "connection-editor-local-encoding",
-                        t!("connection.encoding"),
-                        ConnectionEditorSelect::Encoding,
-                    ))
                     .child(
                         div()
-                            .flex()
-                            .items_start()
-                            .justify_between()
-                            .gap_3()
+                            .min_w_0()
+                            .flex_1()
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight(500.))
-                                            .child(t!("dialog.dynamicTabTitle")),
-                                    )
-                                    .child(
+                                    .text_xs()
+                                    .font_weight(FontWeight(500.))
+                                    .child(t!("dialog.dynamicTabTitle")),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(palette.text_muted))
+                                    .child(t!("dialog.dynamicTabTitleDesc")),
+                            )
+                            .when(
+                                editor.dynamic_tab_title && !editor.shell_args.trim().is_empty(),
+                                |this| {
+                                    this.child(
                                         div()
                                             .mt_1()
                                             .text_size(px(10.))
-                                            .text_color(rgb(palette.text_muted))
-                                            .child(t!("dialog.dynamicTabTitleDesc")),
+                                            .text_color(rgb(palette.warning))
+                                            .child(t!("dialog.dynamicTabTitleCustomArgsHint")),
                                     )
-                                    .when(
-                                        editor.dynamic_tab_title
-                                            && !editor.shell_args.trim().is_empty(),
-                                        |this| {
-                                            this.child(
-                                                div()
-                                                    .mt_1()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(palette.warning))
-                                                    .child(t!(
-                                                        "dialog.dynamicTabTitleCustomArgsHint"
-                                                    )),
-                                            )
-                                        },
-                                    ),
-                            )
-                            .child(
-                                ZzClawSwitch::new("connection-editor-local-dynamic-tab-title")
-                                    .checked(editor.dynamic_tab_title)
-                                    .tooltip(t!("dialog.dynamicTabTitle"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_connection_editor_flag(
-                                            ConnectionEditorToggle::DynamicTabTitle,
-                                            cx,
-                                        );
-                                    })),
+                                },
                             ),
                     )
-                    .child(connection_editor_recording_section(section, cx)),
+                    .child(
+                        ZzClawSwitch::new("connection-editor-local-dynamic-tab-title")
+                            .checked(editor.dynamic_tab_title)
+                            .tooltip(t!("dialog.dynamicTabTitle"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_connection_editor_flag(
+                                    ConnectionEditorToggle::DynamicTabTitle,
+                                    cx,
+                                );
+                            })),
+                    ),
             )
-        })
+            .child(connection_editor_recording_section(section, cx)),
+    )
 }

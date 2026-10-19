@@ -563,7 +563,9 @@ impl ZzClawTermApp {
             snapshot_rows: snapshot.row_count(),
             viewport_rows,
             cell_height: fallback_cell_h,
-        });
+        }) - snapshot.leading_cleared_rows(fallback_viewport_anchor_row)
+            as f32
+            * fallback_cell_h;
         let gutter = terminal_gutter_metrics(
             fallback_cell_w,
             self.settings.summary().terminal_show_timestamps,
@@ -684,6 +686,25 @@ pub(in crate::features) fn terminal_cell_for_visual_geometry(
         row.min(geometry.rows.saturating_sub(1)),
         col.min(geometry.cols.saturating_sub(1)),
     )
+}
+
+pub(super) fn terminal_cell_side_for_visual_geometry(
+    position: Point<Pixels>,
+    geometry: &TerminalHitTestGeometry,
+) -> zzclawterm_terminal::selection::TerminalCellSide {
+    use zzclawterm_terminal::selection::TerminalCellSide;
+
+    let cell_w = geometry.cell_w.max(1.0);
+    let local_x =
+        f32::from(position.x - geometry.bounds.origin.x) - geometry.padding_left - geometry.gutter;
+    if local_x <= 0.0 || geometry.cols == 0 {
+        return TerminalCellSide::Left;
+    }
+    if local_x >= geometry.cols as f32 * cell_w || local_x % cell_w >= cell_w * 0.5 {
+        TerminalCellSide::Right
+    } else {
+        TerminalCellSide::Left
+    }
 }
 
 pub(in crate::features) fn terminal_snapshot_row_for_visual_geometry(
@@ -807,6 +828,7 @@ mod tests {
 
     use gpui::{Point, Size, px};
     use zzclawterm_terminal::TerminalScreen;
+    use zzclawterm_terminal::selection::TerminalCellSide;
 
     use crate::features::terminal::terminal_surface::terminal_absolute_line_for_snapshot_row;
     use crate::features::terminal::{ResolvedAppearanceFont, TerminalFontMeasurement};
@@ -819,6 +841,59 @@ mod tests {
         terminal_line_number_digits_for_end, terminal_snapshot_row_for_viewport_row,
         terminal_snapshot_row_for_visual_geometry,
     };
+
+    #[test]
+    fn half_cell_hit_testing_uses_painted_origin_and_clamps_grid_edges() {
+        let snapshot = Arc::new(TerminalScreen::new(4, 3).snapshot());
+        for scale in [1.0, 1.25, 1.5] {
+            let geometry = TerminalHitTestGeometry {
+                bounds: gpui::bounds(
+                    Point {
+                        x: px(17.0),
+                        y: px(23.0),
+                    },
+                    Size {
+                        width: px(200.0),
+                        height: px(100.0),
+                    },
+                ),
+                snapshot: snapshot.clone(),
+                cell_w: 7.5 * scale,
+                cell_h: 16.0 * scale,
+                padding_left: 3.0,
+                padding_top: 2.0,
+                gutter: 21.0,
+                rows: 3,
+                cols: 4,
+                display_offset: 0,
+                viewport_anchor_row: 0,
+                snapshot_rows: 3,
+                viewport_rows: 3,
+                visual_y_offset: -0.375 * 16.0 * scale,
+            };
+            for (cell_x, col, side) in [
+                (-0.75, 0, TerminalCellSide::Left),
+                (0.0, 0, TerminalCellSide::Left),
+                (0.25, 0, TerminalCellSide::Left),
+                (0.5, 0, TerminalCellSide::Right),
+                (0.75, 0, TerminalCellSide::Right),
+                (1.0, 1, TerminalCellSide::Left),
+                (1.5, 1, TerminalCellSide::Right),
+                (4.0, 3, TerminalCellSide::Right),
+                (4.25, 3, TerminalCellSide::Right),
+            ] {
+                let point = Point {
+                    x: px(41.0 + cell_x * geometry.cell_w),
+                    y: px(28.0),
+                };
+                assert_eq!(
+                    super::terminal_cell_side_for_visual_geometry(point, &geometry),
+                    side
+                );
+                assert_eq!(terminal_cell_for_visual_geometry(point, &geometry).col, col);
+            }
+        }
+    }
 
     #[test]
     fn generic_terminal_family_is_promoted_to_the_measured_family() {
@@ -939,6 +1014,51 @@ mod tests {
         assert_eq!(terminal_line_number_digits_for_end(10), 2);
         assert_eq!(terminal_line_number_digits_for_end(99_999), 5);
         assert_eq!(terminal_line_number_digits_for_end(100_000), 6);
+    }
+
+    #[test]
+    fn clear_all_hit_testing_maps_the_top_prompt_to_its_host_row() {
+        let mut terminal = TerminalScreen::new(40, 12);
+        terminal.advance(b"\x1b[12;1Hroot# draft");
+        terminal.clear_except_input();
+        let snapshot = std::sync::Arc::new(terminal.snapshot());
+        let geometry = TerminalHitTestGeometry {
+            bounds: gpui::bounds(
+                Point {
+                    x: px(0.0),
+                    y: px(0.0),
+                },
+                Size {
+                    width: px(320.0),
+                    height: px(192.0),
+                },
+            ),
+            visual_y_offset: -(snapshot.leading_cleared_rows(0) as f32) * 16.0,
+            snapshot,
+            cell_w: 8.0,
+            cell_h: 16.0,
+            padding_left: 0.0,
+            padding_top: 0.0,
+            gutter: 0.0,
+            rows: 12,
+            cols: 40,
+            display_offset: 0,
+            viewport_anchor_row: 0,
+            snapshot_rows: 12,
+            viewport_rows: 12,
+        };
+        let position = Point {
+            x: px(28.0),
+            y: px(8.0),
+        };
+        assert_eq!(
+            terminal_cell_for_visual_geometry(position, &geometry),
+            TerminalCellPos::new(11, 3)
+        );
+        assert_eq!(
+            terminal_snapshot_row_for_visual_geometry(position, &geometry),
+            11
+        );
     }
 
     #[test]

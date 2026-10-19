@@ -1,6 +1,7 @@
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, point, prelude::*, px,
+    AppContext as _, Context, Entity, InputEvent as _, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, point,
+    prelude::*, px,
 };
 use zzclawterm_core::{
     AppRuntime, QuickCommand, QuickCommandCategory, RuntimeMode, test_support::TestTempDir,
@@ -17,10 +18,26 @@ struct QuickCommandsFixture {
 
 impl Render for QuickCommandsFixture {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel = self.app.update(cx, |app, cx| {
-            app.quick_commands_panel(cx).into_any_element()
+        let (panel, listeners, focus) = self.app.update(cx, |app, cx| {
+            (
+                app.quick_commands_panel(cx).into_any_element(),
+                app.session_tab_drag_listener_layer(cx),
+                app.terminal.input_focus().clone(),
+            )
         });
-        div().w(px(800.)).h(px(500.)).child(panel)
+        let app = self.app.clone();
+        div()
+            .relative()
+            .track_focus(&focus)
+            .w(px(800.))
+            .h(px(500.))
+            .child(listeners)
+            .child(panel)
+            .capture_key_down(move |event, window, cx| {
+                app.update(cx, |app, cx| {
+                    app.cancel_internal_drag_on_escape(event, window, cx);
+                });
+            })
     }
 }
 
@@ -82,6 +99,7 @@ fn quick_command_context_menu_copies_each_row_and_resets_to_blank_in_every_view(
     ] {
         let root = TestTempDir::new("zzclawterm-quick-command-context");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, &root);
         app.update(&mut cx, |app, _| {
             app.commands.replace_quick_command_catalog(
@@ -150,6 +168,7 @@ fn quick_command_toolbar_and_empty_state_create_in_an_empty_selected_category() 
     for selector in ["quick-command-add", "quick-command-empty-add"] {
         let root = TestTempDir::new("zzclawterm-quick-command-toolbar-category");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, &root);
         app.update(&mut cx, |app, _| {
             app.commands.replace_quick_command_catalog(
@@ -187,6 +206,7 @@ fn quick_command_toolbar_and_empty_state_create_in_an_empty_selected_category() 
 fn quick_command_category_blank_menu_creates_a_root_category() {
     let root = TestTempDir::new("zzclawterm-quick-command-category-blank");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -264,6 +284,7 @@ fn category_drag_tracks_only_the_hovered_row_and_shows_before_after_inside() {
     ] {
         let root = TestTempDir::new("zzclawterm-category-drag");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, &root);
         app.update(&mut cx, |app, _| {
             app.commands.replace_quick_command_catalog(
@@ -326,6 +347,7 @@ fn category_drag_tracks_only_the_hovered_row_and_shows_before_after_inside() {
 fn category_drag_to_all_moves_to_root_and_keeps_children() {
     let root = TestTempDir::new("zzclawterm-category-root-drag");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -403,6 +425,7 @@ fn category_drag_to_all_moves_to_root_and_keeps_children() {
 fn category_drag_rejects_descendants_and_clears_marks_on_leave_and_cancel() {
     let root = TestTempDir::new("zzclawterm-category-drag-cancel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -458,10 +481,86 @@ fn category_drag_rejects_descendants_and_clears_marks_on_leave_and_cancel() {
 }
 
 #[test]
+fn quick_command_external_release_escape_and_capture_loss_preserve_order() {
+    for cancellation in [None, Some(false), Some(true)] {
+        let root = TestTempDir::new("zzclawterm-command-external-cancel");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, &root);
+        app.update(&mut cx, |app, _| {
+            app.commands.replace_quick_command_catalog(
+                vec![command("first", "pwd"), command("second", "ls")],
+                Vec::new(),
+            );
+            app.commands.set_quick_view_mode(QuickCommandViewMode::List);
+        });
+        let cx = host(&mut cx, &app);
+        let source = cx.debug_bounds("quick-command-row-first").unwrap().center();
+        let target = cx
+            .debug_bounds("quick-command-row-second")
+            .unwrap()
+            .center();
+        drag(cx, source, target);
+        app.read_with(cx, |app, _| {
+            assert!(app.commands.quick_drop_target().is_some())
+        });
+        match cancellation {
+            None => {
+                let outside = point(px(-30.), px(-30.));
+                cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::none());
+                cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(32));
+            }
+            Some(false) => {
+                cx.update(|window, cx| {
+                    let focus = app.read(cx).terminal.input_focus().clone();
+                    window.focus(&focus, cx);
+                });
+                cx.simulate_keystrokes("escape");
+                cx.read(|cx| assert!(!cx.has_active_drag()));
+                app.read_with(cx, |app, _| {
+                    assert!(app.commands.quick_drop_target().is_none())
+                });
+                cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+            }
+            Some(true) => {
+                cx.update(|window, cx| {
+                    window.dispatch_event(
+                        gpui::PointerCancelEvent {
+                            reason: gpui::PointerCancelReason::CaptureLost,
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                });
+                app.read_with(cx, |app, _| {
+                    assert!(app.commands.quick_drop_target().is_none())
+                });
+                cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
+            }
+        }
+        draw(cx);
+        app.read_with(cx, |app, _| {
+            assert!(app.commands.quick_drop_target().is_none());
+            assert_eq!(
+                app.commands
+                    .quick_commands()
+                    .iter()
+                    .map(|command| command.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+        });
+    }
+}
+
+#[test]
 fn category_rename_resets_cached_input_and_retires_it_on_cancel_and_confirm() {
     use crate::features::text_inputs::TextInputSetup;
     let root = TestTempDir::new("zzclawterm-category-rename");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -559,6 +658,7 @@ fn category_rename_resets_cached_input_and_retires_it_on_cancel_and_confirm() {
 fn category_menu_outdents_one_level_at_a_time_and_persists() {
     let root = TestTempDir::new("zzclawterm-category-menu-outdent");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -626,6 +726,7 @@ fn command_drop_near_category_edges_always_means_inside() {
     for fraction in [0.1, 0.9] {
         let root = TestTempDir::new("zzclawterm-command-category-drag");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, &root);
         app.update(&mut cx, |app, _| {
             app.commands.replace_quick_command_catalog(
@@ -661,6 +762,7 @@ fn command_drop_near_category_edges_always_means_inside() {
 fn category_after_marker_follows_the_whole_subtree_and_root_target_stays_visible() {
     let root = TestTempDir::new("zzclawterm-category-tree-indicator");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         let mut categories = vec![
@@ -722,6 +824,7 @@ fn category_after_marker_follows_the_whole_subtree_and_root_target_stays_visible
 fn all_category_drop_target_clears_on_leave_and_cancel() {
     let root = TestTempDir::new("zzclawterm-category-all-cancel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         app.commands.replace_quick_command_catalog(
@@ -783,6 +886,7 @@ fn all_category_drop_target_clears_on_leave_and_cancel() {
 fn command_drag_to_all_keeps_category_but_uncategorized_removes_it() {
     let root = TestTempDir::new("zzclawterm-command-all-drag");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, &root);
     app.update(&mut cx, |app, _| {
         let mut cmd = command("cmd", "pwd");

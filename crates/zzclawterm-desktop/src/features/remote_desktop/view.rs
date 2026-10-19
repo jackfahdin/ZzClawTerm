@@ -19,6 +19,10 @@ use crate::widgets::small_button;
 
 use super::runtime::format_remote_desktop_error;
 use super::state::RdpCertificatePrompt;
+use super::{REMOTE_DESKTOP_KEY_CONTEXT, RemoteDesktopShiftTab, RemoteDesktopTab};
+
+#[cfg(test)]
+mod keyboard_tests;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn remote_desktop_view(
@@ -271,7 +275,6 @@ impl ZzClawTermApp {
                 })
                 .clone()
         });
-        let input_down = input.clone();
         let input_up = input.clone();
 
         let hide_native_cursor = remote_cursor_hides_native(cursor_visible, cursor_shape.as_ref());
@@ -339,8 +342,11 @@ impl ZzClawTermApp {
         let forward_up_id = session_id.clone();
         let scroll_id = session_id.clone();
         let key_down_id = session_id.clone();
+        let tab_id = session_id.clone();
+        let shift_tab_id = session_id.clone();
         let key_up_id = session_id.clone();
         let modifiers_id = session_id.clone();
+        let hover_id = session_id.clone();
         let focus = surface_focus;
         let release_keyboard_on_exit = self.session.metadata(&session_id).is_some_and(|metadata| {
             matches!(
@@ -360,8 +366,17 @@ impl ZzClawTermApp {
                 CursorStyle::Arrow
             })
             .track_focus(&focus)
+            .key_context(REMOTE_DESKTOP_KEY_CONTEXT)
+            .on_action(cx.listener(move |this, _: &RemoteDesktopTab, window, cx| {
+                this.handle_remote_desktop_tab(&tab_id, false, window, cx);
+            }))
+            .on_action(
+                cx.listener(move |this, _: &RemoteDesktopShiftTab, window, cx| {
+                    this.handle_remote_desktop_tab(&shift_tab_id, true, window, cx);
+                }),
+            )
             .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, window, _cx| {
                 if release_keyboard_on_exit
                     && !hovered
                     && this.remote_desktop.focus.is_focused(window)
@@ -371,27 +386,14 @@ impl ZzClawTermApp {
                         this.remote_desktop.vnc_manager.clone(),
                         None,
                     );
-                    window.blur(cx);
+                    this.release_remote_keys(&hover_id);
+                    // Leaving the viewport releases system shortcut capture;
+                    // keep the existing pressed-key cleanup without blurring
+                    // ordinary keyboard focus. The hook may release all inputs.
                 }
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if input_down
-                    .as_ref()
-                    .is_some_and(|input| input.update(cx, |input, _| input.consumes_key(event)))
-                {
-                    return;
-                }
-
-                if this.send_rdp_key_down(
-                    &key_down_id,
-                    &event.keystroke.key,
-                    event.keystroke.key_char.as_deref(),
-                    event.is_held,
-                    event.keystroke.modifiers,
-                ) {
-                    cx.stop_propagation();
-                    this.mark_user_activity();
-                }
+                this.handle_remote_desktop_key_down(&key_down_id, event, cx);
             }))
             .on_modifiers_changed(
                 cx.listener(move |this, event: &ModifiersChangedEvent, _, cx| {
@@ -840,7 +842,7 @@ mod tests {
             width,
             height,
             hotspot: RemotePoint { x: 0, y: 0 },
-            pixels: vec![0; width.saturating_mul(height).saturating_mul(4) as usize],
+            pixels: vec![0; width.saturating_mul(height).saturating_mul(4) as usize].into(),
         }
     }
 

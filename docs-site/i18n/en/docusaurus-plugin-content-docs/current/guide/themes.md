@@ -18,6 +18,18 @@ The theme list includes two high-contrast themes, suited for accessibility, brig
 
 Select them like any other UI theme from **Settings → Appearance** or the **View → Theme** top menu.
 
+## Custom themes
+
+Open **Settings → Appearance → Manage themes** to browse built-in and custom themes. Selecting a theme changes only the local preview. Built-in themes are read-only; create a copy to edit them. Custom themes support editing, renaming, duplication, export, and deletion.
+
+The editor separates UI and terminal colors, with visual pickers and color inputs. The preview includes UI controls, terminal examples, and the 16 ANSI colors. Invalid inputs keep the last valid preview; low contrast produces a warning.
+
+**Save changes** persists the theme immediately. Saving an active theme refreshes every place using it. **Apply to UI / terminal** changes that scope only; **Apply to both** makes the terminal follow the UI. Unsaved edits can be saved and applied in one operation. Canceling settings does not undo confirmed manager operations. Appearance selectors and other settings still use the settings **Apply / Cancel** workflow.
+
+Creation, duplication, and import produce drafts until saved. Leaving an edited draft offers Save, Discard, or Keep editing. Deletion requires confirmation: an affected UI falls back to GitHub Dark, and terminals explicitly using the deleted theme follow the UI. Deletion cannot be undone.
+
+JSON import and export remain compatible with Tauri single-theme files. Conflicting imported IDs receive a new ID. Exporting a valid draft does not save or apply it. Unknown fields and unsupported records are preserved. Concurrent edits produce a conflict while preserving the draft; export it, or discard and reload before retrying.
+
 ## Minimum contrast
 
 **Settings → Appearance → Minimum contrast** automatically adjusts the terminal foreground color when it sits too close to the background, so a remote program's color choices stay readable under your current theme. Available steps:

@@ -751,6 +751,7 @@ mod tests {
                 recovery_revision: None,
                 recovery_payload_hash: None,
                 recovery_created_at_ms: None,
+                overwrite_blocked: false,
                 message: "remote changed".to_string(),
             })),
             "push failed".to_string(),
@@ -794,6 +795,7 @@ mod tests {
             recovery_revision: Some("recoverable-revision".to_string()),
             recovery_payload_hash: Some("recoverable-hash".to_string()),
             recovery_created_at_ms: Some(3),
+            overwrite_blocked: false,
             message: "remote incomplete".to_string(),
         };
 

@@ -258,6 +258,7 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        self.close_terminal_executions_for_session(session_id, cx);
         self.cancel_native_run_for_closed_session(session_id, cx);
         self.flush_session_asset_monitoring(session_id, cx);
         self.remote_ops.clear_stats_sample(session_id);

@@ -675,6 +675,7 @@ mod restore_activation_tests {
     #[test]
     fn workspace_restore_switching_hosts_clears_the_remote_presentation() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             register_ssh_session(app, "host-a");
@@ -723,6 +724,7 @@ mod restore_activation_tests {
     #[test]
     fn workspace_restore_keeping_the_active_host_preserves_the_remote_presentation() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             register_ssh_session(app, "host-a");

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rust_i18n::t;
+
 use gpui::{
     Context, FontWeight, IntoElement, MouseButton, SharedString, UniformListScrollHandle, div,
     prelude::*, px, rgb, rgba, uniform_list,
@@ -243,6 +245,7 @@ fn docker_container_row(
                         format!("docker-menu-toggle-{short}"),
                         "icons/session/more.svg",
                         14.,
+                        t!("dockerManager.moreActions").to_string(),
                         palette,
                         cx.listener(move |panel, _, _, cx| {
                             panel.with_app(cx, |this, cx| {

@@ -137,18 +137,6 @@ pub(in crate::features) fn terminal_visual_scroll_active_for_state(
     scroll_offset > 0 || (residual_lines.is_finite() && residual_lines.abs() >= f32::EPSILON * 8.0)
 }
 
-fn terminal_scroll_offset_reanchored_for_scrollback_growth(
-    scroll_offset: usize,
-    surface_scrollback_len: usize,
-    current_scrollback_len: usize,
-) -> usize {
-    if scroll_offset == 0 {
-        0
-    } else {
-        scroll_offset.saturating_add(current_scrollback_len.saturating_sub(surface_scrollback_len))
-    }
-}
-
 fn terminal_fractional_scroll_prefetch_offset(
     scroll_offset: usize,
     residual_lines: f32,
@@ -243,6 +231,7 @@ fn terminal_user_scroll_idle_remaining_delay(
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::features) struct TerminalScrollVisualState {
     pub session_id: String,
+    pub history: zzclawterm_terminal::TerminalHistoryState,
     pub scroll_offset: usize,
     pub scroll_residual_lines: f32,
     pub display_offset: usize,
@@ -334,6 +323,7 @@ impl ZzClawTermApp {
             scrollback_len,
         );
         Some(TerminalScrollVisualState {
+            history: view.history_state(),
             session_id: session_id.to_string(),
             scroll_offset,
             scroll_residual_lines,
@@ -492,12 +482,10 @@ impl ZzClawTermApp {
         let (target_display_offset, residual_lines) = {
             let view = self.terminal.view.views.get_mut(&session_id)?;
             let scrollback_len = view.scrollback_len_for_ui();
-            let scroll_offset = terminal_scroll_offset_reanchored_for_scrollback_growth(
-                state.scroll_offset,
-                state.scrollback_len,
-                scrollback_len,
-            )
-            .min(scrollback_len);
+            let scroll_offset = view
+                .history_state()
+                .reanchor_offset(state.history, state.scroll_offset)
+                .min(scrollback_len);
             let residual_lines = terminal_scroll_residual_clamped_for_offset(
                 scroll_offset,
                 state.scroll_residual_lines,
@@ -1697,7 +1685,6 @@ mod tests {
         TerminalScrollVisualState, terminal_display_offset_from_state,
         terminal_fractional_scroll_prefetch_offset, terminal_local_scroll_delta_lines_from_state,
         terminal_scroll_delta_lines_from_raw, terminal_scroll_needs_text_first_repaint,
-        terminal_scroll_offset_reanchored_for_scrollback_growth,
         terminal_scroll_offset_state_needs_update, terminal_scroll_predictive_prefetch_offset,
         terminal_scroll_residual_clamped_for_offset, terminal_scroll_should_consume_raw_lines,
         terminal_scroll_should_request_immediate_text_snapshot,
@@ -1915,19 +1902,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_scroll_reanchors_surface_offset_after_output_growth() {
-        assert_eq!(
-            terminal_scroll_offset_reanchored_for_scrollback_growth(0, 10, 14),
-            0
-        );
-        assert_eq!(
-            terminal_scroll_offset_reanchored_for_scrollback_growth(3, 10, 14),
-            7
-        );
-        assert_eq!(
-            terminal_scroll_offset_reanchored_for_scrollback_growth(3, 14, 10),
-            3
-        );
+    fn terminal_scroll_reanchors_surface_offset_after_growth_and_eviction() {
+        let previous = zzclawterm_terminal::TerminalHistoryState {
+            scrollback_len: 10,
+            ..Default::default()
+        };
+        let growing = zzclawterm_terminal::TerminalHistoryState {
+            scrollback_len: 14,
+            scroll_count: 4,
+            ..previous
+        };
+        assert_eq!(growing.reanchor_offset(previous, 0), 0);
+        assert_eq!(growing.reanchor_offset(previous, 3), 7);
+        let rotated = zzclawterm_terminal::TerminalHistoryState {
+            scroll_count: 7,
+            ..growing
+        };
+        assert_eq!(rotated.reanchor_offset(growing, 7), 10);
+        assert_eq!(previous.reanchor_offset(rotated, 3), 3);
     }
 
     #[test]
@@ -2024,6 +2016,7 @@ mod tests {
     #[test]
     fn terminal_scroll_text_first_repaint_only_when_scrolled_text_missing() {
         let mut state = TerminalScrollVisualState {
+            history: Default::default(),
             session_id: "session".to_string(),
             scroll_offset: 1,
             scroll_residual_lines: 0.0,
@@ -2151,6 +2144,7 @@ mod tests {
     #[test]
     fn a_second_tab_is_measured_even_though_it_paints_the_same_rect_as_the_first() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_for_resize(&mut cx);
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(700.)));
 
@@ -2197,6 +2191,7 @@ mod tests {
     #[test]
     fn a_view_created_after_its_bounds_were_recorded_still_gets_measured() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_for_resize(&mut cx);
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(700.)));
 

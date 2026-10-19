@@ -6,6 +6,7 @@ use crate::app_shell::AppShell;
 use crate::app_shell::AppShellStartup;
 use crate::app_shell::GlobalStateMutation;
 use crate::app_shell::window_state::MainWindowPlacement;
+use crate::features::shell::tray::show_window;
 use crate::models::NavItem;
 use gpui::AppContext as _;
 use gpui::Context;
@@ -33,6 +34,7 @@ impl DesktopController {
             return;
         }
         self.screen_locked = locked;
+        self.request_native_menu_refresh(cx);
         for (id, entry) in &self.windows {
             if *id == source {
                 continue;
@@ -171,6 +173,7 @@ impl DesktopController {
             .borrow_mut()
             .take()
             .expect("window must construct its workspace shell");
+        self.request_native_menu_refresh(cx);
         self.windows.insert(
             workspace_id,
             WorkspaceWindow {
@@ -241,8 +244,7 @@ impl DesktopController {
             return false;
         }
         let _ = entry.handle.update(cx, |_, window, cx| {
-            window.activate_window();
-            cx.activate(true);
+            show_window(window, cx);
         });
         self.most_recent_workspace_id = Some(workspace_id);
         true
@@ -262,8 +264,28 @@ impl DesktopController {
         settings: AppSettingsSummary,
         cx: &mut Context<Self>,
     ) {
+        self.publish_settings_change(source, settings, false, cx);
+    }
+
+    /// The source already merged this commit into its settings draft. Echoing a
+    /// whole-settings event back would misreport its unrelated edits as a conflict.
+    pub(crate) fn publish_theme_settings(
+        &mut self,
+        source: WorkspaceId,
+        settings: AppSettingsSummary,
+        cx: &mut Context<Self>,
+    ) {
+        self.publish_settings_change(source, settings, true, cx);
+    }
+
+    fn publish_settings_change(
+        &mut self,
+        source: WorkspaceId,
+        settings: AppSettingsSummary,
+        exclude_source: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.auto_sync.settings_changed();
-        let _ = source;
         let Some(process_state) = self.process_state.clone() else {
             return;
         };
@@ -272,7 +294,7 @@ impl DesktopController {
         let event = process_state.update(cx, |state, cx| {
             state.mutate(GlobalStateMutation::UpdateSettings(Box::new(settings)), cx)
         });
-        self.broadcast_shared_state(event, cx);
+        self.broadcast_shared_state_except(event, exclude_source.then_some(source), cx);
     }
 
     pub fn activate_or_claim_settings(
@@ -301,8 +323,7 @@ impl DesktopController {
                 app.activate_settings_window(cx);
             });
             let _ = entry.handle.update(cx, |_, window, cx| {
-                window.activate_window();
-                cx.activate(true);
+                show_window(window, cx);
             });
             self.mark_active(owner);
             true

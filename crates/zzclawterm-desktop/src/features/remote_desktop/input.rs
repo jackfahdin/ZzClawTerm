@@ -9,6 +9,60 @@ use gpui::{
 
 use crate::features::ZzClawTermApp;
 
+impl ZzClawTermApp {
+    pub(super) fn handle_remote_desktop_key_down(
+        &mut self,
+        session_id: &str,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .remote_desktop
+            .inputs
+            .get(session_id)
+            .is_some_and(|input| input.update(cx, |input, _| input.consumes_key(event)))
+        {
+            return;
+        }
+        if self.send_rdp_key_down(
+            session_id,
+            &event.keystroke.key,
+            event.keystroke.key_char.as_deref(),
+            event.is_held,
+            event.keystroke.modifiers,
+        ) {
+            cx.stop_propagation();
+            self.mark_user_activity();
+        }
+    }
+
+    pub(super) fn handle_remote_desktop_tab(
+        &mut self,
+        session_id: &str,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let event = KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: "tab".into(),
+                key_char: None,
+                modifiers: gpui::Modifiers {
+                    shift,
+                    ..window.modifiers()
+                },
+            },
+            // KeyMapper also detects repeats from its pressed-key state.
+            is_held: false,
+            prefer_character_input: false,
+        };
+        self.handle_remote_desktop_key_down(session_id, &event, cx);
+        // A focused remote surface owns Tab even while IME consumes it or
+        // the helper rejects input (including VNC view-only mode).
+        cx.stop_propagation();
+    }
+}
+
 /// Local composition state. No committed remote text is retained here.
 pub(super) struct RemoteDesktopInput {
     app: WeakEntity<ZzClawTermApp>,

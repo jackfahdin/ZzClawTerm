@@ -221,7 +221,7 @@ impl ZzClawSelectOption {
         self
     }
 
-    /// Font used by the glyph sample. The option name always inherits the UI font.
+    /// Font used to preview the option name in the dropdown.
     pub fn font_family(mut self, font_family: impl Into<SharedString>) -> Self {
         self.font_family = Some(font_family.into());
         self
@@ -258,27 +258,18 @@ impl gpui_kit::component::select::SelectItem for ZzClawSelectItem {
     }
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(self.label.clone()),
-            )
-            .when_some(self.font_family.clone(), |this, font_family| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .font_family(font_family)
-                        .child("AaBb 0123"),
-                )
-            })
+        div().flex().items_center().gap_3().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .when_some(self.font_family.clone(), |this, font_family| {
+                    this.font_family(font_family)
+                })
+                .child(self.label.clone()),
+        )
     }
 
     fn value(&self) -> &Self::Value {
@@ -461,6 +452,14 @@ impl ZzClawSelectState {
             .as_ref()
             .map(|state| state.read(cx).focus_handle(cx))
             .unwrap_or_else(|| self.focus.clone())
+    }
+
+    /// Discards a hidden popup while retaining the select entity and selected value.
+    pub fn dismiss_menu(&mut self, cx: &mut Context<Self>) {
+        self.state = None;
+        self.trigger_focus = None;
+        self.subscription = None;
+        cx.notify();
     }
 
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {

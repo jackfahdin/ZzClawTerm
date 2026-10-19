@@ -1,12 +1,12 @@
 use gpui::Context;
 use rust_i18n::t;
 use serde_json::{Value, json};
+use zzclawterm_core::ai::AiCommandCard;
 use zzclawterm_core::ai::harness::{
     AgentPlan, AgentTool, AgentToolCall, AgentToolResult, AgentVerification,
 };
-use zzclawterm_core::ai::{AiCommandCard, CommandObservation};
 use zzclawterm_core::capabilities::CapabilityScopeSnapshot;
-use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteArgs, TerminalExecuteResult};
+use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteArgs};
 
 use crate::features::ZzClawTermApp;
 use crate::features::capability_runtime::{CapabilityCaller, CapabilityRequest};
@@ -204,6 +204,9 @@ impl ZzClawTermApp {
                             && (value["exitCode"].is_null()
                                 || value["timedOut"] == true
                                 || value["sourceTruncated"] == true);
+                        let stop_execution = tool_kind == AgentTool::TerminalExecute
+                            && (value["timedOut"] == true || value["sourceTruncated"] == true
+                                || matches!(value["code"].as_str(), Some("execution_incomplete" | "target_disconnected" | "cancelled")));
                         if this.ai.complete_native_call(
                             &callback_run,
                             AgentToolResult {
@@ -228,8 +231,14 @@ impl ZzClawTermApp {
                                 zzclawterm_core::truncate_preview(&value.to_string(), 500),
                             );
                             this.ai.record_native_tool_output(&value);
+                            if stop_execution {
+                                this.ai.set_native_run_status(&callback_run, zzclawterm_core::ai::harness::AgentRunStatus::Blocked);
+                                this.ai.set_native_message("Terminal execution is incomplete; review the terminal before starting another command.".into());
+                                this.clear_capability_owner(&format!("native:{callback_run}"), cx);
+                            } else {
+                                this.start_native_agent_continuation(cx);
+                            }
                             this.persist_native_chat_projection(cx);
-                            this.start_native_agent_continuation(cx);
                         }
                         this.ai.switch_scope(&visible);
                         this.defer_ai_panel_snapshot_flush(cx);
@@ -337,18 +346,19 @@ impl ZzClawTermApp {
                         },
                     )
                 };
-                let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
+                let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
                     job_id,
                     session_id,
                     result,
-                }));
+                })));
             },
         ) {
-            let _ = reject_tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
-                job_id,
-                session_id: reject_session,
-                result: Err(error.to_string()),
-            }));
+            let _ =
+                reject_tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
+                    job_id,
+                    session_id: reject_session,
+                    result: Err(error.to_string()),
+                })));
         }
         self.defer_ai_panel_snapshot_flush(cx);
     }
@@ -445,17 +455,8 @@ impl ZzClawTermApp {
         scope: &CapabilityScopeSnapshot,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session_id) = request.arguments.get("sessionId").and_then(Value::as_str)
-            && self.ai.scope_for_agent_target(session_id).is_some()
-        {
-            let _ = request.reply.send(Err(RpcError {
-                code: "target_busy".into(),
-                message: "Another Agent command is observing this target.".into(),
-            }));
-            return;
-        }
-        let args: TerminalExecuteArgs =
-            serde_json::from_value(request.arguments).expect("validated terminal arguments");
+        let args: TerminalExecuteArgs = serde_json::from_value(request.arguments.clone())
+            .expect("validated terminal arguments");
         let session_id = scope
             .resolve_session(args.session_id.as_deref())
             .expect("validated scope");
@@ -483,38 +484,6 @@ impl ZzClawTermApp {
                 .next(),
         };
         self.ai.present_native_command(card.clone());
-        self.ai.register_native_terminal_reply(request.reply);
-        let result = if self.ai.settings_config().agent_background_execution_enabled {
-            self.begin_ai_agent_background_execution(&card, &session_id, cx)
-        } else {
-            self.begin_ai_agent_observation(&card, &session_id, cx)
-                .map(|wrapped| {
-                    let input = wrapped.unwrap_or_else(|| format!("{}\r", card.command));
-                    self.send_terminal_input_to_session(session_id, input.into_bytes(), cx);
-                })
-        };
-        if result.is_err() {
-            self.ai.complete_native_terminal(Err(RpcError {
-                code: "execution_failed".into(),
-                message: "Cannot start terminal execution.".into(),
-            }));
-        }
-    }
-
-    pub(in crate::features) fn complete_native_terminal_observation(
-        &mut self,
-        observation: &CommandObservation,
-        timed_out: bool,
-        source_truncated: bool,
-    ) -> bool {
-        let result = serde_json::to_value(TerminalExecuteResult {
-            output: observation.output.clone(),
-            exit_code: observation.exit_code,
-            duration_ms: observation.duration_ms,
-            timed_out,
-            source_truncated,
-        })
-        .expect("terminal result");
-        self.ai.complete_native_terminal(Ok(result))
+        self.dispatch_shared_terminal_execute(request, session_id, cx);
     }
 }

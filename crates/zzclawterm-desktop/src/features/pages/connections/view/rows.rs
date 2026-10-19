@@ -1,4 +1,5 @@
 use std::{sync::Arc, time::Duration};
+use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, FontWeight, IntoElement, KeyDownEvent,
@@ -93,11 +94,17 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                         ZzClawIconButton::new(format!("{copy_id}-button"), "icons/copy.svg")
                             .icon_size(px(12.))
                             .tooltip(t!("savedConnections.copy").to_string())
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     copy_value.clone(),
                                 ));
+                                window.notify_operation(
+                                    "copy-connection-detail",
+                                    ZzClawNotificationKind::Success,
+                                    t!("common.copied").to_string(),
+                                    cx,
+                                );
                             }),
                     )
             });
@@ -284,6 +291,7 @@ pub(in crate::features::pages::connections) fn connection_section(
                                     position,
                                 };
                                 if this.connection_state.set_list_drop_target_if_changed(next) {
+                                    this.ensure_drop_hover_clock(cx);
                                     cx.notify();
                                 }
                             })
@@ -591,6 +599,7 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
                         position,
                     };
                     if this.connection_state.set_list_drop_target_if_changed(next) {
+                        this.ensure_drop_hover_clock(cx);
                         cx.notify();
                     }
                 })
@@ -747,8 +756,8 @@ mod hover_card_tests {
     use std::{sync::Arc, time::Duration};
 
     use gpui::{
-        Context, InteractiveElement as _, Modifiers, ParentElement as _, Render, Styled as _,
-        TestAppContext, Window, div, px,
+        AppContext as _, Context, InteractiveElement as _, Modifiers, ParentElement as _, Render,
+        Styled as _, TestAppContext, Window, div, px,
     };
     use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
@@ -806,7 +815,10 @@ mod hover_card_tests {
                 cx,
             )
         });
-        let (_, cx) = cx.add_window_view(|_, _| HoverCardHarness);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| HoverCardHarness);
+            zzclawterm_ui::zzclaw_root(view, window, cx)
+        });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         let trigger = cx

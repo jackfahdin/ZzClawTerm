@@ -49,6 +49,7 @@ fn with_source(
     let root = TestTempDir::new("zzclawterm-tab-drag-preflight-controller");
     let app_root = TestTempDir::new("zzclawterm-tab-drag-preflight-app");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let runtime = AppRuntime::from_parts_for_test(
         RuntimeMode::Portable,
         root.path().into(),

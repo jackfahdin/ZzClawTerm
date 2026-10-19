@@ -1799,6 +1799,7 @@ impl AiPanel {
                                     format!("ai-session-delete-{}", session.id),
                                     "icons/fe/delete.svg",
                                     14.,
+                                    t!("common.delete").to_string(),
                                     palette,
                                     cx.listener(move |panel, _, window, cx| {
                                         if delete_disabled {

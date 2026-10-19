@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use zzclawterm_transport::{SFTP_TRANSFER_CANCELLED, SftpTransferProgress};
 
-use crate::blocking_jobs::BlockingJobScheduler;
+use crate::blocking_jobs::{BlockingJobScheduler, JobOutcome};
 use crate::models::{TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState};
 
 const TRANSFER_PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(50);
@@ -33,7 +33,33 @@ pub(in crate::features) fn submit_transfer_blocking_job(
     rejection_tx: UnboundedSender<TransferJobResult>,
     run: impl FnOnce() + Send + 'static,
 ) {
-    if let Err(error) = scheduler.submit_detached(name, move |_| run()) {
+    // A normal closure sends its own typed result. Only synthesize a terminal
+    // event when the scheduler skips the closure or catches its panic.
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_completed = completed.clone();
+    let outcome_tx = rejection_tx.clone();
+    let outcome_id = rejection_job_id.clone();
+    if let Err(error) = scheduler.submit_with_outcome(
+        name,
+        move |_| {
+            run();
+            run_completed.store(true, std::sync::atomic::Ordering::Release);
+        },
+        move |outcome| {
+            if completed.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let error = match outcome {
+                JobOutcome::Cancelled => SFTP_TRANSFER_CANCELLED.to_string(),
+                JobOutcome::Failed(_) => "transfer worker panicked".to_string(),
+                JobOutcome::Completed => return,
+            };
+            let _ = outcome_tx.unbounded_send(TransferJobResult {
+                id: outcome_id,
+                event: TransferJobEvent::Finished(Err(error)),
+            });
+        },
+    ) {
         let _ = rejection_tx.unbounded_send(TransferJobResult {
             id: rejection_job_id,
             event: TransferJobEvent::Finished(Err(error.to_string())),
@@ -41,7 +67,7 @@ pub(in crate::features) fn submit_transfer_blocking_job(
     }
 }
 
-pub(in crate::features::transfers) struct TransferProgressEventSender {
+pub(in crate::features) struct TransferProgressEventSender {
     id: String,
     tx: UnboundedSender<TransferJobResult>,
     last_sent_at: Option<Instant>,
@@ -49,10 +75,7 @@ pub(in crate::features::transfers) struct TransferProgressEventSender {
 }
 
 impl TransferProgressEventSender {
-    pub(in crate::features::transfers) fn new(
-        id: String,
-        tx: UnboundedSender<TransferJobResult>,
-    ) -> Self {
+    pub(in crate::features) fn new(id: String, tx: UnboundedSender<TransferJobResult>) -> Self {
         Self {
             id,
             tx,
@@ -61,7 +84,7 @@ impl TransferProgressEventSender {
         }
     }
 
-    pub(in crate::features::transfers) fn send(&mut self, progress: SftpTransferProgress) {
+    pub(in crate::features) fn send(&mut self, progress: SftpTransferProgress) {
         let now = Instant::now();
         let completed = progress
             .total_bytes
@@ -117,8 +140,91 @@ pub(super) fn transfer_job_local_target_path(job: &TransferJobState) -> Option<P
 
 #[cfg(test)]
 mod tests {
-    use super::TransferProgressEventSender;
+    use super::{TransferProgressEventSender, submit_transfer_blocking_job};
+    use crate::blocking_jobs::BlockingJobScheduler;
+    use crate::models::TransferJobEvent;
     use zzclawterm_transport::SftpTransferProgress;
+
+    #[test]
+    fn occupied_bulk_executor_does_not_block_interactive_jobs() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let bulk = BlockingJobScheduler::with_limits(1, 4).unwrap();
+        let interactive = BlockingJobScheduler::with_limits(1, 4).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (events, _) = futures::channel::mpsc::unbounded();
+        submit_transfer_blocking_job(&bulk, "paused-transfer", "bulk".into(), events, move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        interactive
+            .submit_detached("directory-and-preview", move |_| {
+                loaded_tx.send(()).unwrap()
+            })
+            .unwrap();
+        let loaded = loaded_rx.recv_timeout(Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        bulk.shutdown();
+        interactive.shutdown();
+        loaded.unwrap();
+    }
+
+    #[test]
+    fn panicking_or_rejected_transfer_reports_a_terminal_error() {
+        let scheduler = BlockingJobScheduler::with_limits(1, 4).unwrap();
+        let (events, mut receiver) = futures::channel::mpsc::unbounded();
+        submit_transfer_blocking_job(&scheduler, "panic", "panic".into(), events.clone(), || {
+            panic!("fixture")
+        });
+        let result = futures::executor::block_on(futures::StreamExt::next(&mut receiver)).unwrap();
+        assert!(matches!(result.event, TransferJobEvent::Finished(Err(_))));
+        scheduler.shutdown();
+        submit_transfer_blocking_job(
+            &scheduler,
+            "rejected",
+            "rejected".into(),
+            events,
+            || unreachable!(),
+        );
+        let result = receiver.try_recv().unwrap();
+        assert_eq!(result.id, "rejected");
+        assert!(matches!(result.event, TransferJobEvent::Finished(Err(_))));
+    }
+
+    #[test]
+    fn shutdown_reports_queued_cancellation_without_running_the_transfer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let scheduler = BlockingJobScheduler::with_limits(1, 4).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        scheduler
+            .submit_detached("occupied", move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (events, mut receiver) = futures::channel::mpsc::unbounded();
+        submit_transfer_blocking_job(
+            &scheduler,
+            "queued",
+            "queued".into(),
+            events,
+            || unreachable!(),
+        );
+        let cleanup = scheduler.begin_shutdown();
+        release_tx.send(()).unwrap();
+        cleanup();
+        let result = receiver.try_recv().unwrap();
+        assert!(
+            matches!(result.event, TransferJobEvent::Finished(Err(error)) if error == zzclawterm_transport::SFTP_TRANSFER_CANCELLED)
+        );
+        assert!(receiver.try_recv().is_err());
+    }
     #[test]
     fn final_progress_is_emitted_once_and_directory_completion_waits_for_all_items() {
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();

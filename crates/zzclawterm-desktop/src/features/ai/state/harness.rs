@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use zzclawterm_core::ai::harness::{
     AgentPlan, AgentQuestion, AgentRequestContext, AgentRun, AgentRunStatus, AgentToolCall,
@@ -10,16 +9,17 @@ use zzclawterm_core::ai::harness::{
 };
 use zzclawterm_core::ai::{AiChatRequest, AiCommandCard, AiMessage, AiMessageRole};
 use zzclawterm_core::capabilities::CapabilityScope;
-use zzclawterm_mcp_protocol::RpcError;
 
 use super::{AiChatLaunch, AiFeatureState};
 
+use crate::features::capability_runtime::terminal_execution::TerminalExecutionPolicy;
+
 pub(super) struct NativeRunState {
+    terminal_policy: TerminalExecutionPolicy,
     pub run: AgentRun,
     pub request: AiChatRequest,
     initial_history: Vec<AiMessage>,
     pub cancellation: CancellationToken,
-    pub terminal_reply: Option<oneshot::Sender<Result<Value, RpcError>>>,
     answers: HashMap<String, String>,
     call_started_at: Option<std::time::Instant>,
 }
@@ -79,14 +79,24 @@ impl AiFeatureState {
         initial_history.drain(..skip);
         self.agent.task_prompt = Some(request.user_input.clone());
         self.agent.native = Some(NativeRunState {
+            terminal_policy: TerminalExecutionPolicy {
+                background: self.settings.config.agent_background_execution_enabled,
+                max_lines: self.settings.config.terminal_output_lines,
+            },
             run,
             request,
             initial_history,
             cancellation: CancellationToken::new(),
-            terminal_reply: None,
             answers: HashMap::new(),
             call_started_at: None,
         });
+    }
+
+    pub(in crate::features) fn native_terminal_policy(&self) -> Option<TerminalExecutionPolicy> {
+        self.agent
+            .native
+            .as_ref()
+            .map(|native| native.terminal_policy)
     }
 
     pub(in crate::features) fn native_initial_history(&self) -> Option<Vec<AiMessage>> {
@@ -395,43 +405,6 @@ impl AiFeatureState {
         Some((launch, request))
     }
 
-    pub(in crate::features) fn register_native_terminal_reply(
-        &mut self,
-        reply: oneshot::Sender<Result<Value, RpcError>>,
-    ) {
-        if let Some(native) = &mut self.agent.native {
-            native.terminal_reply = Some(reply);
-        }
-    }
-
-    pub(in crate::features) fn complete_native_terminal(
-        &mut self,
-        result: Result<Value, RpcError>,
-    ) -> bool {
-        let Some(native) = &mut self.agent.native else {
-            return false;
-        };
-        let Some(reply) = native.terminal_reply.take() else {
-            return false;
-        };
-        self.agent.loop_state = None;
-        self.chat.pending = false;
-        let _ = reply.send(result);
-        true
-    }
-
-    pub(super) fn ai_native_terminal_closed(&mut self) -> bool {
-        self.complete_native_terminal(Err(RpcError {
-            code: "scope_denied".into(),
-            message: "Target session closed.".into(),
-        }))
-    }
-
-    pub(in crate::features) fn native_step_timeout(&self) -> Option<u64> {
-        self.native_pending_call()
-            .and_then(|call| call.arguments.get("timeoutMs").and_then(Value::as_u64))
-    }
-
     pub(in crate::features) fn record_native_tool_output(&mut self, value: &Value) {
         let index = self.last_agent_step_index();
         if let Some(step) = self
@@ -439,9 +412,19 @@ impl AiFeatureState {
             .steps
             .iter_mut()
             .find(|step| step.step_index == index)
-            && step.command.is_none()
         {
-            step.observation = serde_json::to_string_pretty(value).ok();
+            if step.command.is_some() {
+                step.observation = value
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(|output| zzclawterm_core::truncate_preview(output, 12_000));
+                step.exit_code = value
+                    .get("exitCode")
+                    .and_then(Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok());
+            } else {
+                step.observation = serde_json::to_string_pretty(value).ok();
+            }
         }
     }
 

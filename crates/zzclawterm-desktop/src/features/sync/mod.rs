@@ -3,6 +3,7 @@
 mod auto_sync;
 mod cloud_sync_provider;
 mod cloud_sync_runtime;
+pub(crate) mod operation;
 mod state;
 
 pub(crate) use auto_sync::{AutoSyncResult, AutoSyncTrigger, run_auto_sync};

@@ -682,6 +682,22 @@ impl zzclawterm_core::CloudLocalStore for StoreBlockingClient {
             }),
         ))
     }
+
+    fn verify_master_password(
+        &self,
+        master_password: &str,
+    ) -> Result<Option<bool>, zzclawterm_core::CloudSyncError> {
+        let master_password = master_password.to_string();
+        // Decrypting the stored master password does not use the master password
+        // itself, so this is a real check of the candidate. A store with no
+        // stored password cannot tell, and reports `None`.
+        let matches = self
+            .request_fn(StoreDomain::Security, move |store| {
+                store.master_password_matches(&master_password)
+            })
+            .map_err(|error| zzclawterm_core::CloudSyncError::LocalStore(error.to_string()))?;
+        Ok(matches)
+    }
 }
 
 fn cloud_store_response<T>(

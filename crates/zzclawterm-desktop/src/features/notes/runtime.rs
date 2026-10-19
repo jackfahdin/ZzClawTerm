@@ -488,6 +488,7 @@ mod tests {
     #[test]
     fn notes_catalog_event_is_delivered_after_app_update_without_reentry() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx);
         let sink = cx.new(|cx| NotesEventSink::new(&app, cx));
 
@@ -511,6 +512,7 @@ mod tests {
     #[test]
     fn restored_visible_notes_panel_starts_lazy_load() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             if app.shell.panel_multi_open() {
@@ -527,6 +529,7 @@ mod tests {
     #[test]
     fn collapsed_restored_notes_panel_stays_lazy() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             if app.shell.panel_multi_open() {
@@ -545,6 +548,7 @@ mod tests {
     #[test]
     fn restored_multi_open_notes_stack_starts_lazy_load() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             if !app.shell.panel_multi_open() {

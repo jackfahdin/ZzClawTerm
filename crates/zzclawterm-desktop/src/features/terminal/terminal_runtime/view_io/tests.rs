@@ -332,6 +332,7 @@ fn terminal_cursor_position_change_is_detected_for_a_new_live_position() {
 fn moving_the_live_cursor_resets_a_hidden_blink_phase_before_paint() {
     let root = TestConfigDir::new("zzclawterm-cursor-position");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), CURSOR_POSITION_SESSION_ID);
 
     cx.update_entity(&app, |app, cx| {
@@ -1008,6 +1009,105 @@ fn terminal_key_encoding_keeps_alt_meta_setting_outside_mode() {
 }
 
 #[test]
+fn terminal_key_encoding_uses_layout_key_for_option_meta_shortcuts() {
+    for (key, key_char, expected) in [
+        (".", Some("≥"), "\x1b."),
+        ("b", Some("∫"), "\x1bb"),
+        ("f", Some("ƒ"), "\x1bf"),
+        ("d", Some("∂"), "\x1bd"),
+        ("b", Some("��"), "\x1bb"),
+        ("e", None, "\x1be"),
+        ("space", Some("\u{a0}"), "\x1b "),
+    ] {
+        let event = key_event(key, key_char, gpui::Modifiers::alt());
+
+        assert_eq!(
+            terminal_key_bytes_for_mode_and_settings(&event, TerminalKeyMode::default(), true),
+            Some(expected.as_bytes().to_vec()),
+            "Option+{key}"
+        );
+    }
+}
+
+#[test]
+fn terminal_key_encoding_preserves_shift_and_layout_characters_for_meta() {
+    for (key, key_char, shift, expected) in [
+        ("b", "ı", true, "\x1bB"),
+        (">", "˘", false, "\x1b>"),
+        ("é", "´", false, "\x1bé"),
+        ("Ö", "Ø", false, "\x1bÖ"),
+    ] {
+        let event = key_event(
+            key,
+            Some(key_char),
+            gpui::Modifiers {
+                alt: true,
+                shift,
+                ..gpui::Modifiers::default()
+            },
+        );
+
+        assert_eq!(
+            terminal_key_bytes_for_mode_and_settings(&event, TerminalKeyMode::default(), true),
+            Some(expected.as_bytes().to_vec())
+        );
+    }
+}
+
+#[test]
+fn terminal_key_encoding_preserves_protocol_sequences_with_meta_enabled() {
+    let event = key_event("b", Some("∫"), gpui::Modifiers::alt());
+    let mode = TerminalKeyMode {
+        kitty_keyboard_disambiguate: true,
+        ..TerminalKeyMode::default()
+    };
+    assert_eq!(
+        terminal_key_bytes_for_mode_and_settings(&event, mode, true),
+        Some(b"\x1b[98;3u".to_vec())
+    );
+
+    for (key, key_char, expected) in [
+        ("left", None, b"\x1b[1;3D".as_slice()),
+        ("backspace", None, b"\x1b\x7f".as_slice()),
+        ("tab", Some("\t"), b"\x1b\t".as_slice()),
+    ] {
+        let event = key_event(key, key_char, gpui::Modifiers::alt());
+        assert_eq!(
+            terminal_key_bytes_for_mode_and_settings(&event, TerminalKeyMode::default(), true),
+            Some(expected.to_vec())
+        );
+    }
+}
+
+#[test]
+fn terminal_key_encoding_preserves_word_shortcuts_with_meta_disabled() {
+    for (key, key_char) in [("b", "∫"), ("f", "ƒ"), ("d", "∂")] {
+        let event = key_event(key, Some(key_char), gpui::Modifiers::alt());
+        assert_eq!(
+            terminal_key_bytes_for_mode_and_settings(&event, TerminalKeyMode::default(), false),
+            Some(vec![0x1b, key.as_bytes()[0]])
+        );
+    }
+    let event = key_event(".", Some("≥"), gpui::Modifiers::alt());
+    assert!(
+        terminal_key_bytes_for_mode_and_settings(&event, TerminalKeyMode::default(), false)
+            .is_none()
+    );
+}
+
+#[test]
+fn ime_defer_leaves_option_shortcuts_for_terminal_encoding() {
+    let event = key_event("b", Some("∫"), gpui::Modifiers::alt());
+    for marked_text in ["", "五笔"] {
+        assert!(!terminal_should_defer_key_text_to_input_handler_for_state(
+            true,
+            marked_text,
+            &event
+        ));
+    }
+}
+
+#[test]
 fn ime_defer_does_not_swallow_plain_space_without_marked_text() {
     let event = key_event("space", None, gpui::Modifiers::default());
 
@@ -1045,6 +1145,7 @@ fn rejected_input_and_paste_leave_recording_empty_and_preserve_session_encoding(
     use crate::models::SessionLaunchConfig;
     let root = TestConfigDir::new("zzclawterm-rejected-encoding-input");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "encoded");
     cx.update_entity(&app, |app, cx| {
         let mut metadata = app
@@ -1106,6 +1207,7 @@ fn rejected_input_and_paste_leave_recording_empty_and_preserve_session_encoding(
 fn paste_targets_use_their_own_charset_and_bracketed_mode() {
     let root = TestConfigDir::new("zzclawterm-paste-charset-targets");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "gbk");
     cx.update_entity(&app, |app, _| {
         let mut metadata = app
@@ -1162,6 +1264,7 @@ fn encoding_failures_write_nothing_and_mouse_and_protocol_bytes_bypass_charset()
 
     let root = TestConfigDir::new("zzclawterm-encoding-wire");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1307,6 +1410,7 @@ fn encoding_failures_write_nothing_and_mouse_and_protocol_bytes_bypass_charset()
 fn sync_paste_encodes_each_live_target_and_stops_when_primary_cannot_encode() {
     let root = TestConfigDir::new("zzclawterm-sync-paste-wire");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1409,6 +1513,7 @@ fn recording_sensitive_prompts_are_session_local_for_sync_keyboard_paste_and_raw
 
     let root = TestConfigDir::new("zzclawterm-sensitive-recording-wire");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1513,4 +1618,16 @@ fn recording_sensitive_prompts_are_session_local_for_sync_keyboard_paste_and_raw
     for id in ids {
         manager.close(&id).unwrap();
     }
+}
+
+#[test]
+fn retained_snapshot_from_before_history_rotation_is_not_painted() {
+    let mut view = TerminalViewState::new();
+    view.screen = TerminalScreen::new(16, 3);
+    view.screen.set_scrollback_limit(8);
+    view.append_text("0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
+    let old = Arc::new(view.screen.viewport_snapshot(3));
+    view.append_text("11\r\n");
+    assert!(!terminal_retained_snapshot_matches_view(&old, &view, 3, 3));
+    assert!(terminal_paint_window_snapshot_for_view(Some(&view), 3, 3, Some(old)).is_none());
 }

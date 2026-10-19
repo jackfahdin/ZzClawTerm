@@ -1,5 +1,5 @@
 use futures::StreamExt as _;
-use gpui::{ClipboardItem, Context};
+use gpui::Context;
 
 use crate::features::ZzClawTermApp;
 use crate::features::ai::agent_management::AgentCommand;
@@ -84,7 +84,9 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn copy_codex_device_code(&mut self, cx: &mut Context<Self>) {
         if let Some(code) = self.ai.agent_management_view().user_code.clone() {
-            cx.write_to_clipboard(ClipboardItem::new_string(code));
+            self.copy_text_with_feedback("copy-codex-device-code", code, cx);
+        } else {
+            self.copy_text_with_feedback("copy-codex-device-code", String::new(), cx);
         }
     }
 
@@ -111,8 +113,18 @@ impl ZzClawTermApp {
                 serde_json::to_string_pretty(&config).map_err(|error| error.to_string())
             });
         match result {
-            Ok(config) => cx.write_to_clipboard(ClipboardItem::new_string(config)),
-            Err(error) => self.ai.set_agent_management_error(error),
+            Ok(config) => {
+                self.copy_text_with_feedback("copy-mcp-config", config, cx);
+            }
+            Err(error) => {
+                self.ai.set_agent_management_error(error);
+                self.notify_operation(
+                    "copy-mcp-config",
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                    rust_i18n::t!("common.copyFailed").to_string(),
+                    cx,
+                );
+            }
         }
         self.request_settings_panel_refresh(cx);
     }

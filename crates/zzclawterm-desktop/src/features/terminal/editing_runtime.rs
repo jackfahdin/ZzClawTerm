@@ -52,7 +52,7 @@ impl ZzClawTermApp {
         let eligible = text == "\r"
             && !submitted_for_navigation.is_empty()
             && !interactive
-            && !self.ai.agent_capture_is_active_for(&id)
+            && !self.mcp.capabilities.terminal_executions.capturing(&id)
             && self
                 .session
                 .metadata(&id)
@@ -320,13 +320,105 @@ mod tests {
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{TerminalBufferCellPos, TerminalSelection};
     use crate::test_support::TestConfigDir;
+    use zzclawterm_terminal::selection::{TerminalCellSide, TerminalSelectionEndpoint};
 
     struct InputHost;
+
+    #[test]
+    fn half_cell_selection_deletes_and_replaces_only_the_highlighted_input() {
+        let dir = TestConfigDir::new("zzclawterm-shell-edit-half-cell");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            app.note_shell_editing_input(b"abcdef", cx);
+            app.terminal
+                .seed_session_view("s1".into(), "$ abcdef".into(), "UTF-8");
+            app.reconcile_shell_editing("s1", cx);
+            app.terminal.selection.session_id = Some("s1".into());
+            for (start_col, start_side, end_col, end_side, expected) in [
+                (
+                    3,
+                    TerminalCellSide::Left,
+                    5,
+                    TerminalCellSide::Left,
+                    Some((1, 3)),
+                ),
+                (
+                    5,
+                    TerminalCellSide::Left,
+                    3,
+                    TerminalCellSide::Left,
+                    Some((1, 3)),
+                ),
+                (
+                    3,
+                    TerminalCellSide::Left,
+                    3,
+                    TerminalCellSide::Right,
+                    Some((1, 2)),
+                ),
+                (3, TerminalCellSide::Right, 4, TerminalCellSide::Left, None),
+                (
+                    1,
+                    TerminalCellSide::Right,
+                    4,
+                    TerminalCellSide::Left,
+                    Some((0, 2)),
+                ),
+                (1, TerminalCellSide::Left, 4, TerminalCellSide::Left, None),
+            ] {
+                app.terminal.selection.selection = Some(TerminalSelection {
+                    anchor: TerminalSelectionEndpoint::new(
+                        TerminalBufferCellPos::new(0, start_col),
+                        start_side,
+                    ),
+                    head: TerminalSelectionEndpoint::new(
+                        TerminalBufferCellPos::new(0, end_col),
+                        end_side,
+                    ),
+                    all_buffer: false,
+                });
+                app.begin_smart_input_selection();
+                app.commit_smart_input_selection();
+                let range = app.smart_cursor_selected_input_range();
+                assert_eq!(
+                    range.as_ref().map(|range| (range.start, range.end)),
+                    expected
+                );
+                if let Some(range) = range {
+                    let state = app.terminal.editing.state().unwrap();
+                    let delete = plan_edit(
+                        &state.model.input,
+                        state.model.version,
+                        EditIntent::Delete(range.start..range.end),
+                    )
+                    .unwrap();
+                    let replace = plan_edit(
+                        &state.model.input,
+                        state.model.version,
+                        EditIntent::Replace {
+                            range: range.start..range.end,
+                            text: "X",
+                        },
+                    )
+                    .unwrap();
+                    let mut deleted = "abcdef".to_string();
+                    deleted.replace_range(range.start..range.end, "");
+                    let mut replaced = "abcdef".to_string();
+                    replaced.replace_range(range.start..range.end, "X");
+                    assert_eq!(delete.predicted.value, deleted);
+                    assert_eq!(replace.predicted.value, replaced);
+                }
+            }
+        });
+    }
 
     #[test]
     fn foreground_echo_cannot_move_delete_or_replace_shell_input() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-foreground");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"cat", cx);
@@ -365,6 +457,7 @@ mod tests {
     fn docker_line_editor_supports_custom_prompt_but_loses_permission_on_cat() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-docker-context");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"docker exec -it box sh", cx);
@@ -397,6 +490,7 @@ mod tests {
     fn ime_preedit_stays_local_and_committed_selection_replacement_is_sent_once() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-ime");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         let manager = cx.update_entity(&app, |app, _| app.session.manager_handle());
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -419,10 +513,11 @@ mod tests {
                 .seed_session_view(info.id.clone(), "$ abcdef".into(), "UTF-8");
             app.reconcile_shell_editing(&info.id, cx);
             app.terminal.selection.session_id = Some(info.id.clone());
-            app.terminal.selection.selection = Some(TerminalSelection::from_range(
-                TerminalBufferCellPos::new(0, 3),
-                TerminalBufferCellPos::new(0, 5),
-            ));
+            app.terminal.selection.selection = Some(TerminalSelection {
+                anchor: TerminalBufferCellPos::new(0, 3).into(),
+                head: TerminalBufferCellPos::new(0, 6).into(),
+                all_buffer: false,
+            });
             app.begin_smart_input_selection();
             app.commit_smart_input_selection();
             assert!(app.smart_cursor_selected_input_range().is_some());
@@ -475,6 +570,7 @@ mod tests {
     fn nested_shell_echo_enables_editing_even_with_suppressed_or_disabled_suggestions() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-nested");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             let mut settings = app.settings.summary().clone();
@@ -500,6 +596,7 @@ mod tests {
     fn submitted_marked_outer_command_does_not_poison_unmarked_child_input() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-outer-boundary");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"docker exec box sh", cx);
@@ -535,6 +632,7 @@ mod tests {
     fn selection_is_retained_and_write_failure_keeps_input_and_selection() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-selection");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abcdef", cx);
@@ -575,6 +673,7 @@ mod tests {
     fn partial_echo_cannot_confirm_and_ordinary_input_invalidates_edit_selection() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-echo");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abc", cx);
@@ -612,6 +711,7 @@ mod tests {
     fn password_and_native_mouse_modes_cannot_authorize_shell_edits() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-gates");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abc", cx);
@@ -637,6 +737,7 @@ mod tests {
     fn pending_clicks_keep_latest_target_and_timeout_cancels_it() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-queued");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abcd", cx);
@@ -668,6 +769,7 @@ mod tests {
     fn snapshotless_output_cannot_reauthorize_edits_from_cached_cells() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-stale-frame");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abcd", cx);
@@ -695,6 +797,7 @@ mod tests {
     fn ending_marked_input_cancels_queued_edit_instead_of_using_unmarked_echo() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-boundary");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"abcd", cx);

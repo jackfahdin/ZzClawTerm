@@ -789,6 +789,32 @@ impl ZzClawTermApp {
         }
     }
 
+    pub(in crate::features) fn cancel_terminal_mouse_report(
+        &mut self,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if let (Some(button), Some(session_id), Some((col, row))) = (
+            self.terminal.selection.mouse_report_button,
+            self.terminal.selection.mouse_report_session_id.clone(),
+            self.terminal.selection.mouse_report_position,
+        ) {
+            self.maybe_send_mouse_report_for_session(
+                TerminalMouseReportRequest {
+                    session_id: &session_id,
+                    button,
+                    col,
+                    row,
+                    press: false,
+                    motion: false,
+                    modifiers,
+                },
+                cx,
+            );
+        }
+        self.clear_terminal_mouse_report_capture();
+    }
+
     fn clear_terminal_mouse_report_capture(&mut self) {
         self.terminal.selection.mouse_report_button = None;
         self.terminal.selection.mouse_report_session_id = None;
@@ -803,6 +829,22 @@ impl ZzClawTermApp {
     /// into the session recording buffer.
     /// Does not touch command history, status text, or UI notify.
     pub(in crate::features) fn write_session_input_recorded(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .capturing(session_id)
+        {
+            return Err("An automatic command is capturing this terminal".into());
+        }
+        self.write_automated_terminal_input(session_id, bytes)
+    }
+
+    pub(in crate::features) fn write_automated_terminal_input(
         &mut self,
         session_id: &str,
         bytes: &[u8],
@@ -828,6 +870,12 @@ impl ZzClawTermApp {
         {
             self.record_terminal_session_write_failure(session_id, "input", &error);
             return Err(error);
+        }
+        if self.session.active_id() == Some(session_id)
+            && bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            // Covers typed Enter, paste, and autofill through the shared write path.
+            self.terminal.assist.credential_prompt_awaiting_output = true;
         }
         if disposition.record_logical_input
             && self
@@ -859,6 +907,14 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .capturing(session_id)
+        {
+            return Err("An automatic command is capturing this terminal".into());
+        }
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
         }
@@ -894,6 +950,14 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .capturing(session_id)
+        {
+            return Err("An automatic command is capturing this terminal".into());
+        }
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
         }
@@ -1370,19 +1434,32 @@ pub(super) fn terminal_key_bytes_for_mode_and_settings(
     if let Some(bytes) = terminal_key_bytes_with_mode(event, mode) {
         return Some(bytes);
     }
-    // Alt-as-meta: ESC + character for shell word ops (Alt+b/f/d, etc.).
+    // Alt-as-meta uses the layout key, not the Option-generated text in key_char.
+    // GPUI folds shifted punctuation into key but retains Shift for ASCII letters.
     if alt_as_meta
         && event.keystroke.modifiers.alt
         && !event.keystroke.modifiers.control
         && !event.keystroke.modifiers.platform
         && !event.keystroke.modifiers.function
-        && let Some(input) = event.keystroke.key_char.as_deref()
-        && !input.is_empty()
     {
-        let mut bytes = Vec::with_capacity(input.len() + 1);
-        bytes.push(0x1b);
-        bytes.extend_from_slice(input.as_bytes());
-        return Some(bytes);
+        let key = event.keystroke.key.as_str();
+        let input = if key.chars().count() == 1 {
+            Some(key)
+        } else if key == "space" {
+            Some(" ")
+        } else {
+            event.keystroke.key_char.as_deref()
+        };
+        if let Some(input) = input.filter(|input| !input.is_empty()) {
+            let mut bytes = Vec::with_capacity(input.len() + 1);
+            bytes.push(0x1b);
+            if event.keystroke.modifiers.shift {
+                bytes.extend_from_slice(input.to_ascii_uppercase().as_bytes());
+            } else {
+                bytes.extend_from_slice(input.as_bytes());
+            }
+            return Some(bytes);
+        }
     }
     // Even when alt-as-meta is off, still emit ESC+letter for Alt+b/f/d word ops
     // that shells commonly expect (Tauri XTerminal parity).

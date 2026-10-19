@@ -25,6 +25,10 @@ struct NyatermJsonImportFile {
     custom_icons: Vec<crate::models::sessions::ConnectionCustomIcon>,
 }
 
+fn default_telnet_keep_alive_interval_secs() -> u32 {
+    crate::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
+}
+
 fn default_import_version() -> u32 {
     1
 }
@@ -124,6 +128,8 @@ enum NyatermJsonSession {
         username: String,
         #[serde(default)]
         auth: Option<NyatermJsonSshAuth>,
+        #[serde(default = "default_telnet_keep_alive_interval_secs")]
+        keep_alive_interval_secs: u32,
         #[serde(default = "default_telnet_backspace_mode")]
         backspace_mode: String,
         #[serde(default)]
@@ -391,6 +397,7 @@ fn prepare_zzclawterm_json_session(
             username,
             auth,
             backspace_mode,
+            keep_alive_interval_secs,
             description,
             sort_order,
             icon,
@@ -414,6 +421,7 @@ fn prepare_zzclawterm_json_session(
                     force_character_at_a_time: false,
                     send_naws: true,
                     send_sga: true,
+                    keep_alive_interval_secs,
                     auto_login: Default::default(),
                     encoding: String::new(),
                 },

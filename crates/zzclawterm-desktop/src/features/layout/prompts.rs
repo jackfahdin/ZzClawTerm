@@ -10,6 +10,7 @@ use zzclawterm_transport::{
 };
 use zzclawterm_ui::ZzClawScrollable;
 
+use crate::features::ZzClawTermApp;
 use crate::features::session::{
     AgentPromptRequest, AgentPromptState, CredentialPromptState, HostKeyPromptChoice,
     HostKeyPromptIssue, HostKeyPromptRequest, KeyboardInteractivePromptState,
@@ -17,7 +18,6 @@ use crate::features::session::{
     unix_seconds_now,
 };
 use crate::features::view_widgets::dialog_action_button;
-use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
 use crate::widgets::small_button;
 
 impl ZzClawTermApp {
@@ -228,10 +228,11 @@ impl ZzClawTermApp {
                         palette,
                         format!("host-key-reject-{reject_id}"),
                         t!("settings.hostKeyVerifyReject"),
-                        cx.listener(move |this, _, _, cx| {
+                        cx.listener(move |this, _, window, cx| {
                             this.resolve_host_key_prompt(
                                 reject_id.clone(),
                                 HostKeyPromptChoice::Reject,
+                                window,
                                 cx,
                             );
                         }),
@@ -241,10 +242,11 @@ impl ZzClawTermApp {
                         format!("host-key-accept-{accept_id}"),
                         t!("settings.hostKeyVerifyAccept"),
                         changed,
-                        cx.listener(move |this, _, _, cx| {
+                        cx.listener(move |this, _, window, cx| {
                             this.resolve_host_key_prompt(
                                 accept_id.clone(),
                                 HostKeyPromptChoice::Accept,
+                                window,
                                 cx,
                             );
                         }),
@@ -280,11 +282,11 @@ impl ZzClawTermApp {
             }
         };
         let input_id = credential_text_input_id(&prompt.id);
-        let input_setup = if prompt.prompt.echo {
-            TextInputSetup::default()
-        } else {
-            TextInputSetup::masked()
+        let kind = match prompt.prompt.kind {
+            SshCredentialPromptKind::Password => zzclawterm_ui::ZzClawInputKind::Password,
+            _ => zzclawterm_ui::ZzClawInputKind::Secret,
         };
+        let input_setup = crate::features::session::prompt_input_setup(kind, prompt.prompt.echo);
         let input = self.text_input_box(input_id, &prompt.value, input_setup, cx);
         let mut details = div()
             .flex()
@@ -414,11 +416,12 @@ impl ZzClawTermApp {
 
         for (index, field) in prompt.request.prompts.iter().enumerate() {
             let value = prompt.responses.get(index).cloned().unwrap_or_default();
-            let setup = if field.echo {
-                TextInputSetup::default()
+            let kind = if index == 0 && prompt.request.otp_id.is_some() {
+                zzclawterm_ui::ZzClawInputKind::OneTimeCode
             } else {
-                TextInputSetup::masked()
+                zzclawterm_ui::ZzClawInputKind::Secret
             };
+            let setup = crate::features::session::prompt_input_setup(kind, field.echo);
             let request_id = prompt.id.clone();
             let field_id = keyboard_interactive_text_input_id(&request_id, index);
             let click_listener = cx.listener(move |this, _, _, cx| {

@@ -467,3 +467,24 @@ fn nyaterm_json_import_preserves_account_and_key_sort_order() {
     assert_eq!(prepared.passwords[0].sort_order, 9);
     assert_eq!(prepared.ssh_keys[0].sort_order, 4);
 }
+
+#[test]
+fn nyaterm_json_import_retains_telnet_keepalive_in_prepared_and_saved_configs() {
+    for interval in [0, 45, 60, u32::MAX] {
+        let json = serde_json::json!({
+            "version":1, "sessions":[{"name":"Telnet", "type":"telnet", "host":"test.invalid",
+                "keep_alive_interval_secs": interval}]
+        });
+        let prepared = parse_zzclawterm_json_content(&json.to_string()).unwrap();
+        for config in [
+            &prepared.connections[0].config,
+            &prepared.connections[0].saved.as_ref().unwrap().config,
+        ] {
+            assert!(
+                matches!(config, crate::models::connection::ConnectionType::Telnet {
+                keep_alive_interval_secs, ..
+            } if *keep_alive_interval_secs == interval)
+            );
+        }
+    }
+}

@@ -12,7 +12,8 @@ use zzclawterm_ui::{ZzClawContextMenu, ZzClawCopy, ZzClawPaste, ZzClawSelectAll}
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::{
-    TerminalTimestampFormatter, terminal_gutter_labels, terminal_timestamp_format_width_chars,
+    TerminalTimestampFormatter, terminal_gutter_labels, terminal_gutter_row_count,
+    terminal_timestamp_format_width_chars,
 };
 use crate::features::terminal::terminal_runtime::TerminalMouseReportRequest;
 use crate::features::terminal::terminal_selection_runtime::{
@@ -25,7 +26,7 @@ use crate::models::{
     SessionLaunchConfig, TerminalPerformanceMode, TerminalPerformanceOverlay, TerminalSearchMode,
     terminal_action_link_matcher_key, terminal_expensive_interactions_enabled,
 };
-use crate::terminal::{TerminalLineDecorations, ZzClawTerminalElement};
+use crate::terminal::{TerminalGridSelection, TerminalLineDecorations, ZzClawTerminalElement};
 use crate::widgets::small_button;
 
 use super::decorations::{
@@ -522,7 +523,8 @@ impl ZzClawTermApp {
                 .mr(px(10.))
                 .border_r_1()
                 .border_color(rgb(palette.border));
-            for line_index in 0..line_count {
+            let gutter_row_count = terminal_gutter_row_count(snapshot.as_ref());
+            for line_index in 0..line_count.min(gutter_row_count) {
                 let snapshot_row = snapshot.row(line_index);
                 let labels = terminal_gutter_labels(
                     snapshot_row,
@@ -608,15 +610,7 @@ impl ZzClawTermApp {
             );
             grid = grid
                 .with_bold_default_foreground(self.settings.summary().bold_default_foreground)
-                .with_selection(terminal_selection.map(|selection| {
-                    crate::terminal::TerminalGridSelection::new(
-                        selection.anchor.line,
-                        selection.anchor.col,
-                        selection.head.line,
-                        selection.head.col,
-                        selection.all_buffer,
-                    )
-                }))
+                .with_selection(terminal_selection.map(TerminalGridSelection::from_selection))
                 .with_font_fallbacks(terminal_font_fallbacks.clone());
             if let Some(cache) = layout_cache {
                 grid = grid.with_layout_cache(cache);
@@ -643,15 +637,7 @@ impl ZzClawTermApp {
             );
             grid = grid
                 .with_bold_default_foreground(self.settings.summary().bold_default_foreground)
-                .with_selection(terminal_selection.map(|selection| {
-                    crate::terminal::TerminalGridSelection::new(
-                        selection.anchor.line,
-                        selection.anchor.col,
-                        selection.head.line,
-                        selection.head.col,
-                        selection.all_buffer,
-                    )
-                }))
+                .with_selection(terminal_selection.map(TerminalGridSelection::from_selection))
                 .with_font_fallbacks(terminal_font_fallbacks.clone());
             if let Some(cache) = layout_cache {
                 grid = grid.with_layout_cache(cache);

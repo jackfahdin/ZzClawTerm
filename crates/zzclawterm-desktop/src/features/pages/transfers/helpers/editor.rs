@@ -5,8 +5,9 @@ pub(in crate::features::pages::transfers) fn editor_content_preview(
 ) -> String {
     const MAX_PREVIEW_CHARS: usize = 16_000;
     if query.trim().is_empty() {
-        let mut output = content.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
-        if content.chars().count() > MAX_PREVIEW_CHARS {
+        let mut chars = content.chars();
+        let mut output = chars.by_ref().take(MAX_PREVIEW_CHARS).collect::<String>();
+        if chars.next().is_some() {
             output.push_str("\n\n-- preview truncated; full content is kept for saving --");
         }
         return output;

@@ -138,6 +138,7 @@ mod tests {
     fn a_closed_browser_owns_no_clock() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-clock");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             assert!(!app.transfer_cwd_sync_needs_polling());
@@ -155,6 +156,7 @@ mod tests {
     fn opening_the_browser_gives_the_panel_a_clock_without_a_paint() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-clock");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.open_or_toggle_panel(NavItem::Transfers, cx);
@@ -172,6 +174,7 @@ mod tests {
     fn leaving_the_browser_drops_the_panel_clock() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-clock");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.open_or_toggle_panel(NavItem::Transfers, cx);
@@ -196,6 +199,7 @@ mod tests {
     fn unrelated_root_paints_cannot_arm_the_clock() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-clock");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| app.sync_component_theme(cx));
 
@@ -226,6 +230,7 @@ mod tests {
     fn the_panel_clock_beats_through_the_app() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-clock");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.open_or_toggle_panel(NavItem::Transfers, cx);

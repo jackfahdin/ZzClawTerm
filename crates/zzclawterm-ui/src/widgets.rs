@@ -298,11 +298,13 @@ pub fn svg_icon_button(
     id: impl Into<String>,
     icon_path: &'static str,
     icon_size: f32,
+    tooltip: impl Into<SharedString>,
     _palette: ThemePalette,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     ZzClawIconButton::new(id.into(), icon_path)
         .icon_size(px(icon_size))
+        .tooltip(tooltip)
         .on_click(on_click)
 }
 

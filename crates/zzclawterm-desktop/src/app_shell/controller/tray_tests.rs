@@ -49,6 +49,7 @@ fn tray_routes_live_ownership_after_move_and_ignores_closed_sessions() {
     let first_root = TestTempDir::new("zzclawterm-tray-first");
     let second_root = TestTempDir::new("zzclawterm-tray-second");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let runtime = AppRuntime::from_parts_for_test(
         RuntimeMode::Portable,
         root.path().to_path_buf(),

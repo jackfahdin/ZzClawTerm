@@ -7,6 +7,7 @@ mod security_runtime;
 mod security_state;
 mod settings_runtime;
 mod state;
+pub(in crate::features) mod theme_designer;
 
 pub(in crate::features) use settings_runtime::SettingsSaveKind;
 

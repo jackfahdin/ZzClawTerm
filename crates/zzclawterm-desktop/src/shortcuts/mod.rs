@@ -949,6 +949,7 @@ pub(crate) fn rebuild_keymap(overrides: &HashMap<String, String>, cx: &mut App) 
     cx.bind_keys(bindings);
     crate::features::init_protection_key_bindings(cx);
     cx.set_global(ShortcutKeymapGlobal { baseline, resolved });
+    crate::app_shell::native_menu::keymap_changed(cx);
 }
 
 pub(crate) fn resolve_shortcut_invocation(

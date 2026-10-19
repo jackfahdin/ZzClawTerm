@@ -301,6 +301,16 @@ impl ZzClawTermApp {
             return;
         }
         self.hide_ai_provider_secret(cx);
+        if let Some(draft) = self.ai.settings_credential_secret_drafts().get(&id)
+            && !draft.is_empty()
+        {
+            if let Some(input) = self.existing_text_input(format!("ai.credential.{id}.api-key")) {
+                input.update(cx, |input, cx| input.set_masked(false, cx));
+            }
+            self.ai.provider_view_mut().revealed_id = Some(id);
+            self.request_settings_panel_refresh(cx);
+            return;
+        }
         let generation = self.ai.provider_view().generation;
         let reveal_generation = self.ai.provider_view().reveal_generation;
         let settings = self.ai.pending_settings();

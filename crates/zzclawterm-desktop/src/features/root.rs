@@ -43,6 +43,52 @@ struct OverlayFlags {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn copy_text_with_feedback(
+        &self,
+        key: &'static str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let target = cx
+            .active_window()
+            .or_else(|| self.shell.main_window().map(Into::into));
+        self.copy_text_with_feedback_at(target, key, text, cx)
+    }
+
+    pub(in crate::features) fn copy_text_with_feedback_at(
+        &self,
+        target: Option<gpui::AnyWindowHandle>,
+        key: &'static str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use rust_i18n::t;
+        use zzclawterm_ui::notification::ZzClawNotificationKind;
+
+        // Preserve whitespace and never include clipboard contents in feedback.
+        let copied = !text.is_empty();
+        if copied {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        }
+        self.notify_operation_at(
+            target,
+            key,
+            if copied {
+                ZzClawNotificationKind::Success
+            } else {
+                ZzClawNotificationKind::Warning
+            },
+            t!(if copied {
+                "common.copied"
+            } else {
+                "common.nothingToCopy"
+            })
+            .to_string(),
+            cx,
+        );
+        copied
+    }
+
     /// Capture the initiating window before deferring across entity leases.
     pub(in crate::features) fn notify_operation(
         &self,
@@ -133,6 +179,13 @@ impl ZzClawTermApp {
     }
 
     pub(crate) fn start_after_window_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(handle) = window
+            .window_handle()
+            .downcast::<zzclawterm_ui::ZzClawRoot>()
+        {
+            self.shell.remember_main_window(handle);
+        }
+        self.sync_native_window_material(cx);
         self.sync_component_theme(cx);
         // The connections panel renders from a snapshot, so it needs one before its
         // first paint. Later ones come from store replies and panel interactions.
@@ -197,13 +250,13 @@ impl ZzClawTermApp {
             .key_context(crate::shortcuts::WORKSPACE_KEY_CONTEXT)
             .size_full()
             .relative()
-            .bg(self.shell_transparent_color(palette.bg))
+            .bg(self.shell_background().root_color(palette.bg))
             .text_color(rgb(palette.text))
             .font(self.gpui_ui_font().font())
             .text_size(px(self.settings.summary().ui_font_size.clamp(12, 24) as f32))
             .child(self.session_tab_drag_listener_layer(cx))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.cancel_session_tab_drag_on_escape(event, window, cx);
+                this.cancel_internal_drag_on_escape(event, window, cx);
             }))
             .on_click(cx.listener(|this, _, _, _| {
                 this.mark_user_activity();
@@ -813,7 +866,14 @@ impl ZzClawTermApp {
                 |this, editor| {
                     this.child(full_window_overlay_layer(
                         "connection-editor-input-layer",
-                        self.connection_editor_panel(editor, cx),
+                        self.connection_editor_panel(
+                            editor,
+                            (
+                                f32::from(window.viewport_size().width),
+                                f32::from(window.viewport_size().height),
+                            ),
+                            cx,
+                        ),
                     ))
                 },
             )
@@ -873,10 +933,9 @@ impl ZzClawTermApp {
                 |this| this.child(passive_overlay_layer(self.modal_owner_scrim())),
             )
             .when(overlay.locked, |this| {
-                this.child(full_window_overlay_layer(
-                    "lock-screen-input-layer",
-                    self.lock_screen_overlay(window, cx),
-                ))
+                // The lock screen owns its input boundary so Windows caption
+                // presses can reach the native window procedure and start a drag.
+                this.child(passive_overlay_layer(self.lock_screen_overlay(window, cx)))
             })
             // Background SSH operations can request credentials while another
             // overlay is open, so authentication must be the topmost overlay.
@@ -1097,6 +1156,7 @@ impl ZzClawTermApp {
             return;
         }
         self.finish_transfer_browser_column_resize(cx);
+        self.finish_asset_column_resize(cx);
         self.finish_panel_resize(cx);
         self.finish_transfer_height_resize(cx);
         self.finish_bottom_panel_resize(cx);
@@ -1106,6 +1166,33 @@ impl ZzClawTermApp {
         self.finish_terminal_scrollbar_drag(cx);
         self.clear_terminal_window_drop(cx);
         self.clear_session_tab_drag(cx);
+    }
+
+    pub(in crate::features) fn cancel_pointer_interactions(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(controller) = &self.desktop_controller {
+            let _ = controller.update(cx, |controller, _| {
+                controller.update_tab_drag(|drag| drag.cancel());
+            });
+        }
+        self.finish_transfer_browser_column_resize(cx);
+        self.finish_asset_column_resize(cx);
+        self.finish_panel_resize(cx);
+        self.finish_transfer_height_resize(cx);
+        self.finish_bottom_panel_resize(cx);
+        self.finish_panel_stack_resize(cx);
+        self.finish_workspace_split_resize(cx);
+        self.cancel_terminal_mouse_report(window.modifiers(), cx);
+        self.cancel_terminal_selection_drag(cx);
+        self.finish_terminal_scrollbar_drag(cx);
+        self.clear_terminal_window_drop(cx);
+        self.clear_drop_hover(cx);
+        if self.transfer.finish_browser_drag_selection() {
+            cx.notify();
+        }
     }
 
     /// Whether the main window should be held back for a modal child window.
@@ -1561,6 +1648,7 @@ mod tests {
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
                 let mut cx = TestAppContext::single();
+                let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
                 run_root_render_benchmark(&mut cx);
             })
             .expect("spawn root render benchmark thread")

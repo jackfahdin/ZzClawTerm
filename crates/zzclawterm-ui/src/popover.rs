@@ -252,7 +252,11 @@ impl RenderOnce for ZzClawPopover {
             .key_context("Popover")
             .role(Role::Dialog)
             .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
-            .when(self.appearance, |this| this.popover_style(cx).p_3())
+            .when(self.appearance, |this| {
+                this.popover_style(cx)
+                    .shadow(gpui_base::Theme::global(cx).tokens.shadow.md)
+                    .p_3()
+            })
             .child(self.content);
         if self.overlay_closable {
             let on_click_outside = self.on_click_outside.clone();

@@ -45,7 +45,7 @@ use entry_row::{
 };
 use helpers::*;
 
-const NATIVE_EDITOR_MAX_BYTES: u64 = 512 * 1024;
+const NATIVE_EDITOR_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::features) enum TransferBrowserAvailability {

@@ -22,7 +22,6 @@ pub(super) fn security_editor_field(
     let busy = app.security.editor_busy();
     field.update(cx, |field, cx| {
         field.set_disabled(busy, cx);
-        field.set_masked(setup.masked, cx);
     });
     app.text_input_field(field_id, label, &value, setup, cx)
         .into_any_element()

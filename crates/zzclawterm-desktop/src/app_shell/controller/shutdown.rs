@@ -79,6 +79,7 @@ impl DesktopController {
             return Err(StoreSubmitError::ShuttingDown);
         }
         self.closing_workspaces.insert(workspace_id);
+        self.request_native_menu_refresh(cx);
         self.tab_drag.cancel_workspace(workspace_id);
         cx.spawn(async move |this, cx| {
             let persistence = persistence_task.await;
@@ -235,6 +236,7 @@ impl DesktopController {
         })
         .detach();
         self.most_recent_workspace_id = next_recent;
+        self.request_native_menu_refresh(cx);
         self.device_windows = device_windows;
     }
 
@@ -341,6 +343,7 @@ impl DesktopController {
     }
 
     pub fn request_quit(&mut self, cx: &mut Context<Self>) {
+        self.request_native_menu_refresh(cx);
         self.tab_drag.cancel();
         if self.process_quitting {
             return;
@@ -360,20 +363,24 @@ impl DesktopController {
                 })
             })
             .collect::<Vec<_>>();
-        let workspace_id = ready
-            .iter()
-            .copied()
-            .find(|id| {
-                self.windows.get(id).is_some_and(|entry| {
-                    entry
-                        .shell
-                        .update(cx, |shell, cx| {
-                            shell
-                                .app
-                                .as_ref()
-                                .is_some_and(|app| app.read(cx).has_live_sessions())
-                        })
-                        .unwrap_or(false)
+        // Settings has one owner. Route process quit through it so its theme draft
+        // cannot be lost just because another workspace has the most recent session.
+        let workspace_id = self
+            .settings_owner_workspace_id
+            .filter(|id| ready.contains(id))
+            .or_else(|| {
+                ready.iter().copied().find(|id| {
+                    self.windows.get(id).is_some_and(|entry| {
+                        entry
+                            .shell
+                            .update(cx, |shell, cx| {
+                                shell
+                                    .app
+                                    .as_ref()
+                                    .is_some_and(|app| app.read(cx).has_live_sessions())
+                            })
+                            .unwrap_or(false)
+                    })
                 })
             })
             .or_else(|| {

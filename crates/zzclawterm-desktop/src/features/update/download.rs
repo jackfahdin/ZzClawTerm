@@ -594,6 +594,7 @@ mod tests {
 
         let root = TestTempDir::new("zzclawterm-update-quit-lease");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, &root, "update-session");
         let runtime = cx.read(|cx| app.read(cx).runtime.clone());
         let startup = AppShellStartup::prepare(&runtime);

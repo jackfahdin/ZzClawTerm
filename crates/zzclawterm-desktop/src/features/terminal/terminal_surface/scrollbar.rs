@@ -123,7 +123,7 @@ pub(in crate::features) fn terminal_scrollbar_thumb_color(
     palette: crate::theme::ThemePalette,
     _active: bool,
 ) -> u32 {
-    palette.text_muted
+    palette.scroll_thumb
 }
 
 pub(in crate::features) fn terminal_scrollbar_thumb_element(

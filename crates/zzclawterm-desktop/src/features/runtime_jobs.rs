@@ -1,16 +1,13 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
 
-use zzclawterm_core::{
-    AiCommandCard, AiMode, AiModelDiscovery, CommandHistoryEntry, CommandObservation,
-};
+use zzclawterm_core::{AiCommandCard, AiMode, AiModelDiscovery, CommandHistoryEntry};
 use zzclawterm_transport::{
     DockerComposeProject, DockerComposeService, DockerContainerDetails, RemoteDockerOverview,
     RemoteGpuOverview, RemoteNpuOverview, RemoteProcess, RemoteStats, SessionInfo, SessionKind,
-    SessionManager, SshSessionConfig, SshTunnelInfo,
+    SessionManager, SshTunnelInfo,
 };
 
 use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
@@ -48,7 +45,6 @@ pub(in crate::features) struct SessionStartSuccess {
     pub(in crate::features) multiplex_handle: Option<SshConnectionLease>,
     pub(in crate::features) launch_config: Option<SessionLaunchConfig>,
     pub(in crate::features) cleanup: Option<PendingSshSession>,
-    pub(in crate::features) start_warnings: Vec<String>,
 }
 
 /// The worker's session is not owned by a window until its result is accepted.
@@ -76,7 +72,6 @@ impl SessionStartSuccess {
             multiplex_handle: Some(connection),
             launch_config,
             cleanup: Some(cleanup),
-            start_warnings: Vec::new(),
         }
     }
 
@@ -230,12 +225,7 @@ pub(in crate::features) enum AiChatWorkerEvent {
         job_id: u64,
         session_id: String,
     },
-    AgentBackgroundFinished {
-        job_id: u64,
-        state: AiAgentLoopState,
-        result: Result<CommandObservation, String>,
-    },
-    Finished(AiChatJobResult),
+    Finished(Box<AiChatJobResult>),
 }
 
 impl AiChatWorkerEvent {
@@ -244,7 +234,6 @@ impl AiChatWorkerEvent {
             Self::Delta { session_id, .. }
             | Self::AgentToolCallDelta { session_id, .. }
             | Self::AgentProtocolFallback { session_id, .. } => session_id,
-            Self::AgentBackgroundFinished { state, .. } => &state.ai_session_id,
             Self::Finished(result) => &result.session_id,
         }
     }
@@ -263,22 +252,15 @@ pub(in crate::features) struct AiChatJobOutput {
 
 #[derive(Debug, Clone)]
 pub(in crate::features) struct AiAgentLoopState {
+    pub(in crate::features) execution_id: String,
     pub(in crate::features) command_card_id: Option<String>,
     pub(in crate::features) ai_session_id: String,
     pub(in crate::features) terminal_session_id: String,
     pub(in crate::features) available_targets: Vec<zzclawterm_core::AiTerminalTarget>,
     pub(in crate::features) default_target_session_id: Option<String>,
     pub(in crate::features) command: String,
-    pub(in crate::features) marker_id: Option<String>,
-    pub(in crate::features) background_job_id: Option<u64>,
     pub(in crate::features) step_index: u16,
     pub(in crate::features) max_steps: u16,
-    pub(in crate::features) output_start_len: usize,
-    pub(in crate::features) started_at: Instant,
-    pub(in crate::features) min_wait_until: Instant,
-    pub(in crate::features) timeout_at: Instant,
-    pub(in crate::features) last_seen_len: usize,
-    pub(in crate::features) stable_since: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,12 +283,6 @@ pub(in crate::features) struct AiAgentStepView {
 }
 
 pub(in crate::features) use zzclawterm_core::ai::AiAgentStepStatus;
-
-#[derive(Clone)]
-pub(in crate::features) enum AiAgentBackgroundTarget {
-    Ssh(Box<SshSessionConfig>),
-    Local { working_dir: Option<PathBuf> },
-}
 
 #[derive(Debug)]
 pub(in crate::features) enum ProcessJobOutput {

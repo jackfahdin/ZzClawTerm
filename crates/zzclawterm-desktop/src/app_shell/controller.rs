@@ -26,6 +26,7 @@ use zzclawterm_store::BootstrapSnapshot;
 use zzclawterm_store::StoreTask;
 mod auto_sync;
 mod bootstrap;
+pub(crate) mod native_menu;
 mod shutdown;
 #[cfg(test)]
 mod tab_drag_tests;
@@ -109,6 +110,7 @@ pub struct DesktopController {
     shared_refresh_generation: u64,
     applied_shared_refresh_generation: u64,
     auto_sync: AutoSyncCoordinator,
+    native_menu: native_menu::NativeMenuState,
 }
 
 impl DesktopController {
@@ -119,6 +121,7 @@ impl DesktopController {
             .shared_store_runtime()
             .map_or(0, |store| store.sync_mutation_generation());
         Self {
+            native_menu: Default::default(),
             plugin_process: cx
                 .new(|cx| crate::features::plugins::PluginProcess::new(runtime.clone(), cx)),
             runtime,

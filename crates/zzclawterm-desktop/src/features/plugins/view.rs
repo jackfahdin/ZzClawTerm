@@ -11,6 +11,7 @@ use zzclawterm_core::plugins::manifest::{ParameterKind, ResultKind};
 use zzclawterm_core::plugins::{ErrorCode, MAX_TEXT_BYTES, PluginError, PluginStatus};
 use zzclawterm_plugin_host::manager::{Contribution, InvocationLease, PluginSource};
 use zzclawterm_plugin_host::service::{OperationReply, PluginOperation};
+use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 use zzclawterm_ui::{
     ZzClawButton, ZzClawButtonVariant, ZzClawInput, ZzClawInputState, ZzClawScrollable,
 };
@@ -697,10 +698,27 @@ impl Render for PluginPanel {
                 )
                 .child(
                     ZzClawButton::new("plugins-copy", t!("plugins.copy")).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                this.output.read(cx).value(cx),
-                            ));
+                        |this, _, window, cx| {
+                            let value = this.output.read(cx).value(cx);
+                            let copied = !value.is_empty();
+                            if copied {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
+                            }
+                            window.notify_operation(
+                                "copy-plugin-result",
+                                if copied {
+                                    ZzClawNotificationKind::Success
+                                } else {
+                                    ZzClawNotificationKind::Warning
+                                },
+                                t!(if copied {
+                                    "common.copied"
+                                } else {
+                                    "common.nothingToCopy"
+                                })
+                                .to_string(),
+                                cx,
+                            );
                         },
                     )),
                 );
@@ -772,6 +790,7 @@ mod tests {
         {
             let root = TestTempDir::new("zzclawterm-plugin-panel-management");
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let app = app_with_visible_local_session(&mut cx, root.path(), "management-session");
             let runtime = AppRuntime::from_parts_for_test(
                 RuntimeMode::Portable,
@@ -959,6 +978,7 @@ mod tests {
         let root = TestTempDir::new("zzclawterm-plugin-manager-view");
         let app_root = TestTempDir::new("zzclawterm-plugin-manager-app");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, app_root.path(), "draft-session");
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);

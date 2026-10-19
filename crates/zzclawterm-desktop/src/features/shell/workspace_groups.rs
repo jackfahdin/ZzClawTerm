@@ -341,6 +341,7 @@ mod tests {
     #[test]
     fn failed_start_only_hides_its_group_and_preserves_layout() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             app.apply_smart_split(SmartSplitMode::Vertical, cx);
@@ -368,6 +369,7 @@ mod tests {
     #[test]
     fn removing_source_group_does_not_retarget_an_in_flight_split() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             app.apply_smart_split(SmartSplitMode::Vertical, cx);
@@ -407,6 +409,7 @@ mod tests {
     #[test]
     fn reordered_and_merged_tabs_serialize_in_their_visual_order() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             app.reorder_session_relative("c".into(), "a".into(), false, cx);
@@ -429,6 +432,7 @@ mod tests {
     #[test]
     fn background_connection_completion_keeps_the_input_session_visible_in_its_group() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             let group = app.current_terminal_group().unwrap();
@@ -507,6 +511,7 @@ mod tests {
     #[test]
     fn starts_and_duplicate_splits_keep_the_group_reserved_before_focus_changes() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             app.apply_smart_split(SmartSplitMode::Vertical, cx);
@@ -545,6 +550,7 @@ mod tests {
     #[test]
     fn closing_tabs_and_merging_groups_preserves_other_connections_and_properties() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             let original = app.current_terminal_group().unwrap();
@@ -579,6 +585,7 @@ mod tests {
     #[test]
     fn keyboard_tab_switching_and_focus_mode_use_the_visible_group() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             let group = app.current_terminal_group().unwrap();
@@ -606,6 +613,7 @@ mod tests {
     #[test]
     fn old_nested_tabs_convert_without_losing_sessions_or_their_outer_position() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             let panes = WorkspacePaneNode::Split {
@@ -654,6 +662,7 @@ mod tests {
     #[test]
     fn invalid_legacy_conversion_preserves_original_data() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, _| {
             let panes = WorkspacePaneNode::Split {
@@ -675,6 +684,7 @@ mod tests {
     #[test]
     fn resizing_uses_the_local_split_extent_instead_of_a_fixed_viewport_estimate() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, _root) = fixture(&mut cx);
         app.update(&mut cx, |app, cx| {
             let group = app.current_terminal_group().unwrap();

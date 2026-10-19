@@ -5,6 +5,7 @@ use crate::models::{MainMode, NavItem, PanelSide, RightFocus};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_page(&mut self, item: NavItem, cx: &mut Context<Self>) {
+        self.hide_secret_inputs(cx);
         if item == NavItem::Settings || item.opens_settings() {
             if let Some(controller) = self
                 .desktop_controller
@@ -59,6 +60,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn open_panel(&mut self, item: NavItem, cx: &mut Context<Self>) {
+        self.hide_secret_inputs(cx);
         if item == NavItem::Settings || item.opens_settings() {
             self.open_page(NavItem::Settings, cx);
             return;

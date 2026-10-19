@@ -1,7 +1,7 @@
 use rust_i18n::t;
 
 use gpui::{
-    ClipboardItem, Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
+    Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
     StatefulInteractiveElement as _, Window, deferred, div, prelude::*, px, rgb, svg,
 };
 use zzclawterm_core::truncate_preview;
@@ -287,7 +287,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_path_row(
 impl ZzClawTermApp {
     pub(super) fn copy_current_transfer_browser_path(&mut self, cx: &mut Context<Self>) {
         let path = normalized_transfer_browser_path(self.transfer.browser_view().path);
-        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+        self.copy_text_with_feedback("copy-directory-path", path.clone(), cx);
         self.shell
             .set_status("copied current remote directory".to_string());
         self.transfer

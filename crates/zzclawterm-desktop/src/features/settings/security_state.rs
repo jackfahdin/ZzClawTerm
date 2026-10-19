@@ -8,9 +8,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use gpui::FocusHandle;
+use gpui::{AnyWindowHandle, FocusHandle};
 use zzclawterm_core::{OtpEntry, SavedCredential, SavedPassword, SecretString, SshKey};
 use zzclawterm_store::KnownHostEntry;
+use zzclawterm_ui::ZzClawDialogHandle;
 
 use crate::models::{
     SecurityAuthTab, SecurityCredentialEditorState, SecurityDropTarget, SecurityKeyEditorState,
@@ -65,7 +66,6 @@ pub(in crate::features) struct SecurityFeatureFocus {
     pub otp_editor: FocusHandle,
     pub password_editor: FocusHandle,
     pub credential_editor: FocusHandle,
-    pub unlock: FocusHandle,
     pub screen_lock: FocusHandle,
 }
 
@@ -135,7 +135,9 @@ struct SecurityUnlockState {
     pending_action: Option<SecurityUnlockAction>,
     request_id: u64,
     busy: bool,
-    focus: FocusHandle,
+    generation: u64,
+    window: Option<AnyWindowHandle>,
+    dialog: Option<ZzClawDialogHandle>,
 }
 
 /// Whole-application idle/manual lock screen.
@@ -144,9 +146,12 @@ struct SecurityUnlockState {
 /// secrets while the rest of the application remains usable.
 struct SecurityScreenLockState {
     locked: bool,
+    idle: bool,
     restore_focus: Option<FocusHandle>,
     password_draft: SecretString,
     status: String,
+    unlock_request_id: u64,
+    unlock_busy: bool,
     focus: FocusHandle,
     last_user_activity_at: Instant,
 }
@@ -200,13 +205,18 @@ impl SecurityFeatureState {
                 pending_action: None,
                 request_id: 0,
                 busy: false,
-                focus: focus.unlock,
+                generation: 0,
+                window: None,
+                dialog: None,
             },
             screen_lock: SecurityScreenLockState {
                 locked: false,
+                idle: false,
                 restore_focus: None,
                 password_draft: SecretString::default(),
                 status: String::new(),
+                unlock_request_id: 0,
+                unlock_busy: false,
                 focus: focus.screen_lock,
                 last_user_activity_at: Instant::now(),
             },
@@ -317,20 +327,48 @@ impl SecurityFeatureState {
         self.unlock.prompt_open
     }
 
+    pub(in crate::features) fn unlock_busy(&self) -> bool {
+        self.unlock.busy
+    }
+
+    pub(in crate::features) fn bind_unlock_window(&mut self, window: AnyWindowHandle) -> u64 {
+        self.unlock.window = Some(window);
+        self.unlock.generation
+    }
+
+    pub(in crate::features) fn unlock_dialog_matches(
+        &self,
+        generation: u64,
+        window: AnyWindowHandle,
+    ) -> bool {
+        self.unlock.generation == generation
+            && self.unlock.window == Some(window)
+            && (self.unlock.prompt_open || self.unlock.master_required_prompt_open)
+    }
+
+    pub(in crate::features) fn unlock_dialog_generation(&self) -> u64 {
+        self.unlock.generation
+    }
+
+    pub(in crate::features) fn bind_unlock_dialog(&mut self, dialog: ZzClawDialogHandle) {
+        self.unlock.dialog = Some(dialog);
+    }
+
+    pub(in crate::features) fn unlock_dialog(&self) -> Option<ZzClawDialogHandle> {
+        self.unlock.dialog.clone()
+    }
+
     pub(in crate::features) fn master_required_prompt_open(&self) -> bool {
         self.unlock.master_required_prompt_open
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn unlock_draft(&self) -> &str {
         self.unlock.draft.expose_secret()
     }
 
     pub(in crate::features) fn unlock_error(&self) -> Option<&str> {
         self.unlock.error.as_deref()
-    }
-
-    pub(in crate::features) fn unlock_focus(&self) -> &FocusHandle {
-        &self.unlock.focus
     }
 
     pub(in crate::features) fn set_pending_unlock_action(
@@ -341,6 +379,7 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn show_master_required_prompt(&mut self) {
+        self.close_unlock_prompt();
         self.unlock.pending_action = None;
         self.unlock.prompt_open = false;
         self.unlock.master_required_prompt_open = true;
@@ -350,6 +389,7 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn show_unlock_prompt(&mut self) {
+        self.close_unlock_prompt();
         self.unlock.master_required_prompt_open = false;
         self.unlock.prompt_open = true;
         self.unlock.draft.expose_secret_mut().clear();
@@ -363,6 +403,9 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn close_master_required_prompt(&mut self) {
+        self.unlock.generation = self.unlock.generation.wrapping_add(1);
+        self.unlock.window = None;
+        self.unlock.dialog = None;
         self.unlock.master_required_prompt_open = false;
         self.unlock.pending_action = None;
     }
@@ -419,6 +462,35 @@ impl SecurityFeatureState {
         &self.screen_lock.status
     }
 
+    pub(in crate::features) fn screen_lock_is_idle(&self) -> bool {
+        self.screen_lock.idle
+    }
+
+    pub(in crate::features) fn screen_lock_unlock_busy(&self) -> bool {
+        self.screen_lock.unlock_busy
+    }
+
+    pub(in crate::features) fn begin_screen_lock_unlock(&mut self) -> Option<(u64, SecretString)> {
+        if !self.screen_lock.locked || self.screen_lock.unlock_busy {
+            return None;
+        }
+        self.screen_lock.unlock_request_id = self.screen_lock.unlock_request_id.wrapping_add(1);
+        self.screen_lock.unlock_busy = true;
+        self.screen_lock.status.clear();
+        Some((
+            self.screen_lock.unlock_request_id,
+            self.screen_lock.password_draft.clone(),
+        ))
+    }
+
+    pub(in crate::features) fn finish_screen_lock_unlock(&mut self, request_id: u64) -> bool {
+        if !self.screen_lock.unlock_busy || self.screen_lock.unlock_request_id != request_id {
+            return false;
+        }
+        self.screen_lock.unlock_busy = false;
+        true
+    }
+
     pub(in crate::features) fn screen_lock_focus(&self) -> &FocusHandle {
         &self.screen_lock.focus
     }
@@ -428,9 +500,17 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn activate_screen_lock(&mut self, status: String) {
+        self.lock_secrets();
         self.screen_lock.locked = true;
+        self.screen_lock.idle = false;
+        self.screen_lock.unlock_busy = false;
         self.screen_lock.password_draft.expose_secret_mut().clear();
         self.screen_lock.status = status;
+    }
+
+    pub(in crate::features) fn activate_idle_screen_lock(&mut self) {
+        self.activate_screen_lock(String::new());
+        self.screen_lock.idle = true;
     }
 
     pub(in crate::features) fn remember_screen_lock_focus(&mut self, focus: Option<FocusHandle>) {
@@ -445,6 +525,8 @@ impl SecurityFeatureState {
 
     pub(in crate::features) fn deactivate_screen_lock(&mut self) {
         self.screen_lock.locked = false;
+        self.screen_lock.idle = false;
+        self.screen_lock.unlock_busy = false;
         self.screen_lock.password_draft.expose_secret_mut().clear();
         self.screen_lock.status.clear();
         self.screen_lock.last_user_activity_at = Instant::now();
@@ -877,6 +959,13 @@ impl SecurityFeatureState {
         self.editors.otp_qr_importing
     }
 
+    pub(in crate::features) fn account_editor_token(&self) -> Option<u64> {
+        self.editors
+            .password
+            .as_ref()
+            .map(|_| self.editors.request_id)
+    }
+
     pub(in crate::features) fn password_editor(&self) -> Option<&SecurityPasswordEditorState> {
         self.editors.password.as_ref()
     }
@@ -930,6 +1019,8 @@ impl SecurityFeatureState {
         editor: SecurityPasswordEditorState,
         status: String,
     ) {
+        self.panel.pending_request = None;
+        self.revealed.passwords.clear();
         self.clear_editors();
         self.editors.password = Some(editor);
         self.status = status;
@@ -1026,8 +1117,15 @@ impl SecurityFeatureState {
                 match id {
                     "pw-name" => editor.name = text,
                     "pw-username" => editor.username = text,
-                    _ => editor.password = text.into(),
+                    _ => {
+                        editor.password_update =
+                            zzclawterm_core::models::credentials::PasswordUpdate::Replace(
+                                text.into(),
+                            )
+                    }
                 }
+                editor.error = None;
+                editor.error_field = None;
             }
             "otp-issuer" | "otp-username" | "otp-secret" | "otp-digits" | "otp-period"
             | "otp-counter" => {
@@ -1061,6 +1159,7 @@ impl SecurityFeatureState {
     }
 
     fn clear_editors(&mut self) {
+        self.editors.request_id = self.editors.request_id.wrapping_add(1).max(1);
         self.editors.key = None;
         self.editors.otp = None;
         self.editors.password = None;
@@ -1091,7 +1190,11 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn close_password_editor(&mut self) {
+        self.panel.pending_request = None;
+        self.editors.request_id = self.editors.request_id.wrapping_add(1).max(1);
+        self.editors.busy = false;
         self.editors.password = None;
+        self.revealed.passwords.clear();
         self.status = "password editor closed".to_string();
     }
 
@@ -1111,6 +1214,9 @@ impl SecurityFeatureState {
     }
 
     pub(in crate::features) fn close_unlock_prompt(&mut self) {
+        self.unlock.generation = self.unlock.generation.wrapping_add(1);
+        self.unlock.window = None;
+        self.unlock.dialog = None;
         self.unlock.prompt_open = false;
         self.unlock.draft.expose_secret_mut().clear();
         self.unlock.error = None;
@@ -1178,6 +1284,7 @@ mod tests {
 
     fn security_state() -> SecurityFeatureState {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let focus = || cx.update(|cx| cx.focus_handle());
         SecurityFeatureState::new(
             SecurityCatalogState::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -1188,7 +1295,6 @@ mod tests {
                 otp_editor: focus(),
                 password_editor: focus(),
                 credential_editor: focus(),
-                unlock: focus(),
                 screen_lock: focus(),
             },
         )
@@ -1304,9 +1410,13 @@ mod tests {
                 id: None,
                 name: String::new(),
                 username: String::new(),
-                password: zzclawterm_core::SecretString::default(),
+                password_update: zzclawterm_core::models::credentials::PasswordUpdate::Replace(
+                    zzclawterm_core::SecretString::default(),
+                ),
+                references_expanded: false,
+                connection_origin: None,
+                error_field: None,
                 has_password: false,
-                show_password: false,
                 error: None,
             },
             "password editor opened".to_string(),
@@ -1325,7 +1435,6 @@ mod tests {
                 key_content_mode: true,
                 cert_content_mode: false,
                 cert_expanded: false,
-                show_passphrase: false,
                 has_key_data: false,
                 has_cert_data: false,
                 error: None,
@@ -1558,9 +1667,13 @@ mod tests {
                 id: None,
                 name: "draft".to_string(),
                 username: String::new(),
-                password: "secret".to_string().into(),
+                password_update: zzclawterm_core::models::credentials::PasswordUpdate::Replace(
+                    "secret".to_string().into(),
+                ),
+                references_expanded: false,
+                connection_origin: None,
+                error_field: None,
                 has_password: false,
-                show_password: true,
                 error: None,
             },
             "editing".to_string(),
@@ -1572,6 +1685,38 @@ mod tests {
         security.set_auth_tab(crate::models::SecurityAuthTab::Otp);
         assert!(security.password_editor().is_none());
         assert!(!security.finish_editor_request(request_id));
+    }
+
+    #[test]
+    fn account_editor_lifecycle_rejects_old_save_and_reveal_results() {
+        use zzclawterm_core::models::credentials::PasswordUpdate;
+        let mut security = security_state();
+        let draft = SecurityPasswordEditorState {
+            id: Some("account".into()),
+            name: "Account".into(),
+            username: "root".into(),
+            password_update: PasswordUpdate::Replace("new fixture".into()),
+            has_password: true,
+            references_expanded: false,
+            connection_origin: Some(1),
+            error_field: None,
+            error: None,
+        };
+        security.open_password_editor(draft.clone(), "editing".into());
+        let token = security.account_editor_token();
+        let reveal = security.begin_password_request("account".into());
+        let save = security.begin_editor_request().unwrap();
+        security.close_password_editor();
+        security.open_password_editor(draft, "new lifecycle".into());
+        assert_ne!(security.account_editor_token(), token);
+        assert!(!security.finish_password_request(reveal, "account"));
+        assert!(!security.finish_editor_request(save));
+        let save = security.begin_editor_request().unwrap();
+        security.reveal_password("account".into(), "old fixture".into());
+        security.lock_secrets();
+        assert!(security.password_editor().is_none());
+        assert!(security.revealed_password("account").is_none());
+        assert!(!security.finish_editor_request(save));
     }
 
     #[test]
@@ -1670,9 +1815,54 @@ mod tests {
     }
 
     #[test]
+    fn only_idle_lock_shows_the_inactivity_reason() {
+        let mut security = security_state();
+        security.activate_idle_screen_lock();
+        assert!(security.screen_lock_is_idle());
+        security.activate_screen_lock(String::new());
+        assert!(!security.screen_lock_is_idle());
+        security.activate_idle_screen_lock();
+        security.deactivate_screen_lock();
+        assert!(!security.screen_lock_is_idle());
+    }
+
+    #[test]
+    fn screen_unlock_allows_one_verification_at_a_time() {
+        let mut security = security_state();
+        assert!(security.begin_screen_lock_unlock().is_none());
+        security.activate_screen_lock(String::new());
+        security.set_screen_lock_password_draft("draft".to_string(), "rejected".to_string());
+        let (request_id, _) = security.begin_screen_lock_unlock().unwrap();
+        assert!(security.screen_lock_unlock_busy());
+        assert!(security.screen_lock_status().is_empty());
+        assert!(security.begin_screen_lock_unlock().is_none());
+        assert!(!security.finish_screen_lock_unlock(request_id.wrapping_add(1)));
+        assert!(security.screen_lock_unlock_busy());
+        assert!(security.finish_screen_lock_unlock(request_id));
+        assert!(!security.screen_lock_unlock_busy());
+        assert!(security.begin_screen_lock_unlock().is_some());
+    }
+
+    #[test]
+    fn relocking_invalidates_a_pending_screen_unlock_reply() {
+        let mut security = security_state();
+        security.activate_screen_lock(String::new());
+        let (old_request_id, _) = security.begin_screen_lock_unlock().unwrap();
+        security.deactivate_screen_lock();
+        assert!(!security.finish_screen_lock_unlock(old_request_id));
+        security.activate_screen_lock(String::new());
+        let (new_request_id, _) = security.begin_screen_lock_unlock().unwrap();
+        assert!(!security.finish_screen_lock_unlock(old_request_id));
+        assert!(security.screen_locked());
+        assert!(security.screen_lock_unlock_busy());
+        assert!(security.finish_screen_lock_unlock(new_request_id));
+    }
+
+    #[test]
     fn screen_lock_lifecycle_clears_password_and_resets_activity() {
         let mut security = security_state();
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let previous_focus = cx.update(|cx| cx.focus_handle());
         security.remember_screen_lock_focus(Some(previous_focus.clone()));
         security.set_screen_lock_password_draft("secret".to_string(), "ready".to_string());

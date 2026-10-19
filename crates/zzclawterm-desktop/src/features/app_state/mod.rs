@@ -128,6 +128,7 @@ impl gpui::EventEmitter<NotesCatalogEvent> for ZzClawTermApp {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppLifecycleEvent {
     ShutdownRequested,
+    ShutdownCancelled,
     NewWindowRequested,
 }
 

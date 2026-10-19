@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb, svg};
+use rust_i18n::t;
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::{DockerComposeProject, DockerComposeService};
 
@@ -243,6 +244,7 @@ fn docker_compose_project_row(
                                 format!("docker-compose-menu-{project_key}"),
                                 "icons/session/more.svg",
                                 14.,
+                                t!("dockerManager.moreActions").to_string(),
                                 palette,
                                 cx.listener({
                                     let menu_id = menu_id.clone();

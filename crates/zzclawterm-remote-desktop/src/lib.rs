@@ -1,9 +1,11 @@
 mod certificate;
 mod clipboard;
 mod frame;
+mod heartbeat;
 mod helper_process;
 mod input;
 mod ipc;
+pub mod pixel_memory;
 mod protocol;
 mod session;
 mod vnc;

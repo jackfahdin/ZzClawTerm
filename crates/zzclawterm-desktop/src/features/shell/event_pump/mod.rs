@@ -472,13 +472,13 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.hide_secret_inputs(cx);
         self.security.remember_screen_lock_focus(window.focused(cx));
-        let lock_status = if self.settings.summary().has_master_password {
-            "Enter the master password to unlock.".to_string()
-        } else {
-            "No master password is configured.".to_string()
-        };
-        self.security.activate_screen_lock(lock_status);
+        self.security.activate_idle_screen_lock();
+        self.forget_text_inputs("security.unlock.password");
+        self.forget_text_inputs("security.editor.");
+        self.connection_state.clear_editor_secrets(cx);
+        zzclawterm_ui::ZzClawDialogWindowExt::close_all_nya_dialogs(window, cx);
         self.forget_text_inputs("lock-screen.password");
         self.shell.set_status(format!(
             "screen locked after {} minute(s) idle",
@@ -708,6 +708,7 @@ mod tests {
     #[test]
     fn terminal_output_does_not_require_full_shell_repaint() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         let observer = observe_root_notifies(app.clone(), &mut cx);
         cx.update_entity(&app, |app, cx| {
@@ -730,6 +731,7 @@ mod tests {
     #[test]
     fn root_status_change_still_repaints_root() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         let observer = observe_root_notifies(app.clone(), &mut cx);
         cx.update_entity(&app, |app, cx| {
@@ -757,6 +759,7 @@ mod tests {
     #[test]
     fn data_plane_has_no_pending_ui_repaint_work() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_runtime_data_plane_drain(cx);
@@ -786,6 +789,7 @@ mod tests {
     #[test]
     fn a_pending_credential_detection_keeps_the_drain_task_coming_back() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         cx.update_entity(&app, |app, _| {
             assert!(
@@ -813,6 +817,7 @@ mod tests {
     #[test]
     fn the_tail_of_a_burst_is_applied_after_the_task_parks() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_runtime_data_plane_drain(cx);
@@ -870,6 +875,7 @@ mod tests {
     #[test]
     fn a_drain_cut_short_by_its_budget_comes_back_on_the_pacing_interval() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.start_runtime_data_plane_drain(cx);
@@ -923,6 +929,7 @@ mod tests {
     #[test]
     fn github_gist_auth_events_arrive_without_any_timer() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         let (tx, job_id) = cx.update_entity(&app, |app, cx| {
             let start = app
@@ -956,6 +963,7 @@ mod tests {
     #[test]
     fn recording_history_replies_apply_only_for_the_outstanding_query() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = quiet_app_with_visible_session(&mut cx);
         cx.update_entity(&app, |app, cx| {
             app.terminal.open_search_for_test();

@@ -90,7 +90,7 @@ impl ZzClawTermApp {
             .h_full()
             .py(px(TERMINAL_SCROLLBAR_TRACK_PADDING_Y))
             .pr(px(TERMINAL_SCROLLBAR_TRACK_PADDING_RIGHT))
-            .opacity(if show { 1.0 } else { 0.35 })
+            .when(!show, |this| this.invisible())
             .child(
                 div()
                     .id(SharedString::from(track_id))

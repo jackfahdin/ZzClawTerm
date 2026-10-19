@@ -73,6 +73,7 @@ impl ZzClawTermApp {
         let request_item_id = id.clone();
         let location = SecurityStoreLocation::new(self.store_blocking_client());
         let scheduler = self.blocking_jobs.clone();
+        let origin_window = Some(window.window_handle());
         cx.spawn_in(window, async move |this, cx| {
             let task = scheduler.submit_task("known-host-delete", move |_| {
                 let store = location.open()?;
@@ -97,11 +98,25 @@ impl ZzClawTermApp {
                             .set_status(t!("securityAuth.knownHostDeleted").to_string());
                         this.shell
                             .set_status(t!("securityAuth.knownHostDeleted").to_string());
+                        this.notify_operation_at(
+                            origin_window,
+                            "known-host-delete",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                            t!("securityAuth.knownHostDeleted").to_string(),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         this.security
                             .fail_known_hosts_load(generation, error.clone());
                         this.shell.set_status(error);
+                        this.notify_operation_at(
+                            origin_window,
+                            "known-host-delete",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            t!("common.operationFailed").to_string(),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -136,6 +151,7 @@ impl ZzClawTermApp {
         };
         let location = SecurityStoreLocation::new(self.store_blocking_client());
         let scheduler = self.blocking_jobs.clone();
+        let origin_window = Some(window.window_handle());
         cx.spawn_in(window, async move |this, cx| {
             let task = scheduler.submit_task("known-hosts-clear", move |_| {
                 let store = location.open()?;
@@ -157,11 +173,25 @@ impl ZzClawTermApp {
                             .set_status(t!("securityAuth.knownHostsCleared").to_string());
                         this.shell
                             .set_status(t!("securityAuth.knownHostsCleared").to_string());
+                        this.notify_operation_at(
+                            origin_window,
+                            "known-hosts-clear",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                            t!("securityAuth.knownHostsCleared").to_string(),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         this.security
                             .fail_known_hosts_load(generation, error.clone());
                         this.shell.set_status(error);
+                        this.notify_operation_at(
+                            origin_window,
+                            "known-hosts-clear",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            t!("common.operationFailed").to_string(),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();

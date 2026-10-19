@@ -19,9 +19,9 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use zzclawterm_ui::{
-    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputEvent, ZzClawInputShell, ZzClawInputState,
-    ZzClawNumberInput, ZzClawNumberInputEvent, ZzClawNumberInputOptions, ZzClawNumberInputState,
-    ZzClawSearchInput,
+    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputEvent, ZzClawInputKind, ZzClawInputShell,
+    ZzClawInputState, ZzClawNumberInput, ZzClawNumberInputEvent, ZzClawNumberInputOptions,
+    ZzClawNumberInputState, ZzClawSearchInput,
 };
 
 use super::ZzClawTermApp;
@@ -57,6 +57,7 @@ pub(in crate::features) fn ordinary_input_focus_ring(
 pub(in crate::features) struct TextInputSetup {
     pub placeholder: SharedString,
     pub masked: bool,
+    pub kind: ZzClawInputKind,
     pub multi_line: bool,
     pub submit_on_enter: bool,
     /// A multi-line box holding source, rendered with a line-number gutter.
@@ -74,6 +75,29 @@ impl TextInputSetup {
     pub fn masked() -> Self {
         Self {
             masked: true,
+            kind: ZzClawInputKind::Password,
+            ..Default::default()
+        }
+    }
+
+    pub fn secret() -> Self {
+        Self {
+            kind: ZzClawInputKind::Secret,
+            ..Self::masked()
+        }
+    }
+
+    pub fn new_password() -> Self {
+        Self {
+            kind: ZzClawInputKind::NewPassword,
+            ..Self::masked()
+        }
+    }
+
+    pub fn one_time_code(masked: bool) -> Self {
+        Self {
+            kind: ZzClawInputKind::OneTimeCode,
+            masked,
             ..Default::default()
         }
     }
@@ -82,6 +106,7 @@ impl TextInputSetup {
         Self {
             placeholder: placeholder.into(),
             masked: false,
+            kind: ZzClawInputKind::Text,
             multi_line: true,
             submit_on_enter: false,
             code: false,
@@ -94,6 +119,7 @@ impl TextInputSetup {
         Self {
             placeholder: placeholder.into(),
             masked: false,
+            kind: ZzClawInputKind::Text,
             multi_line: true,
             submit_on_enter: false,
             code: true,
@@ -112,7 +138,7 @@ impl TextInputSetup {
 /// that replaces it, and the panel badges whether one is stored at all.
 pub(in crate::features) fn secret_input_setup(secret: bool) -> TextInputSetup {
     if secret {
-        TextInputSetup::masked()
+        TextInputSetup::secret()
     } else {
         TextInputSetup::default()
     }
@@ -128,6 +154,15 @@ pub(in crate::features) struct TextInputRegistry {
 }
 
 impl ZzClawTermApp {
+    /// Navigation and locking hide values without discarding unsaved drafts.
+    pub(in crate::features) fn hide_secret_inputs(&mut self, cx: &mut Context<Self>) {
+        self.hide_ai_provider_secret(cx);
+        for input in self.text_inputs.fields.values() {
+            input.update(cx, |state, cx| state.hide_secret(cx));
+        }
+        self.connection_state.hide_editor_secrets(cx);
+    }
+
     pub(in crate::features) fn focus_text_input_if_present(
         &mut self,
         id: &str,
@@ -210,6 +245,7 @@ impl ZzClawTermApp {
                 input
             };
             input
+                .kind(setup.kind)
                 .masked(setup.masked)
                 .submit_on_enter(setup.submit_on_enter)
         });
@@ -580,6 +616,8 @@ impl ZzClawTermApp {
             self.apply_npu_search(text, cx);
         } else if id.starts_with("remote.process.") && id.ends_with(".nice") {
             self.apply_process_nice_input(text, cx);
+        } else if let Some(field) = id.strip_prefix("theme.designer.") {
+            self.edit_theme_designer(field, text, cx);
         } else if id.as_ref() == "settings.interaction.word-separators" {
             self.apply_interaction_word_separators(text, cx);
         } else if id.as_ref() == "settings.terminal.x11-display" {
@@ -745,5 +783,69 @@ mod tests {
     #[test]
     fn number_input_box_uses_stable_nonzero_width() {
         const { assert!(ORDINARY_NUMBER_INPUT_WIDTH_PX >= 120.) };
+    }
+    #[test]
+    fn secret_inputs_hide_on_navigation_without_losing_drafts() {
+        use super::TextInputSetup;
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::models::{NavItem, SettingsTab};
+        use gpui::TestAppContext;
+        use zzclawterm_core::test_support::TestTempDir;
+        use zzclawterm_ui::ZzClawInputKind;
+        let root = TestTempDir::new("zzclawterm-secret-input-lifecycle");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "input-lifecycle");
+        app.update(&mut cx, |app, cx| {
+            let field = app.text_input(
+                "test.secret",
+                "unsaved secret",
+                TextInputSetup::secret(),
+                cx,
+            );
+            let plain =
+                app.text_input("test.plain", "ordinary text", TextInputSetup::default(), cx);
+            field.update(cx, |field, cx| field.set_masked(false, cx));
+            app.focus_settings_tab(SettingsTab::General, cx);
+            assert!(field.read(cx).is_masked());
+            assert_eq!(field.read(cx).value(cx), "unsaved secret");
+            assert_eq!(field.read(cx).input_kind(), ZzClawInputKind::Secret);
+            assert!(!plain.read(cx).is_masked());
+            field.update(cx, |field, cx| field.set_masked(false, cx));
+            app.open_panel(NavItem::SecurityAuth, cx);
+            assert!(field.read(cx).is_masked());
+            assert_eq!(field.read(cx).value(cx), "unsaved secret");
+        });
+    }
+
+    #[test]
+    fn ai_secret_toggle_reveals_current_draft_and_restores_it_when_hidden() {
+        use crate::features::test_support::app_with_visible_local_session;
+        use gpui::TestAppContext;
+        use zzclawterm_core::{ai::AiProviderKind, test_support::TestTempDir};
+        let root = TestTempDir::new("zzclawterm-ai-secret-draft-toggle");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "ai-secret-toggle");
+        app.update(&mut cx, |app, cx| {
+            let id = app
+                .ai
+                .add_settings_provider_preset(AiProviderKind::OpenaiCompatible);
+            app.ai.apply_settings_credential_input(
+                &format!("{id}.api-key"),
+                "new fixture key".into(),
+            );
+            app.ensure_ai_credential_inputs(&id, cx);
+            let field = app
+                .existing_text_input(format!("ai.credential.{id}.api-key"))
+                .unwrap();
+            app.toggle_ai_provider_secret(id.clone(), cx);
+            assert!(!field.read(cx).is_masked());
+            assert_eq!(field.read(cx).value(cx), "new fixture key");
+            app.toggle_ai_provider_secret(id, cx);
+            assert!(field.read(cx).is_masked());
+            assert_eq!(field.read(cx).value(cx), "new fixture key");
+            assert!(app.ai.provider_view().revealed_id.is_none());
+        });
     }
 }

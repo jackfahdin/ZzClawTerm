@@ -119,6 +119,7 @@ fn all_security_lists_drag_and_save_in_regular_and_compact_layouts() {
         for width in [180., 320.] {
             let root = TestTempDir::new("zzclawterm-security-drag");
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let (app, cx) = hosted(&mut cx, &root, tab, width);
             let target = drag_over_second_row(cx, tab);
             cx.read(|cx| {
@@ -169,6 +170,7 @@ fn all_security_lists_drag_and_save_in_regular_and_compact_layouts() {
 fn cancelled_drags_clear_insertion_marks_and_cross_tab_drops_do_not_sort() {
     let root = TestTempDir::new("zzclawterm-security-drag-cancel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, cx) = hosted(&mut cx, &root, SecurityAuthTab::Passwords, 320.);
     drag_over_second_row(cx, SecurityAuthTab::Passwords);
     cx.run_until_parked();
@@ -207,6 +209,7 @@ fn insertion_mark_tracks_only_the_hovered_row_and_clears_on_source_or_outside() 
         for width in [180., 320.] {
             let root = TestTempDir::new("zzclawterm-security-drag-hover");
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let (app, cx) = hosted(&mut cx, &root, tab, width);
             let (source_id, second_id, third_id, last_id) = match tab {
                 SecurityAuthTab::Passwords => (

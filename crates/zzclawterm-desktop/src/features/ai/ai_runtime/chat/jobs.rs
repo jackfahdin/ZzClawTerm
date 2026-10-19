@@ -12,8 +12,7 @@ use crate::features::{
 };
 use crate::models::SessionLaunchConfig;
 
-use super::super::super::ai_jobs::{AiJobRunOptions, observation_summary, run_ai_ask_job};
-use super::super::super::state::AiAgentBackgroundEffect;
+use super::super::super::ai_jobs::{AiJobRunOptions, run_ai_ask_job};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn cancel_ai_chat(&mut self, cx: &mut Context<Self>) {
@@ -26,11 +25,16 @@ impl ZzClawTermApp {
         if let Some(view) = self.ai.native_run_view() {
             self.forget_text_inputs(&format!("ai.agent-answer.{}.", view.run_id));
         }
+        self.mcp
+            .capabilities
+            .terminal_executions
+            .forget_owner(&format!("ai-session:{}", self.ai.chat_session_id()));
         let native_owner = self.ai.native_owner();
         self.ai.cancel_chat_and_agent();
         if let Some(owner) = native_owner {
             self.clear_capability_owner(&owner, cx);
         }
+        self.poll_terminal_executions(cx);
         self.sync_session_event_bridge_policy();
         self.settings
             .set_store_message(self.ai.panel_status().to_string());
@@ -168,6 +172,10 @@ impl ZzClawTermApp {
                 target_session_ids.clone(),
                 target_session_id.clone(),
                 request.permission_mode.clone(),
+                crate::features::capability_runtime::terminal_execution::TerminalExecutionPolicy {
+                    background: settings.agent_background_execution_enabled,
+                    max_lines: settings.terminal_output_lines,
+                },
             ) {
                 Ok(credential) => Some(credential),
                 Err(error) => {
@@ -219,18 +227,20 @@ impl ZzClawTermApp {
                         },
                     )
                 };
-                let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
+                let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
                     job_id,
                     session_id,
                     result,
-                }));
+                })));
             })
         {
-            let _ = rejected_tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
-                job_id,
-                session_id: rejected_session_id,
-                result: Err(error.to_string()),
-            }));
+            let _ = rejected_tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(
+                AiChatJobResult {
+                    job_id,
+                    session_id: rejected_session_id,
+                    result: Err(error.to_string()),
+                },
+            )));
         }
         self.defer_ai_panel_snapshot_flush(cx);
         self.notify_root_if_ai_header_changed(before, cx);
@@ -788,9 +798,6 @@ impl ZzClawTermApp {
 
     /// Apply one worker event, reporting whether the UI needs a repaint.
     fn apply_ai_chat_event(&mut self, event: AiChatWorkerEvent, cx: &mut Context<Self>) -> bool {
-        // A chat event is what resumes an agent loop after a background step, so this
-        // is the second place its observation clock can need starting.
-        self.ensure_ai_agent_loop_clock(cx);
         let mut dirty = false;
         match event {
             AiChatWorkerEvent::Delta {
@@ -827,27 +834,6 @@ impl ZzClawTermApp {
             }
             AiChatWorkerEvent::AgentProtocolFallback { job_id, .. } => {
                 dirty = self.ai.apply_agent_protocol_fallback(job_id);
-            }
-            AiChatWorkerEvent::AgentBackgroundFinished {
-                job_id,
-                state,
-                result,
-            } => {
-                match self
-                    .ai
-                    .finish_agent_background(job_id, state, result, observation_summary)
-                {
-                    AiAgentBackgroundEffect::Ignored => {}
-                    AiAgentBackgroundEffect::MatchedStale => dirty = true,
-                    AiAgentBackgroundEffect::Continue(state, observation) => {
-                        dirty = true;
-                        self.start_ai_agent_continuation(*state, observation, cx);
-                    }
-                    AiAgentBackgroundEffect::ContinueAfterFailure(state, message) => {
-                        dirty = true;
-                        self.start_ai_agent_continuation_with_message(*state, message, cx);
-                    }
-                }
             }
             AiChatWorkerEvent::Finished(event) => {
                 let native_call = event

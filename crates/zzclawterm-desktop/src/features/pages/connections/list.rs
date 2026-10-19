@@ -1,3 +1,4 @@
+use crate::models::ConnectionEditorFocusTarget;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -461,6 +462,12 @@ pub(super) fn connection_editor_select(
     let show_label = !label.is_empty();
     div()
         .id(SharedString::from(id))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::Select(select))
+                .cloned(),
+        )
         .min_w_0()
         .flex_1()
         .flex()
@@ -1049,6 +1056,10 @@ mod tests {
 /// that already hold a `Context` — reading the app entity again from inside its
 /// own update panics.
 pub(super) struct ConnectionEditorFields {
+    pub(super) account: Option<zzclawterm_core::SavedPassword>,
+    pub(super) account_password_locked: bool,
+    pub(super) errors: HashMap<ConnectionEditorField, String>,
+    pub(super) anchors: HashMap<ConnectionEditorFocusTarget, gpui::ScrollAnchor>,
     fields: HashMap<ConnectionEditorField, Entity<ZzClawInputState>>,
     number_fields: HashMap<ConnectionEditorField, Entity<ZzClawNumberInputState>>,
     selects: HashMap<ConnectionEditorSelect, Entity<ZzClawSelectState>>,
@@ -1068,6 +1079,10 @@ impl ConnectionEditorFields {
         >,
     ) -> Self {
         Self {
+            account: None,
+            account_password_locked: false,
+            errors: HashMap::new(),
+            anchors: HashMap::new(),
             fields,
             number_fields,
             selects,
@@ -1203,6 +1218,16 @@ pub(super) fn editor_field(
 ) -> impl IntoElement {
     let label = label.into();
     div()
+        .id(SharedString::from(format!(
+            "connection-editor-field-{field:?}"
+        )))
+        .debug_selector(move || format!("connection-editor-field-{field:?}"))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::Field(field))
+                .cloned(),
+        )
         .flex()
         .flex_col()
         .gap_1()
@@ -1210,6 +1235,14 @@ pub(super) fn editor_field(
             this.child(field_caption(palette, &label))
         })
         .child(editor_field_box(palette, field, fields, cx))
+        .when_some(fields.errors.get(&field), |this, error| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.danger))
+                    .child(error.clone()),
+            )
+        })
 }
 
 pub(super) fn connection_editor_select_on_open(
@@ -1229,6 +1262,12 @@ pub(super) fn connection_editor_select_on_open(
     let show_label = !label.is_empty();
     div()
         .id(SharedString::from(id))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::Select(select))
+                .cloned(),
+        )
         .min_w_0()
         .flex_1()
         .flex()
@@ -1246,49 +1285,40 @@ pub(super) fn connection_editor_select_on_open(
         )
 }
 
-pub(super) struct EditorSecretFieldOptions<ToggleVisibility, Clear> {
+pub(super) struct EditorSecretFieldOptions<Clear> {
     disabled: bool,
-    visibility_tooltip: SharedString,
     clear_tooltip: SharedString,
-    on_toggle_visibility: ToggleVisibility,
     on_clear: Clear,
 }
 
-impl<ToggleVisibility, Clear> EditorSecretFieldOptions<ToggleVisibility, Clear> {
+impl<Clear> EditorSecretFieldOptions<Clear> {
     pub(super) fn new(
         disabled: bool,
-        visibility_tooltip: impl Into<SharedString>,
         clear_tooltip: impl Into<SharedString>,
-        on_toggle_visibility: ToggleVisibility,
         on_clear: Clear,
     ) -> Self {
         Self {
             disabled,
-            visibility_tooltip: visibility_tooltip.into(),
             clear_tooltip: clear_tooltip.into(),
-            on_toggle_visibility,
             on_clear,
         }
     }
 }
 
-pub(super) fn editor_secret_field<ToggleVisibility, Clear>(
+pub(super) fn editor_secret_field<Clear>(
     palette: crate::theme::ThemePalette,
     label: impl Into<FieldLabel>,
     field: ConnectionEditorField,
     fields: &ConnectionEditorFields,
-    options: EditorSecretFieldOptions<ToggleVisibility, Clear>,
+    options: EditorSecretFieldOptions<Clear>,
     cx: &App,
 ) -> impl IntoElement
 where
-    ToggleVisibility: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     Clear: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 {
     let EditorSecretFieldOptions {
         disabled,
-        visibility_tooltip,
         clear_tooltip,
-        on_toggle_visibility,
         on_clear,
     } = options;
     let label = label.into();
@@ -1296,10 +1326,17 @@ where
     let focused = entity
         .as_ref()
         .is_some_and(|field| field.read(cx).has_focus());
-    let masked = entity
-        .as_ref()
-        .is_none_or(|field| field.read(cx).is_masked());
     div()
+        .id(SharedString::from(format!(
+            "connection-editor-field-{field:?}"
+        )))
+        .debug_selector(move || format!("connection-editor-field-{field:?}"))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::Field(field))
+                .cloned(),
+        )
         .min_w_0()
         .flex()
         .flex_col()
@@ -1333,19 +1370,6 @@ where
                 }))
                 .child(
                     zzclawterm_ui::ZzClawIconButton::new(
-                        "connection-editor-password-visibility",
-                        if masked {
-                            "icons/eye.svg"
-                        } else {
-                            "icons/eye-off.svg"
-                        },
-                    )
-                    .disabled(disabled)
-                    .tooltip(visibility_tooltip)
-                    .on_click(on_toggle_visibility),
-                )
-                .child(
-                    zzclawterm_ui::ZzClawIconButton::new(
                         "connection-editor-password-clear",
                         "icons/delete.svg",
                     )
@@ -1354,6 +1378,14 @@ where
                     .on_click(on_clear),
                 ),
         )
+        .when_some(fields.errors.get(&field), |this, error| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.danger))
+                    .child(error.clone()),
+            )
+        })
 }
 
 pub(super) fn forwarding_endpoint_editor_field(
@@ -1369,6 +1401,15 @@ pub(super) fn forwarding_endpoint_editor_field(
     let handle = entity.read(cx).focus_handle();
     let focused = entity.read(cx).has_focus();
     div()
+        .id(SharedString::from(format!(
+            "connection-editor-forwarding-{index}-{field:?}"
+        )))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::ForwardingEndpoint { index, field })
+                .cloned(),
+        )
         .flex()
         .flex_col()
         .gap_1()
@@ -1467,6 +1508,16 @@ pub(super) fn editor_stepper_field(
     let label = label.into();
     let entity = fields.get_number(&field);
     div()
+        .id(SharedString::from(format!(
+            "connection-editor-field-{field:?}"
+        )))
+        .debug_selector(move || format!("connection-editor-field-{field:?}"))
+        .anchor_scroll(
+            fields
+                .anchors
+                .get(&ConnectionEditorFocusTarget::Field(field))
+                .cloned(),
+        )
         .flex()
         .flex_col()
         .gap_1()
@@ -1488,6 +1539,14 @@ pub(super) fn editor_stepper_field(
                         .child(ZzClawNumberInput::new(field))
                 })),
         )
+        .when_some(fields.errors.get(&field), |this, error| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.danger))
+                    .child(error.clone()),
+            )
+        })
 }
 
 pub(super) fn icon_action_button(

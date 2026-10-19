@@ -190,7 +190,7 @@ pub(crate) struct TransferEditorState {
     pub(crate) remote_path: String,
     pub(crate) raw_path_token: Option<String>,
     pub(crate) name: String,
-    pub(crate) content: String,
+    pub(crate) content: zzclawterm_ui::document_snapshot::ZzClawDocumentSnapshot,
     pub(crate) search_query: String,
     pub(crate) active_match: usize,
     pub(crate) revision: Option<RemoteTextRevision>,
@@ -331,7 +331,7 @@ mod tests {
                 .next()
                 .unwrap_or(remote_path)
                 .to_string(),
-            content: String::new(),
+            content: Default::default(),
             search_query: String::new(),
             active_match: 0,
             revision: None,

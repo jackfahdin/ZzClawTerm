@@ -115,7 +115,7 @@ fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn set_windows_current_user_acl(path: &Path, directory: bool) -> anyhow::Result<()> {
-    super::windows_acl::set_current_user_only(path, directory)
+    crate::platform::windows_acl::set_current_user_only(path, directory)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -212,8 +212,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&store.file).unwrap()).unwrap();
         assert_eq!(actual.token, second.token);
         assert_eq!(actual.generation, second.generation);
-        super::super::windows_acl::assert_current_user_only(&store.directory, true);
-        super::super::windows_acl::assert_current_user_only(&store.file, false);
+        crate::platform::windows_acl::assert_current_user_only(&store.directory, true);
+        crate::platform::windows_acl::assert_current_user_only(&store.file, false);
 
         let temporary_files = std::fs::read_dir(&store.directory)
             .unwrap()

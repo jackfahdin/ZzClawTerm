@@ -1,4 +1,5 @@
 //! Session lifecycle, prompts, recording and file-transfer session runtimes.
+mod transfer_wire;
 
 use std::collections::HashMap;
 
@@ -60,7 +61,8 @@ pub(in crate::features) use auth_runtime::{
 pub(in crate::features) use prompt_runtime::{
     credential_prompt_id, credential_prompt_target, credential_text_input_id,
     keyboard_interactive_prompt_id, keyboard_interactive_prompt_target,
-    keyboard_interactive_text_input_id, sftp_duplicate_prompt_id, uuid_like_prompt_id,
+    keyboard_interactive_text_input_id, prompt_input_setup, sftp_duplicate_prompt_id,
+    uuid_like_prompt_id,
 };
 pub(in crate::features) use state::{
     PendingSessionStart, SavedConnectionStartOptions, SessionCatalogTransferBundle,

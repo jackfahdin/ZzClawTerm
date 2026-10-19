@@ -1,17 +1,16 @@
 use rust_i18n::t;
+use std::time::Instant;
+
+use super::tab_motion::{TabMotionElement, TabStripViewportElement};
 
 use gpui::{
     Anchor, ClickEvent, Context, FontWeight, IntoElement, MouseButton, ScrollDelta,
     ScrollWheelEvent, SharedString, div, point, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::truncate_preview;
-use zzclawterm_ui::{
-    ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement,
-    ZzClawScrollable as _,
-};
+use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
 use crate::features::ZzClawTermApp;
-use crate::features::formatting::session_kind_label;
 use crate::features::icons::resolve_connection_icon;
 use crate::features::shell::{
     NewSessionMenuAnchor, SessionTabDragPayload, SessionTabDragPreview, SessionTabTooltip,
@@ -80,6 +79,24 @@ fn transient_tab_precedes_session(
     session_key: SessionTabOrderKey,
 ) -> bool {
     (transient.0, transient.1) < session_key
+}
+
+/// A view boundary keeps animation frames inside the strip. The application
+/// remains the owner of sessions; this view only adapts its presentation.
+struct SessionTabStrip {
+    app: gpui::WeakEntity<ZzClawTermApp>,
+    group: Option<String>,
+}
+
+impl gpui::Render for SessionTabStrip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view_id = cx.entity_id();
+        self.app
+            .update(cx, |app, cx| {
+                app.render_session_tab_strip(self.group.clone(), view_id, cx)
+            })
+            .unwrap_or_else(|_| div().into_any_element())
+    }
 }
 
 impl ZzClawTermApp {
@@ -174,6 +191,10 @@ impl ZzClawTermApp {
                     .id(SharedString::from(format!(
                         "pending-session-tab-close-{close_request_id}"
                     )))
+                    .tooltip(|window, cx| {
+                        zzclawterm_ui::ZzClawTooltip::new(t!("common.close").to_string())
+                            .build(window, cx)
+                    })
                     .group(SharedString::from(format!(
                         "pending-session-tab-close-group-{close_request_id}"
                     )))
@@ -295,6 +316,10 @@ impl ZzClawTermApp {
                     .id(SharedString::from(format!(
                         "failed-session-tab-close-{close_request_id}"
                     )))
+                    .tooltip(|window, cx| {
+                        zzclawterm_ui::ZzClawTooltip::new(t!("common.close").to_string())
+                            .build(window, cx)
+                    })
                     .group(SharedString::from(format!(
                         "failed-session-tab-close-group-{close_request_id}"
                     )))
@@ -401,6 +426,11 @@ impl ZzClawTermApp {
         let drop_target_session_id = session.id.clone();
         let drag_over_target_session_id = session.id.clone();
         let is_drag_source = self.session.tab_drag_source_is(&session.id);
+        let motion = self
+            .shell
+            .tab_strip_motion(self.terminal.terminal_group_for_tab(&session.id));
+        let has_local_preview = motion.borrow().preview(&session.id).is_some();
+        let preview_width = motion.borrow().width(&session.id).unwrap_or(188.);
         let custom_color = self.session.tab_color(&session.id);
         // Active when any leaf under this tab root is focused.
         let is_active = group_active == Some(session.id.as_str());
@@ -422,6 +452,16 @@ impl ZzClawTermApp {
             .any(|id| self.sync_input.session_is_paused_in_active_group(id));
         let show_sync_indicator = self.sync_input.broadcast_to_all() || sync_group.is_some();
         let sync_indicator_color = sync_group.map(|group| group.color).unwrap_or(palette.link);
+        let sync_indicator_label = show_sync_indicator.then(|| {
+            let scope = sync_group
+                .map(|group| group.name.clone())
+                .unwrap_or_else(|| t!("menu.broadcastToAll").to_string());
+            if sync_paused {
+                format!("{scope} · {}", t!("syncGroup.paused"))
+            } else {
+                scope
+            }
+        });
         let accent_color = if is_active {
             custom_color.unwrap_or(palette.primary)
         } else if let Some(custom_color) = custom_color {
@@ -434,6 +474,22 @@ impl ZzClawTermApp {
             palette.text_dimmed
         };
         let accent = rgb(accent_color);
+        // Build both the strip and its drag preview from the same resolved
+        // icon, including uploaded images and full-color connection assets.
+        let tab_icon = move || {
+            if let Some(image) = custom_icon.as_ref() {
+                gpui::img(image.clone()).size(px(14.)).into_any_element()
+            } else if let Some(icon) = saved_icon {
+                themed_icon(palette, icon, is_active, 14.)
+            } else {
+                svg()
+                    .size(px(14.))
+                    .path(kind_icon)
+                    .text_color(accent)
+                    .into_any_element()
+            }
+        };
+        let drag_icon = tab_icon.clone();
         let bg = if let Some(custom_color) = custom_color {
             rgba((custom_color << 8) | if is_active { 0x24 } else { 0x14 })
         } else if is_active {
@@ -461,7 +517,6 @@ impl ZzClawTermApp {
             order_index: tab_index,
             source_group_id: target_group.clone(),
             display_name: display_name.clone(),
-            kind_label: session_kind_label(session.kind),
             kind_icon,
             preview_background: palette.surface,
             preview_border: palette.border,
@@ -474,6 +529,7 @@ impl ZzClawTermApp {
         let hover_card_id = format!("session-tab-hover-card-{session_id}");
         let tab = div()
             .id(SharedString::from(format!("session-tab-{session_id}")))
+            .debug_selector(|| format!("session-tab-{session_id}"))
             .group(tab_group_name.clone())
             // HoverCard adds trigger-host elements between this tab and
             // the 36px strip. Keep the tab's old explicit strip height so
@@ -493,7 +549,9 @@ impl ZzClawTermApp {
             .when(!is_active, |this| this.border_b_1())
             .bg(bg)
             .when(is_disconnected, |this| this.opacity(0.78))
-            .when(is_drag_source, |this| this.opacity(0.55))
+            .when(is_drag_source, |this| {
+                this.opacity(if has_local_preview { 0. } else { 0.55 })
+            })
             .cursor_pointer()
             .hover(move |this| this.bg(hover_bg))
             .cursor_move()
@@ -501,9 +559,18 @@ impl ZzClawTermApp {
                 let _ = drag_source_app.update(cx, |app, cx| {
                     app.begin_session_tab_drag(payload, position, window, cx);
                 });
-                cx.new(|_| SessionTabDragPreview::new(payload.clone(), position))
+                cx.new(|_| {
+                    SessionTabDragPreview::new(payload.clone(), position)
+                        .with_width(preview_width)
+                        .with_icon(drag_icon.clone())
+                })
             })
             .drag_over::<SessionTabDragPayload>(move |this, payload, _, _| {
+                if payload.source_workspace_id == drop_workspace_id
+                    && payload.source_group_id == hover_target_group
+                {
+                    return this;
+                }
                 if payload.source_workspace_id != drop_workspace_id {
                     return this
                         .bg(drag_target_bg)
@@ -539,6 +606,9 @@ impl ZzClawTermApp {
             .on_drop(
                 cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
                     this.accept_session_tab_drop(payload, cx);
+                    if this.commit_session_tab_preview(payload, &target_group, cx) {
+                        return;
+                    }
                     if payload.source_workspace_id != this.workspace_id {
                         this.request_tab_tree_move(
                             payload,
@@ -594,17 +664,7 @@ impl ZzClawTermApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(if let Some(image) = custom_icon {
-                        gpui::img(image).size(px(14.)).into_any_element()
-                    } else if let Some(icon) = saved_icon {
-                        themed_icon(palette, icon, is_active, 14.)
-                    } else {
-                        svg()
-                            .size(px(14.))
-                            .path(kind_icon)
-                            .text_color(accent)
-                            .into_any_element()
-                    }),
+                    .child(tab_icon()),
             )
             .child(
                 div()
@@ -640,9 +700,15 @@ impl ZzClawTermApp {
                     .text_ellipsis()
                     .child(tab_title.clone()),
             )
-            .when(show_sync_indicator, |this| {
+            .when_some(sync_indicator_label, |this, label| {
                 this.child(
                     div()
+                        .id(SharedString::from(format!(
+                            "session-tab-sync-{close_session_id}"
+                        )))
+                        .tooltip(move |window, cx| {
+                            zzclawterm_ui::ZzClawTooltip::new(label.clone()).build(window, cx)
+                        })
                         .size(px(12.))
                         .flex()
                         .items_center()
@@ -664,6 +730,14 @@ impl ZzClawTermApp {
                     .id(SharedString::from(format!(
                         "session-tab-close-{close_session_id}"
                     )))
+                    .tooltip(move |window, cx| {
+                        let label = if is_locked {
+                            t!("tabCtx.lockedCloseBlocked")
+                        } else {
+                            t!("common.close")
+                        };
+                        zzclawterm_ui::ZzClawTooltip::new(label.to_string()).build(window, cx)
+                    })
                     .size(px(18.))
                     .flex()
                     .items_center()
@@ -738,6 +812,28 @@ impl ZzClawTermApp {
     pub(in crate::features) fn session_tab_strip_for_group(
         &mut self,
         group_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let groups = self
+            .terminal
+            .terminal_window_tree()
+            .map(|root| root.leaf_ids())
+            .unwrap_or_default();
+        self.shell.prune_tab_strips(&groups);
+        if let Some(view) = self.shell.tab_strip_view(&group_id) {
+            return view.into_any_element();
+        }
+        let app = cx.weak_entity();
+        let group = group_id.clone();
+        let view: gpui::AnyView = cx.new(|_| SessionTabStrip { app, group }).into();
+        self.shell.set_tab_strip_view(group_id, view.clone());
+        view.into_any_element()
+    }
+
+    fn render_session_tab_strip(
+        &mut self,
+        group_id: Option<String>,
+        strip_view_id: gpui::EntityId,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let palette = self.theme_palette();
@@ -878,6 +974,12 @@ impl ZzClawTermApp {
             }
             self.shell.consume_session_tab_scroll_into_view();
         }
+        let motion = self.shell.tab_strip_motion(group_id.clone());
+        let motion_for_drag = motion.clone();
+        let scroll_for_drag = tab_scroll.clone();
+        let drag_group = group_id.clone();
+        let drag_workspace = self.workspace_id;
+        let mut motion_order = Vec::new();
         let tab_scroll_for_wheel = tab_scroll.clone();
         let mut tabs = div()
             .id(SharedString::from(format!(
@@ -888,10 +990,37 @@ impl ZzClawTermApp {
             .w_full()
             .flex()
             .items_center()
-            // Tauri tab-strip-scroll: horizontal overflow instead of clipping tabs.
+            // Keep tab overflow scrollable without painting a scrollbar over the tabs;
+            // the wheel handler and open-tabs menu provide overflow navigation.
             .overflow_x_scroll()
             .overflow_y_hidden()
             .track_scroll(&tab_scroll)
+            .on_drag_move(
+                move |event: &gpui::DragMoveEvent<SessionTabDragPayload>, _, cx| {
+                    let payload = event.drag(cx);
+                    let mut motion = motion_for_drag.borrow_mut();
+                    let local = payload.source_workspace_id == drag_workspace
+                        && payload.source_group_id == drag_group;
+                    if local && event.bounds.contains(&event.event.position) {
+                        motion.set_pointer(Some(f32::from(event.event.position.x)));
+                        motion.update(
+                            f32::from(event.event.position.x - scroll_for_drag.offset().x),
+                            Instant::now(),
+                        );
+                    } else {
+                        motion.suspend(Instant::now());
+                    }
+                    if local {
+                        cx.notify(strip_view_id);
+                    }
+                },
+            )
+            .on_drop(cx.listener({
+                let group = group_id.clone();
+                move |this, payload: &SessionTabDragPayload, _, cx| {
+                    this.drop_session_tab_on_strip(payload, &group, cx);
+                }
+            }))
             .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
                 let (delta_x, delta_y) = match event.delta {
                     ScrollDelta::Lines(delta) => (delta.x * 36., delta.y * 36.),
@@ -910,6 +1039,7 @@ impl ZzClawTermApp {
             }));
 
         let mut transient_cursor = 0usize;
+        let motion_sessions = sessions.iter().map(|session| session.id.clone()).collect();
         for (tab_index, session) in sessions.into_iter().enumerate() {
             let session_key = self
                 .session
@@ -922,38 +1052,59 @@ impl ZzClawTermApp {
                 let (_, _, _, request_id, name, error) = transient_tabs[transient_cursor].clone();
                 let tab_number = tab_index + transient_cursor + 1;
                 let active = self.session.start_request_is_active(&request_id);
-                tabs = tabs.child(match error {
+                let motion_id = format!("pending:{request_id}");
+                motion_order.push(motion_id.clone());
+                tabs = tabs.child(TabMotionElement {
+                    id: motion_id,
+                    motion: motion.clone(),
+                    scroll: tab_scroll.clone(),
+                    child: match error {
+                        Some(error) => self
+                            .failed_session_tab(request_id, name, error, tab_number, active, cx)
+                            .into_any_element(),
+                        None => self
+                            .pending_session_tab(request_id, name, tab_number, active, cx)
+                            .into_any_element(),
+                    },
+                });
+                transient_cursor += 1;
+            }
+            motion_order.push(session.id.clone());
+            tabs = tabs.child(TabMotionElement {
+                id: session.id.clone(),
+                motion: motion.clone(),
+                scroll: tab_scroll.clone(),
+                child: self.session_strip_tab(
+                    session,
+                    tab_index,
+                    tab_index + transient_cursor + 1,
+                    group_active.as_deref(),
+                    cx,
+                ),
+            });
+        }
+        while transient_cursor < transient_tabs.len() {
+            let (_, _, _, request_id, name, error) = transient_tabs[transient_cursor].clone();
+            let tab_number = session_count + transient_cursor + 1;
+            let active = self.session.start_request_is_active(&request_id);
+            let motion_id = format!("pending:{request_id}");
+            motion_order.push(motion_id.clone());
+            tabs = tabs.child(TabMotionElement {
+                id: motion_id,
+                motion: motion.clone(),
+                scroll: tab_scroll.clone(),
+                child: match error {
                     Some(error) => self
                         .failed_session_tab(request_id, name, error, tab_number, active, cx)
                         .into_any_element(),
                     None => self
                         .pending_session_tab(request_id, name, tab_number, active, cx)
                         .into_any_element(),
-                });
-                transient_cursor += 1;
-            }
-            tabs = tabs.child(self.session_strip_tab(
-                session,
-                tab_index,
-                tab_index + transient_cursor + 1,
-                group_active.as_deref(),
-                cx,
-            ));
-        }
-        while transient_cursor < transient_tabs.len() {
-            let (_, _, _, request_id, name, error) = transient_tabs[transient_cursor].clone();
-            let tab_number = session_count + transient_cursor + 1;
-            let active = self.session.start_request_is_active(&request_id);
-            tabs = tabs.child(match error {
-                Some(error) => self
-                    .failed_session_tab(request_id, name, error, tab_number, active, cx)
-                    .into_any_element(),
-                None => self
-                    .pending_session_tab(request_id, name, tab_number, active, cx)
-                    .into_any_element(),
+                },
             });
             transient_cursor += 1;
         }
+        motion.borrow_mut().configure(motion_order, motion_sessions);
 
         let end_drop_group = group_id.clone();
         let hover_end_group = group_id.clone();
@@ -974,7 +1125,6 @@ impl ZzClawTermApp {
                     .drag_over::<SessionTabDragPayload>(move |this, payload, _, _| {
                         if payload.source_workspace_id == drop_workspace_id
                             && payload.source_group_id == hover_end_group
-                            && payload.order_index + 1 >= session_count
                         {
                             this
                         } else {
@@ -990,37 +1140,12 @@ impl ZzClawTermApp {
                     ))
                     .on_drop(
                         cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
-                            this.accept_session_tab_drop(payload, cx);
-                            if payload.source_workspace_id == this.workspace_id {
-                                if let Some(group) = &end_drop_group {
-                                    this.dock_tab_on_terminal_window_leaf(
-                                        payload.session_id.clone(),
-                                        group.clone(),
-                                        crate::models::TabDockZone::Center,
-                                        cx,
-                                    );
-                                } else {
-                                    this.reorder_session_to_end(payload.session_id.clone(), cx);
-                                }
-                            } else {
-                                this.request_tab_tree_move(
-                                    payload,
-                                    end_drop_group
-                                        .clone()
-                                        .map(|leaf_id| {
-                                            zzclawterm_core::MoveTabPlacement::TerminalLeaf {
-                                                leaf_id,
-                                                edge: None,
-                                            }
-                                        })
-                                        .unwrap_or(zzclawterm_core::MoveTabPlacement::Append),
-                                    cx,
-                                );
-                            }
+                            this.drop_session_tab_on_strip(payload, &end_drop_group, cx);
                         }),
                     ),
             );
         } else {
+            let empty_drop_group = group_id.clone();
             tabs = tabs.child(
                 div()
                     .id(SharedString::from(format!(
@@ -1036,16 +1161,11 @@ impl ZzClawTermApp {
                             .border_l_2()
                             .border_color(rgb(palette.focus_ring))
                     })
-                    .on_drop(cx.listener(|this, payload: &SessionTabDragPayload, _, cx| {
-                        this.accept_session_tab_drop(payload, cx);
-                        if payload.source_workspace_id != this.workspace_id {
-                            this.request_tab_tree_move(
-                                payload,
-                                zzclawterm_core::MoveTabPlacement::Append,
-                                cx,
-                            );
-                        }
-                    })),
+                    .on_drop(
+                        cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
+                            this.drop_session_tab_on_strip(payload, &empty_drop_group, cx);
+                        }),
+                    ),
             );
         }
 
@@ -1268,8 +1388,11 @@ impl ZzClawTermApp {
                     });
                 });
             })
-            .child(tabs)
-            .horizontal_scrollbar(&tab_scroll);
+            .child(TabStripViewportElement {
+                child: tabs.into_any_element(),
+                motion,
+                scroll: tab_scroll,
+            });
 
         div()
             .h(px(36.)) // Tauri TabBar: h-9

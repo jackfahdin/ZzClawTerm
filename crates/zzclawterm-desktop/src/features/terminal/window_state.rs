@@ -344,6 +344,16 @@ impl TerminalFeatureState {
         self.windows.drop.take().is_some()
     }
 
+    pub(in crate::features) fn clear_terminal_window_drop_for_leaf(
+        &mut self,
+        leaf_id: &str,
+    ) -> bool {
+        if self.terminal_window_drop_for_leaf(leaf_id).is_none() {
+            return false;
+        }
+        self.clear_terminal_window_drop()
+    }
+
     pub(in crate::features) fn dock_tab_on_terminal_window_leaf(
         &mut self,
         tab_id: &str,

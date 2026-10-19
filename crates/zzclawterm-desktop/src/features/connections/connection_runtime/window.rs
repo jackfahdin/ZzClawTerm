@@ -76,9 +76,16 @@ impl Render for ConnectionEditorWindow {
                 field.update(cx, |field, cx| field.select_all(window, cx));
             }
         }
-        let content = self
-            .app
-            .update(cx, |app, cx| app.connection_editor_window_view(editor, cx));
+        let content = self.app.update(cx, |app, cx| {
+            app.connection_editor_window_view(
+                editor,
+                (
+                    f32::from(window.viewport_size().width),
+                    f32::from(window.viewport_size().height),
+                ),
+                cx,
+            )
+        });
         let close_app = self.app.clone();
         let on_close: ChildWindowCloseHandler =
             Rc::new(move |window: &mut Window, cx: &mut App| {
@@ -176,7 +183,7 @@ fn open_connection_editor_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &m
     }
 
     let title = app.read(cx).connection_editor_title().to_string();
-    let spec = ChildWindowSpec::modal_editor(title, 520., 620.).min_size(420., 480.);
+    let spec = ChildWindowSpec::modal_editor(title, 900., 680.).min_size(420., 480.);
     let chrome = spec.chrome();
     let parent = app.read(cx).shell.main_window();
     let options = child_window_options(&spec, parent, cx);

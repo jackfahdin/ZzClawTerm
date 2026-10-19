@@ -18,9 +18,11 @@ pub mod hex_document;
 pub mod keyword_highlight_presets;
 pub mod models;
 pub mod natural_order;
+pub mod network_cli_prompt;
 pub mod note_export;
 pub mod plugins;
 pub mod portable_snapshot;
+pub mod raw_cli_capture;
 pub mod remote_preview;
 pub mod runtime;
 pub mod secret;
@@ -49,6 +51,7 @@ pub mod terminal_wire_write {
     pub use super::terminal::wire_write::*;
 }
 pub mod text_edit;
+pub mod themes;
 pub mod transfer_speed;
 pub mod translation;
 pub mod updater;
@@ -61,10 +64,7 @@ pub use activation::{
     decode_activation_ack, decode_activation_request, encode_activation_ack,
     encode_activation_request, parse_activation_request, parse_deep_link,
 };
-pub use agent_capture::{
-    AgentCaptureCancelResult, AgentCaptureProcessResult, AgentCapturedOutput,
-    AgentOutputCaptureProcessor, build_agent_capture_command,
-};
+pub use agent_capture::build_agent_capture_command;
 pub use ai::{
     AI_AUDIT_MAX_LOGS, AI_HISTORY_MAX_MESSAGES, AI_HISTORY_MAX_SESSIONS,
     AI_REQUEST_USER_AGENT_DEFAULT, AgentApprovalDecision, AgentApprovalOutcome,
@@ -132,18 +132,19 @@ pub use cloud_sync::{
     GithubGistSyncSettings, LocalCloudSyncOptions, LocalDirectoryRemote, MASKED_SECRET_VALUE,
     OAuthDriveSyncSettings, REMOTE_SYNC_POINTER_SCHEMA_VERSION, RemoteSyncPointer, S3HttpMethod,
     S3SignedRequest, S3SyncSettings, SNIPPET_REMOTE_FILE_PREFIX, SNIPPET_REMOTE_FILE_SUFFIX,
-    SnippetBlobBackend, SnippetHttpClient, SnippetHttpDocument, SnippetHttpFile, SnippetHttpMethod,
-    SnippetHttpRequest, SnippetHttpResponse, SnippetRemote, WebdavSyncSettings,
-    append_cloud_sync_history, build_s3_signed_request, build_s3_signed_request_with_query,
-    check_local_snapshot, check_snapshot_with_remote, cleanup_sync_snapshots_with_remote,
-    decide_cloud_remote_check, decode_snippet_blob, drive_remote_segments, encode_snippet_blob,
-    gitee_snippet_patch_body, github_gist_patch_body, github_gist_update_conflict_is_retryable,
-    google_drive_query_literal, legacy_sync_snapshot_file, load_sync_pointer,
-    load_sync_pointer_from_remote, mask_cloud_sync_settings, merge_masked_cloud_sync_settings,
-    pull_local_snapshot, pull_snapshot_with_remote, pull_snapshot_with_remote_guarded,
-    push_local_snapshot, push_snapshot_with_remote, read_cloud_sync_history,
-    recover_current_snapshot_with_remote, recover_local_current_snapshot, remote_path,
-    s3_payload_sha256, snippet_remote_filename, snippet_remote_path,
+    SnapshotUnreadableCause, SnippetBlobBackend, SnippetHttpClient, SnippetHttpDocument,
+    SnippetHttpFile, SnippetHttpMethod, SnippetHttpRequest, SnippetHttpResponse, SnippetRemote,
+    WebdavSyncSettings, append_cloud_sync_history, build_s3_signed_request,
+    build_s3_signed_request_with_query, check_local_snapshot, check_snapshot_with_remote,
+    cleanup_sync_snapshots_with_remote, decide_cloud_remote_check, decode_snippet_blob,
+    drive_remote_segments, encode_snippet_blob, gitee_snippet_patch_body, github_gist_patch_body,
+    github_gist_update_conflict_is_retryable, google_drive_query_literal,
+    legacy_sync_snapshot_file, load_sync_pointer, load_sync_pointer_from_remote,
+    mask_cloud_sync_settings, merge_masked_cloud_sync_settings, pull_local_snapshot,
+    pull_snapshot_with_remote, pull_snapshot_with_remote_guarded, push_local_snapshot,
+    push_snapshot_with_remote, read_cloud_sync_history, recover_current_snapshot_with_remote,
+    recover_local_current_snapshot, remote_path, s3_payload_sha256, snippet_remote_filename,
+    snippet_remote_path,
 };
 pub use command_search::{
     fuzzy_search_items, manual_empty_command_suggestions, search_command_sources,

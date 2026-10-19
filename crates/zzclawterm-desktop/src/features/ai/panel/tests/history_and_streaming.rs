@@ -22,6 +22,7 @@ struct HistoryHost {
 fn opening_the_current_history_entry_keeps_live_message_ids_and_draft() {
     let root = TestConfigDir::new("zzclawterm-ai-current-history");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, root.path());
     cx.update_entity(&app, |app, cx| {
         app.ai.switch_visible_scope("terminal:fixture");
@@ -63,6 +64,7 @@ impl Render for HistoryHost {
 fn successful_history_load_restores_focus_from_the_inner_search_field() {
     let root = TestConfigDir::new("zzclawterm-ai-history-load-focus");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     vcx.update(|window, cx| {
         let field = app
@@ -120,6 +122,7 @@ fn successful_history_load_restores_focus_from_the_inner_search_field() {
 fn history_header_preserves_conversation_and_gives_the_list_a_visible_viewport() {
     let root = TestConfigDir::new("zzclawterm-ai-history-header");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, root.path());
     let original = cx.update_entity(&app, |app, cx| {
         app.sync_component_theme(cx);
@@ -217,6 +220,7 @@ fn history_header_preserves_conversation_and_gives_the_list_a_visible_viewport()
 fn snapshot_refresh_does_not_switch_or_create_a_conversation() {
     let root = TestConfigDir::new("zzclawterm-ai-snapshot-scope");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, root.path());
     cx.update_entity(&app, |app, cx| {
         app.ai.switch_visible_scope("terminal:fixture");
@@ -239,6 +243,7 @@ fn history_exposes_all_two_hundred_sessions_and_scrolls_in_a_short_panel() {
     for theme in ["github-dark", "github-light"] {
         let root = TestConfigDir::new("zzclawterm-ai-history-list");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = compact_host(&mut cx, root.path());
         // Resize the actual viewport, rather than merely the shell's projection.
         vcx.update(|window, cx| {
@@ -288,6 +293,7 @@ fn history_exposes_all_two_hundred_sessions_and_scrolls_in_a_short_panel() {
 fn content_cache_parses_only_changed_messages_and_ignores_a_replaced_session() {
     let root = TestConfigDir::new("zzclawterm-ai-content-cache");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         snapshot.messages = (0..2000).map(transcript_message).collect::<Vec<_>>().into();
@@ -367,6 +373,7 @@ fn streaming_bursts_coalesce_without_losing_text_and_background_sessions_do_not_
     use std::time::Duration;
     let root = TestConfigDir::new("zzclawterm-ai-stream-burst");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let launch = vcx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -469,13 +476,13 @@ fn streaming_bursts_coalesce_without_losing_text_and_background_sessions_do_not_
         .unwrap();
     launch
         .tx
-        .unbounded_send(AiChatWorkerEvent::Finished(
+        .unbounded_send(AiChatWorkerEvent::Finished(Box::new(
             crate::features::runtime_jobs::AiChatJobResult {
                 job_id: launch.job_id,
                 session_id: launch.session_id.clone(),
                 result: Err("fixture failure".into()),
             },
-        ))
+        )))
         .unwrap();
     vcx.run_until_parked();
     assert_eq!(vcx.update(|_, cx| ai_snapshot_sets(&app, cx)), before + 1);
@@ -490,6 +497,7 @@ fn compare_immediate_and_coalesced_stream_updates_for_two_thousand_messages() {
     for coalesced in [false, true] {
         let root = TestConfigDir::new("zzclawterm-ai-stream-profile");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = compact_host(&mut cx, root.path());
         let launch = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {

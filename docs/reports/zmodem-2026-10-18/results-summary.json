@@ -1,0 +1,548 @@
+{
+  "environment": {
+    "record": "environment",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "profile": "debug",
+    "revision": "cf79db753e3149089f3f6a97e72abbd7501d843b",
+    "worktree_modified": true,
+    "unix_time": 1792302931.1403165
+  },
+  "total_runs": 84,
+  "all_success": true,
+  "payload_bytes": 8388608,
+  "sha256": "d521072d1cb032cc9ce2e25ba8c6fb6a03a20eb5a49c5206f21912b8fd8141a5",
+  "groups": [
+    {
+      "layer": "protocol_file_io",
+      "label": "conservative",
+      "direction": null,
+      "window": 10,
+      "nonstop_receive": false,
+      "buffered_files": false,
+      "runs": 3,
+      "median_mib_per_second": 4.387533022355962,
+      "min_mib_per_second": 4.263659820063962,
+      "max_mib_per_second": 4.452915621646224,
+      "median_elapsed_seconds": 1.8233481,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "bounded-path-buffered",
+      "direction": null,
+      "window": 10,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.635608975025715,
+      "min_mib_per_second": 4.5823271783896535,
+      "max_mib_per_second": 4.7278971105575005,
+      "median_elapsed_seconds": 1.7257711,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-window",
+      "direction": null,
+      "window": 10,
+      "nonstop_receive": true,
+      "buffered_files": false,
+      "runs": 3,
+      "median_mib_per_second": 4.602846020244122,
+      "min_mib_per_second": 4.189328972660806,
+      "max_mib_per_second": 4.682376821298259,
+      "median_elapsed_seconds": 1.7380551,
+      "sender_ack_waits": [
+        821
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-window",
+      "direction": null,
+      "window": 64,
+      "nonstop_receive": true,
+      "buffered_files": false,
+      "runs": 3,
+      "median_mib_per_second": 4.581989402431261,
+      "min_mib_per_second": 4.503350013929425,
+      "max_mib_per_second": 4.703582024649827,
+      "median_elapsed_seconds": 1.7459665,
+      "sender_ack_waits": [
+        129
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-window",
+      "direction": null,
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": false,
+      "runs": 3,
+      "median_mib_per_second": 4.612644527126097,
+      "min_mib_per_second": 4.423464199494254,
+      "max_mib_per_second": 4.76375440297444,
+      "median_elapsed_seconds": 1.734363,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-window",
+      "direction": null,
+      "window": 1024,
+      "nonstop_receive": true,
+      "buffered_files": false,
+      "runs": 3,
+      "median_mib_per_second": 4.610120655501531,
+      "min_mib_per_second": 4.608471996015054,
+      "max_mib_per_second": 4.6871250299976,
+      "median_elapsed_seconds": 1.7353125,
+      "sender_ack_waits": [
+        9
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-buffered",
+      "direction": null,
+      "window": 10,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.760931038151959,
+      "min_mib_per_second": 4.647917355381504,
+      "max_mib_per_second": 4.777954708095038,
+      "median_elapsed_seconds": 1.6803436,
+      "sender_ack_waits": [
+        821
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-buffered",
+      "direction": null,
+      "window": 64,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.81433922050793,
+      "min_mib_per_second": 4.735114162418677,
+      "max_mib_per_second": 4.815748847139824,
+      "median_elapsed_seconds": 1.6617026,
+      "sender_ack_waits": [
+        129
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-buffered",
+      "direction": null,
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.869026533699232,
+      "min_mib_per_second": 4.7614478896429695,
+      "max_mib_per_second": 4.932794680375561,
+      "median_elapsed_seconds": 1.6430389,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "protocol_file_io",
+      "label": "nonstop-buffered",
+      "direction": null,
+      "window": 1024,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.871906019958494,
+      "min_mib_per_second": 4.556120786634756,
+      "max_mib_per_second": 4.921275282052128,
+      "median_elapsed_seconds": 1.6420678,
+      "sender_ack_waits": [
+        9
+      ],
+      "source_queue_peak_bytes": 0,
+      "write_queue_peak_bytes": 0,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 10,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.5512632620261866,
+      "min_mib_per_second": 2.98206563362446,
+      "max_mib_per_second": 3.5674631132117924,
+      "median_elapsed_seconds": 2.2527195,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 1108,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 64,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.3476177577898962,
+      "min_mib_per_second": 3.3106210932084674,
+      "max_mib_per_second": 3.5206700961807464,
+      "median_elapsed_seconds": 2.3897591,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 1108,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 256,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.3927417972091223,
+      "min_mib_per_second": 3.142269100862085,
+      "max_mib_per_second": 3.5605406289285555,
+      "median_elapsed_seconds": 2.3579749,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 1108,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 1024,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.4825110471780123,
+      "min_mib_per_second": 3.0758025383983187,
+      "max_mib_per_second": 3.4895965965266478,
+      "median_elapsed_seconds": 2.297193,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 1108,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 10,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.184849401393911,
+      "min_mib_per_second": 4.116056959436825,
+      "max_mib_per_second": 4.403759335212895,
+      "median_elapsed_seconds": 1.9116578,
+      "sender_ack_waits": [
+        821
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 10818,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 64,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.740265169248501,
+      "min_mib_per_second": 4.567839033006748,
+      "max_mib_per_second": 4.74324151820963,
+      "median_elapsed_seconds": 1.6876693,
+      "sender_ack_waits": [
+        129
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 68777,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 7.574934088604762,
+      "min_mib_per_second": 6.729882698144571,
+      "max_mib_per_second": 7.591084953919268,
+      "median_elapsed_seconds": 1.0561148,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 62382,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "upload",
+      "window": 1024,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 8.7500795710361,
+      "min_mib_per_second": 8.100743273573137,
+      "max_mib_per_second": 8.84653854298616,
+      "median_elapsed_seconds": 0.9142774,
+      "sender_ack_waits": [
+        9
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 62403,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-slow-peer",
+      "direction": "upload",
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 2.1918794264662536,
+      "min_mib_per_second": 2.1670578973671084,
+      "max_mib_per_second": 2.2162669282969776,
+      "median_elapsed_seconds": 3.6498358,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 21,
+      "write_queue_peak_bytes": 62382,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 10,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.385300947118341,
+      "min_mib_per_second": 3.089743372867372,
+      "max_mib_per_second": 3.3965014676282843,
+      "median_elapsed_seconds": 2.3631577,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 1108,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 64,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.227644907740595,
+      "min_mib_per_second": 3.1650731644247205,
+      "max_mib_per_second": 3.3495138578390122,
+      "median_elapsed_seconds": 2.4785874,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 1108,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 256,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.2999704941388197,
+      "min_mib_per_second": 3.230270477007581,
+      "max_mib_per_second": 3.363812982930541,
+      "median_elapsed_seconds": 2.4242641,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 1108,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 1024,
+      "nonstop_receive": false,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 3.301461982282787,
+      "min_mib_per_second": 3.1594106719679473,
+      "max_mib_per_second": 3.397101889913941,
+      "median_elapsed_seconds": 2.4231689,
+      "sender_ack_waits": [
+        8193
+      ],
+      "source_queue_peak_bytes": 1108,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 10,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.562329721736097,
+      "min_mib_per_second": 4.525923129911192,
+      "max_mib_per_second": 4.688797752987453,
+      "median_elapsed_seconds": 1.7534901,
+      "sender_ack_waits": [
+        821
+      ],
+      "source_queue_peak_bytes": 9716,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 64,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 4.911752989906839,
+      "min_mib_per_second": 4.89639353685846,
+      "max_mib_per_second": 4.9142838328170475,
+      "median_elapsed_seconds": 1.6287464,
+      "sender_ack_waits": [
+        129
+      ],
+      "source_queue_peak_bytes": 58065,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 5.022915482226571,
+      "min_mib_per_second": 5.0053532252744315,
+      "max_mib_per_second": 5.126332702324497,
+      "median_elapsed_seconds": 1.5927004999999999,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 214753,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-loopback",
+      "direction": "download",
+      "window": 1024,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 5.074737885030672,
+      "min_mib_per_second": 4.964386422626531,
+      "max_mib_per_second": 5.127131388573944,
+      "median_elapsed_seconds": 1.5764361,
+      "sender_ack_waits": [
+        9
+      ],
+      "source_queue_peak_bytes": 860491,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    },
+    {
+      "layer": "runtime_tcp",
+      "label": "runtime-slow-peer",
+      "direction": "download",
+      "window": 256,
+      "nonstop_receive": true,
+      "buffered_files": true,
+      "runs": 3,
+      "median_mib_per_second": 1.477435551583388,
+      "min_mib_per_second": 1.4773179071797464,
+      "max_mib_per_second": 1.489221350936724,
+      "median_elapsed_seconds": 5.4147878,
+      "sender_ack_waits": [
+        33
+      ],
+      "source_queue_peak_bytes": 1105,
+      "write_queue_peak_bytes": 21,
+      "capacity_wait_nanoseconds_max": 0
+    }
+  ]
+}

@@ -333,6 +333,7 @@ fn omitted_fields(path: &str) -> &'static [&'static str] {
             "agent_forwarding_config",
             "agent_forwarding",
             "auto_login",
+            "keep_alive_interval_secs",
             "encoding",
         ],
         "/auth" => &["account_id", "password_source"],

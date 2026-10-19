@@ -64,6 +64,7 @@ fn draw(app: &Entity<ZzClawTermApp>, cx: &mut VisualTestContext) {
 fn render_groups_and_invoke_menu() {
     let root = TestTempDir::new("zzclawterm-group-stack");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app_with_visible_local_session(&mut cx, root.path(), "s0");
     app.update(&mut cx, |app, cx| {
         app.sync_component_theme(cx);

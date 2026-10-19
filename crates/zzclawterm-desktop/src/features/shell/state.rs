@@ -7,8 +7,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{cell::RefCell, rc::Rc};
 
-use gpui::{Entity, Pixels, RenderImage, ScrollHandle, SharedString};
+use gpui::{AnyView, Entity, Pixels, RenderImage, ScrollHandle, SharedString};
 use zzclawterm_ui::{ChildWindowSlot, ZzClawAppMenuBar, ZzClawWindowHandle};
 
 use super::super::app_state::SettingsDraftSnapshot;
@@ -52,6 +53,8 @@ pub(in crate::features) struct ShellFeatureState {
     /// answer when a child window opens from a background event. Child windows
     /// need this one to pick the display and the placement to open on.
     main_window: Option<ZzClawWindowHandle>,
+    tab_strip_motion: HashMap<Option<String>, Rc<RefCell<super::tab_reorder::TabReorderMotion>>>,
+    tab_strip_views: HashMap<Option<String>, AnyView>,
 }
 
 #[derive(Default)]
@@ -195,6 +198,34 @@ pub(super) struct ShellWorkspaceState {
 }
 
 impl ShellFeatureState {
+    pub(in crate::features) fn prune_tab_strips(&mut self, groups: &[String]) {
+        self.tab_strip_views
+            .retain(|group, _| group.as_ref().is_none_or(|id| groups.contains(id)));
+        self.tab_strip_motion
+            .retain(|group, _| group.as_ref().is_none_or(|id| groups.contains(id)));
+    }
+
+    pub(in crate::features) fn tab_strip_view(&self, group: &Option<String>) -> Option<AnyView> {
+        self.tab_strip_views.get(group).cloned()
+    }
+
+    pub(in crate::features) fn set_tab_strip_view(&mut self, group: Option<String>, view: AnyView) {
+        self.tab_strip_views.insert(group, view);
+    }
+
+    pub(in crate::features) fn tab_strip_motion(
+        &mut self,
+        group: Option<String>,
+    ) -> Rc<RefCell<super::tab_reorder::TabReorderMotion>> {
+        self.tab_strip_motion.entry(group).or_default().clone()
+    }
+
+    pub(in crate::features) fn finish_tab_strip_motion(&mut self) {
+        for motion in self.tab_strip_motion.values() {
+            motion.borrow_mut().finish(Instant::now());
+        }
+    }
+
     pub(in crate::features) fn workspace_layout_restore_is_settled(&self) -> bool {
         self.workspace.pane_layout_restored && !self.workspace.pane_layout_loading
     }
@@ -209,6 +240,8 @@ impl ShellFeatureState {
 
     pub(in crate::features) fn new(init: ShellFeatureInit) -> Self {
         Self {
+            tab_strip_motion: HashMap::new(),
+            tab_strip_views: HashMap::new(),
             status: init.status,
             runtime: ShellRuntimeState::default(),
             bottom_panel: ShellBottomPanelState {

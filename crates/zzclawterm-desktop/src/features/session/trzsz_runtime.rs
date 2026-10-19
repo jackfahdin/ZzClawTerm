@@ -1,3 +1,4 @@
+use super::transfer_wire::TransferWire;
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::short_id;
 use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
@@ -54,6 +55,7 @@ struct TrzszDownloadFile {
 }
 
 struct TrzszDownloadWorker {
+    wire: TransferWire,
     command_tx: mpsc::Sender<TrzszDownloadWorkerCommand>,
     event_rx: Option<mpsc::Receiver<TrzszDownloadWorkerEvent>>,
     worker: Option<thread::JoinHandle<()>>,
@@ -91,6 +93,7 @@ struct TrzszUploadRuntime {
 }
 
 struct TrzszUploadWorker {
+    wire: TransferWire,
     command_tx: mpsc::Sender<TrzszUploadWorkerCommand>,
     event_rx: Option<mpsc::Receiver<TrzszUploadWorkerEvent>>,
     worker: Option<thread::JoinHandle<()>>,
@@ -139,16 +142,33 @@ struct TrzszUploadPrepareEvent {
 }
 
 impl TrzszDownloadWorker {
+    #[cfg(test)]
     fn spawn(download: TrzszDownloadRuntime, remote_is_windows: bool) -> Self {
+        Self::spawn_connected(download, remote_is_windows, TransferWire::default())
+    }
+
+    fn spawn_connected(
+        download: TrzszDownloadRuntime,
+        remote_is_windows: bool,
+        wire: TransferWire,
+    ) -> Self {
+        let worker_wire = wire.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(TRZSZ_DOWNLOAD_WORKER_EVENT_CHANNEL_CAP);
         let worker = thread::Builder::new()
             .name("zzclawterm-trzsz-download".to_string())
             .spawn(move || {
-                run_trzsz_download_worker(download, remote_is_windows, command_rx, event_tx)
+                run_trzsz_download_worker(
+                    download,
+                    remote_is_windows,
+                    command_rx,
+                    event_tx,
+                    worker_wire,
+                )
             })
             .expect("failed to spawn trzsz download worker");
         Self {
+            wire,
             command_tx,
             event_rx: Some(event_rx),
             worker: Some(worker),
@@ -176,6 +196,7 @@ impl TrzszDownloadWorker {
     }
 
     fn shutdown(&mut self) {
+        self.wire.stop();
         self.event_rx.take();
         let _ = self.command_tx.send(TrzszDownloadWorkerCommand::Stop);
         if let Some(worker) = self.worker.take()
@@ -236,14 +257,28 @@ impl Drop for TrzszUploadPrepareWorker {
 }
 
 impl TrzszUploadWorker {
-    fn spawn(upload: TrzszUploadRuntime, remote_is_windows: bool) -> Self {
+    fn spawn_connected(
+        upload: TrzszUploadRuntime,
+        remote_is_windows: bool,
+        wire: TransferWire,
+    ) -> Self {
+        let worker_wire = wire.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(TRZSZ_UPLOAD_WORKER_EVENT_CHANNEL_CAP);
         let worker = thread::Builder::new()
             .name("zzclawterm-trzsz-upload".to_string())
-            .spawn(move || run_trzsz_upload_worker(upload, remote_is_windows, command_rx, event_tx))
+            .spawn(move || {
+                run_trzsz_upload_worker(
+                    upload,
+                    remote_is_windows,
+                    command_rx,
+                    event_tx,
+                    worker_wire,
+                )
+            })
             .expect("failed to spawn trzsz upload worker");
         Self {
+            wire,
             command_tx,
             event_rx: Some(event_rx),
             worker: Some(worker),
@@ -270,6 +305,7 @@ impl TrzszUploadWorker {
     }
 
     fn shutdown(&mut self) {
+        self.wire.stop();
         self.event_rx.take();
         let _ = self.command_tx.send(TrzszUploadWorkerCommand::Stop);
         if let Some(worker) = self.worker.take()
@@ -358,9 +394,9 @@ impl TrzszSessionState {
         self.protocol_active = true;
     }
 
-    fn begin_download(&mut self, trigger: &TrzszTrigger, directory: PathBuf) {
+    fn begin_download(&mut self, trigger: &TrzszTrigger, directory: PathBuf, wire: TransferWire) {
         self.begin_trigger(trigger);
-        self.download_worker = Some(TrzszDownloadWorker::spawn(
+        self.download_worker = Some(TrzszDownloadWorker::spawn_connected(
             TrzszDownloadRuntime {
                 engine: TrzszDownloadEngine::new(trigger.remote_is_windows),
                 directory,
@@ -369,6 +405,7 @@ impl TrzszSessionState {
                 current_file: None,
             },
             trigger.remote_is_windows,
+            wire,
         ));
     }
 
@@ -559,8 +596,15 @@ impl ZzClawTermApp {
                         let action = TrzszAction::local_default(trigger.remote_is_windows);
                         let action_frame =
                             build_trzsz_action_frame(&action, trigger.remote_is_windows);
-                        self.trzsz_state_mut(session_id)
-                            .begin_download(&trigger, directory.clone());
+                        let wire = TransferWire::connected(
+                            self.session.manager_handle(),
+                            session_id.to_string(),
+                        );
+                        self.trzsz_state_mut(session_id).begin_download(
+                            &trigger,
+                            directory.clone(),
+                            wire,
+                        );
                         protocol_responses.push(action_frame);
                         latest_trigger_status = Some(format!(
                             "trzsz download accepted (v{version}{server}) -> {}",
@@ -1249,7 +1293,11 @@ impl ZzClawTermApp {
         else {
             return;
         };
-        let worker = TrzszUploadWorker::spawn(upload, remote_is_windows);
+        let worker = TrzszUploadWorker::spawn_connected(
+            upload,
+            remote_is_windows,
+            TransferWire::connected(self.session.manager_handle(), session_id.to_string()),
+        );
         worker.begin();
         if let Some(state) = self.session.trzsz_state_mut(session_id) {
             state.upload_worker = Some(worker);
@@ -1585,6 +1633,7 @@ fn run_trzsz_download_worker(
     remote_is_windows: bool,
     command_rx: mpsc::Receiver<TrzszDownloadWorkerCommand>,
     event_tx: mpsc::SyncSender<TrzszDownloadWorkerEvent>,
+    wire: TransferWire,
 ) {
     if let Err(error) = std::fs::create_dir_all(&download.directory) {
         let message = format!("failed to prepare trzsz download directory: {error}");
@@ -1601,12 +1650,26 @@ fn run_trzsz_download_worker(
     while let Ok(command) = command_rx.recv() {
         match command {
             TrzszDownloadWorkerCommand::Output(data) => {
-                let event = process_trzsz_download_worker_output(
+                let mut event = process_trzsz_download_worker_output(
                     &mut download,
                     &mut protocol,
                     &mut transfer,
                     data,
                 );
+                let mut remaining = Vec::new();
+                for response in std::mem::take(&mut event.responses) {
+                    match wire.send(&response) {
+                        Ok(true) => {}
+                        Ok(false) => remaining.push(response),
+                        Err(error) => {
+                            event.failed = Some(error);
+                            event.completed = None;
+                            event.progress.clear();
+                            break;
+                        }
+                    }
+                }
+                event.responses = remaining;
                 let done = event.completed.is_some() || event.failed.is_some();
                 let _ = event_tx.send(event);
                 if done {
@@ -1726,9 +1789,10 @@ fn run_trzsz_upload_worker(
     remote_is_windows: bool,
     command_rx: mpsc::Receiver<TrzszUploadWorkerCommand>,
     event_tx: mpsc::SyncSender<TrzszUploadWorkerEvent>,
+    wire: TransferWire,
 ) {
     while let Ok(command) = command_rx.recv() {
-        let event = match command {
+        let mut event = match command {
             TrzszUploadWorkerCommand::Begin => {
                 process_trzsz_upload_worker_begin(&mut upload, remote_is_windows)
             }
@@ -1737,6 +1801,20 @@ fn run_trzsz_upload_worker(
             }
             TrzszUploadWorkerCommand::Stop => break,
         };
+        let mut remaining = Vec::new();
+        for response in std::mem::take(&mut event.responses) {
+            match wire.send(&response) {
+                Ok(true) => {}
+                Ok(false) => remaining.push(response),
+                Err(error) => {
+                    event.failed = Some(error);
+                    event.completed = None;
+                    event.progress.clear();
+                    break;
+                }
+            }
+        }
+        event.responses = remaining;
         let done = event.completed.is_some() || event.failed.is_some();
         let _ = event_tx.send(event);
         if done {
@@ -2450,6 +2528,7 @@ mod tests {
     fn idle_zmodem_output_stays_in_active_trzsz_protocol() {
         let root = TestConfigDir::new("zzclawterm-zmodem-idle-trzsz");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "protocol-session");
         cx.update_entity(&app, |app, cx| {
             let state = app.trzsz_state_mut("protocol-session");
@@ -2481,6 +2560,7 @@ mod tests {
     fn idle_trzsz_prefix_reaches_terminal_without_a_second_output_event() {
         let root = TestConfigDir::new("zzclawterm-trzsz-idle-colon");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "colon-session");
         cx.update_entity(&app, |app, cx| {
             assert_eq!(
@@ -2505,6 +2585,7 @@ mod tests {
     fn idle_trzsz_prefix_stays_in_active_transfer_protocol_instead_of_terminal() {
         let root = TestConfigDir::new("zzclawterm-trzsz-idle-protocol");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "protocol-session");
         cx.update_entity(&app, |app, cx| {
             let state = app.trzsz_state_mut("protocol-session");
@@ -2539,6 +2620,7 @@ mod tests {
     fn output_discontinuity_discards_pending_trzsz_prefix_before_idle_flush() {
         let root = TestConfigDir::new("zzclawterm-trzsz-idle-reset");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "reset-session");
         cx.update_entity(&app, |app, cx| {
             app.process_trzsz_output("reset-session", b":", cx);

@@ -151,6 +151,7 @@ mod tests {
     #[test]
     fn no_focus_clock_runs_without_a_request() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             assert!(!app.has_pending_focus_request());
@@ -164,6 +165,7 @@ mod tests {
     #[test]
     fn an_unsatisfiable_request_keeps_the_clock_armed() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             // A credential-prompt focus with no active prompt cannot be taken: the

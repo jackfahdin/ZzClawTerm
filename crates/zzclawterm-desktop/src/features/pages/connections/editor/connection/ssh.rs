@@ -1,3 +1,4 @@
+use crate::models::ConnectionEditorSection;
 use rust_i18n::t;
 
 use std::collections::HashSet;
@@ -18,14 +19,14 @@ use zzclawterm_ui::{
 
 use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorCredentialOverlay, ConnectionEditorField,
-    ConnectionEditorPasswordSource, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorForwardingTab,
+    ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
 };
 
 use super::super::super::list::{
     ConnectionEditorChoice, ConnectionEditorRenderContext, EDITOR_CONTROL_HEIGHT_PX,
-    EditorSecretFieldOptions, connection_editor_select, editor_field, editor_secret_field,
-    editor_stepper_field, editor_switch_row, forwarding_endpoint_editor_field, required,
+    connection_editor_select, editor_field, editor_stepper_field, editor_switch_row,
+    forwarding_endpoint_editor_field, required,
 };
 
 use super::{ConnectionEditorSectionContext, recording::connection_editor_recording_section};
@@ -277,19 +278,80 @@ pub(super) fn connection_editor_ssh_section(
     options: SshConnectionSectionOptions,
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
+    let content = match section.editor.section {
+        ConnectionEditorSection::Basic => ssh_basic(section, cx),
+        ConnectionEditorSection::Authentication => {
+            ssh_authentication(section, labels.otp, options.auth, cx)
+        }
+        ConnectionEditorSection::Network => ssh_network(section, labels.proxy, labels.jump, cx),
+        ConnectionEditorSection::Forwarding => ssh_forwarding(section, cx),
+        ConnectionEditorSection::PostLogin => ssh_post_login(section, cx),
+        ConnectionEditorSection::Terminal => ssh_terminal(section, cx),
+        ConnectionEditorSection::Sftp => ssh_sftp(section, cx),
+        ConnectionEditorSection::Algorithms => ssh_algorithms(section, cx),
+        _ => div(),
+    };
+    div()
+        .debug_selector(|| "connection-editor-ssh-section".to_string())
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(content)
+}
+
+fn ssh_basic(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        fields,
+        narrow,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(
+        div()
+            .flex()
+            .when(!narrow, |this| this.flex_wrap())
+            .when(narrow, |this| this.flex_col())
+            .items_end()
+            .when(narrow, |this| this.items_stretch())
+            .gap_3()
+            .child(div().min_w(px(180.)).flex_1().child(editor_field(
+                palette,
+                required(t!("dialog.host")),
+                ConnectionEditorField::Host,
+                fields,
+                cx,
+            )))
+            .child(
+                div()
+                    .when(!narrow, |this| this.w(px(132.)).flex_none())
+                    .when(narrow, |this| this.w_full())
+                    .child(editor_stepper_field(
+                        palette,
+                        required(t!("dialog.port")),
+                        ConnectionEditorField::Port,
+                        fields,
+                        cx,
+                    )),
+            ),
+    )
+}
+
+fn ssh_authentication(
+    section: ConnectionEditorSectionContext<'_>,
+    otp_label: String,
+    auth_options: Vec<ConnectionEditorChoice>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
     let ConnectionEditorSectionContext {
         palette,
         editor,
         fields,
-        baud_popover_open: _,
+        narrow,
+        ..
     } = section;
-    let SshConnectionSectionLabels {
-        otp: otp_label,
-        proxy: proxy_label,
-        jump: jump_label,
-    } = labels;
-    let SshConnectionSectionOptions { auth: auth_options } = options;
-
     let auth_tab_options = auth_options
         .iter()
         .filter_map(|option| option.value.as_ref().map(|value| (value, option)))
@@ -320,113 +382,11 @@ pub(super) fn connection_editor_ssh_section(
             );
         }));
 
-    let advanced_tabs = ZzClawTabs::new("connection-advanced-network-tabs")
-        .items([
-            ZzClawTabItem::new(t!("panel.network")),
-            ZzClawTabItem::new(t!("dialog.twoFactorAuth")),
-            ZzClawTabItem::new(t!("dialog.sshAgentForwardingTab")),
-        ])
-        .selected_index(match editor.advanced_network_tab {
-            ConnectionEditorAdvancedTab::Network => 0,
-            ConnectionEditorAdvancedTab::TwoFactor => 1,
-            ConnectionEditorAdvancedTab::AgentForwarding => 2,
-            _ => 0,
-        })
-        .on_select(cx.listener(|this, index, _, cx| {
-            let tab = match *index {
-                0 => ConnectionEditorAdvancedTab::Network,
-                1 => ConnectionEditorAdvancedTab::TwoFactor,
-                _ => ConnectionEditorAdvancedTab::AgentForwarding,
-            };
-            this.set_connection_editor_advanced_tab(tab, cx);
-        }));
-
-    let behavior_tabs = ZzClawTabs::new("connection-advanced-behavior-tabs")
-        .items([
-            ZzClawTabItem::new(t!("dialog.commandExecution")),
-            ZzClawTabItem::new(t!("dialog.encodingSettings")),
-            ZzClawTabItem::new("SFTP"),
-            ZzClawTabItem::new(t!("dialog.x11Forwarding")),
-            ZzClawTabItem::new(t!("dialog.backspaceMode")),
-        ])
-        .selected_index(match editor.advanced_behavior_tab {
-            ConnectionEditorAdvancedTab::PostLogin => 0,
-            ConnectionEditorAdvancedTab::Terminal => 1,
-            ConnectionEditorAdvancedTab::Sftp => 2,
-            ConnectionEditorAdvancedTab::X11 => 3,
-            ConnectionEditorAdvancedTab::Backspace => 4,
-            _ => 0,
-        })
-        .on_select(cx.listener(|this, index, _, cx| {
-            let tab = match *index {
-                0 => ConnectionEditorAdvancedTab::PostLogin,
-                1 => ConnectionEditorAdvancedTab::Terminal,
-                2 => ConnectionEditorAdvancedTab::Sftp,
-                3 => ConnectionEditorAdvancedTab::X11,
-                _ => ConnectionEditorAdvancedTab::Backspace,
-            };
-            this.set_connection_editor_advanced_tab(tab, cx);
-        }));
-
-    let password_source_tabs = ZzClawTabs::new("connection-password-source-tabs")
-        .items([
-            ZzClawTabItem::new(t!("dialog.askWhenConnecting")),
-            ZzClawTabItem::new(t!("dialog.directPassword")),
-            ZzClawTabItem::new(t!("dialog.account")),
-        ])
-        .selected_index(match editor.password_source {
-            ConnectionEditorPasswordSource::Ask => 0,
-            ConnectionEditorPasswordSource::Direct => 1,
-            ConnectionEditorPasswordSource::Saved => 2,
-        })
-        .on_select(cx.listener(|this, index, _, cx| {
-            let source = match *index {
-                0 => ConnectionEditorPasswordSource::Ask,
-                1 => ConnectionEditorPasswordSource::Direct,
-                _ => ConnectionEditorPasswordSource::Saved,
-            };
-            this.set_connection_editor_password_source(source, cx);
-        }));
-
     div()
-        .debug_selector(|| "connection-editor-ssh-section".to_string())
         .flex()
         .flex_col()
         .gap_3()
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_end()
-                .gap_3()
-                .child(div().min_w(px(180.)).flex_1().child(editor_field(
-                    palette,
-                    required(t!("dialog.host")),
-                    ConnectionEditorField::Host,
-                    fields,
-                    cx,
-                )))
-                .child(div().w(px(132.)).flex_none().child(editor_stepper_field(
-                    palette,
-                    required(t!("dialog.port")),
-                    ConnectionEditorField::Port,
-                    fields,
-                    cx,
-                ))),
-        )
-        .child(editor_field(
-            palette,
-            required(t!("dialog.username")),
-            ConnectionEditorField::Username,
-            fields,
-            cx,
-        ))
-        .child(connection_editor_select(
-            ConnectionEditorRenderContext { palette, fields, cx },
-            "connection-editor-account",
-            t!("dialog.account"),
-            ConnectionEditorSelect::Account,
-        ))
+        .child(super::authentication::login_identity(section, cx))
         .child(
             div()
                 .flex()
@@ -453,93 +413,7 @@ pub(super) fn connection_editor_ssh_section(
             )
         })
         .when(editor.auth_mode == "password", |this| {
-            this.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(palette.text_muted))
-                            .child(t!("dialog.passwordSource")),
-                    )
-                    .child(password_source_tabs)
-                    .when(
-                        editor.password_source == ConnectionEditorPasswordSource::Ask,
-                        |this| {
-                            this.child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgba((palette.accent << 8) | 0x18))
-                                    .text_size(px(10.))
-                                    .text_color(rgb(palette.text_muted))
-                                    .child(t!("dialog.askPasswordDescription")),
-                            )
-                        },
-                    )
-                    .when(
-                        editor.password_source == ConnectionEditorPasswordSource::Direct,
-                        |this| {
-                            this.child(editor_secret_field(
-                                palette,
-                                t!("dialog.password"),
-                                ConnectionEditorField::Password,
-                                fields,
-                                EditorSecretFieldOptions::new(
-                                    false,
-                                    t!("passwordManager.showPassword"),
-                                    t!("dialog.clearPassword"),
-                                    cx.listener(|this, _, _, cx| {
-                                        this.toggle_connection_editor_password_visibility(cx);
-                                    }),
-                                    cx.listener(|this, _, _, cx| {
-                                        this.clear_connection_editor_password(cx);
-                                    }),
-                                ),
-                                cx,
-                            ))
-                        },
-                    )
-                    .when(
-                        editor.password_source == ConnectionEditorPasswordSource::Saved,
-                        |this| {
-                            this.child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_end()
-                                    .gap_2()
-                                    .child(div().min_w(px(180.)).flex_1().child(
-                                        connection_editor_select(
-                                            ConnectionEditorRenderContext {
-                                                palette,
-                                                fields,
-                                                cx,
-                                            },
-                                            "connection-editor-saved-password",
-                                            t!("dialog.account"),
-                                            ConnectionEditorSelect::SavedPassword,
-                                        ),
-                                    ))
-                                    .child(
-                                        zzclawterm_ui::ZzClawButton::new(
-                                            "connection-editor-manage-passwords",
-                                            t!("dialog.managePasswords"),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.set_connection_editor_credential_overlay(
-                                                Some(ConnectionEditorCredentialOverlay::Passwords),
-                                                cx,
-                                            );
-                                        })),
-                                    ),
-                            )
-                        },
-                    ),
-            )
+            this.child(super::authentication::password_source(section, cx))
         })
         .when(editor.auth_mode == "agent", |this| {
             this.child(
@@ -627,26 +501,32 @@ pub(super) fn connection_editor_ssh_section(
                 this.child(
                     div()
                         .flex()
-                        .flex_wrap()
+                        .when(!narrow, |this| this.flex_wrap())
+                        .when(narrow, |this| this.flex_col())
                         .items_end()
+                        .when(narrow, |this| this.items_stretch())
                         .gap_2()
-                        .child(div().min_w(px(180.)).flex_1().child(
-                            connection_editor_select(
-                                ConnectionEditorRenderContext {
-                                    palette,
-                                    fields,
-                                    cx,
-                                },
-                                "connection-editor-key",
-                                t!("dialog.privateKey"),
-                                ConnectionEditorSelect::SshKey,
-                            ),
-                        ))
+                        .child(
+                            div()
+                                .min_w(px(180.))
+                                .flex_1()
+                                .child(connection_editor_select(
+                                    ConnectionEditorRenderContext {
+                                        palette,
+                                        fields,
+                                        cx,
+                                    },
+                                    "connection-editor-key",
+                                    t!("dialog.privateKey"),
+                                    ConnectionEditorSelect::SshKey,
+                                )),
+                        )
                         .child(
                             zzclawterm_ui::ZzClawButton::new(
                                 "connection-editor-manage-keys",
                                 t!("dialog.manageKeys"),
                             )
+                            .form_control()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_connection_editor_credential_overlay(
                                     Some(ConnectionEditorCredentialOverlay::Keys),
@@ -657,122 +537,113 @@ pub(super) fn connection_editor_ssh_section(
                 )
             },
         )
-        .child(
+        .child(ssh_advanced_content(
+            palette,
+            t!("dialog.twoFactorAuth"),
+            truncate_preview(&otp_label, 36),
             div()
-                .id("connection-editor-advanced-toggle")
-                .h(px(28.))
                 .flex()
-                .items_center()
+                .flex_col()
                 .gap_2()
-                .text_xs()
-                .text_color(rgb(palette.text_muted))
-                .cursor_pointer()
-                .hover(|this| this.text_color(rgb(palette.text)))
-                .child(
-                    svg()
-                        .size(px(14.))
-                        .flex_none()
-                        .path(if editor.advanced.ssh {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/fe/forward.svg"
-                        })
-                        .text_color(rgb(palette.text_muted)),
-                )
-                .child(t!("dialog.advancedConfig"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_connection_editor_flag(ConnectionEditorToggle::Advanced, cx);
-                })),
-        )
-        .when(editor.advanced.ssh, |this| {
-            this.child(
+                .child(connection_editor_select(
+                    ConnectionEditorRenderContext {
+                        palette,
+                        fields,
+                        cx,
+                    },
+                    "connection-editor-otp",
+                    t!("dialog.selectOtp"),
+                    ConnectionEditorSelect::Otp,
+                ))
+                .child(editor_switch_row(
+                    palette,
+                    "connection-editor-otp-auto-fill",
+                    t!("dialog.autoFillOtp"),
+                    editor.auto_fill_otp,
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_connection_editor_flag(ConnectionEditorToggle::AutoFillOtp, cx);
+                    }),
+                )),
+        ))
+}
+
+fn ssh_network(
+    section: ConnectionEditorSectionContext<'_>,
+    proxy_label: String,
+    jump_label: String,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        fields,
+        narrow,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(ssh_advanced_content(
+        palette,
+        t!("panel.network"),
+        format!(
+            "{} · {}",
+            truncate_preview(&proxy_label, 28),
+            truncate_preview(&jump_label, 28)
+        ),
+        div()
+            .flex()
+            .when(!narrow, |this| this.flex_wrap())
+            .when(narrow, |this| this.flex_col())
+            .gap_3()
+            .child(
                 div()
-                    .id("connection-editor-ssh-advanced")
-                    .debug_selector(|| "connection-editor-ssh-advanced".to_string())
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(advanced_tabs)
-                    .when(
-                        editor.advanced_network_tab == ConnectionEditorAdvancedTab::Network,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("panel.network"),
-                                format!(
-                                    "{} · {}",
-                                    truncate_preview(&proxy_label, 28),
-                                    truncate_preview(&jump_label, 28)
-                                ),
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_3()
-                                    .child(div().min_w(px(180.)).flex_1().child(
-                                        connection_editor_select(
-                                            ConnectionEditorRenderContext {
-                                                palette,
-                                                fields,
-                                                cx,
-                                            },
-                                            "connection-editor-proxy",
-                                            t!("dialog.proxySelect"),
-                                            ConnectionEditorSelect::Proxy,
-                                        ),
-                                    ))
-                                    .child(div().min_w(px(180.)).flex_1().child(
-                                        connection_editor_select(
-                                            ConnectionEditorRenderContext {
-                                                palette,
-                                                fields,
-                                                cx,
-                                            },
-                                            "connection-editor-jump",
-                                            t!("dialog.selectProxyJump"),
-                                            ConnectionEditorSelect::ProxyJump,
-                                        ),
-                                    )),
-                            ))
+                    .min_w(px(180.))
+                    .flex_1()
+                    .child(connection_editor_select(
+                        ConnectionEditorRenderContext {
+                            palette,
+                            fields,
+                            cx,
                         },
-                    )
-                    .when(
-                        editor.advanced_network_tab == ConnectionEditorAdvancedTab::TwoFactor,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("dialog.twoFactorAuth"),
-                                truncate_preview(&otp_label, 36),
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-otp",
-                                        t!("dialog.selectOtp"),
-                                        ConnectionEditorSelect::Otp,
-                                    ))
-                                    .child(editor_switch_row(
-                                        palette,
-                                        "connection-editor-otp-auto-fill",
-                                        t!("dialog.autoFillOtp"),
-                                        editor.auto_fill_otp,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.toggle_connection_editor_flag(
-                                                ConnectionEditorToggle::AutoFillOtp,
-                                                cx,
-                                            );
-                                        }),
-                                    )),
-                            ))
+                        "connection-editor-proxy",
+                        t!("dialog.proxySelect"),
+                        ConnectionEditorSelect::Proxy,
+                    )),
+            )
+            .child(
+                div()
+                    .min_w(px(180.))
+                    .flex_1()
+                    .child(connection_editor_select(
+                        ConnectionEditorRenderContext {
+                            palette,
+                            fields,
+                            cx,
                         },
-                    )
-                    .when(
-                        editor.advanced_network_tab == ConnectionEditorAdvancedTab::AgentForwarding,
+                        "connection-editor-jump",
+                        t!("dialog.selectProxyJump"),
+                        ConnectionEditorSelect::ProxyJump,
+                    )),
+            ),
+    ))
+}
+
+fn ssh_forwarding(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3()
+.child(ZzClawTabs::new("connection-forwarding-tabs")
+        .items([ZzClawTabItem::new(t!("dialog.sshAgentForwardingTab")), ZzClawTabItem::new(t!("dialog.x11Forwarding"))])
+        .selected_index(usize::from(editor.forwarding_tab == ConnectionEditorForwardingTab::X11))
+        .on_select(cx.listener(|this, index, _, cx| {
+           this.set_connection_editor_forwarding_tab(*index == 1, cx);
+        })))
+.when(
+                        editor.forwarding_tab != ConnectionEditorForwardingTab::X11,
                         |this| {
                             let endpoints = &editor
                                 .agent_forwarding_config
@@ -1190,210 +1061,8 @@ pub(super) fn connection_editor_ssh_section(
                             )
                         },
                     )
-                    .child(behavior_tabs)
-                    .when(
-                        editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::PostLogin,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("dialog.postLoginCommand"),
-                                t!("dialog.postLoginCommandDesc"),
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(editor_switch_row(
-                                        palette,
-                                        "connection-editor-post-login",
-                                        t!("dialog.enabled"),
-                                        editor.post_login_enabled,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.toggle_connection_editor_flag(
-                                                ConnectionEditorToggle::PostLogin,
-                                                cx,
-                                            );
-                                        }),
-                                    ))
-                                    .when(editor.post_login_enabled, |this| {
-                                        this.child(editor_field(
-                                            palette,
-                                            t!("dialog.postLoginCommandContent"),
-                                            ConnectionEditorField::PostLoginCommand,
-                                            fields,
-                                            cx,
-                                        ))
-                                        .child(
-                                            editor_stepper_field(
-                                                palette,
-                                                t!("dialog.postLoginDelay"),
-                                                ConnectionEditorField::PostLoginDelay,
-                                                fields,
-                                                cx,
-                                            ),
-                                        )
-                                    }),
-                            ))
-                        },
-                    )
-                    .when(
-                        editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::Terminal,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("dialog.encodingSettings"),
-                                t!("connection.encodingFollowGlobal"),
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .gap_3()
-                                            .child(div().min_w(px(180.)).flex_1().child(
-                                                connection_editor_select(
-                                                    ConnectionEditorRenderContext {
-                                                        palette,
-                                                        fields,
-                                                        cx,
-                                                    },
-                                                    "connection-editor-ssh-profile",
-                                                    t!("dialog.sshProfile"),
-                                                    ConnectionEditorSelect::SshProfile,
-                                                ),
-                                            ))
-                                            .child(div().min_w(px(180.)).flex_1().child(
-                                                connection_editor_select(
-                                                    ConnectionEditorRenderContext {
-                                                        palette,
-                                                        fields,
-                                                        cx,
-                                                    },
-                                                    "connection-editor-ssh-terminal-type",
-                                                    t!("dialog.sshTerminalType"),
-                                                    ConnectionEditorSelect::SshTerminalType,
-                                                ),
-                                            )),
-                                    )
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-ssh-encoding",
-                                        t!("connection.encoding"),
-                                        ConnectionEditorSelect::Encoding,
-                                    ))
-                                    .when(
-                                        editor.ssh_profile
-                                            == zzclawterm_core::SshProfile::NetworkDevice,
-                                        |this| {
-                                            this.child(
-                                                div()
-                                                    .rounded_md()
-                                                    .border_1()
-                                                    .border_color(rgb(palette.warning))
-                                                    .bg(rgba((palette.warning << 8) | 0x18))
-                                                    .p_2()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(palette.text_muted))
-                                                    .child(t!(
-                                                        "dialog.sshNetworkDeviceLimitations",
-                                                    )),
-                                            )
-                                        },
-                                    )
-                                    .child(editor_switch_row(
-                                        palette,
-                                        "connection-editor-dynamic-tab-title",
-                                        t!("dialog.dynamicTabTitle"),
-                                        editor.dynamic_tab_title,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.toggle_connection_editor_flag(
-                                                ConnectionEditorToggle::DynamicTabTitle,
-                                                cx,
-                                            );
-                                        }),
-                                    ))
-                                    .child(connection_editor_recording_section(section, cx)),
-                            ))
-                        },
-                    )
-                    .when(
-                        editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::Sftp,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("dialog.sftpAdvanced"),
-                                t!("dialog.sftpAdvancedDesc"),
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(editor_switch_row(
-                                        palette,
-                                        "connection-editor-sftp-enabled",
-                                        t!("dialog.enabled"),
-                                        editor.sftp_enabled,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.toggle_connection_editor_flag(
-                                                ConnectionEditorToggle::SftpEnabled,
-                                                cx,
-                                            );
-                                        }),
-                                    ))
-                                    .child(editor_switch_row(
-                                        palette,
-                                        "connection-editor-sftp-compatibility",
-                                        t!("dialog.sftpCompatibilityMode"),
-                                        editor.sftp_compatibility_mode,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.toggle_connection_editor_flag(
-                                                ConnectionEditorToggle::SftpCompatibilityMode,
-                                                cx,
-                                            );
-                                        }),
-                                    ))
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-sftp-cwd",
-                                        t!("dialog.sftpCwdFollowMode"),
-                                        ConnectionEditorSelect::SftpCwdFollowMode,
-                                    ))
-                                    .child(editor_stepper_field(
-                                        palette,
-                                        t!("dialog.sftpShellDetectionTimeout"),
-                                        ConnectionEditorField::SftpShellDetectionTimeout,
-                                        fields,
-                                        cx,
-                                    ))
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-sftp-filename-encoding",
-                                        t!("dialog.sftpFilenameEncoding"),
-                                        ConnectionEditorSelect::SftpFilenameEncoding,
-                                    ))
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext { palette, fields, cx },
-                                        "connection-editor-sftp-pipeline-depth",
-                                        t!("dialog.sftpPipelineDepth"),
-                                        ConnectionEditorSelect::SftpPipelineDepth,
-                                    )),
-                            ))
-                        },
-                    )
-                    .when(
-                        editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::X11,
+.when(
+                        editor.forwarding_tab == ConnectionEditorForwardingTab::X11,
                         |this| {
                             this.child(ssh_advanced_content(
                                 palette,
@@ -1414,108 +1083,340 @@ pub(super) fn connection_editor_ssh_section(
                             ))
                         },
                     )
-                    .when(
-                        editor.advanced_behavior_tab == ConnectionEditorAdvancedTab::Backspace,
-                        |this| {
-                            this.child(ssh_advanced_content(
-                                palette,
-                                t!("dialog.backspaceMode"),
-                                t!("dialog.sshBackspaceModeDesc"),
-                                connection_editor_select(
-                                    ConnectionEditorRenderContext {
-                                        palette,
-                                        fields,
-                                        cx,
-                                    },
-                                    "connection-editor-backspace",
-                                    t!("dialog.backspaceMode"),
-                                    ConnectionEditorSelect::Backspace,
-                                ),
-                            ))
-                        },
-                    )
-                    .child({
-                        let supported = zzclawterm_transport::supported_ssh_algorithms();
-                        let algorithm_tabs = ZzClawTabs::new("connection-ssh-algorithm-tabs")
-                            .items([
-                                ZzClawTabItem::new(t!("dialog.algorithmKexTab")),
-                                ZzClawTabItem::new(t!("dialog.algorithmCiphersTab")),
-                                ZzClawTabItem::new(t!("dialog.algorithmMacsTab")),
-                                ZzClawTabItem::new(t!("dialog.algorithmHostKeysTab")),
-                            ])
-                            .selected_index(match editor.ssh_algorithm_tab {
-                                ConnectionEditorSshAlgorithmTab::KeyExchange => 0,
-                                ConnectionEditorSshAlgorithmTab::Ciphers => 1,
-                                ConnectionEditorSshAlgorithmTab::Macs => 2,
-                                ConnectionEditorSshAlgorithmTab::HostKeys => 3,
-                            })
-                            .on_select(cx.listener(|this, index, _, cx| {
-                                let tab = match *index {
-                                    0 => ConnectionEditorSshAlgorithmTab::KeyExchange,
-                                    1 => ConnectionEditorSshAlgorithmTab::Ciphers,
-                                    2 => ConnectionEditorSshAlgorithmTab::Macs,
-                                    _ => ConnectionEditorSshAlgorithmTab::HostKeys,
-                                };
-                                this.set_connection_editor_ssh_algorithm_tab(tab, cx);
-                            }));
-                        let (options, selected_values) = match editor.ssh_algorithm_tab {
-                            ConnectionEditorSshAlgorithmTab::KeyExchange => (
-                                supported.kex.as_slice(),
-                                editor.ssh_algorithm_kex.as_slice(),
-                            ),
-                            ConnectionEditorSshAlgorithmTab::Ciphers => (
-                                supported.ciphers.as_slice(),
-                                editor.ssh_algorithm_ciphers.as_slice(),
-                            ),
-                            ConnectionEditorSshAlgorithmTab::Macs => (
-                                supported.macs.as_slice(),
-                                editor.ssh_algorithm_macs.as_slice(),
-                            ),
-                            ConnectionEditorSshAlgorithmTab::HostKeys => (
-                                supported.host_keys.as_slice(),
-                                editor.ssh_algorithm_host_keys.as_slice(),
-                            ),
-                        };
-                        let mode_description = match editor.ssh_algorithm_mode.as_str() {
-                            "secure" => t!("dialog.algorithmModeSecureDesc"),
-                            "custom" => t!("dialog.algorithmModeCustomDesc"),
-                            _ => t!("dialog.algorithmModeCompatibleDesc"),
-                        };
-                        ssh_advanced_content(
-                            palette,
-                            t!("dialog.sshAlgorithms"),
-                            t!("dialog.sshAlgorithmsDesc"),
+}
+
+fn ssh_post_login(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(ssh_advanced_content(
+        palette,
+        t!("dialog.postLoginCommand"),
+        t!("dialog.postLoginCommandDesc"),
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(editor_switch_row(
+                palette,
+                "connection-editor-post-login",
+                t!("dialog.enabled"),
+                editor.post_login_enabled,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_connection_editor_flag(ConnectionEditorToggle::PostLogin, cx);
+                }),
+            ))
+            .when(editor.post_login_enabled, |this| {
+                this.child(editor_field(
+                    palette,
+                    t!("dialog.postLoginCommandContent"),
+                    ConnectionEditorField::PostLoginCommand,
+                    fields,
+                    cx,
+                ))
+                .child(editor_stepper_field(
+                    palette,
+                    t!("dialog.postLoginDelay"),
+                    ConnectionEditorField::PostLoginDelay,
+                    fields,
+                    cx,
+                ))
+            }),
+    ))
+}
+
+fn ssh_terminal(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        narrow,
+        ..
+    } = section;
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(ssh_advanced_content(
+            palette,
+            t!("dialog.encodingSettings"),
+            t!("connection.encodingFollowGlobal"),
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .flex()
+                        .when(!narrow, |this| this.flex_wrap())
+                        .when(narrow, |this| this.flex_col())
+                        .gap_3()
+                        .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
+                                .min_w(px(180.))
+                                .flex_1()
                                 .child(connection_editor_select(
                                     ConnectionEditorRenderContext {
                                         palette,
                                         fields,
                                         cx,
                                     },
-                                    "connection-editor-ssh-algorithm-mode",
-                                    t!("dialog.algorithmMode"),
-                                    ConnectionEditorSelect::SshAlgorithmMode,
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(palette.text_muted))
-                                        .child(mode_description),
-                                )
-                                .when(editor.ssh_algorithm_mode == "custom", |this| {
-                                    this.child(algorithm_tabs).child(ssh_algorithm_list(
-                                        palette,
-                                        editor.ssh_algorithm_tab,
-                                        options,
-                                        selected_values,
-                                        cx,
-                                    ))
-                                }),
+                                    "connection-editor-ssh-profile",
+                                    t!("dialog.sshProfile"),
+                                    ConnectionEditorSelect::SshProfile,
+                                )),
                         )
+                        .child(
+                            div()
+                                .min_w(px(180.))
+                                .flex_1()
+                                .child(connection_editor_select(
+                                    ConnectionEditorRenderContext {
+                                        palette,
+                                        fields,
+                                        cx,
+                                    },
+                                    "connection-editor-ssh-terminal-type",
+                                    t!("dialog.sshTerminalType"),
+                                    ConnectionEditorSelect::SshTerminalType,
+                                )),
+                        ),
+                )
+                .child(connection_editor_select(
+                    ConnectionEditorRenderContext {
+                        palette,
+                        fields,
+                        cx,
+                    },
+                    "connection-editor-ssh-encoding",
+                    t!("connection.encoding"),
+                    ConnectionEditorSelect::Encoding,
+                ))
+                .when(
+                    editor.ssh_profile == zzclawterm_core::SshProfile::NetworkDevice,
+                    |this| {
+                        this.child(
+                            div()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(palette.warning))
+                                .bg(rgba((palette.warning << 8) | 0x18))
+                                .p_2()
+                                .text_size(px(10.))
+                                .text_color(rgb(palette.text_muted))
+                                .child(t!("dialog.sshNetworkDeviceLimitations",)),
+                        )
+                    },
+                )
+                .child(editor_switch_row(
+                    palette,
+                    "connection-editor-dynamic-tab-title",
+                    t!("dialog.dynamicTabTitle"),
+                    editor.dynamic_tab_title,
+                    cx.listener(|this, _, _, cx| {
+                        this.toggle_connection_editor_flag(
+                            ConnectionEditorToggle::DynamicTabTitle,
+                            cx,
+                        );
                     }),
-            )
-        })
+                ))
+                .child(connection_editor_recording_section(section, cx)),
+        ))
+        .child(ssh_advanced_content(
+            palette,
+            t!("dialog.backspaceMode"),
+            t!("dialog.sshBackspaceModeDesc"),
+            connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-backspace",
+                t!("dialog.backspaceMode"),
+                ConnectionEditorSelect::Backspace,
+            ),
+        ))
+}
+
+fn ssh_sftp(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(ssh_advanced_content(
+        palette,
+        t!("dialog.sftpAdvanced"),
+        t!("dialog.sftpAdvancedDesc"),
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(editor_switch_row(
+                palette,
+                "connection-editor-sftp-enabled",
+                t!("dialog.enabled"),
+                editor.sftp_enabled,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_connection_editor_flag(ConnectionEditorToggle::SftpEnabled, cx);
+                }),
+            ))
+            .child(editor_switch_row(
+                palette,
+                "connection-editor-sftp-compatibility",
+                t!("dialog.sftpCompatibilityMode"),
+                editor.sftp_compatibility_mode,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_connection_editor_flag(
+                        ConnectionEditorToggle::SftpCompatibilityMode,
+                        cx,
+                    );
+                }),
+            ))
+            .child(connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-sftp-cwd",
+                t!("dialog.sftpCwdFollowMode"),
+                ConnectionEditorSelect::SftpCwdFollowMode,
+            ))
+            .child(editor_stepper_field(
+                palette,
+                t!("dialog.sftpShellDetectionTimeout"),
+                ConnectionEditorField::SftpShellDetectionTimeout,
+                fields,
+                cx,
+            ))
+            .child(connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-sftp-filename-encoding",
+                t!("dialog.sftpFilenameEncoding"),
+                ConnectionEditorSelect::SftpFilenameEncoding,
+            ))
+            .child(connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-sftp-pipeline-depth",
+                t!("dialog.sftpPipelineDepth"),
+                ConnectionEditorSelect::SftpPipelineDepth,
+            )),
+    ))
+}
+
+fn ssh_algorithms(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        editor,
+        fields,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child({
+        let supported = zzclawterm_transport::supported_ssh_algorithms();
+        let algorithm_tabs = ZzClawTabs::new("connection-ssh-algorithm-tabs")
+            .items([
+                ZzClawTabItem::new(t!("dialog.algorithmKexTab")),
+                ZzClawTabItem::new(t!("dialog.algorithmCiphersTab")),
+                ZzClawTabItem::new(t!("dialog.algorithmMacsTab")),
+                ZzClawTabItem::new(t!("dialog.algorithmHostKeysTab")),
+            ])
+            .selected_index(match editor.ssh_algorithm_tab {
+                ConnectionEditorSshAlgorithmTab::KeyExchange => 0,
+                ConnectionEditorSshAlgorithmTab::Ciphers => 1,
+                ConnectionEditorSshAlgorithmTab::Macs => 2,
+                ConnectionEditorSshAlgorithmTab::HostKeys => 3,
+            })
+            .on_select(cx.listener(|this, index, _, cx| {
+                let tab = match *index {
+                    0 => ConnectionEditorSshAlgorithmTab::KeyExchange,
+                    1 => ConnectionEditorSshAlgorithmTab::Ciphers,
+                    2 => ConnectionEditorSshAlgorithmTab::Macs,
+                    _ => ConnectionEditorSshAlgorithmTab::HostKeys,
+                };
+                this.set_connection_editor_ssh_algorithm_tab(tab, cx);
+            }));
+        let (options, selected_values) = match editor.ssh_algorithm_tab {
+            ConnectionEditorSshAlgorithmTab::KeyExchange => (
+                supported.kex.as_slice(),
+                editor.ssh_algorithm_kex.as_slice(),
+            ),
+            ConnectionEditorSshAlgorithmTab::Ciphers => (
+                supported.ciphers.as_slice(),
+                editor.ssh_algorithm_ciphers.as_slice(),
+            ),
+            ConnectionEditorSshAlgorithmTab::Macs => (
+                supported.macs.as_slice(),
+                editor.ssh_algorithm_macs.as_slice(),
+            ),
+            ConnectionEditorSshAlgorithmTab::HostKeys => (
+                supported.host_keys.as_slice(),
+                editor.ssh_algorithm_host_keys.as_slice(),
+            ),
+        };
+        let mode_description = match editor.ssh_algorithm_mode.as_str() {
+            "secure" => t!("dialog.algorithmModeSecureDesc"),
+            "custom" => t!("dialog.algorithmModeCustomDesc"),
+            _ => t!("dialog.algorithmModeCompatibleDesc"),
+        };
+        ssh_advanced_content(
+            palette,
+            t!("dialog.sshAlgorithms"),
+            t!("dialog.sshAlgorithmsDesc"),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(connection_editor_select(
+                    ConnectionEditorRenderContext {
+                        palette,
+                        fields,
+                        cx,
+                    },
+                    "connection-editor-ssh-algorithm-mode",
+                    t!("dialog.algorithmMode"),
+                    ConnectionEditorSelect::SshAlgorithmMode,
+                ))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(palette.text_muted))
+                        .child(mode_description),
+                )
+                .when(editor.ssh_algorithm_mode == "custom", |this| {
+                    this.child(algorithm_tabs).child(ssh_algorithm_list(
+                        palette,
+                        editor.ssh_algorithm_tab,
+                        options,
+                        selected_values,
+                        cx,
+                    ))
+                }),
+        )
+    })
 }

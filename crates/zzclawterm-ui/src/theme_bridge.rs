@@ -96,7 +96,7 @@ pub fn apply_component_theme(
     component_theme.colors.button_danger = color(palette.danger);
     component_theme.colors.button_danger_active = color(palette.danger);
     component_theme.colors.button_danger_foreground = color(palette.on_primary);
-    component_theme.colors.button_danger_hover = color(palette.danger);
+    component_theme.colors.button_danger_hover = color(palette.danger_hover);
     component_theme.colors.button_primary = color(palette.primary);
     component_theme.colors.button_primary_active = color(palette.primary_hover);
     component_theme.colors.button_primary_foreground = color(palette.on_primary);
@@ -143,7 +143,7 @@ pub fn apply_component_theme(
     component_theme.colors.secondary_active = color(palette.hover);
     component_theme.colors.secondary_foreground = color(palette.text);
     component_theme.colors.danger = color(palette.danger);
-    component_theme.colors.danger_hover = color(palette.danger);
+    component_theme.colors.danger_hover = color(palette.danger_hover);
     component_theme.colors.danger_active = color(palette.danger);
     component_theme.colors.danger_foreground = color(palette.on_primary);
     component_theme.colors.ring = color(palette.focus_ring);
@@ -181,7 +181,7 @@ pub fn apply_component_theme(
     component_theme.colors.status_bar_border = color(palette.border);
     component_theme.colors.selection = color(palette.terminal_selection);
     component_theme.colors.scrollbar = transparent_black();
-    component_theme.colors.scrollbar_thumb = color(palette.border);
+    component_theme.colors.scrollbar_thumb = color(palette.scroll_thumb);
     component_theme.colors.scrollbar_thumb_hover = color(palette.text_dimmed);
     // Zed-style auto-hide: fade the bar in while the pointer is over the panel
     // or that axis is scrolling, and out after idle. Set explicitly so the
@@ -232,7 +232,15 @@ pub fn apply_component_theme(
     // keeps whatever projection the last `Theme::change` built - which happens
     // only on a light/dark flip, from the built-in palette rather than ours.
     Theme::sync_base(cx);
+    gpui_base::Theme::global_mut(cx).tokens.shadow =
+        gpui_base::ShadowTokens::elevations(gpui::rgba(palette.shadow).into());
     refresh_zzclaw_root_fonts(ui_font, cx);
+    // The assignments above changed the component colors but requested no
+    // repaint: `Theme::change` runs only on a light/dark flip, so a same-mode
+    // theme switch (dark -> dark) left already-rendered windows on the old
+    // palette until some unrelated relayout. Mirror `Theme::edit`, which
+    // refreshes every window after a theme write.
+    cx.refresh_windows();
 }
 
 #[cfg(test)]

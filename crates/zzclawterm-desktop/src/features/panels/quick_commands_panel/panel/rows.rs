@@ -597,6 +597,7 @@ mod tests {
     #[test]
     fn command_menu_keeps_send_to_all_visible_without_a_live_session() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let items = cx.update_entity(&app, |app, cx| {
             app.quick_command_row_menu_items("command-1".to_string(), cx)

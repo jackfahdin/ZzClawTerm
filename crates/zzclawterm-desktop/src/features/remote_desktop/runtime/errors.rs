@@ -2,6 +2,7 @@ use zzclawterm_remote_desktop::{RdpError, RdpErrorKind, RemoteDesktopError};
 
 pub(in crate::features::remote_desktop) fn format_rdp_error(error: &RdpError) -> String {
     let category = match error.kind {
+        RdpErrorKind::ResourceExhausted => "Remote desktop resources exhausted",
         RdpErrorKind::Authentication => "Authentication failed",
         RdpErrorKind::CertificateRejected => "Certificate rejected",
         RdpErrorKind::Timeout => "Connection timed out",

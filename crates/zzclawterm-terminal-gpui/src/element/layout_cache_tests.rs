@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use gpui::{Bounds, ShapedLine, SharedString, font, point, px, rgb, size};
 use zzclawterm_core::ResolvedKeywordHighlightRule;
+use zzclawterm_terminal::selection::{
+    TerminalBufferCellPos, TerminalCellSide, TerminalSelection, TerminalSelectionEndpoint,
+    selected_row_text,
+};
 use zzclawterm_terminal::{ShellInputLineKind, TerminalScreen, TerminalSnapshot};
 
 use super::{
@@ -24,6 +28,7 @@ use super::{
 use crate::glyphs::CellGlyph;
 use crate::keywords::{
     TerminalKeywordHighlightLookup, compile_terminal_keyword_highlighter,
+    precompute_terminal_input_highlights, precompute_terminal_input_highlights_reusing,
     precompute_terminal_keyword_highlights, terminal_keyword_row_reuse_keys,
     terminal_keyword_rules_key,
 };
@@ -689,7 +694,7 @@ fn zebra_stripes_merge_input_rows_and_target_row_takes_priority() {
     assert_eq!(stripes.len(), 3);
     assert_eq!(
         stripes[1].background,
-        gpui::rgba((palette.accent << 8) | 0x24).into()
+        gpui::rgb(palette.terminal_line_highlight).into()
     );
 }
 
@@ -805,16 +810,128 @@ fn cell_backgrounds_cover_trailing_blanks_wide_spacers_and_reverse_video() {
     let snapshot = screen.snapshot();
     let row = snapshot.row(0).unwrap();
     assert_eq!(row.text, "中TEXT");
-    let ranges = terminal_background_ranges_for_cells(&row.cells, palette);
+    let ranges = terminal_background_ranges_for_cells(&row.cells, palette, false);
     assert_eq!(ranges.len(), 2);
     assert_eq!((ranges[0].start, ranges[0].end), (0, 6));
     assert_eq!((ranges[1].start, ranges[1].end), (6, 14));
     assert_eq!(ranges[1].bg, palette.terminal_ansi_color(4));
-    let ranges = terminal_background_ranges_for_cells(&snapshot.row(1).unwrap().cells, palette);
+    let ranges =
+        terminal_background_ranges_for_cells(&snapshot.row(1).unwrap().cells, palette, false);
     assert_eq!(
         (ranges[0].start, ranges[0].end, ranges[0].bg),
         (0, 4, palette.terminal_fg)
     );
+}
+
+#[test]
+fn reverse_backgrounds_cover_spaces_wide_spacers_and_adjacent_color_ranges() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    for alternate in [false, true] {
+        let mut screen = TerminalScreen::new(16, 2);
+        if alternate {
+            screen.advance(b"\x1b[?1049h");
+        }
+        screen.advance("\x1b[31;44mN\x1b[7m  中  \x1b[32m  \x1b[27mN\x1b[0m".as_bytes());
+        let snapshot = screen.snapshot();
+        let row = snapshot.row(0).unwrap();
+        assert_eq!(row.cells[4].width, 0);
+        let ranges = terminal_background_ranges_for_cells(&row.cells, palette, false);
+        let actual: Vec<_> = ranges.iter().map(|r| (r.start, r.end, r.bg)).collect();
+        assert_eq!(
+            actual,
+            vec![
+                (0, 1, palette.terminal_ansi_color(4)),
+                (1, 7, palette.terminal_ansi_color(1)),
+                (7, 9, palette.terminal_ansi_color(2)),
+                (9, 10, palette.terminal_ansi_color(4)),
+            ]
+        );
+        let spans =
+            crate::ansi::ansi_to_highlight_spans_compiled(&row.styled_spans, palette, &[], false);
+        let span_ranges = terminal_background_ranges_for_spans(&spans);
+        let from_spans: Vec<_> = span_ranges.iter().map(|r| (r.start, r.end, r.bg)).collect();
+        assert_eq!(from_spans, actual);
+
+        screen.advance(b"\r\x1b[0;31;44;7m                \x1b[0m");
+        let snapshot = screen.snapshot();
+        let row = snapshot.row(0).unwrap();
+        assert!(row.text.is_empty());
+        let ranges = terminal_background_ranges_for_cells(&row.cells, palette, false);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            (ranges[0].start, ranges[0].end, ranges[0].bg),
+            (0, 16, palette.terminal_ansi_color(1))
+        );
+    }
+}
+
+#[test]
+fn reverse_button_updates_invalidate_snapshot_and_layout_cache() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(16, 2);
+    let mut cache = ZzClawTerminalLayoutCache::default();
+    let mut previous: Option<TerminalSnapshot> = None;
+    let decorations = TerminalLineDecorations::default();
+    for reverse in [false, true, false, true, false] {
+        screen.advance(if reverse {
+            b"\r\x1b[0;31;44;7mSELECTED"
+        } else {
+            b"\r\x1b[0;31;44mSELECTED"
+        });
+        let snapshot = screen.snapshot();
+        let row = snapshot.row(0).unwrap();
+        let key = terminal_row_layout_key(
+            Some(row.revision),
+            &row.text,
+            Some(&row.styled_spans),
+            &decorations,
+            &[],
+            false,
+            0,
+        );
+        if let Some(before) = &previous {
+            let before = before.row(0).unwrap();
+            assert_eq!(before.text, row.text);
+            assert_ne!(before.revision, row.revision);
+            assert_ne!(before.signature, row.signature);
+            assert_ne!(
+                terminal_row_layout_key(
+                    None,
+                    &before.text,
+                    Some(&before.styled_spans),
+                    &decorations,
+                    &[],
+                    false,
+                    0
+                ),
+                terminal_row_layout_key(
+                    None,
+                    &row.text,
+                    Some(&row.styled_spans),
+                    &decorations,
+                    &[],
+                    false,
+                    0
+                ),
+            );
+        }
+        let (painted, _, _) = cache.paint_row(0, key, || {
+            (
+                Arc::new(ShapedLine::default()),
+                std::time::Duration::ZERO,
+                1,
+                terminal_background_ranges_for_cells(&row.cells, palette, false),
+                TerminalRowTextDecorations::default(),
+                Vec::new(),
+            )
+        });
+        assert_eq!(
+            painted.background_ranges[0].bg,
+            palette.terminal_ansi_color(if reverse { 1 } else { 4 })
+        );
+        assert_eq!(row.cells[0].style.reverse, reverse);
+        previous = Some(snapshot);
+    }
 }
 
 #[test]
@@ -1479,6 +1596,135 @@ fn stale_keyword_prefix_is_painted_and_not_reused_as_the_final_parse() {
 }
 
 #[test]
+fn paired_input_colors_override_late_batches_and_reuse_the_final_layout() {
+    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true);
+    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(40, 3);
+    screen.advance(b"$ l");
+    let old = Arc::new(precompute_terminal_keyword_highlights(
+        &screen.snapshot(),
+        &highlighter,
+        palette,
+        None,
+    ));
+    let mut previous_input = None;
+    for echo in [
+        b"s".as_slice(),
+        b"\x08 \x08",
+        b"\x08 \x08",
+        b"\r\n$ ",
+        b"\r\n$ ",
+        b"\r\n$ ",
+        b"\r\n$ ",
+    ] {
+        screen.advance(echo);
+        let snapshot = Arc::new(screen.viewport_snapshot(0));
+        let input = Arc::new(
+            precompute_terminal_input_highlights_reusing(
+                &snapshot,
+                &highlighter,
+                previous_input.as_deref(),
+            )
+            .unwrap(),
+        );
+        previous_input = Some(input.clone());
+        let final_batch = Arc::new(precompute_terminal_keyword_highlights(
+            &snapshot,
+            &highlighter,
+            palette,
+            None,
+        ));
+        let make_element = || {
+            ZzClawTerminalElement::new(
+                snapshot.clone(),
+                Arc::new(Vec::new()),
+                Vec::new(),
+                false,
+                "block",
+                8.0,
+                16.0,
+                palette,
+                "monospace".into(),
+                14.0,
+                400.0,
+                700.0,
+            )
+        };
+        let pending = make_element()
+            .with_keyword_highlights(old.clone())
+            .with_input_keyword_highlights(input);
+        let complete = make_element().with_keyword_highlights(final_batch);
+        let style_key = pending.paint_style_key(pending.keyword_rules_key());
+        let empty_key = pending.paint_style_key(0);
+        for (row, reuse_key) in terminal_keyword_row_reuse_keys(&snapshot)
+            .into_iter()
+            .enumerate()
+        {
+            if !snapshot.row(row).unwrap().text.starts_with('$') {
+                continue;
+            }
+            assert_eq!(
+                pending
+                    .keyword_highlight_lookup(row, reuse_key)
+                    .unwrap()
+                    .ranges(),
+                complete
+                    .keyword_highlight_lookup(row, reuse_key)
+                    .unwrap()
+                    .ranges()
+            );
+            assert_eq!(
+                pending.row_layout_cache_keys(row, style_key, empty_key, reuse_key),
+                complete.row_layout_cache_keys(row, style_key, empty_key, reuse_key)
+            );
+        }
+    }
+}
+
+#[test]
+fn known_empty_input_result_suppresses_stale_command_colors() {
+    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true)
+        .into_iter()
+        .filter(|rule| rule.id == "builtin-command")
+        .collect::<Vec<_>>();
+    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = TerminalScreen::new(40, 3);
+    screen.advance(b"$ l");
+    let old = Arc::new(precompute_terminal_keyword_highlights(
+        &screen.snapshot(),
+        &highlighter,
+        palette,
+        None,
+    ));
+    screen.advance(b"\x08 \x08");
+    let snapshot = Arc::new(screen.snapshot());
+    let input = Arc::new(precompute_terminal_input_highlights(&snapshot, &highlighter).unwrap());
+    let element = ZzClawTerminalElement::new(
+        snapshot.clone(),
+        Arc::new(Vec::new()),
+        Vec::new(),
+        false,
+        "block",
+        8.0,
+        16.0,
+        palette,
+        "monospace".into(),
+        14.0,
+        400.0,
+        700.0,
+    )
+    .with_keyword_highlights(old)
+    .with_input_keyword_highlights(input);
+    let lookup = element
+        .keyword_highlight_lookup(0, terminal_keyword_row_reuse_keys(&snapshot)[0])
+        .unwrap();
+    assert!(lookup.is_known_empty());
+    assert!(!lookup.is_stale());
+}
+
+#[test]
 fn stale_keyword_cache_key_tracks_the_retained_ranges() {
     let ranges = [
         crate::types::TerminalKeywordRange {
@@ -1700,13 +1946,22 @@ fn dynamic_decoration_backgrounds_include_occurrence_and_search() {
         &mut out,
     );
 
-    assert_eq!(out.len(), 3);
+    assert_eq!(out.len(), 4);
     assert!(out.iter().all(|quad| quad.bounds.origin.y == px(-8.0)));
     assert_eq!(
         out[0].background,
         gpui::rgba((palette.text_muted << 8) | 0x58).into()
     );
-    assert_eq!(out[2].background, gpui::rgb(palette.warning).into());
+    assert_eq!(
+        out[2].background,
+        gpui::rgb(palette.terminal_find_bg).into()
+    );
+    assert_eq!(
+        out[3].border_color,
+        gpui::rgb(palette.terminal_find_border).into()
+    );
+    assert_eq!(out[3].bounds, out[2].bounds);
+    assert_eq!(out[3].border_widths.top, px(1.));
 }
 
 #[test]
@@ -1764,6 +2019,116 @@ fn grid_selection_uses_cell_columns_for_wide_characters() {
         terminal_selection_cols_for_snapshot_row(&snapshot, 0, Some(selection)),
         Some((1, 3))
     );
+}
+
+#[test]
+fn half_cell_grid_selection_paints_the_same_cells_that_are_copied() {
+    let mut screen = TerminalScreen::new(8, 2);
+    screen.advance("A界😀B".as_bytes());
+    let snapshot = screen.snapshot();
+    for (start_col, start_side, end_col, end_side, expected, text) in [
+        (
+            0,
+            TerminalCellSide::Left,
+            0,
+            TerminalCellSide::Right,
+            Some((0, 1)),
+            "A",
+        ),
+        (
+            0,
+            TerminalCellSide::Left,
+            1,
+            TerminalCellSide::Left,
+            Some((0, 1)),
+            "A",
+        ),
+        (
+            1,
+            TerminalCellSide::Left,
+            1,
+            TerminalCellSide::Right,
+            Some((1, 3)),
+            "界",
+        ),
+        (
+            2,
+            TerminalCellSide::Left,
+            2,
+            TerminalCellSide::Right,
+            Some((1, 3)),
+            "界",
+        ),
+        (
+            4,
+            TerminalCellSide::Left,
+            4,
+            TerminalCellSide::Right,
+            Some((3, 5)),
+            "😀",
+        ),
+        (
+            0,
+            TerminalCellSide::Right,
+            1,
+            TerminalCellSide::Left,
+            None,
+            "",
+        ),
+    ] {
+        let a =
+            TerminalSelectionEndpoint::new(TerminalBufferCellPos::new(0, start_col), start_side);
+        let b = TerminalSelectionEndpoint::new(TerminalBufferCellPos::new(0, end_col), end_side);
+        for (anchor, head) in [(a, b), (b, a)] {
+            let selection = TerminalSelection {
+                anchor,
+                head,
+                all_buffer: false,
+            };
+            let grid = TerminalGridSelection::from_selection(selection);
+            assert_eq!(
+                terminal_selection_cols_for_snapshot_row(&snapshot, 0, Some(grid)),
+                expected
+            );
+            let copied = selection
+                .cols_for_absolute_line(0)
+                .map(|(start, end)| selected_row_text(&snapshot.row(0).unwrap().cells, start, end))
+                .unwrap_or_default();
+            assert_eq!(copied, text);
+            for scale in [1.0, 1.25, 1.5] {
+                let geometry = TerminalPaintGeometry {
+                    bounds: Bounds::new(
+                        point(px(3.5), px(9.25)),
+                        size(px(8.0 * 7.5 * scale), px(32.0)),
+                    ),
+                    visual_y_offset: -2.5,
+                    cell_width: 7.5 * scale,
+                    cell_height: 16.0 * scale,
+                };
+                let mut backgrounds = Vec::new();
+                push_dynamic_selection_background(
+                    &snapshot,
+                    0,
+                    Some(grid),
+                    zzclawterm_ui::theme_palette("github-dark"),
+                    geometry,
+                    &mut backgrounds,
+                );
+                assert_eq!(backgrounds.len(), usize::from(expected.is_some()));
+                if let Some((start, end)) = expected {
+                    let bounds = backgrounds[0].bounds;
+                    assert_eq!(
+                        f32::from(bounds.left()),
+                        (3.5 + start as f32 * geometry.cell_width).floor()
+                    );
+                    assert_eq!(
+                        f32::from(bounds.right()),
+                        (3.5 + end as f32 * geometry.cell_width).ceil()
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

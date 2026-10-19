@@ -11,6 +11,10 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.mark_user_activity();
+        if event.keystroke.key == "escape" && self.close_open_transfer_browser_menu(cx) {
+            cx.stop_propagation();
+            return;
+        }
         // The path field owns all editing keys, including clipboard shortcuts.
         if self.transfer.browser_view().path_editing {
             return;
@@ -107,5 +111,27 @@ impl ZzClawTermApp {
             cx.stop_propagation();
             self.open_selected_transfer_delete_dialog(window, cx);
         }
+    }
+
+    /// Close whichever browser popup menu is open; false when none was.
+    fn close_open_transfer_browser_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let view = self.transfer.browser_view();
+        let (upload, favorites, path) = (
+            view.upload_menu.is_some(),
+            view.favorites_menu.is_some(),
+            view.path_menu.is_some(),
+        );
+        if upload {
+            self.close_transfer_browser_upload_menu(cx);
+        } else if favorites {
+            self.close_transfer_browser_favorites_menu(cx);
+        } else if path {
+            self.close_transfer_browser_path_menu(cx);
+        } else if self.transfer.transfer_job_menu().is_some() {
+            self.close_transfer_job_menu(cx);
+        } else {
+            return false;
+        }
+        true
     }
 }

@@ -81,6 +81,7 @@ mod tests {
     #[test]
     fn workspace_features_share_controller_service_and_closing_one_keeps_other_alive() {
         let mut cx = gpui::TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = TestTempDir::new("zzclawterm-plugin-multiwindow");
         let runtime = AppRuntime::from_parts_for_test(
             RuntimeMode::Portable,

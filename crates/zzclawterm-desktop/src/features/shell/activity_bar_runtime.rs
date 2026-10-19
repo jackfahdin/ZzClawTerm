@@ -648,6 +648,7 @@ mod tests {
     fn hiding_an_active_panel_clears_its_side_and_removes_it_from_the_rail() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             // Open the left file explorer, then hide it from the rail.
@@ -679,6 +680,7 @@ mod tests {
     fn floating_panels_are_transient_per_side_and_independent_from_multi_open() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.open_panel(NavItem::Transfers, cx);
@@ -727,6 +729,7 @@ mod tests {
     fn plugin_panel_follows_placement_and_toggles_in_docked_floating_and_multi_open_modes() {
         let test_dir = TestConfigDir::new("zzclawterm-plugins-panel-navigation");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             let panel = app.plugins.panel.entity_id();
@@ -801,6 +804,7 @@ mod tests {
                     .expect("save layout");
             }
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let app = test_app(&mut cx, test_dir.path());
             cx.read(|cx| {
                 let app = app.read(cx);
@@ -825,6 +829,7 @@ mod tests {
     fn normalization_migrates_aliases_and_inserts_notes_at_its_anchor() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, _cx| {
             app.shell.chrome.activity_bar_layout.left_top = vec![
@@ -861,6 +866,7 @@ mod tests {
     fn disabling_an_available_panel_closes_floating_state_without_hiding_its_slot() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             if !app.settings.summary().ui_show_gpu_monitor {
@@ -883,6 +889,7 @@ mod tests {
     fn drop_indices_map_to_visible_insertion_slots_across_both_sides() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.shell.chrome.activity_bar_layout.left_top = vec![
@@ -927,6 +934,7 @@ mod tests {
     fn reset_activity_bar_layout_restores_defaults_and_collapses_sides() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.hide_activity_entry("aiAssistant".to_string(), cx);

@@ -143,6 +143,7 @@ fn settings_paints(app: &Entity<ZzClawTermApp>, cx: &mut gpui::App) -> usize {
 fn detected_terminal_error_refreshes_ai_panel_only() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = hosted(&mut cx, test_dir.path());
     let before_snapshots = vcx.update(|_, cx| ai_snapshot_sets(&app, cx));
     let before_ai_paints = vcx.update(|_, cx| ai_paints(&app, cx));
@@ -193,6 +194,7 @@ fn detected_terminal_error_refreshes_ai_panel_only() {
 fn repeated_ai_refresh_requests_coalesce() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = hosted(&mut cx, test_dir.path());
     let before = vcx.update(|_, cx| ai_snapshot_sets(&app, cx));
 
@@ -247,6 +249,7 @@ fn repeated_ai_refresh_requests_coalesce() {
 fn ai_header_running_transition_notifies_root() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = app(&mut cx, test_dir.path());
     cx.update_entity(&app, |app, cx| {
         app.sync_component_theme(cx);
@@ -357,6 +360,7 @@ fn ai_header_running_transition_notifies_root() {
 fn unrelated_app_notify_does_not_repaint_cached_ai_panel() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = hosted(&mut cx, test_dir.path());
     let before = vcx.update(|_, cx| ai_paints(&app, cx));
     assert!(
@@ -379,6 +383,7 @@ fn unrelated_app_notify_does_not_repaint_cached_ai_panel() {
 fn streaming_delta_repaints_ai_panel_without_repainting_sibling_panels() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = hosted(&mut cx, test_dir.path());
 
     let before = vcx.update(|_, cx| {
@@ -422,6 +427,7 @@ fn streaming_delta_repaints_ai_panel_without_repainting_sibling_panels() {
 fn prompt_subscription_refreshes_snapshot_before_next_paint() {
     let test_dir = TestConfigDir::new("zzclawterm-ai-panel");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = hosted(&mut cx, test_dir.path());
     let prompt_input = vcx.update(|_, cx| {
         app.read(cx)
@@ -554,6 +560,7 @@ fn edit_panel_snapshot(
 fn narrow_ai_panel_centers_empty_state_and_keeps_compact_controls_inside_composer() {
     let root = TestConfigDir::new("zzclawterm-ai-compact");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (_, vcx) = compact_host(&mut cx, root.path());
     let viewport = vcx.debug_bounds("ai-transcript-viewport").unwrap();
     let empty = vcx.debug_bounds("ai-empty-transcript").unwrap();
@@ -582,6 +589,7 @@ fn narrow_ai_panel_centers_empty_state_and_keeps_compact_controls_inside_compose
 fn mention_picker_reveals_keyboard_selection_beyond_eight_sessions() {
     let root = TestConfigDir::new("zzclawterm-ai-mentions");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         snapshot.mention_open = true;
@@ -628,6 +636,7 @@ fn transcript_message(index: usize) -> Arc<AiMessage> {
 fn growing_transcript_follows_bottom_but_preserves_a_readers_scroll_position() {
     let root = TestConfigDir::new("zzclawterm-ai-scroll");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         snapshot.messages = (0..24).map(transcript_message).collect::<Vec<_>>().into();
@@ -660,6 +669,7 @@ fn growing_transcript_follows_bottom_but_preserves_a_readers_scroll_position() {
 fn prepending_history_preserves_the_visible_message_anchor() {
     let root = TestConfigDir::new("zzclawterm-ai-prepend");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         snapshot.messages = (10..34).map(transcript_message).collect::<Vec<_>>().into();
@@ -682,6 +692,7 @@ fn prepending_history_preserves_the_visible_message_anchor() {
 fn streaming_remeasures_the_growing_row_and_preserves_a_readers_anchor() {
     let root = TestConfigDir::new("zzclawterm-ai-stream-measure");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         let mut messages = (0..24).map(transcript_message).collect::<Vec<_>>();
@@ -731,6 +742,7 @@ fn streaming_remeasures_the_growing_row_and_preserves_a_readers_anchor() {
 fn switching_conversations_resumes_tail_following_even_with_the_same_message_ids() {
     let root = TestConfigDir::new("zzclawterm-ai-scroll-session");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         snapshot.messages = (0..24).map(transcript_message).collect::<Vec<_>>().into();
@@ -750,6 +762,7 @@ fn switching_conversations_resumes_tail_following_even_with_the_same_message_ids
 fn mixed_transcript_preserves_card_indices_and_remeasures_changed_agent_details() {
     let root = TestConfigDir::new("zzclawterm-ai-transcript-projection");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut previous =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -867,6 +880,7 @@ fn transcript_deduplicates_ids_and_preserves_unrelated_commands_and_old_text() {
     use crate::features::ai::presentation::{AiAgentStepKind, AiCommandPhase};
     let root = TestConfigDir::new("zzclawterm-ai-card-dedup");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut snapshot =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -915,6 +929,7 @@ fn transcript_deduplicates_ids_and_preserves_unrelated_commands_and_old_text() {
 fn linked_execution_changes_remeasure_only_the_owning_message() {
     let root = TestConfigDir::new("zzclawterm-ai-linked-height");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut previous =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -942,6 +957,7 @@ fn linked_execution_changes_remeasure_only_the_owning_message() {
 fn advancing_and_stopping_agent_refreshes_activity_in_retained_rows() {
     let root = TestConfigDir::new("zzclawterm-ai-step-activity");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut previous =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -1003,6 +1019,7 @@ fn command_buttons_and_running_animation_match_execution_phase_in_a_narrow_panel
 
     let root = TestConfigDir::new("zzclawterm-ai-command-controls");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     for status in [
         AiAgentStepStatus::NeedsApproval,
@@ -1070,6 +1087,7 @@ fn command_buttons_and_running_animation_match_execution_phase_in_a_narrow_panel
 fn reasoning_disclosure_accepts_keyboard_and_persists_when_body_text_starts() {
     let root = TestConfigDir::new("zzclawterm-ai-thought-keyboard");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let (job, id) = vcx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -1126,6 +1144,7 @@ fn native_plan_stays_in_request_history_but_questions_remain_visible_and_focused
     };
     let root = TestConfigDir::new("zzclawterm-ai-native-disclosure");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let user_id = vcx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -1198,6 +1217,7 @@ fn native_plan_stays_in_request_history_but_questions_remain_visible_and_focused
 fn execution_disclosures_accept_keyboard_and_mouse_without_following_a_long_script_to_the_end() {
     let root = TestConfigDir::new("zzclawterm-ai-execution-interaction");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let user_id = vcx.update(|_, cx| {
         app.update(cx, |app, cx| {
@@ -1310,6 +1330,7 @@ fn execution_disclosures_accept_keyboard_and_mouse_without_following_a_long_scri
 fn historic_steps_without_a_command_card_fold_their_script_inside_the_request() {
     let root = TestConfigDir::new("zzclawterm-ai-historic-command");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         let mut messages: Vec<_> = (0..3).map(transcript_message).collect();
@@ -1337,6 +1358,7 @@ fn historic_steps_without_a_command_card_fold_their_script_inside_the_request() 
 fn request_disclosure_keeps_the_user_and_final_answer_visible_and_hides_commands() {
     let root = TestConfigDir::new("zzclawterm-ai-request-disclosure");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         let mut messages: Vec<_> = (0..4).map(transcript_message).collect();
@@ -1412,6 +1434,7 @@ fn execution_groups_do_not_merge_requests_or_promote_tool_narration_to_final_ans
     use crate::features::ai::presentation::{AiAgentStepKind, AiResponsePhase};
     let root = TestConfigDir::new("zzclawterm-ai-request-boundaries");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut snapshot =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -1462,6 +1485,7 @@ fn tool_preparation_belongs_to_the_streaming_message_and_remeasures_it() {
 
     let root = TestConfigDir::new("zzclawterm-ai-inline-progress");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     let mut previous =
         vcx.update(|_, cx| app.read(cx).ai_panel.read(cx).snapshot().unwrap().clone());
@@ -1502,6 +1526,7 @@ fn tool_preparation_belongs_to_the_streaming_message_and_remeasures_it() {
 fn command_expansion_preserves_results_and_approval_shows_the_complete_script() {
     let root = TestConfigDir::new("zzclawterm-ai-script-expansion");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     edit_panel_snapshot(&app, vcx, |snapshot| {
         let mut message = transcript_message(0);
@@ -1575,6 +1600,7 @@ fn command_expansion_preserves_results_and_approval_shows_the_complete_script() 
 fn long_commands_and_collapsed_output_fit_light_and_dark_panel_layouts() {
     let root = TestConfigDir::new("zzclawterm-ai-command-themes");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let (app, vcx) = compact_host(&mut cx, root.path());
     for theme in ["github-dark", "solarized-light"] {
         let palette = zzclawterm_ui::theme_palette(theme);

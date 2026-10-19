@@ -21,9 +21,11 @@ mod state;
 mod status_clocks;
 mod tab_drag;
 mod tab_mouse;
+pub(in crate::features) mod tab_reorder;
 mod tab_windows_runtime;
 mod terminal_recovery;
 pub(crate) mod tray;
+pub(in crate::features) mod window_material;
 mod workspace_runtime;
 
 pub(in crate::features) use activity_bar_runtime::{

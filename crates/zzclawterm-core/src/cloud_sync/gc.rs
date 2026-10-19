@@ -23,9 +23,29 @@ pub fn cleanup_sync_snapshots_with_remote(
     remote: &dyn CloudSyncRemote,
     latest: Option<&RemoteSyncPointer>,
 ) -> Result<(), CloudSyncError> {
+    cleanup_sync_snapshots_with_remote_controlled(
+        local_store,
+        options,
+        remote,
+        latest,
+        &super::control::CloudSyncOperationControl::default(),
+    )
+}
+
+pub fn cleanup_sync_snapshots_with_remote_controlled(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    latest: Option<&RemoteSyncPointer>,
+    control: &super::control::CloudSyncOperationControl,
+) -> Result<(), CloudSyncError> {
+    control.checkpoint()?;
+    let remote = &control.remote(remote);
+    let local_store = &control.local_store(local_store);
     let prefix = remote_path(&options.remote_root, SYNC_SNAPSHOTS_DIR);
     let mut snapshots = Vec::new();
     for path in remote.list_files(&prefix)? {
+        control.checkpoint()?;
         let Some(revision_id) = snapshot_revision_from_path(&path) else {
             continue;
         };
@@ -72,6 +92,7 @@ pub fn cleanup_sync_snapshots_with_remote(
             first_error = Some(error);
         }
     }
+    control.checkpoint()?;
     first_error.map_or(Ok(()), Err)
 }
 

@@ -18,6 +18,23 @@ fn snapshot_text(snapshot: &TerminalSnapshot) -> String {
 }
 
 #[test]
+fn reverse_snapshot_preserves_source_colors_and_sgr_reset_semantics() {
+    let mut screen = TerminalScreen::new(16, 2);
+    screen.advance(b"\x1b[1;4;31;44mA\x1b[7mB\x1b[27mC\x1b[7mD\x1b[0mE");
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    for (col, reverse) in [false, true, false, true].into_iter().enumerate() {
+        let style = row.cells[col].style;
+        assert_eq!(style.fg, Some(1));
+        assert_eq!(style.bg, Some(4));
+        assert_eq!(style.reverse, reverse);
+        assert!(style.bold && style.underline);
+        assert_eq!(row.styled_spans[col].style, style);
+    }
+    assert_eq!(row.cells[4].style, super::CellStyle::default());
+}
+
+#[test]
 fn snapshot_preserves_styled_trailing_blanks_while_trimming_plain_text() {
     for alternate in [false, true] {
         let mut screen = TerminalScreen::new(24, 3);
@@ -908,6 +925,8 @@ fn snapshot_row_cache_uses_revision_as_authoritative_invalidation() {
     conflicting.text = "zlpha".to_string();
     let conflicting = Arc::new(conflicting);
     let key = TerminalSnapshotRowCacheKey {
+        cleared: original.cleared,
+        display_line_number: original.display_line_number,
         cols: screen.cols(),
         revision: original.revision,
         signature: original.signature,
@@ -942,6 +961,8 @@ fn snapshot_row_cache_prunes_to_limit() {
     for signature in 0..=TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT as u64 {
         cache.entries.insert(
             TerminalSnapshotRowCacheKey {
+                cleared: false,
+                display_line_number: None,
                 cols: 1,
                 revision: signature,
                 signature,
@@ -1054,6 +1075,99 @@ fn scrolled_lines_keep_timestamps_in_history_viewport() {
             .iter()
             .any(|row| row.timestamp_ms.is_some() && row.text.contains("one"))
     );
+}
+
+#[test]
+fn output_burst_keeps_timestamps_above_the_final_screen() {
+    for chunk_size in [1, 37, 4096] {
+        let mut screen = TerminalScreen::new(40, 5);
+        let output = (0..100)
+            .map(|line| format!("line-{line:03}\r\n"))
+            .collect::<String>();
+        for chunk in output.as_bytes().chunks(chunk_size) {
+            screen.advance(chunk);
+        }
+        let snapshot = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+        assert_eq!(
+            snapshot
+                .rows()
+                .iter()
+                .filter(|row| !row.text.is_empty())
+                .count(),
+            100
+        );
+        for row in snapshot.rows().iter().filter(|row| !row.text.is_empty()) {
+            assert!(
+                row.timestamp_ms.is_some(),
+                "missing timestamp for {} with chunk size {chunk_size}",
+                row.text
+            );
+        }
+    }
+}
+
+#[test]
+fn long_output_keeps_history_timestamps_after_width_change() {
+    let mut screen = TerminalScreen::new(40, 5);
+    let output = (0..100)
+        .map(|line| format!("line-{line:03}\r\n"))
+        .collect::<String>();
+    screen.advance(output.as_bytes());
+    let before = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+
+    screen.resize(30, 5);
+    let after = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+    for (old, new) in before.rows().iter().zip(after.rows()) {
+        assert_eq!(new.text, old.text);
+        assert_eq!(
+            new.timestamp_ms, old.timestamp_ms,
+            "timestamp changed for {}",
+            old.text
+        );
+    }
+}
+
+#[test]
+fn width_reflow_preserves_wrapped_output_times_and_wide_characters() {
+    let mut screen = TerminalScreen::new(12, 3);
+    screen.advance("abcdef   中文e\u{301}ghijklmnopqrstuvwxyz\r\nnext\r\n".as_bytes());
+    for metadata in screen.primary_lines.metadata.values_mut() {
+        metadata.timestamp_ms = Some(123);
+    }
+    for cols in [7, 18, 5, 12] {
+        screen.resize(cols, 3);
+        let snapshot = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+        for row in snapshot.rows().iter().filter(|row| !row.text.is_empty()) {
+            assert_eq!(
+                row.timestamp_ms,
+                Some(123),
+                "timestamp changed for {} at width {cols}",
+                row.text
+            );
+        }
+    }
+}
+
+#[test]
+fn width_reflow_keeps_distinct_times_for_repeated_lines_after_history_eviction() {
+    let mut screen = TerminalScreen::new(12, 3);
+    screen.set_scrollback_limit(5);
+    screen.advance(b"repeated-line\r\nrepeated-line\r\nrepeated-line\r\n");
+    for (index, metadata) in screen.primary_lines.metadata.values_mut().enumerate() {
+        metadata.timestamp_ms = Some(100 + index as u64);
+    }
+    let before = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+    screen.resize(6, 3);
+    let after = screen.viewport_snapshot_with_window(0, screen.scrollback_len(), 0);
+    // The last two complete repeated lines survive, even when the oldest is
+    // partially evicted. Each new row inherits its source row's time.
+    let last_complete = &after.rows()[after.row_count() - 7..after.row_count() - 1];
+    for (index, row) in last_complete.iter().enumerate() {
+        let source =
+            &before.rows()[before.row_count() - 5 + index / 3 * 2 + usize::from(index % 3 == 2)];
+        assert_eq!(row.timestamp_ms, source.timestamp_ms);
+    }
+    assert!(after.rows().iter().all(|row| row.timestamp_ms.is_some()));
 }
 
 #[test]
@@ -1312,6 +1426,15 @@ fn clear_except_input_keeps_bottom_prompt_at_host_cursor_coordinates() {
     let snapshot = screen.snapshot();
     assert_eq!(snapshot.cursor.row, 11);
     assert_eq!(snapshot.rows()[11].text, "root# draft");
+    assert_eq!(snapshot.leading_cleared_rows(0), 11);
+    assert!(
+        snapshot
+            .rows()
+            .iter()
+            .take(11)
+            .all(|row| row.cleared && row.timestamp_ms.is_none())
+    );
+    assert!(!snapshot.rows()[11].cleared);
     assert!(
         snapshot
             .rows()
@@ -1321,6 +1444,157 @@ fn clear_except_input_keeps_bottom_prompt_at_host_cursor_coordinates() {
     );
     screen.advance(b"!");
     assert_eq!(screen.snapshot().rows()[11].text, "root# draft!");
+}
+
+#[test]
+fn cleared_rows_follow_scrolling_and_host_rewrites() {
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.advance(b"\x1b[4;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"!\r\nresult");
+    let snapshot = screen.snapshot();
+    assert_eq!(snapshot.leading_cleared_rows(0), 2);
+    assert!(
+        snapshot
+            .rows()
+            .iter()
+            .take(2)
+            .all(|row| row.cleared && row.timestamp_ms.is_none())
+    );
+    assert_eq!(snapshot.rows()[2].text, "root# draft!");
+    assert_eq!(snapshot.rows()[3].text, "result");
+    assert_eq!(screen.scrollback_len(), 0);
+    assert_eq!(snapshot.rows()[2].display_line_number, Some(1));
+    assert_eq!(snapshot.rows()[3].display_line_number, Some(2));
+    screen.advance(b"\x1b[Hnew");
+    let snapshot = screen.snapshot();
+    assert_eq!(snapshot.leading_cleared_rows(0), 0);
+    assert!(!snapshot.rows()[0].cleared);
+    assert!(snapshot.rows()[0].timestamp_ms.is_some());
+}
+
+#[test]
+fn cleared_rows_do_not_hide_an_absolute_cursor_move_or_survive_reset() {
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.advance(b"\x1b[4;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"\x1b[H");
+    assert_eq!(screen.snapshot().leading_cleared_rows(0), 0);
+    screen.advance(b"\x1bc");
+    assert!(screen.snapshot().rows().iter().all(|row| !row.cleared));
+}
+
+#[test]
+fn clear_all_starts_numbering_at_one_and_scrolls_only_after_real_output_fills_viewport() {
+    for chunk_size in [1, 8, 128] {
+        let mut screen = TerminalScreen::new(20, 4);
+        screen.advance(b"old\r\nold\r\nold\r\nroot# draft");
+        screen.clear_except_input();
+        assert_eq!(screen.snapshot().rows()[3].display_line_number, Some(1));
+        let output = b"\r\ntwo\r\n\r\nfour";
+        for chunk in output.chunks(chunk_size) {
+            screen.advance(chunk);
+        }
+        assert_eq!(screen.scrollback_len(), 0, "chunk size {chunk_size}");
+        let snapshot = screen.snapshot();
+        assert_eq!(snapshot.scrollback_len, 0);
+        assert_eq!(snapshot.total_rows, 4);
+        assert_eq!(snapshot.leading_cleared_rows(0), 0);
+        assert_eq!(snapshot.rows()[0].text, "root# draft");
+        assert_eq!(snapshot.rows()[1].text, "two");
+        assert!(snapshot.rows()[2].text.is_empty());
+        assert!(
+            !snapshot.rows()[2].cleared,
+            "intentional blank output must survive"
+        );
+        for (index, row) in snapshot.rows().iter().enumerate() {
+            assert_eq!(row.display_line_number, Some(index + 1));
+        }
+        screen.advance(b"\r\nfive");
+        assert_eq!(screen.scrollback_len(), 1);
+        let top = screen.viewport_snapshot(1);
+        assert_eq!(top.rows()[0].text, "root# draft");
+        assert_eq!(top.rows()[0].display_line_number, Some(1));
+        assert_eq!(screen.snapshot().rows()[3].display_line_number, Some(5));
+        assert!(
+            screen
+                .all_text()
+                .unwrap()
+                .starts_with("root# draft\ntwo\n\nfour\nfive")
+        );
+    }
+}
+
+#[test]
+fn clear_all_preserves_new_blank_output_below_a_prompt_in_the_middle_of_the_screen() {
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.advance(b"\x1b[2;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"\r\n\r\nthree");
+    let snapshot = screen.snapshot();
+    assert!(!snapshot.rows()[2].cleared);
+    assert_eq!(snapshot.rows()[2].display_line_number, Some(2));
+    screen.advance(b"\r\nfour\r\nfive");
+    assert_eq!(screen.scrollback_len(), 1);
+    assert_eq!(screen.viewport_snapshot(1).rows()[0].text, "root# draft");
+    assert_eq!(screen.viewport_snapshot(1).rows()[1].text, "");
+    assert!(!screen.viewport_snapshot(1).rows()[1].cleared);
+}
+
+#[test]
+fn clear_all_removes_old_history_again_and_keeps_the_configured_limit() {
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.set_scrollback_limit(2);
+    screen.advance(b"\x1b[4;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
+    assert_eq!(screen.scrollback_len(), 2);
+    assert_eq!(screen.snapshot().rows()[3].display_line_number, Some(7));
+    screen.clear_except_input();
+    assert_eq!(screen.scrollback_len(), 0);
+    assert_eq!(screen.snapshot().rows()[3].display_line_number, Some(1));
+    screen.advance(b"\r\neight");
+    assert_eq!(screen.scrollback_len(), 0);
+    assert_eq!(screen.snapshot().rows()[3].display_line_number, Some(2));
+}
+
+#[test]
+fn clear_all_survives_width_reflow_and_keeps_erased_rows_out_of_history() {
+    let mut screen = TerminalScreen::new(20, 6);
+    screen.advance(b"\x1b[6;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"\r\ntwo");
+    for cols in [30, 16, 25] {
+        screen.resize(cols, 6);
+        assert_eq!(screen.scrollback_len(), 0);
+        let snapshot = screen.snapshot();
+        let prompt = snapshot
+            .rows()
+            .iter()
+            .position(|row| row.text == "root# draft")
+            .unwrap();
+        assert_eq!(snapshot.leading_cleared_rows(0), prompt);
+        assert_eq!(snapshot.rows()[prompt].display_line_number, Some(1));
+        assert_eq!(snapshot.rows()[prompt + 1].display_line_number, Some(2));
+    }
+    screen.advance(b"\r\nthree");
+    assert_eq!(screen.scrollback_len(), 0);
+    assert_eq!(
+        screen.snapshot().rows().last().unwrap().display_line_number,
+        Some(3)
+    );
+}
+
+#[test]
+fn host_redraw_after_clear_all_rebases_line_numbers_without_creating_history() {
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.advance(b"\x1b[4;1Hroot# draft");
+    screen.clear_except_input();
+    screen.advance(b"\x1b[H\x1b[0Jroot# draft");
+    assert_eq!(screen.scrollback_len(), 0);
+    assert_eq!(screen.snapshot().rows()[0].display_line_number, Some(1));
+    screen.advance(b"\r\ntwo");
+    assert_eq!(screen.snapshot().rows()[1].display_line_number, Some(2));
 }
 
 #[test]
@@ -2087,4 +2361,97 @@ fn utf8_mouse_coordinates_are_protocol_bytes_in_legacy_charset_sessions() {
             b"\x1b[<0;101;111M"
         );
     }
+}
+
+#[test]
+fn tab_cell_materializes_stop_columns_for_paint() {
+    // The alacritty fork's `put_tab` keeps the literal tab in the starting cell
+    // and leaves blank cells up to the next tab stop. The GPUI paint layer relies
+    // on these exact columns: the tab span covers the tab cell plus the blanks,
+    // so colored spans after it start at the stop. Changing tab handling in the
+    // grid invalidates that contract.
+    let mut screen = TerminalScreen::new(40, 2);
+    screen.advance(b"System load:  \t\x1b[0;33;40m0.33\x1b[0m");
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+
+    assert_eq!(row.cells[14].text(), "\t");
+    assert!(row.cells[15].text().is_empty());
+    assert_eq!(
+        &row.cells[16..20]
+            .iter()
+            .map(|c| c.text())
+            .collect::<String>(),
+        "0.33"
+    );
+    assert!(
+        row.cells[16..20]
+            .iter()
+            .all(|cell| cell.style.fg == Some(3) && cell.style.bg == Some(0))
+    );
+
+    // Span accounting must count the tab cell and the following blank as two
+    // columns, so the colored span's background starts at the tab stop.
+    assert_eq!(row.styled_spans[0].text, "System load:  \t ");
+    assert_eq!(row.styled_spans[1].text, "0.33");
+    assert_eq!(row.styled_spans[1].style.bg, Some(0));
+}
+
+#[test]
+fn history_coordinates_distinguish_growth_from_full_buffer_rotation() {
+    let mut screen = TerminalScreen::new(16, 3);
+    screen.set_scrollback_limit(8);
+    let initial = screen.history_state();
+    screen.advance(b"0\r\n1\r\n2\r\n3\r\n4\r\n");
+    let growing = screen.snapshot();
+    assert!(growing.history.preserves_coordinates_from(initial));
+    assert!(growing.history.scroll_count > initial.scroll_count);
+    screen.advance(b"5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
+    let full = screen.snapshot();
+    assert_eq!(full.scrollback_len, 8);
+    let reading = screen.viewport_snapshot(3);
+    screen.advance(b"11\r\n12\r\n");
+    let rotated = screen.snapshot();
+    assert_eq!(rotated.scrollback_len, full.scrollback_len);
+    assert_eq!(rotated.history.scrolled_since(full.history), Some(2));
+    assert!(!rotated.history.preserves_coordinates_from(full.history));
+    let anchored = rotated.history.reanchor_offset(full.history, 3);
+    assert_eq!(anchored, 5);
+    assert_eq!(screen.viewport_snapshot(anchored).line(0), reading.line(0));
+    assert_eq!(rotated.history.reanchor_offset(full.history, 0), 0);
+}
+
+#[test]
+fn history_coordinates_reject_reset_resize_screen_switch_and_backwards_snapshots() {
+    let mut screen = TerminalScreen::new(16, 3);
+    screen.advance(b"0\r\n1\r\n2\r\n3\r\n");
+    let before = screen.history_state();
+    screen.advance(b"4\r\n");
+    let after = screen.history_state();
+    assert_eq!(before.scrolled_since(after), None);
+    screen.advance(b"\x1b[?1049h");
+    assert_eq!(screen.history_state().scrolled_since(after), None);
+    screen.advance(b"\x1b[?1049l");
+    let primary = screen.history_state();
+    screen.resize(20, 3);
+    assert_eq!(screen.history_state().scrolled_since(primary), None);
+    let resized = screen.history_state();
+    screen.advance(b"\x1bc");
+    assert_eq!(screen.history_state().scrolled_since(resized), None);
+}
+
+#[test]
+fn history_scroll_counter_wrap_preserves_a_continuous_observation() {
+    let previous = super::TerminalHistoryState {
+        scroll_count: u64::MAX,
+        scrollback_len: 8,
+        ..Default::default()
+    };
+    let current = super::TerminalHistoryState {
+        scroll_count: 1,
+        ..previous
+    };
+    assert_eq!(current.scrolled_since(previous), Some(2));
+    assert_eq!(current.reanchor_offset(previous, 7), 8);
+    assert!(!current.preserves_coordinates_from(previous));
 }

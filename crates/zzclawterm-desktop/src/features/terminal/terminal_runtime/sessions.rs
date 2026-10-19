@@ -90,6 +90,10 @@ impl ZzClawTermApp {
             .session
             .active_id()
             .is_some_and(|active_id| close_ids.iter().any(|id| id == active_id));
+        // A pane that fails to close must not abandon the rest of the tab tree half
+        // torn down: the remaining panes still close and the layout is still pruned.
+        let mut close_error = None;
+        let mut closed_any = false;
         for close_id in &close_ids {
             let disconnected = self.session.is_disconnected(close_id);
             let close_result = if self.remote_desktop.is_session(close_id) {
@@ -97,21 +101,29 @@ impl ZzClawTermApp {
             } else {
                 self.session
                     .manager()
-                    .close(close_id)
+                    .close_detached(close_id)
                     .map_err(anyhow::Error::from)
             };
             match close_result {
                 Ok(()) => {}
                 Err(_) if disconnected => {}
                 Err(error) if !disconnected && !self.session.has_session(close_id) => {
-                    self.shell.set_status(format!("close failed: {error}"));
-                    cx.notify();
-                    return;
+                    close_error.get_or_insert(error);
+                    continue;
                 }
-                Err(_) => {}
+                Err(error) => {
+                    close_error.get_or_insert(error);
+                    continue;
+                }
             }
             self.cleanup_recording_for_session(close_id);
             self.remove_session_state(close_id, cx);
+            closed_any = true;
+        }
+        if !closed_any && let Some(error) = close_error.take() {
+            self.shell.set_status(format!("close failed: {error}"));
+            cx.notify();
+            return;
         }
         self.prune_workspace_split();
         if was_active {
@@ -146,6 +158,9 @@ impl ZzClawTermApp {
         } else {
             self.shell
                 .set_status(format!("closed {}", short_id(&session_id)));
+        }
+        if let Some(error) = close_error {
+            self.shell.set_status(format!("close failed: {error}"));
         }
         cx.notify();
     }
@@ -330,6 +345,18 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings.theme_designer().submitting {
+            cx.emit(AppLifecycleEvent::ShutdownCancelled);
+            return;
+        }
+        if self.settings.theme_designer().dirty() {
+            self.activate_settings_window(cx);
+            self.theme_designer_action(
+                crate::features::settings::theme_designer::ThemeIntent::Quit(open_sessions),
+                cx,
+            );
+            return;
+        }
         if self.settings.summary().confirm_on_close && open_sessions > 0 {
             // Reuse the close-all confirmation as the quit-with-sessions gate.
             // A title-bar close control can also produce the native window-close
@@ -402,6 +429,9 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        if self.session.dialog_should_quit_after_close_all() {
+            cx.emit(AppLifecycleEvent::ShutdownCancelled);
+        }
         self.update
             .update(cx, |update, _| update.install_requested = false);
         self.session.dialog_cancel_close_all_sessions_confirm();

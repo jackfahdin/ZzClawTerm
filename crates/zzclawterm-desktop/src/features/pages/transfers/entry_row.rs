@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::*, px, rgb,
+    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::*, px, rgb,
 };
 use zzclawterm_transport::{SftpFileEntry, SftpFileType};
 use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
@@ -105,6 +105,31 @@ fn transfer_browser_text_cell(
         .child(value)
 }
 
+fn transfer_browser_detail_row(
+    palette: ThemePalette,
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .w(px(88.))
+                .flex_none()
+                .text_color(rgb(palette.text_muted))
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .whitespace_normal()
+                .child(value.into()),
+        )
+}
+
 pub(super) fn transfer_browser_entry_row(
     presentation: TransferBrowserEntryRowPresentation<'_>,
     cx: &mut Context<TransferPanel>,
@@ -126,19 +151,6 @@ pub(super) fn transfer_browser_entry_row(
         crate::features::transfers::drag_export::DraggedSelection::new(entry_identity.clone());
     let drag_app = app_handle;
     let drag_name = entry.name.clone();
-    let drag_hint = if local_backend {
-        rust_i18n::t!("fileExplorer.dragLocal")
-    } else if !matches!(
-        entry.file_type,
-        SftpFileType::File | SftpFileType::Directory
-    ) {
-        rust_i18n::t!("fileExplorer.dragDirectoryUnsupported")
-    } else if virtual_drag_supported {
-        rust_i18n::t!("fileExplorer.dragRemote")
-    } else {
-        rust_i18n::t!("fileExplorer.dragPlatformUnsupported")
-    };
-
     let mouse_down_path = entry_identity.clone();
     let mouse_move_path = entry_identity.clone();
     let context_path = entry_identity.clone();
@@ -169,50 +181,57 @@ pub(super) fn transfer_browser_entry_row(
         .map(format_permissions_octal)
         .unwrap_or_else(|| "-".to_string());
     let detail = div()
-        .w(px(320.))
-        .max_w(px(320.))
-        .p_3()
+        .w(px(296.))
+        .max_w(px(296.))
         .flex()
         .flex_col()
-        .gap_1()
-        .text_xs()
+        .gap_2()
+        .text_size(px(12.))
+        .line_height(px(18.))
         .text_color(rgb(palette.text))
         .child(
             div()
-                .text_sm()
+                .w_full()
+                .pb_2()
+                .border_b_1()
+                .border_color(rgb(palette.border))
+                .text_size(px(13.))
+                .font_weight(FontWeight(600.))
                 .whitespace_normal()
                 .child(entry.name.clone()),
         )
-        .child(drag_hint)
-        .child(format!(
-            "{}: {modified_display}",
-            rust_i18n::t!("fileExplorer.mtime")
+        .child(transfer_browser_detail_row(
+            palette,
+            rust_i18n::t!("fileExplorer.mtime").to_string(),
+            modified_display.clone(),
         ))
-        .child(format!(
-            "{}: {size_display}",
-            rust_i18n::t!("fileExplorer.size")
+        .child(transfer_browser_detail_row(
+            palette,
+            rust_i18n::t!("fileExplorer.size").to_string(),
+            size_display.clone(),
         ))
-        .child(format!(
-            "{}: {permissions_display}",
-            rust_i18n::t!("fileExplorer.permissions")
+        .child(transfer_browser_detail_row(
+            palette,
+            rust_i18n::t!("fileExplorer.permissions").to_string(),
+            permissions_display.clone(),
         ))
-        .child(format!(
-            "{}: {}",
-            rust_i18n::t!("fileExplorer.owner"),
+        .child(transfer_browser_detail_row(
+            palette,
+            rust_i18n::t!("fileExplorer.owner").to_string(),
             if entry.owner.is_empty() {
-                "-"
+                "-".to_string()
             } else {
-                &entry.owner
-            }
+                entry.owner.clone()
+            },
         ))
-        .child(format!(
-            "{}: {}",
-            rust_i18n::t!("fileExplorer.group"),
+        .child(transfer_browser_detail_row(
+            palette,
+            rust_i18n::t!("fileExplorer.group").to_string(),
             if entry.group.is_empty() {
-                "-"
+                "-".to_string()
             } else {
-                &entry.group
-            }
+                entry.group.clone()
+            },
         ));
     div()
         .id(SharedString::from(format!(

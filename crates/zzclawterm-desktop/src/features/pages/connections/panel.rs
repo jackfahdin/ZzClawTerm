@@ -500,6 +500,7 @@ mod tests {
     fn an_unrelated_app_notify_does_not_repaint_the_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -528,6 +529,7 @@ mod tests {
     fn a_catalog_replacement_reaches_the_snapshot_before_any_paint() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -560,6 +562,7 @@ mod tests {
     fn all_folder_actions_persist_expansion_and_publish_the_cached_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let mut child = group("child", "Child");
         child.parent_id = Some("parent".to_string());
         let (app, vcx) = hosted(
@@ -610,6 +613,7 @@ mod tests {
     fn a_catalog_move_under_an_unchanged_query_still_expands_the_new_match() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -655,6 +659,7 @@ mod tests {
     fn interaction_state_changes_reach_the_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -718,6 +723,7 @@ mod tests {
     fn panel_interaction_flushes_after_its_lease_is_released() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -759,6 +765,7 @@ mod tests {
     fn closing_search_from_a_panel_listener_does_not_reenter_the_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -789,6 +796,7 @@ mod tests {
     fn search_input_changes_reach_the_snapshot_after_the_subscription_runs() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -832,6 +840,7 @@ mod tests {
     fn only_the_visible_range_is_materialised() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let connections = (0..500)
             .map(|index| connection(&format!("c{index}"), &format!("Host {index}"), None))
             .collect();
@@ -855,6 +864,7 @@ mod tests {
     fn every_selection_mutation_moves_the_arc_while_a_snapshot_holds_it() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(
             &mut cx,
             test_dir.path(),
@@ -944,6 +954,7 @@ mod tests {
     fn long_connection_actions_stay_at_minimum_panel_viewport_right_edge() {
         let test_dir = TestConfigDir::new("zzclawterm-connection-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let long_name = "生产环境-一段非常长且必须完整显示的-connection-name-0123456789";
         let (app, vcx) = hosted_at_width(
             &mut cx,

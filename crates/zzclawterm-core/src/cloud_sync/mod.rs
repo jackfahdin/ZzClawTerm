@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{PortableSnapshotError, RawPortableSnapshot};
 
+pub mod control;
 mod gc;
 mod history;
 mod protocol;
@@ -16,6 +17,7 @@ mod snippet;
 
 pub use gc::{
     SYNC_SNAPSHOT_GC_GRACE_PERIOD, SYNC_SNAPSHOT_KEEP_RECENT, cleanup_sync_snapshots_with_remote,
+    cleanup_sync_snapshots_with_remote_controlled,
 };
 pub use history::{
     CLOUD_SYNC_HISTORY_DOMAIN, CLOUD_SYNC_HISTORY_EVENT, CLOUD_SYNC_HISTORY_LIMIT,
@@ -49,6 +51,8 @@ pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum CloudSyncError {
+    #[error("cloud sync was cancelled before commit")]
+    Cancelled,
     #[error(
         "gist_capacity: Gitee snippet has insufficient file slots; remove unrelated files or choose a new snippet, then retry sync"
     )]
@@ -86,8 +90,33 @@ pub enum CloudSyncError {
         expected_revision: Option<String>,
         actual_revision: Option<String>,
     },
-    #[error("remote sync snapshot {revision} is corrupted")]
-    CorruptedSnapshot { revision: String },
+    #[error("remote sync snapshot {revision} could not be decoded: {detail}")]
+    CorruptedSnapshot { revision: String, detail: String },
+    #[error(
+        "cannot read remote sync snapshot {revision} at '{path}' ({bytes} bytes, sha256 {digest}): {cause}; decoder reported: {source}"
+    )]
+    RemoteSnapshotUnreadable {
+        revision: String,
+        path: String,
+        bytes: usize,
+        digest: String,
+        cause: SnapshotUnreadableCause,
+        /// Boxed to keep `CloudSyncError` small: an inlined decoder error would
+        /// push this variant past the size at which every `Result` returning
+        /// this error trips `clippy::result_large_err`.
+        source: Box<PortableSnapshotError>,
+    },
+    #[error(
+        "remote sync did not keep the snapshot just written to '{path}': read back {actual_bytes} bytes with sha256 {actual_digest} instead of {expected_bytes} bytes with sha256 {expected_digest} (revision {revision}); the remote accepted the upload but serves different data"
+    )]
+    RemoteWriteDiverged {
+        revision: String,
+        path: String,
+        expected_bytes: usize,
+        expected_digest: String,
+        actual_bytes: usize,
+        actual_digest: String,
+    },
     #[error("invalid remote path '{path}'")]
     InvalidRemotePath { path: String },
     #[error("cloud sync remote error: {0}")]
@@ -120,6 +149,70 @@ pub enum CloudSyncError {
 }
 
 pub const GIST_CAPACITY_ERROR_CODE: &str = "gist_capacity";
+
+/// Why a remote snapshot payload could not be decrypted.
+///
+/// An AEAD authentication failure cannot be told apart from the ciphertext
+/// alone, so this is decided with local evidence: when the store can verify the
+/// configured master password, the answer is authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotUnreadableCause {
+    /// The payload was produced by another key (another device's master
+    /// password, a rotated password, or a foreign file) or was altered in
+    /// transit, while the configured master password is known to be correct.
+    PayloadNotAuthentic,
+    /// The configured master password does not match this device's local state,
+    /// so the cloud copy is most likely still valid and must not be overwritten.
+    MasterPasswordMismatch,
+    /// Not enough local evidence to choose between the two.
+    Unknown,
+}
+
+impl SnapshotUnreadableCause {
+    /// Whether overwriting the cloud copy must be refused for this cause.
+    pub fn blocks_remote_overwrite(self) -> bool {
+        matches!(self, Self::MasterPasswordMismatch)
+    }
+}
+
+impl std::fmt::Display for SnapshotUnreadableCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PayloadNotAuthentic => {
+                "it was written with a different master password (for example by another device) \
+                 or altered in transit, and this device verified that the configured master \
+                 password is correct"
+            }
+            Self::MasterPasswordMismatch => {
+                "the configured master password does not match this device's local state, so the \
+                 cloud copy is most likely still valid; fix the master password instead of \
+                 overwriting the cloud"
+            }
+            Self::Unknown => {
+                "it was either written with a different master password or altered in transit"
+            }
+        })
+    }
+}
+
+impl CloudSyncError {
+    /// The remote snapshot path, byte count, digest and cause, when this error
+    /// reports a payload that could not be decrypted.
+    pub fn unreadable_remote_snapshot(
+        &self,
+    ) -> Option<(&str, usize, &str, SnapshotUnreadableCause)> {
+        match self {
+            Self::RemoteSnapshotUnreadable {
+                path,
+                bytes,
+                digest,
+                cause,
+                ..
+            } => Some((path.as_str(), *bytes, digest.as_str(), *cause)),
+            _ => None,
+        }
+    }
+}
 
 impl CloudSyncError {
     pub fn code(&self) -> Option<&'static str> {
@@ -214,6 +307,11 @@ pub struct CloudConflictPreview {
     pub recovery_payload_hash: Option<String>,
     #[serde(default)]
     pub recovery_created_at_ms: Option<u64>,
+    /// Set when pushing the local snapshot over the remote head must be refused,
+    /// because doing so would overwrite a cloud copy that is still readable by
+    /// the correct master password.
+    #[serde(default)]
+    pub overwrite_blocked: bool,
     pub message: String,
 }
 
@@ -363,6 +461,21 @@ pub trait CloudLocalStore: Send + Sync {
     ) -> Result<CloudSyncBackupInfo, CloudSyncError>;
 
     fn persist_cloud_sync_state(&self, state: &CloudSyncState) -> Result<(), CloudSyncError>;
+
+    /// Best-effort check that `master_password` is the password this device
+    /// already unlocked its local state with.
+    ///
+    /// Used to tell "the remote payload was written with a different master
+    /// password" apart from "the configured master password is wrong". Returning
+    /// `Ok(None)` means this device cannot tell, and callers must not treat it as
+    /// either answer.
+    fn verify_master_password(
+        &self,
+        master_password: &str,
+    ) -> Result<Option<bool>, CloudSyncError> {
+        let _ = master_password;
+        Ok(None)
+    }
 }
 
 pub fn push_local_snapshot(
@@ -382,6 +495,27 @@ pub fn push_snapshot_with_remote(
     state: &CloudSyncState,
     force: bool,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    push_snapshot_with_remote_controlled(
+        local_store,
+        options,
+        remote,
+        state,
+        force,
+        &control::CloudSyncOperationControl::default(),
+    )
+}
+
+pub fn push_snapshot_with_remote_controlled(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    force: bool,
+    control: &control::CloudSyncOperationControl,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    control.checkpoint()?;
+    let remote = &control.remote(remote);
+    let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
     let mut next_state = normalized_state(state, &options.device_id);
@@ -396,15 +530,23 @@ pub fn push_snapshot_with_remote(
             protocol::RemoteSnapshotResolution::Inconsistent {
                 pointer,
                 recovery_candidate,
+                unreadable,
             } => {
-                return Err(CloudSyncError::Conflict(Box::new(
-                    remote_inconsistent_preview(
-                        remote.provider(),
-                        &local_hash,
-                        &pointer,
-                        recovery_candidate.as_ref(),
-                    ),
-                )));
+                let preview = remote_inconsistent_preview(
+                    remote.provider(),
+                    &local_hash,
+                    &pointer,
+                    recovery_candidate.as_ref(),
+                    unreadable.as_ref(),
+                );
+                // A forced push is the documented way out of an unreadable
+                // remote head, unless doing so would clobber a cloud copy that
+                // the correct master password can still read.
+                if force && !preview.overwrite_blocked {
+                    None
+                } else {
+                    return Err(CloudSyncError::Conflict(Box::new(preview)));
+                }
             }
         }
     } else {
@@ -481,6 +623,7 @@ pub fn push_snapshot_with_remote(
             latest.as_ref(),
         )?;
     }
+    control.begin_commit()?;
     write_sync_pointer(local_store, remote, &options.remote_root, &pointer)?;
     let _ = protocol::write_current_sync_snapshot_compat(local_store, remote, options, &snapshot);
     next_state.last_synced_payload_hash = Some(pointer.payload_hash.clone());
@@ -527,6 +670,29 @@ pub fn pull_snapshot_with_remote_guarded(
     force: bool,
     before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    pull_snapshot_with_remote_controlled(
+        local_store,
+        options,
+        remote,
+        state,
+        force,
+        before_apply,
+        &control::CloudSyncOperationControl::default(),
+    )
+}
+
+pub fn pull_snapshot_with_remote_controlled(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    force: bool,
+    before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+    control: &control::CloudSyncOperationControl,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    control.checkpoint()?;
+    let remote = &control.remote(remote);
+    let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
     let latest = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?
@@ -541,6 +707,7 @@ pub fn pull_snapshot_with_remote_guarded(
             protocol::RemoteSnapshotResolution::Inconsistent {
                 pointer,
                 recovery_candidate,
+                unreadable,
             } => {
                 return Err(CloudSyncError::Conflict(Box::new(
                     remote_inconsistent_preview(
@@ -548,6 +715,7 @@ pub fn pull_snapshot_with_remote_guarded(
                         &local_snapshot.meta.payload_hash,
                         &pointer,
                         recovery_candidate.as_ref(),
+                        unreadable.as_ref(),
                     ),
                 )));
             }
@@ -641,9 +809,27 @@ pub fn recover_current_snapshot_with_remote(
     options: &LocalCloudSyncOptions,
     remote: &dyn CloudSyncRemote,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    recover_current_snapshot_with_remote_controlled(
+        local_store,
+        options,
+        remote,
+        &control::CloudSyncOperationControl::default(),
+    )
+}
+
+pub fn recover_current_snapshot_with_remote_controlled(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    control: &control::CloudSyncOperationControl,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    control.checkpoint()?;
+    let remote = &control.remote(remote);
+    let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
-    let snapshot = protocol::recover_current_remote_snapshot(local_store, remote, options)?;
+    let snapshot =
+        protocol::recover_current_remote_snapshot(local_store, remote, options, control)?;
     let backup = local_store.apply_sync_snapshot(options, &snapshot)?;
     let mut applied_snapshot = local_store.build_sync_snapshot(options)?;
     applied_snapshot.recalculate_hash()?;
@@ -710,6 +896,7 @@ pub fn check_snapshot_with_remote(
             protocol::RemoteSnapshotResolution::Inconsistent {
                 pointer,
                 recovery_candidate,
+                unreadable,
             } => {
                 return Err(CloudSyncError::Conflict(Box::new(
                     remote_inconsistent_preview(
@@ -717,6 +904,7 @@ pub fn check_snapshot_with_remote(
                         &local.meta.payload_hash,
                         &pointer,
                         recovery_candidate.as_ref(),
+                        unreadable.as_ref(),
                     ),
                 )));
             }
@@ -775,16 +963,35 @@ fn write_sync_pointer(
 ) -> Result<(), CloudSyncError> {
     let bytes = local_store.encode_sync_pointer(pointer)?;
     let path = remote_path(remote_root, SYNC_LATEST_FILE);
-    remote.write(&path, &bytes)?;
-    let verified = load_sync_pointer_from_remote(local_store, remote, remote_root)?;
-    if verified.as_ref() != Some(pointer) {
-        return Err(if remote.file_capacity()?.is_some() {
-            CloudSyncError::GistCapacity
-        } else {
-            CloudSyncError::Remote("Remote head write could not be verified".into())
-        });
+    // As with snapshot uploads, retry reads after an accepted PUT so repeated
+    // writes do not restart eventual-consistency delays. File-slot stores keep
+    // their write retry and capacity verdict.
+    let capacity_limited = remote.file_capacity()?.is_some();
+    let attempts = if capacity_limited {
+        2
+    } else {
+        protocol::READBACK_VERIFY_ATTEMPTS
+    };
+    for attempt in 0..attempts {
+        if capacity_limited || attempt == 0 {
+            remote.write(&path, &bytes)?;
+        }
+        if load_sync_pointer_from_remote(local_store, remote, remote_root)?.as_ref()
+            == Some(pointer)
+        {
+            return Ok(());
+        }
+        if attempt + 1 < attempts && !capacity_limited {
+            protocol::readback_backoff(attempt);
+        }
     }
-    Ok(())
+    Err(if capacity_limited {
+        CloudSyncError::GistCapacity
+    } else {
+        CloudSyncError::Remote(format!(
+            "remote head write {path} could not be verified after {attempts} attempts"
+        ))
+    })
 }
 
 fn conflict_preview(
@@ -805,6 +1012,7 @@ fn conflict_preview(
         recovery_revision: None,
         recovery_payload_hash: None,
         recovery_created_at_ms: None,
+        overwrite_blocked: false,
         message: format!(
             "Both local and cloud state changed since last sync ({})",
             options.remote_dir.display()
@@ -817,7 +1025,18 @@ fn remote_inconsistent_preview(
     local_hash: &str,
     pointer: &RemoteSyncPointer,
     recovery_candidate: Option<&RawPortableSnapshot>,
+    unreadable: Option<&protocol::RemoteSnapshotUnreadableHead>,
 ) -> CloudConflictPreview {
+    let mut message = if recovery_candidate.is_some() {
+        "Remote cloud sync metadata is inconsistent. A different current snapshot is available for explicit recovery."
+    } else {
+        "Remote cloud sync metadata is inconsistent and no valid current snapshot is available."
+    }
+    .to_string();
+    if let Some(unreadable) = unreadable {
+        message.push(' ');
+        message.push_str(&unreadable.reason);
+    }
     CloudConflictPreview {
         detected_at_ms: current_time_ms(),
         provider: provider.to_string(),
@@ -828,13 +1047,11 @@ fn remote_inconsistent_preview(
         remote_created_at_ms: pointer.created_at_ms,
         remote_device_id: pointer.device_id.clone(),
         recovery_revision: recovery_candidate.map(|candidate| candidate.meta.revision_id.clone()),
-        recovery_payload_hash: recovery_candidate.map(|candidate| candidate.meta.payload_hash.clone()),
+        recovery_payload_hash: recovery_candidate
+            .map(|candidate| candidate.meta.payload_hash.clone()),
         recovery_created_at_ms: recovery_candidate.map(|candidate| candidate.meta.created_at_ms),
-        message: if recovery_candidate.is_some() {
-            "Remote cloud sync metadata is inconsistent. A different current snapshot is available for explicit recovery."
-        } else {
-            "Remote cloud sync metadata is inconsistent and no valid current snapshot is available."
-        }.to_string(),
+        overwrite_blocked: unreadable.is_some_and(|unreadable| unreadable.overwrite_blocked),
+        message,
     }
 }
 

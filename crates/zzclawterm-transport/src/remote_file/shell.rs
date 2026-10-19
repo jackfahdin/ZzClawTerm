@@ -9,6 +9,8 @@ use crate::{
 
 const REMOTE_FILE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+mod transfer;
+
 #[derive(Debug, Default)]
 pub(super) struct ShellOutput {
     pub(super) stdout: Vec<u8>,
@@ -207,9 +209,19 @@ pub(super) fn shell_quote(value: &str) -> String {
     }
 }
 
+pub(super) fn shell_quote_path(path: &str) -> String {
+    // BSD chmod does not accept GNU's post-mode `--`. Protect relative
+    // filenames from option parsing without relying on an option terminator.
+    if path.starts_with('-') {
+        shell_quote(&format!("./{path}"))
+    } else {
+        shell_quote(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ShellOutput, apply_channel_message, shell_quote};
+    use super::{ShellOutput, apply_channel_message, shell_quote, shell_quote_path};
     use russh::ChannelMsg;
 
     #[test]
@@ -217,6 +229,15 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn protects_leading_dash_paths_without_changing_other_paths() {
+        assert_eq!(shell_quote_path("-a'b [*]"), "'./-a'\\''b [*]'");
+        assert_eq!(shell_quote_path("--"), "'./--'");
+        assert_eq!(shell_quote_path("/tmp/-file"), "'/tmp/-file'");
+        assert_eq!(shell_quote_path("dir/-file"), "'dir/-file'");
+        assert_eq!(shell_quote_path(""), "''");
     }
 
     #[test]

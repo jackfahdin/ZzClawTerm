@@ -750,7 +750,7 @@ mod tests {
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
-    use crate::models::{ActivityBarContextTarget, PanelSide};
+    use crate::models::{ActivityBarContextTarget, ActivityBarZone, PanelSide};
     use crate::test_support::TestConfigDir;
 
     struct AppHost {
@@ -844,6 +844,7 @@ mod tests {
     fn right_click_keeps_entry_target_and_blank_space_uses_bar_target() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar-view");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| app.sync_component_theme(cx));
         let host_app = app.clone();
@@ -893,6 +894,7 @@ mod tests {
     fn bar_menu_hidden_items_opener_tracks_current_side_recovery() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar-view");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| app.sync_component_theme(cx));
         let host_app = app.clone();
@@ -943,6 +945,7 @@ mod tests {
     fn hidden_recovery_is_side_scoped_and_availability_filtered() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar-view");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.hide_activity_entry("fileExplorer".to_string(), cx);
@@ -963,6 +966,40 @@ mod tests {
             assert!(right.iter().any(|id| id == "aiAssistant"));
             assert!(!right.iter().any(|id| id == "fileExplorer"));
             assert!(!right.iter().any(|id| id == "gpuMonitor"));
+        });
+    }
+
+    #[test]
+    fn activity_entry_released_outside_preserves_every_zone() {
+        let test_dir = TestConfigDir::new("zzclawterm-activity-external-drop");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, test_dir.path());
+        app.update(&mut cx, |app, cx| app.sync_component_theme(cx));
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| AppHost { app: host_app });
+        draw(&app, cx);
+        let zones = [
+            ActivityBarZone::LeftTop,
+            ActivityBarZone::LeftBottom,
+            ActivityBarZone::RightTop,
+            ActivityBarZone::RightBottom,
+        ];
+        let before = app.read_with(cx, |app, _| {
+            zones.map(|zone| app.activity_entries_for_zone(zone))
+        });
+        let source = gpui::point(gpui::px(20.), gpui::px(22.));
+        let outside = gpui::point(gpui::px(-30.), gpui::px(22.));
+        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::default());
+        cx.read(|cx| assert!(cx.has_active_drag()));
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
+        cx.read(|cx| assert!(!cx.has_active_drag()));
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                zones.map(|zone| app.activity_entries_for_zone(zone)),
+                before
+            );
         });
     }
 }

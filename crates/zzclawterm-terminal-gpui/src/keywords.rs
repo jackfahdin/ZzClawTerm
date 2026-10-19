@@ -11,7 +11,7 @@ use zzclawterm_terminal::{
 };
 
 use crate::element::{TerminalBufferMatch, TerminalSearchFlags};
-use crate::semantic::{SemanticContext, SemanticHighlighter, extend_region};
+use crate::semantic::{SemanticContext, SemanticHighlighter, extend_region, fallback_prompt};
 use crate::types::{TerminalHighlightSpan, TerminalKeywordRange};
 use zzclawterm_core::keyword_highlight_presets::builtin_keyword_matcher;
 
@@ -74,6 +74,105 @@ pub struct TerminalKeywordHighlightSnapshot {
     rows: Vec<Option<Arc<Vec<TerminalKeywordRange>>>>,
     source_rows: Vec<Option<Arc<TerminalSnapshotRow>>>,
     rows_by_reuse_key: HashMap<TerminalKeywordRowReuseKey, Option<Arc<Vec<TerminalKeywordRange>>>>,
+}
+
+impl std::fmt::Debug for TerminalKeywordHighlightSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalKeywordHighlightSnapshot")
+            .field("rules_key", &self.rules_key)
+            .field("known_rows", &self.known_row_count())
+            .field("range_count", &self.range_count())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prepare the live input logical line before its frame is published. Call this
+/// on the frame worker, never from rendering or a GPUI update callback. Output,
+/// completion pages and pathological input retain the ordinary batch path;
+/// the adjacent input line is also prepared when the cursor leaves it.
+pub fn precompute_terminal_input_highlights(
+    snapshot: &TerminalSnapshot,
+    highlighter: &TerminalKeywordHighlighter,
+) -> Option<TerminalKeywordHighlightSnapshot> {
+    precompute_terminal_input_highlights_reusing(snapshot, highlighter, None)
+}
+
+/// Retain unchanged input rows across frames, including viewport scrolling, and
+/// prepare the just-submitted line before publishing its first output frame.
+pub fn precompute_terminal_input_highlights_reusing(
+    snapshot: &TerminalSnapshot,
+    highlighter: &TerminalKeywordHighlighter,
+    previous: Option<&TerminalKeywordHighlightSnapshot>,
+) -> Option<TerminalKeywordHighlightSnapshot> {
+    const MAX_INPUT_ROWS: usize = 16;
+    const MAX_INPUT_BYTES: usize = 16 * 1024;
+
+    if snapshot.display_offset != 0 {
+        return None;
+    }
+    snapshot.row(snapshot.cursor.row)?;
+    let current = terminal_keyword_wrapped_group_bounds(snapshot, snapshot.cursor.row);
+    let mut requested = current.start..current.start;
+    let mut input_rows = 0;
+    let mut input_bytes = 0;
+    // CR/LF and the next prompt may arrive in separate packets. The previous
+    // logical line must keep its colors even while the cursor is on a blank row.
+    for group in [
+        Some(current),
+        (current.start > 0)
+            .then(|| terminal_keyword_wrapped_group_bounds(snapshot, current.start - 1)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let rows = &snapshot.rows()[group.start..group.end];
+        let bytes = rows
+            .iter()
+            .map(|row| terminal_keyword_row_bytes(row))
+            .sum::<usize>();
+        if group.oversized
+            || input_rows + rows.len() > MAX_INPUT_ROWS
+            || input_bytes + bytes > MAX_INPUT_BYTES
+            || !terminal_keyword_group_is_input(rows)
+        {
+            continue;
+        }
+        input_rows += rows.len();
+        input_bytes += bytes;
+        requested.start = requested.start.min(group.start);
+        requested.end = requested.end.max(group.end);
+    }
+    let previous = previous.filter(|previous| previous.rules_key == highlighter.rules_key);
+    if requested.is_empty() && previous.is_none() {
+        return None;
+    }
+    let (highlights, _) =
+        precompute_keyword_rows(snapshot, highlighter, previous, requested, || false)?;
+    (highlights.known_row_count() > 0).then_some(highlights)
+}
+
+fn terminal_keyword_group_is_input(rows: &[Arc<TerminalSnapshotRow>]) -> bool {
+    if rows.iter().any(|row| row.shell_input_columns.is_some()) {
+        return true;
+    }
+    !rows.iter().any(|row| row.shell_integration) && !rows[0].wrapped && {
+        // Row text trims trailing blanks. Preserve the actual cells so an
+        // empty "$ " prompt still publishes a known-empty input result.
+        let line = rows[0]
+            .cells
+            .iter()
+            .filter(|cell| cell.width != 0)
+            .map(|cell| {
+                if cell.text.is_empty() {
+                    " "
+                } else {
+                    cell.text()
+                }
+            })
+            .collect::<String>();
+        fallback_prompt(&line).is_some()
+    }
 }
 
 pub(super) enum TerminalKeywordHighlightLookup<'a> {
@@ -313,12 +412,25 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
     palette: zzclawterm_ui::ThemePalette,
     previous: Option<&TerminalKeywordHighlightSnapshot>,
     requested_rows: Range<usize>,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Option<(
     TerminalKeywordHighlightSnapshot,
     TerminalKeywordHighlightPrecomputeStats,
 )> {
     let _ = palette;
+    precompute_keyword_rows(snapshot, highlighter, previous, requested_rows, cancelled)
+}
+
+fn precompute_keyword_rows(
+    snapshot: &TerminalSnapshot,
+    highlighter: &TerminalKeywordHighlighter,
+    previous: Option<&TerminalKeywordHighlightSnapshot>,
+    requested_rows: Range<usize>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<(
+    TerminalKeywordHighlightSnapshot,
+    TerminalKeywordHighlightPrecomputeStats,
+)> {
     let previous = previous.filter(|previous| previous.rules_key == highlighter.rules_key);
     let requested_rows = terminal_keyword_highlight_expanded_rows(snapshot, requested_rows);
     let mut stats = TerminalKeywordHighlightPrecomputeStats {

@@ -1,6 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{ClipboardItem, Context, ParentElement as _, Window, div};
+use gpui::{Context, ParentElement as _, Window, div};
 use zzclawterm_core::{QuickCommandCategory, uuid};
 use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::{ZzClawConfirmDialog, ZzClawDialogFooter, ZzClawDialogWindowExt};
@@ -148,8 +148,9 @@ impl ZzClawTermApp {
         if command.trim().is_empty() {
             self.shell
                 .set_status("quick command has no text to copy".to_string());
+            self.copy_text_with_feedback("copy-quick-command", String::new(), cx);
         } else {
-            cx.write_to_clipboard(ClipboardItem::new_string(command));
+            self.copy_text_with_feedback("copy-quick-command", command, cx);
             self.shell
                 .set_status("quick command copied to clipboard".to_string());
         }

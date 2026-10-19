@@ -8,6 +8,7 @@ use zzclawterm_terminal::{
     TerminalSearchQuery, TerminalSnapshot,
 };
 
+use crate::models::recording::RecordingWritePipeline;
 use crate::terminal::{TerminalLineDecorations, terminal_screen_from_output};
 
 use super::{
@@ -38,6 +39,104 @@ use super::{
     terminal_line_decorations_estimated_bytes, terminal_snapshot_matches_grid_geometry,
     try_next_terminal_frame_command,
 };
+
+#[test]
+fn frame_worker_publishes_input_colors_with_each_echo_and_obeys_rule_changes() {
+    let mut recording = RecordingWritePipeline::spawn(4096);
+    let mut pipeline = TerminalFramePipeline::spawn(recording.writer());
+    let rules =
+        Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
+    pipeline.set_keyword_rules(rules.clone());
+    for echo in [b"$ l".as_slice(), b"s", b"\x08 \x08"] {
+        pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
+            session_id: "s1".into(),
+            data: echo.to_vec(),
+            encoding: "UTF-8".into(),
+            scrollback_limit: 100,
+            raw_already_captured: true,
+        }]);
+        pipeline.finish_pending_output().unwrap();
+        let mut events = VecDeque::new();
+        pipeline.drain_events_into(&mut events, usize::MAX);
+        let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
+            panic!("output frame");
+        };
+        assert!(frame.snapshot.is_some());
+        let input = frame.input_highlights.unwrap();
+        assert_eq!(
+            input.rules_key(),
+            zzclawterm_terminal_gpui::terminal_keyword_rules_key(&rules)
+        );
+        assert_eq!(input.known_row_count(), 1);
+        assert!(input.range_count() > 0);
+    }
+    pipeline.set_keyword_rules(Arc::new(Vec::new()));
+    pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
+        session_id: "s1".into(),
+        data: b"s".to_vec(),
+        encoding: "UTF-8".into(),
+        scrollback_limit: 100,
+        raw_already_captured: true,
+    }]);
+    pipeline.finish_pending_output().unwrap();
+    let mut events = VecDeque::new();
+    pipeline.drain_events_into(&mut events, usize::MAX);
+    let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
+        panic!("output frame");
+    };
+    assert!(frame.input_highlights.is_none());
+    pipeline.shutdown();
+    recording.shutdown();
+}
+
+#[test]
+fn frame_worker_keeps_prior_prompt_colors_when_returns_arrive_before_keyword_batches() {
+    let mut recording = RecordingWritePipeline::spawn(4096);
+    let mut pipeline = TerminalFramePipeline::spawn(recording.writer());
+    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true)
+        .into_iter()
+        .filter(|rule| rule.id == "builtin-prompt")
+        .collect();
+    pipeline.set_keyword_rules(Arc::new(rules));
+    for echo in [
+        "[root@host dir]# ",
+        "\r",
+        "\n",
+        "[root@host dir]# ",
+        "\r\n[root@host dir]# ",
+        "\r\n[root@host dir]# ",
+    ] {
+        pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
+            session_id: "s1".into(),
+            data: echo.as_bytes().to_vec(),
+            encoding: "UTF-8".into(),
+            scrollback_limit: 100,
+            raw_already_captured: true,
+        }]);
+        pipeline.finish_pending_output().unwrap();
+        let mut events = VecDeque::new();
+        pipeline.drain_events_into(&mut events, usize::MAX);
+        let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
+            panic!("output frame");
+        };
+        let snapshot = frame.snapshot.unwrap();
+        let input = frame.input_highlights.unwrap();
+        let mut prompts = 0;
+        for (row, source) in snapshot.rows().iter().enumerate() {
+            if source.text.starts_with("[root@host dir]#") {
+                assert!(input.matches_snapshot_rows(
+                    &snapshot,
+                    zzclawterm_ui::theme_palette("github-dark"),
+                    row..row + 1,
+                ));
+                prompts += 1;
+            }
+        }
+        assert_eq!(input.range_count(), prompts);
+    }
+    pipeline.shutdown();
+    recording.shutdown();
+}
 
 #[test]
 fn line_number_gutter_keeps_high_water_width_after_scrollback_prunes() {
@@ -213,6 +312,7 @@ fn output_frame_with_sizes(
     skipped_output_bytes: usize,
 ) -> TerminalFrameOutputEvent {
     TerminalFrameOutputEvent {
+        input_highlights: None,
         session_id: "s1".to_string(),
         visible_text: "x".to_string(),
         recording_text_bytes: 1,
@@ -1097,6 +1197,45 @@ fn clear_except_input_is_ordered_between_output_frames() {
 }
 
 #[test]
+fn clear_all_frames_keep_real_history_and_rebase_gutter_line_numbers() {
+    let pipeline = TerminalFramePipeline::default();
+    pipeline.submit_output(
+        "clear-session",
+        b"old\r\n\x1b[24;1Hprompt> draft".to_vec(),
+        "UTF-8",
+        1000,
+    );
+    pipeline.clear_session_except_input("clear-session");
+    pipeline.submit_output("clear-session", b"!\r\nnext".to_vec(), "UTF-8", 1000);
+    pipeline.flush_for_test();
+    let mut events = VecDeque::new();
+    pipeline.drain_events_into(&mut events, usize::MAX);
+    let clear_index = events
+        .iter()
+        .position(|event| matches!(event, TerminalFrameEvent::ClearExceptInput(_)))
+        .unwrap();
+    let TerminalFrameEvent::ClearExceptInput(clear) = &events[clear_index] else {
+        unreachable!()
+    };
+    assert_eq!(clear.snapshot.scrollback_len, 0);
+    assert_eq!(clear.snapshot.rows()[23].display_line_number, Some(1));
+    let later = events
+        .iter()
+        .skip(clear_index + 1)
+        .find_map(|event| match event {
+            TerminalFrameEvent::Output(frame) => frame.snapshot.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(later.scrollback_len, 0);
+    assert_eq!(later.total_rows, 24);
+    assert_eq!(later.rows()[22].text, "prompt> draft!");
+    assert_eq!(later.rows()[22].display_line_number, Some(1));
+    assert_eq!(later.rows()[23].text, "next");
+    assert_eq!(later.rows()[23].display_line_number, Some(2));
+}
+
+#[test]
 fn clear_presentation_keeps_terminal_protocol_and_stream_state() {
     let mut view = TerminalViewState::new();
     view.screen.advance(b"\x1b[?2004hprompt> draft");
@@ -1749,6 +1888,7 @@ fn the_drain_tasks_frame_interest_mask_covers_every_reply_kind() {
 
     let screen = TerminalScreen::default();
     queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
+        input_highlights: None,
         session_id: "s1".to_string(),
         offset: 1,
         snapshot: Arc::new(screen.snapshot()),
@@ -1777,6 +1917,7 @@ fn terminal_frame_event_queue_keeps_snapshot_wake_armed_across_output() {
 
     let screen = TerminalScreen::default();
     queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
+        input_highlights: None,
         session_id: "s1".to_string(),
         offset: 1,
         snapshot: Arc::new(screen.snapshot()),
@@ -1954,6 +2095,7 @@ fn terminal_frame_event_queue_delivers_snapshot_reply_after_critical_pressure() 
         let screen = TerminalScreen::default();
         let outcome =
             producer_queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
+                input_highlights: None,
                 session_id: "s1".to_string(),
                 offset: 0,
                 snapshot: Arc::new(screen.snapshot()),
@@ -3678,4 +3820,150 @@ fn interleaved_frame_sessions_keep_their_own_output_and_recording_charsets() {
     assert_eq!(gbk_frame.recording_text_bytes, "测".len());
     assert_eq!(utf8_frame.visible_text, "中文😀");
     assert_eq!(utf8_frame.recording_text_bytes, "中文😀".len());
+}
+
+#[test]
+fn synthetic_command_blocks_preserve_order_without_recording_or_output_observers() {
+    use zzclawterm_transport::{
+        ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
+        RecordingRotationPolicy,
+    };
+    let directory = crate::test_support::TestConfigDir::new("zzclawterm-synthetic-frame-recording");
+    let path = directory.path().join("session.log");
+    let mut recording = RecordingWritePipeline::spawn(1024 * 1024);
+    let writer = recording.writer();
+    writer
+        .start(
+            "s1".into(),
+            RecordingContext {
+                session_id: "s1".into(),
+                session_name: "fixture".into(),
+                connection_id: None,
+                connection_name: None,
+                group_path: None,
+                protocol: "local".into(),
+                host: None,
+                port: None,
+                username: None,
+                started_at: time::OffsetDateTime::now_utc(),
+            },
+            RecordingProfile {
+                mode: RecordingMode::Transcript,
+                base_path: directory.path().into(),
+                path_template: "session.log".into(),
+                include_timestamps: false,
+                include_io_labels: false,
+                include_session_metadata: false,
+                rotation: RecordingRotationPolicy::Session,
+                existing_file_behavior: ExistingFileBehavior::Overwrite,
+                include_binary_transfer_payloads: false,
+                include_input: false,
+            },
+            Some(path.clone()),
+            1024 * 1024,
+        )
+        .unwrap();
+    let mut pipeline = TerminalFramePipeline::spawn(writer.clone());
+    pipeline.submit_output("s1", b"before\r\n".to_vec(), "UTF-8", 1000);
+    pipeline.submit_synthetic_output(
+        "s1".into(),
+        "\x1b[35mAI synthetic fixture\x1b[0m\r\n".into(),
+    );
+    pipeline.submit_output("s1", b"after\r\n".to_vec(), "UTF-8", 1000);
+    let text = futures::executor::block_on(pipeline.request_all_text("s1".into()))
+        .unwrap()
+        .unwrap();
+    assert!(text.find("before").unwrap() < text.find("AI synthetic fixture").unwrap());
+    assert!(text.find("AI synthetic fixture").unwrap() < text.find("after").unwrap());
+    let mut events = VecDeque::new();
+    pipeline.drain_events_into(&mut events, usize::MAX);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TerminalFrameEvent::Snapshot(_)))
+    );
+    for event in events {
+        if let TerminalFrameEvent::Output(frame) = event {
+            assert!(!frame.visible_text.contains("AI synthetic fixture"));
+        }
+    }
+    writer.stop("s1".into()).unwrap();
+    let transcript = std::fs::read_to_string(path).unwrap();
+    assert!(transcript.contains("before") && transcript.contains("after"));
+    assert!(!transcript.contains("AI synthetic fixture"));
+    pipeline.shutdown();
+    recording.shutdown();
+}
+
+#[test]
+fn full_history_output_reanchors_reading_and_invalidates_query_caches() {
+    let mut view = TerminalViewState::new();
+    view.screen = TerminalScreen::new(16, 3);
+    view.screen.set_scrollback_limit(8);
+    view.append_text("0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
+    view.scroll_offset = 3;
+    let old_snapshot = Arc::new(view.screen.viewport_snapshot(3));
+    let reading = old_snapshot.line(0).unwrap().to_string();
+    view.remember_scrollback_snapshot(3, old_snapshot.clone());
+    view.pending_snapshot_offsets.insert(3);
+    view.priority_pending_snapshot_offsets.insert(3);
+    view.append_text("11\r\n12\r\n");
+    assert_eq!(view.scroll_offset, 5);
+    assert!(view.has_new_while_scrolled);
+    assert_eq!(
+        view.screen.viewport_snapshot(5).line(0),
+        Some(reading.as_str())
+    );
+    assert!(view.scrollback_snapshots.is_empty());
+    assert!(view.pending_snapshot_offsets.is_empty());
+    assert!(view.priority_pending_snapshot_offsets.is_empty());
+    view.remember_scrollback_snapshot(3, old_snapshot);
+    assert!(view.scrollback_snapshots.is_empty());
+}
+
+#[test]
+fn repeated_full_history_frames_keep_anchor_until_the_read_line_is_evicted() {
+    let mut view = TerminalViewState::new();
+    let mut worker = TerminalScreen::new(16, 3);
+    worker.set_scrollback_limit(16);
+    for index in 0..20 {
+        worker.advance_decoded_text(&format!("{index}\r\n"));
+    }
+    view.screen.resize(16, 3);
+    view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 1);
+    view.scroll_offset = 3;
+    let reading = worker.viewport_snapshot(3).line(0).unwrap().to_string();
+    for index in 20..30 {
+        worker.advance_decoded_text(&format!("{index}\r\n"));
+        view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, index);
+        assert_eq!(view.scroll_offset, 3 + (index as usize - 19));
+        assert_eq!(
+            worker.viewport_snapshot(view.scroll_offset).line(0),
+            Some(reading.as_str())
+        );
+    }
+    view.scroll_offset = 0;
+    worker.advance(b"30\r\n");
+    view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 31);
+    assert_eq!(view.scroll_offset, 0);
+}
+
+#[test]
+fn hidden_session_keeps_history_anchor_when_releasing_its_snapshot() {
+    let mut view = TerminalViewState::new();
+    let mut worker = TerminalScreen::new(16, 3);
+    worker.set_scrollback_limit(8);
+    for index in 0..12 {
+        worker.advance_decoded_text(&format!("{index}\r\n"));
+    }
+    view.screen.resize(16, 3);
+    view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 1);
+    view.scroll_offset = 3;
+    let baseline = view.history_state();
+    view.apply_terminal_background_frame_parts(None, None, TerminalProtocolState::default(), 0, 2);
+    assert!(view.frame_snapshot.is_none());
+    assert_eq!(view.history_state(), baseline);
+    worker.advance(b"12\r\n13\r\n");
+    view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 3);
+    assert_eq!(view.scroll_offset, 5);
 }

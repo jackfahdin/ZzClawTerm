@@ -1,8 +1,10 @@
 use gpui::{
-    Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    prelude::FluentBuilder as _, px, relative, rgb, svg,
+    Animation, AnimationExt as _, Context, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, div, prelude::FluentBuilder as _, px, relative, rgb, svg,
 };
+use std::time::Duration;
+
 use zzclawterm_core::truncate_preview;
 use zzclawterm_ui::ZzClawTooltip;
 
@@ -50,6 +52,11 @@ pub(in crate::features::pages::transfers) fn transfer_job_row(
     let detail = transfer_job_detail(&job, directory_progress, &labels);
     let progress_label = transfer_job_right_label(&job, &labels);
     let progress_percent = transfer_job_progress_percent(&job);
+    let indeterminate = matches!(
+        job.status,
+        TransferJobStatus::Running | TransferJobStatus::Paused
+    ) && job.progress.is_some()
+        && progress_percent.is_none();
     let context_job_id = job.id.clone();
 
     div()
@@ -154,6 +161,33 @@ pub(in crate::features::pages::transfers) fn transfer_job_row(
                         .child(progress_label),
                 ),
         )
+        .when(indeterminate, |this| {
+            let indicator = div()
+                .h_full()
+                .w(relative(0.3))
+                .rounded_full()
+                .bg(direction_color);
+            let indicator = if job.status == TransferJobStatus::Running {
+                indicator
+                    .with_animation(
+                        SharedString::from(format!("copy-progress-{}", job.id)),
+                        Animation::new(Duration::from_secs(2)).repeat(),
+                        |bar, progress| bar.ml(relative(0.7 * progress)),
+                    )
+                    .into_any_element()
+            } else {
+                indicator.into_any_element()
+            };
+            this.child(
+                div()
+                    .mt_1()
+                    .h(px(4.))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(rgb(palette.border))
+                    .child(indicator),
+            )
+        })
         .when_some(progress_percent, |this, percent| {
             this.child(
                 div()
@@ -241,11 +275,17 @@ fn transfer_job_detail(
             )
         })
     });
-    let text = directory_progress
-        .or(size_detail)
-        .or(completed_size)
-        .or_else(|| (job.status == TransferJobStatus::Failed).then(|| job.detail.clone()))
-        .filter(|value| !value.trim().is_empty());
+    let size = if job.status == TransferJobStatus::Completed {
+        completed_size.or(size_detail)
+    } else {
+        size_detail.or(completed_size)
+    };
+    let text = match (directory_progress, size) {
+        (Some(items), Some(size)) => Some(format!("{items} · {size}")),
+        (items, size) => items.or(size),
+    }
+    .or_else(|| (job.status == TransferJobStatus::Failed).then(|| job.detail.clone()))
+    .filter(|value| !value.trim().is_empty());
     match text {
         Some(text) => format!("{time} · {text}"),
         None => time,
@@ -257,7 +297,16 @@ fn transfer_job_progress_percent(job: &TransferJobRowSnapshot) -> Option<f32> {
         job.status,
         TransferJobStatus::Running | TransferJobStatus::Paused
     )
-    .then(|| job.progress.as_ref().and_then(transfer_progress_ratio))
+    .then(|| {
+        job.progress.as_ref().and_then(|progress| {
+            if matches!(job.kind, TransferJobKind::SendTo { .. }) && progress.total_bytes.is_none()
+            {
+                None
+            } else {
+                transfer_progress_ratio(progress)
+            }
+        })
+    })
     .flatten()
 }
 
@@ -342,9 +391,9 @@ mod tests {
     use zzclawterm_transport::SftpTransferProgress;
 
     use super::{
-        TransferJobRowLabels, format_transfer_row_time, transfer_job_file_name,
-        transfer_job_icon_path, transfer_job_progress_percent, transfer_job_right_label,
-        transfer_job_status_label,
+        TransferJobRowLabels, format_transfer_row_time, transfer_job_detail,
+        transfer_job_file_name, transfer_job_icon_path, transfer_job_progress_percent,
+        transfer_job_right_label, transfer_job_status_label,
     };
 
     fn labels() -> TransferJobRowLabels {
@@ -397,6 +446,42 @@ mod tests {
             speed: Default::default(),
         }
         .row_snapshot()
+    }
+
+    #[test]
+    fn completed_staged_copy_shows_content_size_instead_of_two_leg_work_size() {
+        let mut job = job(TransferJobStatus::Completed);
+        job.kind = TransferJobKind::SendTo {
+            source_path: "/source".into(),
+            target_session_id: "target".into(),
+            target_path: "/target".into(),
+            target_parent_path: "/".into(),
+        };
+        job.progress = Some(progress("/target", 2048, Some(2048), Some(2), Some(2)));
+        job.summary = Some(zzclawterm_transport::SftpTransferSummary {
+            remote_path: "/target".into(),
+            local_path: PathBuf::new(),
+            bytes: 1024,
+            skipped: false,
+        });
+        let detail = transfer_job_detail(&job, Some("2 / 2".into()), &labels());
+        assert!(detail.contains("1.0 KiB / 1.0 KiB"));
+        assert!(!detail.contains("2.0 KiB"));
+    }
+
+    #[test]
+    fn unknown_copy_byte_total_is_indeterminate_but_zero_byte_copy_uses_items() {
+        let mut job = job(TransferJobStatus::Running);
+        job.kind = TransferJobKind::SendTo {
+            source_path: "/source".into(),
+            target_session_id: "target".into(),
+            target_path: "/target".into(),
+            target_parent_path: "/".into(),
+        };
+        job.progress = Some(progress("/target", 100, None, Some(1), Some(2)));
+        assert!(transfer_job_progress_percent(&job).is_none());
+        job.progress = Some(progress("/target", 0, Some(0), Some(1), Some(2)));
+        assert_eq!(transfer_job_progress_percent(&job), Some(0.5));
     }
 
     #[test]

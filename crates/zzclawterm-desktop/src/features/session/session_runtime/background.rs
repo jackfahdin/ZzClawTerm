@@ -285,7 +285,6 @@ impl ZzClawTermApp {
                             multiplex_handle: None,
                             cleanup: None,
                             launch_config: None,
-                            start_warnings: Vec::new(),
                         })
                         .map_err(|error| error.to_string())
                 } else {
@@ -603,7 +602,6 @@ impl ZzClawTermApp {
                 let ui_register_started_at = Instant::now();
                 self.shell.clear_last_connect_failure();
                 let session_id = success.session_info.id.clone();
-                let start_warnings = std::mem::take(&mut success.start_warnings);
                 let reconnect_session_id = pending
                     .as_ref()
                     .and_then(|pending| pending.reconnect_session_id.clone());
@@ -740,9 +738,6 @@ impl ZzClawTermApp {
                     self.seed_terminal_frame_session(&session_id, seed_output.clone(), &encoding);
                     self.terminal
                         .seed_session_view(session_id.clone(), seed_output, &encoding);
-                }
-                for warning in start_warnings {
-                    self.append_terminal_log_for_session(Some(&session_id), &warning, true);
                 }
                 if let Some(old_id) = reconnect_session_id.as_deref()
                     && old_id != session_id
@@ -977,7 +972,6 @@ fn create_session_from_launch_config(
                 multiplex_handle: None,
                 cleanup: None,
                 launch_config: None,
-                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Ssh(config) => {
@@ -1003,7 +997,6 @@ fn create_session_from_launch_config(
                 multiplex_handle: None,
                 cleanup: None,
                 launch_config: None,
-                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Serial(config) => session_manager
@@ -1013,7 +1006,6 @@ fn create_session_from_launch_config(
                 multiplex_handle: None,
                 cleanup: None,
                 launch_config: None,
-                start_warnings: Vec::new(),
             })
             .map_err(|error| error.to_string()),
         SessionLaunchConfig::Rdp(_) | SessionLaunchConfig::Vnc(_) => {
@@ -1051,6 +1043,8 @@ fn launch_config_for_session_info(info: &SessionInfo) -> SessionLaunchConfig {
                 force_character_at_a_time: false,
                 send_naws: false,
                 send_sga: false,
+                keep_alive_interval_secs:
+                    zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS,
                 auto_login: zzclawterm_transport::TelnetAutoLoginConfig::default(),
                 encoding: "UTF-8".to_string(),
                 cols: info.cols,
@@ -1070,6 +1064,115 @@ fn launch_config_for_session_info(info: &SessionInfo) -> SessionLaunchConfig {
         }),
         SessionKind::Rdp | SessionKind::Vnc => {
             unreachable!("remote desktop session metadata does not originate from SessionManager")
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use gpui::TestAppContext;
+    use zzclawterm_core::AiExecutionProfile;
+    use zzclawterm_transport::{SessionInfo, SessionKind};
+
+    use super::super::PendingSessionStartRegistration;
+    use crate::features::runtime_jobs::{SessionStartResult, SessionStartSuccess};
+    use crate::features::test_support::{
+        app_with_visible_local_session, session_focus_test_window,
+    };
+    use crate::models::{SessionLaunchConfig, TransferBrowserSessionCacheState};
+    use crate::test_support::TestConfigDir;
+
+    #[test]
+    fn background_ssh_completion_preserves_input_focus_and_user_tab_selection() {
+        for switch_tab in [false, true] {
+            let root = TestConfigDir::new("zzclawterm-background-ssh-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    // The completion is synthetic: retain a browser cache so
+                    // activation cannot start file operations against a fake SSH peer.
+                    app.transfer.store_browser_session_cache(
+                        "new-ssh".into(),
+                        TransferBrowserSessionCacheState {
+                            entries: Arc::new(Vec::new()),
+                            current_path: "/".into(),
+                            current_raw_path_token: None,
+                            home_dir: "/".into(),
+                            history: VecDeque::from(["/".into()]),
+                            history_index: 0,
+                            visited_history: VecDeque::new(),
+                        },
+                    );
+                    let request_id = app.register_pending_session_start(
+                        PendingSessionStartRegistration {
+                            connection_name: "SSH".into(),
+                            launch_config: Some(SessionLaunchConfig::Ssh(Box::default())),
+                            kind: SessionKind::Ssh,
+                            ai_execution_profile: AiExecutionProfile::Posix,
+                            custom_name: None,
+                            tab_color: None,
+                            locked: false,
+                            after_session_id: Some("source".into()),
+                            insert_index: None,
+                            seed_output: None,
+                            startup_command: None,
+                            multiplex_key: None,
+                            source_connection_id: None,
+                            reconnect_session_id: None,
+                            workspace_split: None,
+                            tab_placement: None,
+                            status_message: "connecting".into(),
+                            append_start_log: false,
+                        },
+                        cx,
+                    );
+                    if switch_tab {
+                        app.activate_session_id("source", cx);
+                    }
+                    window.focus(app.session.prompt_credential_focus(), cx);
+                    let now = Instant::now();
+                    // Drive the real completion callback without a network connection.
+                    app.apply_session_start_event(
+                        SessionStartResult {
+                            request_id,
+                            connection_name: "SSH".into(),
+                            kind: SessionKind::Ssh,
+                            worker_started_at: now,
+                            worker_finished_at: now,
+                            result: Ok(SessionStartSuccess {
+                                session_info: SessionInfo {
+                                    id: "new-ssh".into(),
+                                    name: "SSH".into(),
+                                    kind: SessionKind::Ssh,
+                                    working_dir: None,
+                                    cols: 80,
+                                    rows: 24,
+                                },
+                                multiplex_handle: None,
+                                launch_config: Some(SessionLaunchConfig::Ssh(Box::default())),
+                                cleanup: None,
+                            }),
+                        },
+                        cx,
+                    );
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let app = app.read(cx);
+                assert!(app.session.prompt_credential_focus().is_focused(window));
+                assert_eq!(
+                    app.session.active_id(),
+                    Some(if switch_tab { "source" } else { "new-ssh" }),
+                );
+            });
         }
     }
 }

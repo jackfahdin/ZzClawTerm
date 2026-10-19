@@ -120,8 +120,12 @@ impl SecurityStoreProxy {
         self.mutate(move |store| store.delete_otp_entry(&otp_id))
     }
 
-    pub(super) fn save_password(&self, entry: SavedPassword) -> Result<String, StoreClientError> {
-        self.mutate(move |store| store.save_password(entry))
+    pub(super) fn save_password_with_update(
+        &self,
+        entry: SavedPassword,
+        update: zzclawterm_core::models::credentials::PasswordUpdate,
+    ) -> Result<String, StoreClientError> {
+        self.mutate(move |store| store.save_password_with_update(entry, update))
     }
 
     pub(super) fn load_decrypted_password_by_id(

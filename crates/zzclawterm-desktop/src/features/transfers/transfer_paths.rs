@@ -809,6 +809,7 @@ mod tests {
         value: fn(&AppSettingsSummary) -> &str,
     ) {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = TestTempDir::new("zzclawterm-settings-path-picker");
         let runtime = AppRuntime::from_parts_for_test(
             RuntimeMode::Portable,

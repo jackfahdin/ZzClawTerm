@@ -11,8 +11,7 @@ use gpui::{
 };
 use zzclawterm_core::{
     ConnectionAuth, CredentialPromptKind, SavedConnection, SecretString, TerminalInputState,
-    credential_password_prompt_target_user, credential_password_prompt_targets_user,
-    credential_prompt_requests_password, truncate_preview,
+    credential_password_prompt_targets_user, credential_prompt_requests_password, truncate_preview,
 };
 use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain, store_request};
 use zzclawterm_terminal::TerminalSnapshot;
@@ -30,7 +29,6 @@ use super::command_suggestions::{
 };
 
 const CREDENTIAL_AUTOFILL_INPUT_TAIL_LIMIT: usize = 4096;
-const RECENT_PROMPT_TTL_MS: u64 = 30_000;
 const PENDING_PASSWORD_TTL_MS: u64 = 60_000;
 const CREDENTIAL_PROMPT_INPUT_TTL_MS: u64 = 120_000;
 
@@ -86,31 +84,16 @@ impl ZzClawTermApp {
         self.terminal.assist.credential_prompt_input_mode(now)
     }
 
-    fn prune_recent_credential_prompts(&mut self, now: u64) {
-        self.terminal
-            .assist
-            .credential_autofill_recent
-            .retain(|_, ts| now.saturating_sub(*ts) <= RECENT_PROMPT_TTL_MS);
+    pub(in crate::features) fn cancel_credential_autofill(&mut self, cx: &mut Context<Self>) {
+        if self.terminal.assist.cancel_credential_autofill() {
+            cx.notify();
+        }
     }
 
-    fn remember_credential_prompt(
-        &mut self,
-        kind: CredentialPromptKind,
-        prompt_text: &str,
-        now: u64,
-    ) -> bool {
-        self.prune_recent_credential_prompts(now);
-        let key = format!("{kind:?}:{prompt_text}");
-        if let Some(last) = self.terminal.assist.credential_autofill_recent.get(&key)
-            && now.saturating_sub(*last) < RECENT_PROMPT_TTL_MS
-        {
-            return false;
-        }
-        self.terminal
-            .assist
-            .credential_autofill_recent
-            .insert(key, now);
-        true
+    fn credential_autofill_enabled(&self) -> bool {
+        self.settings
+            .summary()
+            .interaction_credential_autofill_enabled
     }
 
     fn show_credential_panel(
@@ -118,43 +101,49 @@ impl ZzClawTermApp {
         kind: CredentialPromptKind,
         matches: Vec<CredentialAutofillTarget>,
         prompt_text: String,
+        precise: bool,
         cx: &mut Context<Self>,
     ) {
-        if matches.is_empty() {
+        if !self.credential_autofill_enabled() || matches.is_empty() {
             return;
         }
         let Some(session_id) = self.session.active_id_owned() else {
             return;
         };
-        let (cursor_row, cursor_col) = self.active_terminal_cursor_cell_for_autofill();
+        let (cursor_row, cursor_col) = self.active_terminal_cursor_cell();
         self.dismiss_command_suggestions(cx);
+        let selected_index = (precise && matches.len() == 1).then_some(0);
         self.terminal.assist.credential_suggestions = Some(CredentialSuggestionState {
             session_id,
             kind,
             matches,
             prompt_text,
-            selected_index: 0,
+            selected_index,
             cursor_row,
             cursor_col,
         });
         cx.notify();
     }
 
-    fn active_terminal_cursor_cell_for_autofill(&self) -> (usize, usize) {
-        let offset = self.active_terminal_display_offset();
-        let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), offset);
-        let row = if snapshot.cursor.row == usize::MAX {
-            snapshot.row_count().saturating_sub(1)
-        } else {
-            snapshot.cursor.row
-        };
-        (row, snapshot.cursor.col)
-    }
-
     pub(in crate::features) fn drain_pending_credential_autofill_detection(
         &mut self,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.credential_autofill_enabled() {
+            let had_panel = self.terminal.assist.credential_suggestions.is_some();
+            if had_panel
+                || self.terminal.assist.credential_autofill_pending.is_some()
+                || self
+                    .terminal
+                    .assist
+                    .credential_autofill_pending_request
+                    .is_some()
+                || self.terminal.assist.credential_autofill_detection_pending
+            {
+                self.cancel_credential_autofill(cx);
+            }
+            return had_panel;
+        }
         // Common idle path: no credentials, no detection, no match pipeline reply.
         if self
             .terminal
@@ -216,17 +205,18 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id_owned() else {
             return false;
         };
-        let Some(prompt_text) = self
-            .terminal
-            .view
-            .views
-            .get(&session_id)
-            .and_then(|view| view.frame_snapshot.as_deref())
+        let view = self.terminal.view.views.get(&session_id);
+        let snapshot = view.and_then(|view| view.frame_snapshot.as_deref());
+        let row = snapshot.and_then(credential_autofill_prompt_row_from_snapshot);
+        let instance = row.map(|row| (row.line_id, row.revision));
+        let prompt_text = snapshot
             .and_then(credential_autofill_prompt_text_from_snapshot)
-        else {
-            return self.sync_credential_autofill_prompt_text(&session_id, String::new(), cx);
-        };
-        self.sync_credential_autofill_prompt_text(&session_id, prompt_text, cx)
+            .unwrap_or_default();
+        let dirty = self
+            .terminal
+            .assist
+            .observe_credential_prompt_instance(instance);
+        self.sync_credential_autofill_prompt_text(&session_id, prompt_text, cx) || dirty
     }
 
     fn sync_credential_autofill_prompt_text(
@@ -294,7 +284,8 @@ impl ZzClawTermApp {
         &mut self,
         _cx: &mut Context<Self>,
     ) -> bool {
-        if self.session.active_id().is_none()
+        if !self.credential_autofill_enabled()
+            || self.session.active_id().is_none()
             || self.terminal.assist.credential_suggestions.is_some()
         {
             return false;
@@ -344,7 +335,10 @@ impl ZzClawTermApp {
         }
 
         if self.terminal.assist.credential_autofill_pending.is_none()
-            && !self.remember_credential_prompt(prompt_kind, &prompt_text, now)
+            && !self
+                .terminal
+                .assist
+                .remember_credential_prompt(prompt_kind, &prompt_text)
         {
             return false;
         }
@@ -377,6 +371,13 @@ impl ZzClawTermApp {
     /// from the security catalog, or the active session's saved connection
     /// password. Kept cheap because detection ticks call it on idle frames.
     fn has_credential_autofill_candidates(&self) -> bool {
+        if !self
+            .settings
+            .summary()
+            .interaction_credential_autofill_enabled
+        {
+            return false;
+        }
         if !self.security.credentials().is_empty() {
             return true;
         }
@@ -427,9 +428,13 @@ impl ZzClawTermApp {
         if !connection_has_resolvable_password(auth) {
             return None;
         }
-        if credential_password_prompt_target_user(prompt_text).is_some()
-            && !credential_password_prompt_targets_user(prompt_text, &username)
-        {
+        // A login secret is only offered to a prompt that names the account
+        // this session logs in as, such as `[sudo] password for root:`. A bare
+        // `Password:` or `Enter password:` belongs to whatever program printed
+        // it -- mysql, redis, `su -` -- and has no relation to the SSH login
+        // password, so offering the saved secret there is misleading and hands
+        // a remote process a way to phish it.
+        if !credential_password_prompt_targets_user(prompt_text, &username) {
             return None;
         }
         let connection = self.active_connection()?;
@@ -513,12 +518,13 @@ impl ZzClawTermApp {
         event: CredentialAutofillMatchEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self
-            .terminal
-            .assist
-            .credential_autofill_pending_request
-            .as_ref()
-            != Some(&event.key)
+        if !self.credential_autofill_enabled()
+            || self
+                .terminal
+                .assist
+                .credential_autofill_pending_request
+                .as_ref()
+                != Some(&event.key)
         {
             return false;
         }
@@ -537,7 +543,9 @@ impl ZzClawTermApp {
             CredentialAutofillAction::Send { target, kind } => {
                 self.terminal.assist.credential_autofill_pending = None;
                 self.terminal.assist.credential_autofill_buffer.clear();
-                self.terminal.assist.credential_autofill_recent.clear();
+                self.terminal
+                    .assist
+                    .remember_credential_prompt(kind, &event.key.prompt_text);
                 self.send_credential_value(&target, kind, &event.key.session_id, cx);
                 true
             }
@@ -545,6 +553,7 @@ impl ZzClawTermApp {
                 kind,
                 matches,
                 clear_pending,
+                precise,
             } => {
                 if clear_pending {
                     self.terminal.assist.credential_autofill_pending = None;
@@ -554,7 +563,7 @@ impl ZzClawTermApp {
                 // output, so it is only ever offered: `show_credential_panel`
                 // puts it in the list and `select_credential_suggestion` is the
                 // single place that fills it, behind a user action.
-                self.show_credential_panel(kind, matches, event.key.prompt_text, cx);
+                self.show_credential_panel(kind, matches, event.key.prompt_text, precise, cx);
                 true
             }
             CredentialAutofillAction::None { clear_pending } => {
@@ -566,6 +575,16 @@ impl ZzClawTermApp {
         }
     }
 
+    fn send_credential_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> bool {
+        // Credential fills must never enter sync fanout, history, or recording,
+        // even when terminal output has not identified a sensitive prompt.
+        if !self.send_sensitive_input_to_active_session(bytes, cx) {
+            return false;
+        }
+        self.terminal.assist.credential_prompt_awaiting_output = true;
+        true
+    }
+
     fn send_credential_value(
         &mut self,
         target: &CredentialAutofillTarget,
@@ -573,7 +592,7 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if session_id.is_empty() {
+        if !self.credential_autofill_enabled() || session_id.is_empty() {
             return;
         }
         if self.session.is_disconnected(session_id) {
@@ -586,14 +605,16 @@ impl ZzClawTermApp {
         if self.session.active_id() != Some(session_id) {
             self.activate_session_id_with_surface_sync(session_id, cx);
         }
+        let generation = self.terminal.assist.credential_autofill_generation;
         let credential_name = target.display_name();
         match (kind, target) {
             (CredentialPromptKind::Username, CredentialAutofillTarget::Vault(credential)) => {
                 let mut payload = credential.username.clone();
                 payload.push('\r');
-                self.send_terminal_input_without_suggestion_track(payload.into_bytes(), cx);
-                self.shell
-                    .set_status(format!("filled username from '{credential_name}'"));
+                if self.send_credential_input(payload.into_bytes(), cx) {
+                    self.shell
+                        .set_status(format!("filled username from '{credential_name}'"));
+                }
             }
             // Username prompts never offer the connection password.
             (CredentialPromptKind::Username, CredentialAutofillTarget::ConnectionPassword(_)) => {}
@@ -610,6 +631,12 @@ impl ZzClawTermApp {
                         resolve_connection_password_from_store(store, &connection_id)
                     }),
                     move |this, event, cx| {
+                        if !this.terminal.assist.credential_fill_is_current(
+                            this.credential_autofill_enabled(),
+                            generation,
+                        ) {
+                            return;
+                        }
                         if this.session.active_id() != Some(session_id.as_str()) {
                             this.shell.set_status(
                                 "credential fill cancelled because the active session changed"
@@ -629,12 +656,13 @@ impl ZzClawTermApp {
                         match event.outcome {
                             Ok(ConnectionPasswordResolve::Resolved(mut password)) => {
                                 password.expose_secret_mut().push('\r');
-                                this.send_terminal_input_without_suggestion_track(
-                                    password.into_secret().into_bytes(),
-                                    cx,
-                                );
-                                this.shell
-                                    .set_status(format!("filled password from '{closure_name}'"));
+                                if this
+                                    .send_credential_input(password.into_secret().into_bytes(), cx)
+                                {
+                                    this.shell.set_status(format!(
+                                        "filled password from '{closure_name}'"
+                                    ));
+                                }
                             }
                             Ok(ConnectionPasswordResolve::MissingConnection) => {
                                 this.shell.set_status(format!(
@@ -669,6 +697,12 @@ impl ZzClawTermApp {
                         store.load_decrypted_credential_by_id(&credential_id)
                     }),
                     move |this, event, cx| {
+                        if !this.terminal.assist.credential_fill_is_current(
+                            this.credential_autofill_enabled(),
+                            generation,
+                        ) {
+                            return;
+                        }
                         if this.session.active_id() != Some(session_id.as_str()) {
                             this.shell.set_status(
                                 "credential fill cancelled because the active session changed"
@@ -697,12 +731,13 @@ impl ZzClawTermApp {
                                     return;
                                 };
                                 password.expose_secret_mut().push('\r');
-                                this.send_terminal_input_without_suggestion_track(
-                                    password.into_secret().into_bytes(),
-                                    cx,
-                                );
-                                this.shell
-                                    .set_status(format!("filled password from '{closure_name}'"));
+                                if this
+                                    .send_credential_input(password.into_secret().into_bytes(), cx)
+                                {
+                                    this.shell.set_status(format!(
+                                        "filled password from '{closure_name}'"
+                                    ));
+                                }
                             }
                             Ok(None) => this
                                 .shell
@@ -724,17 +759,27 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
+    /// Fills the highlighted suggestion. Returns false when the panel has no
+    /// selection (the unfiltered fallback list), so the caller can let Enter
+    /// reach the terminal instead of submitting an unchosen password.
     pub(in crate::features) fn apply_selected_credential_suggestion(
         &mut self,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if !self.credential_autofill_enabled() {
+            return false;
+        }
         let Some(state) = self.terminal.assist.credential_suggestions.clone() else {
-            return;
+            return false;
         };
-        let Some(target) = state.matches.get(state.selected_index).cloned() else {
-            return;
+        let Some(index) = state.selected_index else {
+            return false;
+        };
+        let Some(target) = state.matches.get(index).cloned() else {
+            return false;
         };
         self.select_credential_suggestion(target, cx);
+        true
     }
 
     pub(in crate::features) fn select_credential_suggestion(
@@ -742,6 +787,9 @@ impl ZzClawTermApp {
         target: CredentialAutofillTarget,
         cx: &mut Context<Self>,
     ) {
+        if !self.credential_autofill_enabled() {
+            return;
+        }
         let Some(state) = self.terminal.assist.credential_suggestions.clone() else {
             return;
         };
@@ -771,7 +819,9 @@ impl ZzClawTermApp {
         }
         self.terminal.assist.credential_autofill_sending = false;
         self.terminal.assist.credential_suggestions = None;
-        self.terminal.assist.credential_autofill_recent.clear();
+        self.terminal
+            .assist
+            .remember_credential_prompt(state.kind, &state.prompt_text);
 
         if was_username {
             // Keep buffer so a password prompt that arrived during selection can still be detected.
@@ -780,7 +830,6 @@ impl ZzClawTermApp {
             }
         } else {
             self.terminal.assist.credential_autofill_buffer.clear();
-            self.terminal.assist.credential_autofill_recent.clear();
         }
         cx.notify();
     }
@@ -799,7 +848,10 @@ impl ZzClawTermApp {
         }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.alt || keystroke.modifiers.control {
-            // Non-navigation keys dismiss the panel (Tauri: any other input dismisses).
+            // A chord such as Ctrl+V is input the panel cannot act on, so it
+            // dismisses like any other key. Leaving the panel open let the next
+            // Enter submit the highlighted password on top of the pasted one.
+            self.dismiss_credential_suggestions(cx);
             return false;
         }
         match keystroke.key.as_str() {
@@ -809,25 +861,33 @@ impl ZzClawTermApp {
             }
             "up" => {
                 if let Some(state) = self.terminal.assist.credential_suggestions.as_mut() {
-                    if state.selected_index == 0 {
-                        state.selected_index = state.matches.len().saturating_sub(1);
-                    } else {
-                        state.selected_index -= 1;
-                    }
+                    state.selected_index = credential_suggestion_step_selection(
+                        state.selected_index,
+                        state.matches.len(),
+                        -1,
+                    );
                     cx.notify();
                 }
                 true
             }
             "down" => {
                 if let Some(state) = self.terminal.assist.credential_suggestions.as_mut() {
-                    state.selected_index = (state.selected_index + 1) % state.matches.len().max(1);
+                    state.selected_index = credential_suggestion_step_selection(
+                        state.selected_index,
+                        state.matches.len(),
+                        1,
+                    );
                     cx.notify();
                 }
                 true
             }
             "enter" => {
-                self.apply_selected_credential_suggestion(cx);
-                true
+                if self.apply_selected_credential_suggestion(cx) {
+                    true
+                } else {
+                    self.dismiss_credential_suggestions(cx);
+                    false
+                }
             }
             _ => {
                 // Typing while the panel is open dismisses it (Tauri parity).
@@ -885,7 +945,7 @@ impl ZzClawTermApp {
             .overflow_y_scrollbar();
 
         for (index, credential) in state.matches.iter().enumerate() {
-            let selected = index == state.selected_index;
+            let selected = state.selected_index == Some(index);
             list = list.child(
                 div()
                     .id(SharedString::from(format!("credential-suggestion-{index}")))
@@ -909,7 +969,7 @@ impl ZzClawTermApp {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(state) = this.terminal.assist.credential_suggestions.as_mut() {
-                            state.selected_index = index;
+                            state.selected_index = Some(index);
                         }
                         let Some(selected) = this
                             .terminal
@@ -1093,6 +1153,34 @@ fn resolve_connection_password_from_store(
     })
 }
 
+/// Move the panel highlight by one row, treating `None` as "no selection".
+/// Stepping past either end returns to no selection, so an unchosen list keeps
+/// requiring an explicit pick. Mirrors the command-suggestion panel.
+fn credential_suggestion_step_selection(
+    current: Option<usize>,
+    len: usize,
+    direction: i32,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    if direction > 0 {
+        return match current {
+            None => Some(0),
+            Some(index) if index + 1 < len => Some(index + 1),
+            Some(_) => None,
+        };
+    }
+    if direction < 0 {
+        return match current {
+            None => Some(len - 1),
+            Some(0) => None,
+            Some(index) => Some(index.min(len - 1).saturating_sub(1)),
+        };
+    }
+    current.map(|index| index.min(len - 1))
+}
+
 fn credential_autofill_snapshot_detection_can_run(
     active_session_id: Option<&str>,
     has_credentials_or_pending: bool,
@@ -1146,15 +1234,21 @@ fn credential_autofill_prompt_text_from_snapshot(snapshot: &TerminalSnapshot) ->
 }
 
 fn credential_autofill_prompt_line_from_snapshot(snapshot: &TerminalSnapshot) -> Option<&str> {
+    credential_autofill_prompt_row_from_snapshot(snapshot).map(|row| row.text.as_str())
+}
+
+fn credential_autofill_prompt_row_from_snapshot(
+    snapshot: &TerminalSnapshot,
+) -> Option<&zzclawterm_terminal::TerminalSnapshotRow> {
     if snapshot.cursor.row != usize::MAX {
-        return snapshot.line(snapshot.cursor.row);
+        return snapshot.row(snapshot.cursor.row);
     }
     snapshot
         .rows()
         .iter()
         .rev()
         .find(|row| !row.text.trim().is_empty())
-        .map(|row| row.text.as_str())
+        .map(AsRef::as_ref)
 }
 
 #[cfg(test)]
@@ -1273,7 +1367,7 @@ mod tests {
         credential_autofill_prompt_line_from_viewport,
         credential_autofill_prompt_text_from_visible,
         credential_autofill_snapshot_detection_can_run, credential_autofill_visible_tail,
-        resolve_connection_password_from_store,
+        credential_suggestion_step_selection, resolve_connection_password_from_store,
     };
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{ConnectionPasswordTarget, CredentialAutofillTarget, SessionLaunchConfig};
@@ -1986,6 +2080,7 @@ mod tests {
     fn connection_password_candidate_matches_the_effective_session_user() {
         let root = TestConfigDir::new("zzclawterm-credential-autofill-user");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         // The catalog says `dev`; the saved account resolved the session to `root`.
         let app = app_with_account_backed_session(
             &mut cx,
@@ -2009,6 +2104,7 @@ mod tests {
     fn connection_password_candidate_is_refused_for_otp_style_prompts() {
         let root = TestConfigDir::new("zzclawterm-credential-autofill-otp");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_account_backed_session(
             &mut cx,
             &root,
@@ -2029,8 +2125,48 @@ mod tests {
             );
         }
         assert!(
-            connection_password_candidate(&app, &mut cx, "Password:").is_some(),
-            "a real password prompt still offers the connection password"
+            connection_password_candidate(&app, &mut cx, "Password:").is_none(),
+            "a bare prompt belongs to whatever program printed it, not the login"
+        );
+        assert!(
+            connection_password_candidate(&app, &mut cx, "[sudo] password for dev:").is_some(),
+            "a prompt naming the session user still offers the connection password"
+        );
+    }
+
+    #[test]
+    fn connection_password_candidate_is_refused_for_bare_in_session_prompts() {
+        // mysql/redis print `Enter password:` and `su -` prints `Password:`;
+        // none of them name the SSH login user, so the saved secret is not an
+        // answer to them.
+        let root = TestConfigDir::new("zzclawterm-credential-autofill-bare");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_account_backed_session(
+            &mut cx,
+            &root,
+            ssh_connection("dev", Some(account_password_auth())),
+            "root",
+        );
+
+        for prompt in [
+            "Password:",
+            "Enter password: ",
+            "su: Password: ",
+            "请输入密码：",
+        ] {
+            assert!(
+                connection_password_candidate(&app, &mut cx, prompt).is_none(),
+                "{prompt} must not offer the SSH connection password"
+            );
+        }
+        assert!(
+            connection_password_candidate(&app, &mut cx, "[sudo] password for root:").is_some(),
+            "the session's own login user is still offered"
+        );
+        assert!(
+            connection_password_candidate(&app, &mut cx, "[sudo] password for postgres:").is_none(),
+            "a different account is not the login user"
         );
     }
 
@@ -2038,6 +2174,7 @@ mod tests {
     fn connection_password_candidate_requires_a_resolvable_password_source() {
         let root = TestConfigDir::new("zzclawterm-credential-autofill-source");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         // The connection owns its password, so the account reference is not one.
         let connection_owned_without_password = ConnectionAuth {
             mode: "password".into(),
@@ -2053,8 +2190,373 @@ mod tests {
         );
 
         assert!(
-            connection_password_candidate(&app, &mut cx, "Password:").is_none(),
+            connection_password_candidate(&app, &mut cx, "[sudo] password for dev:").is_none(),
             "an account reference is not a password when the connection owns it"
         );
+    }
+
+    #[test]
+    fn credential_suggestion_selection_steps_out_at_the_ends() {
+        assert_eq!(credential_suggestion_step_selection(None, 3, 1), Some(0));
+        assert_eq!(credential_suggestion_step_selection(Some(0), 3, 1), Some(1));
+        assert_eq!(credential_suggestion_step_selection(Some(1), 3, 1), Some(2));
+        assert_eq!(credential_suggestion_step_selection(Some(2), 3, 1), None);
+        assert_eq!(credential_suggestion_step_selection(None, 3, -1), Some(2));
+        assert_eq!(
+            credential_suggestion_step_selection(Some(2), 3, -1),
+            Some(1)
+        );
+        assert_eq!(credential_suggestion_step_selection(Some(0), 3, -1), None);
+        assert_eq!(credential_suggestion_step_selection(None, 0, 1), None);
+        assert_eq!(credential_suggestion_step_selection(None, 0, -1), None);
+        assert_eq!(credential_suggestion_step_selection(Some(0), 1, 1), None);
+        assert_eq!(credential_suggestion_step_selection(Some(0), 1, -1), None);
+    }
+    fn test_credential_target(id: &str) -> CredentialAutofillTarget {
+        use zzclawterm_core::models::credentials::SavedCredential;
+        CredentialAutofillTarget::Vault(SavedCredential {
+            id: id.into(),
+            name: id.into(),
+            sort_order: 0,
+            username: "user".into(),
+            password: None,
+            has_password: true,
+            username_prompt_regex: None,
+            password_prompt_regex: Some("Password:".into()),
+            enabled: true,
+        })
+    }
+
+    #[test]
+    fn only_a_unique_precise_match_is_preselected() {
+        let root = TestConfigDir::new("zzclawterm-credential-selection");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), SESSION_ID);
+        cx.update_entity(&app, |app, cx| {
+            for (precise, count, expected) in [
+                (true, 1, Some(0)),
+                (true, 2, None),
+                (false, 1, None),
+                (false, 2, None),
+            ] {
+                let targets = (0..count)
+                    .map(|index| test_credential_target(&format!("c{index}")))
+                    .collect();
+                app.show_credential_panel(
+                    CredentialPromptKind::Password,
+                    targets,
+                    "Password:".into(),
+                    precise,
+                    cx,
+                );
+                assert_eq!(
+                    app.terminal
+                        .assist
+                        .credential_suggestions
+                        .as_ref()
+                        .unwrap()
+                        .selected_index,
+                    expected
+                );
+                if expected.is_none() {
+                    assert!(!app.apply_selected_credential_suggestion(cx));
+                }
+                app.dismiss_credential_suggestions(cx);
+            }
+        });
+    }
+
+    #[test]
+    fn disabling_autofill_cancels_the_password_pending_after_username_selection() {
+        let root = TestConfigDir::new("zzclawterm-credential-toggle-pending");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), SESSION_ID);
+        cx.update_entity(&app, |app, cx| {
+            let target = test_credential_target("c1");
+            app.show_credential_panel(
+                CredentialPromptKind::Username,
+                vec![target.clone()],
+                "Username:".into(),
+                true,
+                cx,
+            );
+            app.select_credential_suggestion(target, cx);
+            assert!(app.terminal.assist.credential_autofill_pending.is_some());
+            let generation = app.terminal.assist.credential_autofill_generation;
+            app.toggle_credential_autofill(cx);
+            assert!(
+                !app.settings
+                    .summary()
+                    .interaction_credential_autofill_enabled
+            );
+            assert!(app.terminal.assist.credential_autofill_pending.is_none());
+            assert!(app.terminal.assist.credential_suggestions.is_none());
+            app.terminal.assist.credential_autofill_buffer = "Password:".into();
+            assert!(!app.detect_credential_prompt(cx));
+            app.toggle_credential_autofill(cx);
+            assert!(
+                !app.terminal
+                    .assist
+                    .credential_fill_is_current(true, generation)
+            );
+        });
+    }
+
+    #[test]
+    fn disabled_autofill_rejects_pending_detection_and_late_match_events() {
+        use crate::models::{
+            CredentialAutofillMatchEvent, CredentialAutofillMatchOutcome,
+            CredentialAutofillMatchRequestKey, PendingCredentialAutofill,
+        };
+        let root = TestConfigDir::new("zzclawterm-credential-disabled");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_account_backed_session(
+            &mut cx,
+            &root,
+            ssh_connection("root", Some(account_password_auth())),
+            "root",
+        );
+        cx.update_entity(&app, |app, cx| {
+            let key = CredentialAutofillMatchRequestKey {
+                request_id: 1,
+                session_id: SESSION_ID.into(),
+                prompt_text: "Password:".into(),
+            };
+            app.terminal.assist.credential_autofill_pending = Some(PendingCredentialAutofill {
+                session_id: SESSION_ID.into(),
+                credential_id: "c1".into(),
+                expires_at_ms: u64::MAX,
+            });
+            app.terminal.assist.credential_autofill_pending_request = Some(key.clone());
+            app.terminal.assist.credential_autofill_buffer = key.prompt_text.clone();
+            app.terminal.assist.credential_autofill_detection_pending = true;
+            let mut settings = app.settings.summary().clone();
+            settings.interaction_credential_autofill_enabled = false;
+            app.settings.replace_summary(settings);
+            assert!(!app.detect_credential_prompt(cx));
+            assert!(!app.apply_credential_autofill_match_event(
+                CredentialAutofillMatchEvent {
+                    key: key.clone(),
+                    outcome: CredentialAutofillMatchOutcome::AutoFill {
+                        credential: test_credential_target("c1"),
+                        kind: CredentialPromptKind::Password
+                    },
+                },
+                cx
+            ));
+            assert!(!app.drain_pending_credential_autofill_detection(cx));
+            assert!(app.terminal.assist.credential_autofill_pending.is_none());
+            assert!(
+                app.terminal
+                    .assist
+                    .credential_autofill_pending_request
+                    .is_none()
+            );
+            app.toggle_credential_autofill(cx);
+            assert!(!app.apply_credential_autofill_match_event(
+                CredentialAutofillMatchEvent {
+                    key,
+                    outcome: CredentialAutofillMatchOutcome::Suggest {
+                        kind: CredentialPromptKind::Password,
+                        matches: vec![test_credential_target("c1")],
+                        clear_pending: true,
+                        precise: true
+                    },
+                },
+                cx
+            ));
+            assert!(app.terminal.assist.credential_suggestions.is_none());
+        });
+    }
+    #[test]
+    fn credential_fills_skip_sync_peers_history_and_recording_without_prompt_detection() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
+        use zzclawterm_transport::{
+            ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
+            RecordingRotationPolicy, TelnetSessionConfig,
+        };
+
+        let root = TestConfigDir::new("zzclawterm-credential-sensitive-wire");
+        let store = ConnectionStore::open(root.path().join("config")).unwrap();
+        let mut vault = match test_credential_target("vault") {
+            CredentialAutofillTarget::Vault(credential) => credential,
+            CredentialAutofillTarget::ConnectionPassword(_) => unreachable!(),
+        };
+        vault.username = "fixture-user".into();
+        vault.password = Some(SecretString::from("vault-fixture"));
+        store.save_credential(vault.clone()).unwrap();
+        let connection = ssh_connection(
+            "fixture-user",
+            Some(ConnectionAuth {
+                mode: "password".into(),
+                password: Some(SecretString::from("connection-fixture")),
+                ..Default::default()
+            }),
+        );
+        store.save_connection(&connection).unwrap();
+        drop(store);
+
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (manager, ids) = cx.update_entity(&app, |app, cx| {
+            app.start_command_persistence_event_drain(cx);
+            let manager = app.session.manager_handle();
+            let metadata = app.session.metadata("fixture").unwrap().clone();
+            let mut ids = Vec::new();
+            app.sync_input.create_group();
+            for index in 0..2 {
+                let config = TelnetSessionConfig {
+                    host: "127.0.0.1".into(),
+                    port,
+                    raw_tcp: true,
+                    encoding: "UTF-8".into(),
+                    ..Default::default()
+                };
+                let info = manager.create_telnet_session(config.clone()).unwrap();
+                let mut metadata = metadata.clone();
+                metadata.launch_config = SessionLaunchConfig::Telnet(config);
+                app.session.register_session_metadata(&info.id, metadata);
+                app.terminal
+                    .seed_session_view(info.id.clone(), "$ ".into(), "UTF-8");
+                app.sync_input.toggle_selected_session(info.id.clone());
+                app.recording
+                    .writer()
+                    .start(
+                        info.id.clone(),
+                        RecordingContext {
+                            session_id: info.id.clone(),
+                            session_name: "synthetic".into(),
+                            connection_id: None,
+                            connection_name: None,
+                            group_path: None,
+                            protocol: "telnet".into(),
+                            host: None,
+                            port: None,
+                            username: None,
+                            started_at: time::OffsetDateTime::now_utc(),
+                        },
+                        RecordingProfile {
+                            mode: RecordingMode::Raw,
+                            base_path: root.path().into(),
+                            path_template: "unused.log".into(),
+                            include_timestamps: false,
+                            include_io_labels: false,
+                            include_session_metadata: false,
+                            rotation: RecordingRotationPolicy::Session,
+                            existing_file_behavior: ExistingFileBehavior::Unique,
+                            include_binary_transfer_payloads: false,
+                            include_input: true,
+                        },
+                        Some(root.path().join(format!("{index}.bin"))),
+                        4096,
+                    )
+                    .unwrap();
+                ids.push(info.id);
+            }
+            app.session.select_active_session(&ids[0]);
+            (manager, ids)
+        });
+        let mut streams = (0..2)
+            .map(|_| listener.accept().unwrap().0)
+            .collect::<Vec<_>>();
+        for stream in &streams {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+        }
+        let vault_target = CredentialAutofillTarget::Vault(vault);
+        let connection_target =
+            CredentialAutofillTarget::ConnectionPassword(ConnectionPasswordTarget {
+                connection_id: connection.id,
+                connection_name: connection.name,
+                username: "fixture-user".into(),
+            });
+        for (kind, target) in [
+            (CredentialPromptKind::Username, &vault_target),
+            (CredentialPromptKind::Password, &vault_target),
+            (CredentialPromptKind::Password, &connection_target),
+        ] {
+            let expected_status = format!(
+                "filled {} from '{}'",
+                if kind == CredentialPromptKind::Username {
+                    "username"
+                } else {
+                    "password"
+                },
+                target.display_name()
+            );
+            cx.update_entity(&app, |app, cx| {
+                assert_eq!(app.sync_peer_session_ids(&ids[0]), vec![ids[1].clone()]);
+                assert!(!app.recording_input_is_sensitive(&ids[0]));
+                app.terminal.assist.credential_prompt_awaiting_output = false;
+                app.shell.set_status(String::new());
+                app.send_credential_value(target, kind, &ids[0], cx);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                cx.run_until_parked();
+                if cx.update_entity(&app, |app, _| app.shell.status() == expected_status) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "credential fill callback did not complete"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            cx.update_entity(&app, |app, _| {
+                assert!(app.terminal.assist.credential_prompt_awaiting_output);
+                app.terminal.assist.observe_credential_prompt_output();
+                assert!(!app.terminal.assist.credential_prompt_awaiting_output);
+            });
+        }
+        cx.update_entity(&app, |app, _| {
+            for id in &ids {
+                assert!(
+                    app.session
+                        .command_history_for(id)
+                        .is_none_or(|history| history.is_empty())
+                );
+                let completion = app.recording.writer().stop_complete(id.clone()).unwrap();
+                assert!(completion.error.is_none());
+                assert!(
+                    std::fs::read(completion.input_file_path.unwrap())
+                        .unwrap()
+                        .is_empty()
+                );
+                app.write_session_protocol_response(id, b"END").unwrap();
+            }
+            assert!(app.commands.command_history().is_empty());
+            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+        });
+        let store_client = cx.update_entity(&app, |app, _| app.store_blocking_client());
+        assert!(
+            store_client
+                .request_fn(zzclawterm_store::StoreDomain::Commands, |store| store
+                    .list_command_history(64))
+                .unwrap()
+                .is_empty()
+        );
+        for (stream, expected) in streams.iter_mut().zip([
+            b"fixture-user\rvault-fixture\rconnection-fixture\rEND".as_slice(),
+            b"END".as_slice(),
+        ]) {
+            let mut received = vec![0; expected.len()];
+            stream.read_exact(&mut received).unwrap();
+            assert_eq!(received, expected);
+        }
+        for id in ids {
+            manager.close(&id).unwrap();
+        }
     }
 }

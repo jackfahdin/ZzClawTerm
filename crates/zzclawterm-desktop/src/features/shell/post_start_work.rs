@@ -134,6 +134,7 @@ mod tests {
     #[test]
     fn a_closed_gate_keeps_the_clock_rather_than_giving_up() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             assert!(

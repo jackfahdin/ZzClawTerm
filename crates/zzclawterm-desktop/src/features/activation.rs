@@ -231,6 +231,8 @@ mod tests {
             force_character_at_a_time: false,
             send_naws: true,
             send_sga: true,
+            keep_alive_interval_secs:
+                zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS,
             auto_login: TelnetAutoLoginConfig::default(),
             encoding: String::new(),
         };

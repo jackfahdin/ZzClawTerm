@@ -1,5 +1,24 @@
 //! Unit tests for the shell environment module.
 
+#[test]
+fn resolved_local_shell_uses_real_program_to_match_environment_snapshot() {
+    let program = std::path::PathBuf::from("resolved-profile-shell");
+    let shell = crate::local_shell::ResolvedLocalShell {
+        program: program.to_string_lossy().into_owned(),
+        args: Vec::new(),
+    };
+    let mut snapshot = super::EnvironmentSnapshot {
+        values: std::sync::Arc::new(std::collections::HashMap::new()),
+        exact: true,
+        source_shell: Some(program),
+    };
+    assert!(shell.matches_environment(&snapshot));
+    snapshot.source_shell = Some(std::path::PathBuf::from("wt.exe"));
+    assert!(!shell.matches_environment(&snapshot));
+    snapshot.source_shell = None;
+    assert!(!shell.matches_environment(&snapshot));
+}
+
 #[cfg(unix)]
 use std::collections::HashMap;
 

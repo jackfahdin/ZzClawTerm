@@ -7,6 +7,7 @@ mod child_window;
 mod command;
 mod dialog;
 mod document_editor;
+pub mod document_snapshot;
 pub mod document_syntax;
 pub mod hex_editor;
 mod hover_card;
@@ -33,9 +34,16 @@ pub use app_menu_bar::{ZzClawAppMenu, ZzClawAppMenuBar};
 pub use button::{ZzClawButton, ZzClawButtonVariant, ZzClawIconButton};
 pub use child_window::{ChildWindowSlot, activate_child_window};
 pub use command::{ZzClawCommand, ZzClawCommandIndex, ZzClawCommandItem, ZzClawCommandState};
-pub use dialog::{ZzClawConfirmDialog, ZzClawDialog, ZzClawDialogFooter, ZzClawDialogWindowExt};
+pub use dialog::{
+    ZzClawConfirmDialog, ZzClawDialog, ZzClawDialogFooter, ZzClawDialogHandle,
+    ZzClawDialogWindowExt,
+};
 pub use document_editor::{
     ZzClawDocumentEditor, ZzClawDocumentEditorEvent, ZzClawDocumentEditorState,
+};
+pub use gpui_kit::component::color_picker::{
+    ColorPicker as ZzClawColorPicker, ColorPickerEvent as ZzClawColorPickerEvent,
+    ColorPickerState as ZzClawColorPickerState,
 };
 pub use gpui_kit::component::input::{
     Copy as ZzClawCopy, Cut as ZzClawCut, Paste as ZzClawPaste, Redo as ZzClawRedo,
@@ -51,8 +59,8 @@ pub use gpui_kit::component::slider::{
 pub use gpui_kit::component::tag::Tag as ZzClawTag;
 pub use hover_card::ZzClawHoverCard;
 pub use input::{
-    ZzClawInput, ZzClawInputEvent, ZzClawInputShell, ZzClawInputState, ZzClawSearchInput,
-    ZzClawTextArea,
+    ZzClawInput, ZzClawInputEvent, ZzClawInputKind, ZzClawInputLabels, ZzClawInputShell,
+    ZzClawInputState, ZzClawSearchInput, ZzClawTextArea, set_nya_input_label_provider,
 };
 pub use markdown::ZzClawMarkdown;
 pub use menu::{ZzClawContextMenu, ZzClawDropdownMenu, ZzClawMenuAnchor, ZzClawMenuItem};
@@ -61,7 +69,7 @@ pub use number_input::{
     ZzClawNumberStep,
 };
 pub use popover::{ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement};
-pub use root::{ZzClawRoot, ZzClawWindowHandle, zzclaw_root};
+pub use root::{ZzClawRoot, ZzClawWindowHandle, set_nya_root_transparent, zzclaw_root};
 pub use selectable_text::ZzClawSelectableText;
 pub use selection::{
     ZzClawCheckbox, ZzClawRadioGroup, ZzClawSelect, ZzClawSelectEvent, ZzClawSelectOption,
@@ -70,7 +78,10 @@ pub use selection::{
 pub use settings::{ZzClawSettingsLayout, ZzClawSettingsNavGroup, ZzClawSettingsNavItem};
 pub use sizing::NYA_FORM_CONTROL_HEIGHT_PX;
 pub use tabs::{ZzClawTabItem, ZzClawTabs, ZzClawTabsVariant};
-pub use theme::{APPEARANCE_THEME_IDS, ThemePalette, appearance_theme_label, theme_palette};
+pub use theme::{
+    APPEARANCE_THEME_IDS, ThemePalette, appearance_theme_label, available_themes,
+    palette_from_theme, resolve_theme_palette, theme_palette,
+};
 pub use theme_bridge::apply_component_theme;
 pub use tooltip::ZzClawTooltip;
 pub use widgets::{
@@ -87,7 +98,7 @@ mod tests {
     /// This pins the whole chain without mutating the global, which parallel tests
     /// would race.
     #[test]
-    fn gpui_kit_shares_the_rust_i18n_locale_and_ships_simplified_chinese() {
+    fn gpui_component_shares_the_rust_i18n_locale_and_ships_simplified_chinese() {
         assert_eq!(&*gpui_kit::component::locale(), &*rust_i18n::locale());
 
         let english = gpui_kit::component::_rust_i18n_try_translate("en", "Calendar.month.January");

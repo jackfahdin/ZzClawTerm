@@ -9,9 +9,9 @@ pub(crate) enum SecurityAuthTab {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SecurityUnlockAction {
+    SavePasswordEditor(u64),
     ViewPrivateKey(String),
     CopyPublicKey(String),
-    OpenPasswordEditor(Option<String>),
     RevealPassword(String),
     CopyPassword(String),
     DeletePassword(String),
@@ -55,7 +55,6 @@ pub(crate) struct SecurityKeyEditorState {
     pub(crate) key_content_mode: bool,
     pub(crate) cert_content_mode: bool,
     pub(crate) cert_expanded: bool,
-    pub(crate) show_passphrase: bool,
     pub(crate) has_key_data: bool,
     pub(crate) has_cert_data: bool,
     pub(crate) error: Option<String>,
@@ -88,9 +87,11 @@ pub(crate) struct SecurityPasswordEditorState {
     pub(crate) id: Option<String>,
     pub(crate) name: String,
     pub(crate) username: String,
-    pub(crate) password: zzclawterm_core::SecretString,
+    pub(crate) password_update: zzclawterm_core::models::credentials::PasswordUpdate,
+    pub(crate) references_expanded: bool,
+    pub(crate) connection_origin: Option<u64>,
+    pub(crate) error_field: Option<&'static str>,
     pub(crate) has_password: bool,
-    pub(crate) show_password: bool,
     pub(crate) error: Option<String>,
 }
 
@@ -104,6 +105,5 @@ pub(crate) struct SecurityCredentialEditorState {
     pub(crate) password_prompt_regex: String,
     pub(crate) enabled: bool,
     pub(crate) has_password: bool,
-    pub(crate) show_password: bool,
     pub(crate) error: Option<String>,
 }

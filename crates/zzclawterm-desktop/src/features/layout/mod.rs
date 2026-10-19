@@ -9,4 +9,4 @@ mod sync_history_panel;
 mod workspace;
 
 mod activity_bar;
-mod title_bar;
+pub(crate) mod title_bar;

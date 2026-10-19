@@ -39,7 +39,7 @@ impl ZzClawTermApp {
         };
         let app = cx.weak_entity();
         cx.defer(move |cx| {
-            let _ = window.update(cx, |_, window, cx| {
+            let _ = gpui::AnyWindowHandle::from(window).update(cx, |_, window, cx| {
                 let _ = app.update(cx, |app, cx| {
                     app.pump_startup_restore_queue_if_ready(window, cx);
                 });
@@ -62,7 +62,9 @@ impl ZzClawTermApp {
         let app = cx.weak_entity();
         let session_id = session_id.to_string();
         cx.defer(move |cx| {
-            let _ = window.update(cx, |_, window, cx| {
+            // Dialog APIs read and update ZzClawRoot themselves. A typed window
+            // update would lease that root for this entire callback.
+            let _ = gpui::AnyWindowHandle::from(window).update(cx, |_, window, cx| {
                 let _ = app.update(cx, |app, cx| {
                     use gpui::{ParentElement as _, Styled as _};
                     use zzclawterm_ui::{
@@ -75,7 +77,9 @@ impl ZzClawTermApp {
                         app.settle_remote_desktop_restore(cx);
                         return;
                     }
-                    let input = cx.new(|cx| ZzClawInputState::new(cx, "").masked(true));
+                    let input = cx.new(|cx| {
+                        ZzClawInputState::new(cx, "").kind(zzclawterm_ui::ZzClawInputKind::Password)
+                    });
                     let render_input = input.clone();
                     let cancel_input = input.clone();
                     let cancel_id = session_id.clone();
@@ -570,6 +574,34 @@ impl ZzClawTermApp {
         true
     }
 
+    pub(super) fn schedule_vnc_helper_reconnect(&mut self, session_id: &str) -> bool {
+        let Some((enabled, max_attempts)) =
+            self.session
+                .metadata(session_id)
+                .and_then(|metadata| match &metadata.launch_config {
+                    crate::models::SessionLaunchConfig::Vnc(config) => {
+                        Some((config.reconnect.enabled, config.reconnect.max_attempts))
+                    }
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        let Some(session) = self.remote_desktop.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if !enabled || session.reconnect_attempts >= max_attempts {
+            return false;
+        }
+        session.reconnect_attempts += 1;
+        session.reconnect_at = Some(
+            Instant::now()
+                + rdp_reconnect_delay(session.reconnect_attempts, rand::random_range(0..250)),
+        );
+        session.state = RemoteDesktopViewState::Reconnecting;
+        true
+    }
+
     pub(super) fn drive_rdp_reconnects(&mut self, cx: &mut Context<Self>) -> bool {
         let now = Instant::now();
         let due = self
@@ -583,7 +615,16 @@ impl ZzClawTermApp {
             if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
                 session.reconnect_at = None;
             }
-            self.restart_rdp_runtime(session_id, false, cx);
+            if self.session.metadata(session_id).is_some_and(|metadata| {
+                matches!(
+                    metadata.launch_config,
+                    crate::models::SessionLaunchConfig::Vnc(_)
+                )
+            }) {
+                self.restart_vnc_runtime(session_id, false, cx);
+            } else {
+                self.restart_rdp_runtime(session_id, false, cx);
+            }
         }
         !due.is_empty()
     }

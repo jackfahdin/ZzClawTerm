@@ -344,6 +344,41 @@ pub(in crate::features) struct TerminalGutterLabels {
     pub line_number: String,
 }
 
+pub(in crate::features) fn terminal_gutter_row_count(
+    snapshot: &zzclawterm_terminal::TerminalSnapshot,
+) -> usize {
+    let row_count = snapshot.row_count();
+    let absolute_start = snapshot
+        .total_rows
+        .saturating_sub(snapshot.display_offset)
+        .saturating_sub(row_count);
+    // Historical blank lines are output, not unused screen space. Skip them so
+    // this scan stays bounded by the live screen even in a large retained window.
+    let history_rows = snapshot
+        .scrollback_len
+        .saturating_sub(absolute_start)
+        .min(row_count);
+    let cursor_rows = snapshot
+        .cursor
+        .row
+        .checked_add(1)
+        .filter(|end| *end <= row_count)
+        .unwrap_or(0);
+    let retained_rows = history_rows.max(cursor_rows);
+    let content_rows = snapshot.rows()[retained_rows..]
+        .iter()
+        .rposition(|row| !row.text.is_empty() || row.wrapped)
+        .map_or(retained_rows, |row| retained_rows + row + 1);
+    let image_rows = snapshot
+        .images
+        .iter()
+        .filter(|image| image.height_cells > 0)
+        .map(|image| image.row.saturating_add(image.height_cells))
+        .max()
+        .unwrap_or(0);
+    content_rows.max(image_rows).min(row_count)
+}
+
 pub(in crate::features) fn terminal_gutter_labels(
     row: Option<&zzclawterm_terminal::TerminalSnapshotRow>,
     absolute_line_number: usize,
@@ -353,17 +388,22 @@ pub(in crate::features) fn terminal_gutter_labels(
     timestamp_formatter: &TerminalTimestampFormatter,
 ) -> TerminalGutterLabels {
     let wrapped = row.is_some_and(|row| row.wrapped);
-    let timestamp = if show_timestamps && !wrapped {
+    let timestamp = if show_timestamps {
         row.and_then(|row| row.timestamp_ms)
             .map(|timestamp| timestamp_formatter.format(timestamp))
             .unwrap_or_else(|| " ".repeat(timestamp_formatter.width_chars()))
     } else {
         String::new()
     };
-    let line_number = if show_line_numbers && !wrapped {
-        format!("{absolute_line_number:>line_number_digits$}")
-    } else {
+    let line_number = if !show_line_numbers || row.is_some_and(|row| row.cleared) {
         String::new()
+    } else if wrapped {
+        format!("{:>line_number_digits$}", "-")
+    } else {
+        let absolute_line_number = row
+            .and_then(|row| row.display_line_number)
+            .unwrap_or(absolute_line_number);
+        format!("{absolute_line_number:>line_number_digits$}")
     };
     TerminalGutterLabels {
         timestamp,
@@ -592,8 +632,109 @@ mod tests {
 
     use super::{
         TerminalTimestampFormatter, format_history_timestamp_ms, terminal_gutter_labels,
-        terminal_timestamp_format_width_chars,
+        terminal_gutter_row_count, terminal_timestamp_format_width_chars,
     };
+
+    #[test]
+    fn gutter_omits_metadata_for_locally_cleared_rows() {
+        let mut terminal = TerminalScreen::new(20, 4);
+        terminal.advance(b"\x1b[4;1Hroot# draft");
+        terminal.clear_except_input();
+        let snapshot = terminal.snapshot();
+        let formatter = TerminalTimestampFormatter::new("HH:mm:ss");
+        for row in 0..3 {
+            let labels =
+                terminal_gutter_labels(snapshot.row(row), row + 1, true, true, 1, &formatter);
+            assert!(labels.timestamp.trim().is_empty());
+            assert!(labels.line_number.is_empty());
+        }
+        let labels = terminal_gutter_labels(snapshot.row(3), 4, true, true, 1, &formatter);
+        assert_eq!(labels.line_number, "1");
+        assert!(!labels.timestamp.trim().is_empty());
+    }
+
+    #[test]
+    fn gutter_omits_unused_screen_rows_even_when_they_have_timestamps() {
+        let mut terminal = TerminalScreen::new(10, 6);
+        terminal.advance(b"first\r\n\r\n# ");
+        let snapshot = terminal.snapshot();
+
+        assert!(snapshot.row(5).unwrap().text.is_empty());
+        assert!(snapshot.row(5).unwrap().timestamp_ms.is_some());
+        assert_eq!(snapshot.cursor.row, 2);
+        assert!(snapshot.row(1).unwrap().text.is_empty());
+        assert_eq!(terminal_gutter_row_count(&snapshot), 3);
+    }
+
+    #[test]
+    fn gutter_keeps_blank_cursor_row_even_when_cursor_paint_is_disabled() {
+        let mut terminal = TerminalScreen::new(10, 6);
+        terminal.advance(b"first\r\n\r\n\x1b[?25l");
+        let snapshot = terminal.snapshot();
+
+        assert!(!snapshot.cursor.visible);
+        assert!(snapshot.row(2).unwrap().text.is_empty());
+        assert_eq!(terminal_gutter_row_count(&snapshot), 3);
+    }
+
+    #[test]
+    fn gutter_keeps_output_below_cursor_and_trims_resized_or_cleared_screen_padding() {
+        let mut terminal = TerminalScreen::new(10, 6);
+        terminal.advance(b"first\r\n\r\n\x1b]133;A\x07last\x1b]133;B\x07\x1b[H");
+        let snapshot = terminal.snapshot();
+        assert_eq!(snapshot.cursor.row, 0);
+        assert_eq!(terminal_gutter_row_count(&snapshot), 3);
+
+        terminal.resize(10, 12);
+        assert_eq!(terminal_gutter_row_count(&terminal.snapshot()), 3);
+
+        terminal.advance(b"\x1b[2J\x1b[H");
+        assert_eq!(terminal_gutter_row_count(&terminal.snapshot()), 1);
+    }
+
+    #[test]
+    fn gutter_keeps_soft_wrapped_output_and_omits_rows_after_it() {
+        let mut terminal = TerminalScreen::new(4, 6);
+        terminal.advance(b"abcdefghijkl");
+        let snapshot = terminal.snapshot();
+
+        assert!(snapshot.row(2).unwrap().wrapped);
+        assert_eq!(terminal_gutter_row_count(&snapshot), 3);
+    }
+
+    #[test]
+    fn gutter_preserves_blank_history_in_large_prefetched_windows() {
+        let mut terminal = TerminalScreen::new(10, 6);
+        for _ in 0..1_000 {
+            terminal.advance(b"\r\n");
+        }
+        let history = terminal.viewport_snapshot(terminal.scrollback_len());
+        assert_eq!(history.cursor.row, usize::MAX);
+        assert!(history.rows().iter().all(|row| row.text.is_empty()));
+        assert_eq!(terminal_gutter_row_count(&history), history.row_count());
+
+        terminal.advance(b"\x1b[2J\x1b[H# ");
+        let prefetched = terminal.viewport_snapshot_with_window(0, terminal.scrollback_len(), 0);
+        assert!(prefetched.row_count() > 900);
+        assert_eq!(
+            terminal_gutter_row_count(&prefetched),
+            prefetched.cursor.row + 1
+        );
+        let scrolled = terminal.viewport_snapshot(1);
+        assert_eq!(scrolled.cursor.row, usize::MAX);
+        assert_eq!(terminal_gutter_row_count(&scrolled), 2);
+    }
+
+    #[test]
+    fn gutter_keeps_rows_occupied_by_inline_images_without_text() {
+        let mut terminal = TerminalScreen::new(10, 6);
+        terminal.advance(b"\x1b[4;1H\x1b_Ga=T,i=9,c=1,r=2;QUI=\x1b\\\x1b[H");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(snapshot.images.len(), 1);
+        assert!(snapshot.rows().iter().all(|row| row.text.is_empty()));
+        assert_eq!(terminal_gutter_row_count(&snapshot), 5);
+    }
 
     #[test]
     fn terminal_timestamp_milliseconds_follow_format_tokens_only() {
@@ -644,16 +785,94 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_continuation_has_no_duplicate_gutter_labels() {
+    fn soft_wrapped_output_shows_timestamps_and_right_aligned_continuation_dashes() {
+        let formatter = TerminalTimestampFormatter::new("HH:mm:ss");
+
+        for output in [b"abcdefgh".as_slice(), b"abcdefghijkl".as_slice()] {
+            let row_count = output.len() / 4;
+            let mut terminal = TerminalScreen::new(4, row_count as u16);
+            terminal.advance(output);
+            let snapshot = terminal.snapshot();
+
+            for row_index in 0..row_count {
+                let row = snapshot.row(row_index).expect("output row");
+                assert_eq!(row.wrapped, row_index > 0);
+                let timestamp = row.timestamp_ms.expect("output timestamp");
+                let labels =
+                    terminal_gutter_labels(Some(row), 37 + row_index, true, true, 3, &formatter);
+
+                assert_eq!(labels.timestamp, formatter.format(timestamp));
+                assert_eq!(
+                    labels.line_number,
+                    if row_index == 0 { " 37" } else { "  -" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_gutter_labels_use_each_rows_existing_timestamp() {
+        let mut terminal = TerminalScreen::new(4, 3);
+        terminal.advance(b"abcdefghijkl");
+        let snapshot = terminal.snapshot();
+        let formatter = TerminalTimestampFormatter::new("HH:mm:ss.SSS");
+
+        for (row_index, timestamp) in [123, 123, 1_123].into_iter().enumerate() {
+            let mut row = snapshot.row(row_index).expect("output row").clone();
+            row.timestamp_ms = Some(timestamp);
+            let labels =
+                terminal_gutter_labels(Some(&row), row_index + 1, true, true, 1, &formatter);
+
+            assert_eq!(labels.timestamp, formatter.format(timestamp));
+            assert_eq!(labels.line_number, if row_index == 0 { "1" } else { "-" });
+        }
+    }
+
+    #[test]
+    fn wrapped_gutter_labels_respect_independent_switches_and_missing_timestamps() {
         let mut terminal = TerminalScreen::new(4, 2);
         terminal.advance(b"abcdefgh");
         let snapshot = terminal.snapshot();
-        assert!(snapshot.row(1).is_some_and(|row| row.wrapped));
-        let formatter = TerminalTimestampFormatter::new("HH:mm:ss");
+        let mut row = snapshot.row(1).expect("wrapped row").clone();
+        assert!(row.wrapped);
+        let formatter = TerminalTimestampFormatter::new("HH:mm:ss.SSS");
 
-        let labels = terminal_gutter_labels(snapshot.row(1), 2, true, true, 1, &formatter);
+        for timestamp in [None, Some(123)] {
+            row.timestamp_ms = timestamp;
+            for show_timestamps in [false, true] {
+                for show_line_numbers in [false, true] {
+                    for snapshot_row in [None, snapshot.row(0), Some(&row)] {
+                        let labels = terminal_gutter_labels(
+                            snapshot_row,
+                            2,
+                            show_timestamps,
+                            show_line_numbers,
+                            3,
+                            &formatter,
+                        );
+                        let expected_timestamp = if show_timestamps {
+                            snapshot_row
+                                .and_then(|row| row.timestamp_ms)
+                                .map(|timestamp| formatter.format(timestamp))
+                                .unwrap_or_else(|| " ".repeat(formatter.width_chars()))
+                        } else {
+                            String::new()
+                        };
 
-        assert!(labels.timestamp.is_empty());
-        assert!(labels.line_number.is_empty());
+                        assert_eq!(labels.timestamp, expected_timestamp);
+                        assert_eq!(
+                            labels.line_number,
+                            if !show_line_numbers {
+                                ""
+                            } else if snapshot_row.is_some_and(|row| row.wrapped) {
+                                "  -"
+                            } else {
+                                "  2"
+                            }
+                        );
+                    }
+                }
+            }
+        }
     }
 }

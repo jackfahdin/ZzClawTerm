@@ -137,6 +137,7 @@ mod tests {
     #[test]
     fn narrowing_the_right_panel_constrains_the_sort_key_with_no_render() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, _| {
             app.remote_ops
@@ -185,6 +186,7 @@ mod tests {
     #[test]
     fn a_session_switch_reconciles_remote_panel_demand_without_a_paint() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
             let mut summary = app.settings.summary().clone();

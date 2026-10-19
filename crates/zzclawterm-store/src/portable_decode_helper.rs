@@ -145,9 +145,13 @@ pub(crate) fn decode_remote_snapshot_in_helper(
             reply.snapshot.source_payload_hash = reply.source_payload_hash;
             Ok(reply.snapshot)
         }
+        // status 1 means the payload did not authenticate with the password.
+        // That is not proof the password is wrong: an altered or partially
+        // written payload fails the same way. The caller adds path/size/digest
+        // and decides which cause it is.
         Some(1) => Err(PortableSnapshotError::Decrypt {
-            new_error: "decoder helper rejected password".into(),
-            legacy_error: "decoder helper rejected password".into(),
+            new_error: "payload did not authenticate with the master password".into(),
+            legacy_error: "payload did not authenticate with the master password".into(),
         }),
         Some(2) => Err(PortableSnapshotError::MissingMasterPassword),
         _ => Err(PortableSnapshotError::CorruptPayload),

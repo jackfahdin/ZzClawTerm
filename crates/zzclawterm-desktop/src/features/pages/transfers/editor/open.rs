@@ -1,10 +1,7 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use gpui::{Context, Window};
 use zzclawterm_core::AiCustomActionConfig;
 use zzclawterm_transport::{
-    RemoteTextGeneration, SftpFileEntry, SftpFileType, SftpTransferControl,
+    RemoteTextGeneration, SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType, SftpTransferControl,
 };
 
 use crate::features::ZzClawTermApp;
@@ -14,10 +11,8 @@ use crate::models::{
 };
 
 use super::super::helpers::remote_file_name;
-use super::helpers::{
-    RemoteFileTextKind, open_local_path_with_editor, remote_file_text_kind,
-    sanitize_local_open_segment,
-};
+use super::helpers::{RemoteFileTextKind, open_local_path_with_editor, remote_file_text_kind};
+use super::workspace::{external_edit_path, prepare_external_edit_workspace};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn enabled_transfer_file_ai_actions_for_entry(
@@ -280,7 +275,7 @@ impl ZzClawTermApp {
             remote_path: entry.path.clone(),
             raw_path_token: entry.raw_path_token.clone(),
             name: entry.name.clone(),
-            content: String::new(),
+            content: Default::default(),
             search_query: String::new(),
             active_match: 0,
             revision: None,
@@ -432,7 +427,12 @@ impl ZzClawTermApp {
         self.transfer.select_browser_path(entry.path.clone());
         self.transfer.set_remote_path(entry.path.clone());
         let remote_path = entry.path.clone();
-        let local_path = self.transfer_external_open_path(&entry, session_id.as_deref());
+        let file_name = if entry.name.trim().is_empty() {
+            remote_file_name(&entry.path)
+        } else {
+            entry.name.clone()
+        };
+        let local_path = external_edit_path(&file_name);
         let default_editor = self.settings.summary().transfer_default_editor.clone();
         let transfer_options = self.sftp_transfer_options();
         let id = self.transfer.next_transfer_job_id("sftp-open-external");
@@ -459,34 +459,53 @@ impl ZzClawTermApp {
 
         let progress_tx = self.transfer.transfer_event_sender();
         let finished_tx = self.transfer.transfer_event_sender();
-        self.submit_transfer_blocking_job(
+        self.submit_bulk_transfer_job(
             "sftp-open-external",
             id.clone(),
             finished_tx.clone(),
             move || {
                 let progress_id = id.clone();
-                let result = service
-                    .download_remote_file_with_progress_and_control_options(
-                        &remote_file_path,
-                        local_path.clone(),
-                        control,
-                        transfer_options,
-                        move |progress| {
-                            let _ = progress_tx.unbounded_send(TransferJobResult {
-                                id: progress_id.clone(),
-                                event: TransferJobEvent::Progress(progress),
-                            });
-                        },
-                    )
+                let result = prepare_external_edit_workspace(&local_path)
                     .map_err(|error| error.to_string())
-                    .and_then(|_| {
-                        open_local_path_with_editor(&local_path, &default_editor).map(|_| {
-                            TransferJobOutput::ExternalOpened {
-                                remote_path: remote_path.clone(),
-                                raw_path_token: remote_file_path.raw_path_token.clone(),
-                                local_path: local_path.clone(),
-                            }
-                        })
+                    .and_then(|_workspace| {
+                        service
+                            .download_remote_file_with_progress_and_control_options(
+                                &remote_file_path,
+                                local_path.clone(),
+                                control.clone(),
+                                transfer_options,
+                                move |progress| {
+                                    let _ = progress_tx.unbounded_send(TransferJobResult {
+                                        id: progress_id.clone(),
+                                        event: TransferJobEvent::Progress(progress),
+                                    });
+                                },
+                            )
+                            .map_err(|error| error.to_string())
+                            .and_then(|_| {
+                                let baseline = crate::features::transfers::external_sync_runtime::read_external_editor_version(
+                                    &local_path,
+                                    || control.is_cancelled(),
+                                )
+                                .map_err(|error| {
+                                    if error.kind() == std::io::ErrorKind::Interrupted {
+                                        SFTP_TRANSFER_CANCELLED.to_string()
+                                    } else {
+                                        error.to_string()
+                                    }
+                                })?;
+                                if control.is_cancelled() {
+                                    return Err(SFTP_TRANSFER_CANCELLED.to_string());
+                                }
+                                open_local_path_with_editor(&local_path, &default_editor).map(
+                                    |_| TransferJobOutput::ExternalOpened {
+                                        baseline,
+                                        remote_path: remote_path.clone(),
+                                        raw_path_token: remote_file_path.raw_path_token.clone(),
+                                        local_path: local_path.clone(),
+                                    },
+                                )
+                            })
                     });
                 let _ = finished_tx.unbounded_send(TransferJobResult {
                     id,
@@ -495,32 +514,5 @@ impl ZzClawTermApp {
             },
         );
         cx.notify();
-    }
-
-    pub(in crate::features) fn transfer_external_open_path(
-        &self,
-        entry: &SftpFileEntry,
-        session_id: Option<&str>,
-    ) -> PathBuf {
-        let session_id = session_id
-            .map(sanitize_local_open_segment)
-            .unwrap_or_else(|| "session".to_string());
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or_default();
-        let fallback_name;
-        let raw_file_name = if entry.name.trim().is_empty() {
-            fallback_name = remote_file_name(&entry.path);
-            fallback_name.as_str()
-        } else {
-            entry.name.as_str()
-        };
-        let file_name = sanitize_local_open_segment(raw_file_name);
-        std::env::temp_dir()
-            .join("zzclawterm")
-            .join(session_id)
-            .join(timestamp_ms.to_string())
-            .join(file_name)
     }
 }

@@ -158,6 +158,7 @@ impl ZzClawTermApp {
                             TextInputSetup {
                                 placeholder: t!("settings.keyContentPlaceholder").into(),
                                 masked: false,
+                                kind: zzclawterm_ui::ZzClawInputKind::Text,
                                 multi_line: true,
                                 submit_on_enter: false,
                                 code: false,
@@ -181,14 +182,18 @@ impl ZzClawTermApp {
                                     )),
                                     cx,
                                 )))
-                                .child(small_button(
-                                    palette,
-                                    "security-key-browse",
-                                    t!("securityAuth.browse"),
-                                    cx.listener(|this, _, window, cx| {
-                                        this.pick_security_key_file(false, window, cx);
-                                    }),
-                                )),
+                                .child(
+                                    zzclawterm_ui::ZzClawButton::new(
+                                        "security-key-browse",
+                                        t!("securityAuth.browse"),
+                                    )
+                                    .form_control()
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.pick_security_key_file(false, window, cx);
+                                        },
+                                    )),
+                                ),
                         )
                     }),
             )
@@ -248,6 +253,7 @@ impl ZzClawTermApp {
                                 TextInputSetup {
                                     placeholder: t!("settings.certContentPlaceholder").into(),
                                     masked: false,
+                                    kind: zzclawterm_ui::ZzClawInputKind::Text,
                                     multi_line: true,
                                     submit_on_enter: false,
                                     code: false,
@@ -271,14 +277,18 @@ impl ZzClawTermApp {
                                         )),
                                         cx,
                                     )))
-                                    .child(small_button(
-                                        palette,
-                                        "security-cert-browse",
-                                        t!("securityAuth.browse"),
-                                        cx.listener(|this, _, window, cx| {
-                                            this.pick_security_key_file(true, window, cx);
-                                        }),
-                                    )),
+                                    .child(
+                                        zzclawterm_ui::ZzClawButton::new(
+                                            "security-cert-browse",
+                                            t!("securityAuth.browse"),
+                                        )
+                                        .form_control()
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.pick_security_key_file(true, window, cx);
+                                            }),
+                                        ),
+                                    ),
                             )
                         }),
                 )
@@ -295,32 +305,14 @@ impl ZzClawTermApp {
                         editor.passphrase.expose_secret().to_owned(),
                         TextInputSetup {
                             placeholder: "".into(),
-                            masked: !editor.show_passphrase,
+                            masked: true,
+                            kind: zzclawterm_ui::ZzClawInputKind::Secret,
                             multi_line: false,
                             submit_on_enter: false,
                             code: false,
                         },
                         cx,
-                    )))
-                    .child(
-                        zzclawterm_ui::ZzClawIconButton::new(
-                            "security-key-passphrase-visible",
-                            if editor.show_passphrase {
-                                "icons/eye-off.svg"
-                            } else {
-                                "icons/eye.svg"
-                            },
-                        )
-                        .tooltip(t!(if editor.show_passphrase {
-                            "settings.hidePassphrase"
-                        } else {
-                            "settings.showPassphrase"
-                        }))
-                        .disabled(self.security.editor_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_security_key_passphrase_visibility(cx)
-                        })),
-                    ),
+                    ))),
             )
             .when_some(editor.error.clone(), |this, error| {
                 this.child(

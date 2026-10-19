@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::widgets::small_button;
 
-use super::helpers::{editor_content_preview, editor_search_matches};
+use super::helpers::editor_content_preview;
 
 #[derive(Clone, Copy)]
 enum ExternalSyncButtonStyle {
@@ -289,38 +289,40 @@ impl ZzClawTermApp {
         let encoding_label = t!("fileEditor.encodingUtf8");
         let line_ending_label = t!("fileEditor.lineEndingLf");
         let plain_text_label = t!("fileEditor.plainText");
-        let workspace = self.transfer.editor_workspace_snapshot();
+        let has_native_editor = native_editor.is_some();
+        let content_preview = if has_native_editor {
+            SharedString::default()
+        } else {
+            self.transfer.editor_content_preview(editor_content_preview)
+        };
+        let empty_state = TransferEditorState {
+            id: String::new(),
+            session_id: None,
+            remote_path: String::new(),
+            raw_path_token: None,
+            name: String::new(),
+            content: Default::default(),
+            search_query: String::new(),
+            active_match: 0,
+            revision: None,
+            generation: RemoteTextGeneration::next(),
+            loading: false,
+            saving: false,
+            dirty: false,
+            conflict: false,
+            close_after_save: false,
+            reload_confirm: false,
+            error: None,
+            backup_warning_path: None,
+            focused_field: TransferEditorField::Content,
+        };
+        let workspace = self.transfer.editor_workspace();
         let state = workspace
-            .as_ref()
             .and_then(TransferEditorWorkspaceState::active_tab)
-            .cloned()
-            .unwrap_or(TransferEditorState {
-                id: String::new(),
-                session_id: None,
-                remote_path: String::new(),
-                raw_path_token: None,
-                name: String::new(),
-                content: String::new(),
-                search_query: String::new(),
-                active_match: 0,
-                revision: None,
-                generation: RemoteTextGeneration::next(),
-                loading: false,
-                saving: false,
-                dirty: false,
-                conflict: false,
-                close_after_save: false,
-                reload_confirm: false,
-                error: None,
-                backup_warning_path: None,
-                focused_field: TransferEditorField::Content,
-            });
-        let close_confirm = workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.close_confirm);
+            .unwrap_or(&empty_state);
+        let close_confirm = workspace.is_some_and(|workspace| workspace.close_confirm);
         let tabs = workspace
-            .as_ref()
-            .map(|workspace| workspace.tabs.clone())
+            .map(|workspace| workspace.tabs.as_slice())
             .unwrap_or_default();
         let status = if state.loading {
             loading_label.clone()
@@ -358,12 +360,6 @@ impl ZzClawTermApp {
             line = cursor_line,
             column = cursor_column
         );
-        let search_matches = editor_search_matches(&state.content, &state.search_query);
-        let active_match = state
-            .active_match
-            .min(search_matches.len().saturating_sub(1));
-        let content_preview =
-            editor_content_preview(&state.content, &state.search_query, active_match);
         let active_tab_id = state.id.clone();
         let content_font = self.gpui_terminal_font().font();
         let host_name = state.session_id.as_deref().and_then(|session_id| {
@@ -376,7 +372,6 @@ impl ZzClawTermApp {
                 .or_else(|| self.session.display_name(session_id))
                 .or_else(|| self.session.ssh_host(session_id))
         });
-        let has_native_editor = native_editor.is_some();
         let tabs_menu_open = self.transfer.editor_tabs_menu_is_open() && tabs.len() > 1;
         let mut tab_list = div()
             .id("transfer-editor-tab-list")
@@ -838,10 +833,8 @@ impl ZzClawTermApp {
                                     })
                                     .child(if state.loading {
                                         SharedString::from(loading_label)
-                                    } else if content_preview.is_empty() {
-                                        SharedString::from("")
                                     } else {
-                                        SharedString::from(content_preview)
+                                        content_preview
                                     })
                             })
                     )

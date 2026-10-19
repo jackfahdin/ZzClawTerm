@@ -32,6 +32,8 @@ mod notes;
 mod portable;
 mod remote_file_backend;
 mod session_import;
+mod themes;
+pub use themes::ThemeCommitOutcome;
 mod vault;
 mod vnc_known_hosts;
 mod window_state;

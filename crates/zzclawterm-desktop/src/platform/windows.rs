@@ -8,6 +8,32 @@ use windows_sys::core::{s, w};
 
 static NATIVE_MENU_THEME_INIT: Once = Once::new();
 
+pub(super) fn window_material_capabilities() -> super::WindowMaterialCapabilities {
+    let composition_disabled = std::env::var("GPUI_DISABLE_DIRECT_COMPOSITION")
+        .is_ok_and(|value| value == "true" || value == "1");
+    let build = windows_version()
+        .and_then(|version| (version.dwMajorVersion >= 10).then_some(version.dwBuildNumber));
+    // This matches GPUI's dynamically loaded entry point; application code never
+    // calls it or duplicates the backend's native material implementation.
+    let accent_api_available = unsafe {
+        let module = GetModuleHandleW(w!("user32.dll"));
+        !module.is_null() && GetProcAddress(module, s!("SetWindowCompositionAttribute")).is_some()
+    };
+    let supported = window_material_supported(build, composition_disabled, accent_api_available);
+    super::WindowMaterialCapabilities {
+        transparent: supported,
+        blurred: supported,
+    }
+}
+
+fn window_material_supported(
+    build: Option<u32>,
+    composition_disabled: bool,
+    accent_api_available: bool,
+) -> bool {
+    build.is_some_and(|build| build >= 17763) && !composition_disabled && accent_api_available
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DarkMenuApi {
     Legacy,
@@ -108,6 +134,24 @@ mod tests {
     use windows_sys::core::w;
 
     use super::{DarkMenuApi, enable_native_menu_dark_mode, windows_version};
+
+    #[test]
+    fn native_window_material_requires_supported_build_composition_and_accent_api() {
+        for (build, disabled, api, expected) in [
+            (None, false, true, false),
+            (Some(17762), false, true, false),
+            (Some(17763), false, true, true),
+            (Some(19045), false, true, true),
+            (Some(22621), false, true, true),
+            (Some(22621), true, true, false),
+            (Some(22621), false, false, false),
+        ] {
+            assert_eq!(
+                super::window_material_supported(build, disabled, api),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn native_menu_api_uses_actual_windows_build_to_select_ordinal_135_abi() {

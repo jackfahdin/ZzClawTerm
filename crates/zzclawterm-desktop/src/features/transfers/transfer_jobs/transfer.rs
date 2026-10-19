@@ -18,8 +18,7 @@ use crate::models::{
 };
 
 use super::helpers::{
-    TransferProgressEventSender, log_sftp_upload_job_failure, submit_transfer_blocking_job,
-    transfer_job_remote_parent_path,
+    TransferProgressEventSender, log_sftp_upload_job_failure, transfer_job_remote_parent_path,
 };
 
 impl ZzClawTermApp {
@@ -116,8 +115,7 @@ impl ZzClawTermApp {
             .set_status(format!("remote download started for {display_path}"));
         let progress_tx = self.transfer.transfer_event_sender();
         let finished_tx = self.transfer.transfer_event_sender();
-        submit_transfer_blocking_job(
-            &self.blocking_jobs,
+        self.submit_bulk_transfer_job(
             "sftp-download",
             id.clone(),
             finished_tx.clone(),
@@ -182,53 +180,47 @@ impl ZzClawTermApp {
         ));
         let progress_tx = self.transfer.transfer_event_sender();
         let finished_tx = self.transfer.transfer_event_sender();
-        submit_transfer_blocking_job(
-            &self.blocking_jobs,
-            "sftp-upload",
-            id.clone(),
-            finished_tx.clone(),
-            move || {
-                // Siblings in one selection may have the same basename. Hold the
-                // target lock through conflict resolution and the upload itself.
-                let mut progress_sender = TransferProgressEventSender::new(id.clone(), progress_tx);
-                let service = session.service;
-                let result = (|| {
-                    let _target_guard = lock_upload_target(&target_lock, &control)?;
-                    service
-                        .upload_path_with_progress_and_path_options(
-                            local_path,
-                            &remote_path,
-                            control,
-                            path_options,
-                            move |progress| {
-                                progress_sender.send(progress);
+        self.submit_bulk_transfer_job("sftp-upload", id.clone(), finished_tx.clone(), move || {
+            // Siblings in one selection may have the same basename. Hold the
+            // target lock through conflict resolution and the upload itself.
+            let mut progress_sender = TransferProgressEventSender::new(id.clone(), progress_tx);
+            let service = session.service;
+            let result = (|| {
+                let _target_guard = lock_upload_target(&target_lock, &control)?;
+                service
+                    .upload_path_with_progress_and_path_options(
+                        local_path,
+                        &remote_path,
+                        control,
+                        path_options,
+                        move |progress| {
+                            progress_sender.send(progress);
+                        },
+                    )
+                    .map(|summary| {
+                        if summary.skipped {
+                            return TransferJobOutput::Summary(summary);
+                        }
+                        let parent_path = transfer_job_remote_parent_path(&summary.remote_path);
+                        match service.list_dir(&parent_path) {
+                            Ok(entries) => TransferJobOutput::Uploaded {
+                                summary,
+                                parent_path,
+                                entries,
                             },
-                        )
-                        .map(|summary| {
-                            if summary.skipped {
-                                return TransferJobOutput::Summary(summary);
-                            }
-                            let parent_path = transfer_job_remote_parent_path(&summary.remote_path);
-                            match service.list_dir(&parent_path) {
-                                Ok(entries) => TransferJobOutput::Uploaded {
-                                    summary,
-                                    parent_path,
-                                    entries,
-                                },
-                                Err(_) => TransferJobOutput::Summary(summary),
-                            }
-                        })
-                })();
-                if let Err(error) = &result {
-                    log_sftp_upload_job_failure(&id, error);
-                }
-                let result = result.map_err(|error| error.to_string());
-                let _ = finished_tx.unbounded_send(TransferJobResult {
-                    id,
-                    event: TransferJobEvent::Finished(result),
-                });
-            },
-        );
+                            Err(_) => TransferJobOutput::Summary(summary),
+                        }
+                    })
+            })();
+            if let Err(error) = &result {
+                log_sftp_upload_job_failure(&id, error);
+            }
+            let result = result.map_err(|error| error.to_string());
+            let _ = finished_tx.unbounded_send(TransferJobResult {
+                id,
+                event: TransferJobEvent::Finished(result),
+            });
+        });
         cx.notify();
     }
 
@@ -464,8 +456,7 @@ impl ZzClawTermApp {
                     .set_status(format!("retrying remote download for {remote_path}"));
                 let progress_tx = self.transfer.transfer_event_sender();
                 let finished_tx = self.transfer.transfer_event_sender();
-                submit_transfer_blocking_job(
-                    &self.blocking_jobs,
+                self.submit_bulk_transfer_job(
                     "sftp-download-retry",
                     job_id.clone(),
                     finished_tx.clone(),
@@ -544,8 +535,7 @@ impl ZzClawTermApp {
                 ));
                 let progress_tx = self.transfer.transfer_event_sender();
                 let finished_tx = self.transfer.transfer_event_sender();
-                submit_transfer_blocking_job(
-                    &self.blocking_jobs,
+                self.submit_bulk_transfer_job(
                     "sftp-upload-retry",
                     job_id.clone(),
                     finished_tx.clone(),

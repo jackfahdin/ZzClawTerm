@@ -101,6 +101,7 @@ impl TerminalFeatureState {
                     .remove(&session_id);
                 let selection = if self.selection.session_id.as_deref() == Some(&session_id) {
                     self.selection.session_id = None;
+                    self.selection.click_anchor = None;
                     self.selection.dragging = false;
                     self.selection.drag_pointer_position = None;
                     self.selection.autoscroll = None;
@@ -205,6 +206,7 @@ impl TerminalFeatureState {
                 && self.selection.selection.is_none()
             {
                 self.selection.session_id = Some(entry.session_id.clone());
+                self.selection.click_anchor = None;
                 self.selection.selection = Some(selection);
             }
             if let Some(view) = entry.view {
@@ -250,6 +252,14 @@ impl TerminalFeatureState {
         self.view
             .frame_pipeline
             .ensure_session(session_id, encoding, scrollback_limit);
+    }
+
+    #[cfg(all(test, windows))]
+    pub(in crate::features) fn request_frame_text_for_test(
+        &self,
+        session_id: &str,
+    ) -> futures::channel::oneshot::Receiver<Option<String>> {
+        self.view.frame_pipeline.request_all_text(session_id.into())
     }
 
     pub(in crate::features) fn remove_frame_session(&mut self, session_id: &str) {
@@ -375,13 +385,6 @@ impl TerminalFeatureState {
             .views
             .get(session_id)
             .map(|view| view.output.as_str())
-    }
-
-    pub(in crate::features) fn session_output_len_or_default(&self, session_id: &str) -> usize {
-        self.view
-            .views
-            .get(session_id)
-            .map_or(self.view.output.len(), |view| view.output.len())
     }
 
     pub(in crate::features) fn session_has_unread(&self, session_id: &str) -> bool {

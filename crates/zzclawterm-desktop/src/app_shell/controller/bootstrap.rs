@@ -72,13 +72,25 @@ impl DesktopController {
     }
 
     pub(super) fn broadcast_shared_state(&self, event: SharedStateEvent, cx: &mut Context<Self>) {
+        self.broadcast_shared_state_except(event, None, cx);
+    }
+
+    pub(super) fn broadcast_shared_state_except(
+        &self,
+        event: SharedStateEvent,
+        source: Option<WorkspaceId>,
+        cx: &mut Context<Self>,
+    ) {
         if !event.changed {
             return;
         }
         let Some(process_state) = self.process_state.clone() else {
             return;
         };
-        for entry in self.windows.values() {
+        for (id, entry) in &self.windows {
+            if Some(*id) == source {
+                continue;
+            }
             let shell = entry.shell.clone();
             let process_state = process_state.clone();
             cx.defer(move |cx| {

@@ -83,7 +83,7 @@ impl ZzClawTermApp {
             self.shell.set_cursor_blink_clock_armed(false);
             // Leave the caret visible; a stopped clock must not strand it hidden.
             if self.shell.set_cursor_blink_on(true) {
-                self.notify_active_terminal_surface(cx);
+                self.notify_active_terminal_cursor_blink(cx);
             }
             return false;
         }
@@ -96,7 +96,7 @@ impl ZzClawTermApp {
         }
         self.shell.toggle_cursor_blink_phase();
         // Blink is terminal-local; this must never rebuild the full shell.
-        self.notify_active_terminal_surface(cx);
+        self.notify_active_terminal_cursor_blink(cx);
         true
     }
 }
@@ -133,6 +133,7 @@ mod tests {
     fn the_caret_toggles_exactly_one_interval_apart() {
         let root = TestConfigDir::new("zzclawterm-cursor-blink");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_blinking_caret(&mut cx, &root);
         cx.update_entity(&app, |app, cx| {
             app.ensure_cursor_blink_clock(cx);
@@ -173,6 +174,7 @@ mod tests {
     fn the_clock_keeps_its_own_cadence_with_no_runtime_tick() {
         let root = TestConfigDir::new("zzclawterm-cursor-blink");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_blinking_caret(&mut cx, &root);
         cx.update_entity(&app, |app, cx| app.ensure_cursor_blink_clock(cx));
 
@@ -190,6 +192,7 @@ mod tests {
     fn the_clock_stops_and_leaves_the_caret_visible() {
         let root = TestConfigDir::new("zzclawterm-cursor-blink");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_blinking_caret(&mut cx, &root);
         cx.update_entity(&app, |app, cx| app.ensure_cursor_blink_clock(cx));
 
@@ -222,6 +225,7 @@ mod tests {
     fn resetting_cursor_blink_phase_makes_hidden_caret_visible() {
         let root = TestConfigDir::new("zzclawterm-cursor-blink");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_blinking_caret(&mut cx, &root);
 
         cx.update_entity(&app, |app, _| {

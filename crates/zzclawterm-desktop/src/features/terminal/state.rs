@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+use zzclawterm_terminal::selection::TerminalSelectionEndpoint;
 
 use gpui::{Entity, FocusHandle, Subscription, Task};
 use zzclawterm_core::ResolvedKeywordHighlightRule;
@@ -24,7 +25,7 @@ use crate::models::{
     RecordingHistorySearchKey, TerminalFrameEvent, TerminalFramePipeline, TerminalSearchMode,
     TerminalSelection, TerminalViewState,
 };
-use crate::theme::ThemePalette;
+use crate::terminal::terminal_keyword_rules_key;
 
 pub(in crate::features) struct TerminalFeatureState {
     pub(super) search: TerminalSearchState,
@@ -97,6 +98,9 @@ pub(super) struct TerminalPasteReviewState {
 /// Text selection and mouse reporting.
 pub(super) struct TerminalSelectionState {
     pub(super) selection: Option<TerminalSelection>,
+    /// A released empty selection retains only its anchor for a later Shift+click.
+    /// It shares `session_id` with selection and is never painted or copied.
+    pub(super) click_anchor: Option<TerminalSelectionEndpoint>,
     pub(super) session_id: Option<String>,
     /// Derived once from the worker's authoritative buffer for each Select All.
     pub(super) all_buffer_text: Option<String>,
@@ -181,8 +185,9 @@ pub(super) struct TerminalMenuState {
 
 /// Paint-time caches invalidated whenever appearance settings change.
 pub(super) struct TerminalPaintCacheState {
-    pub(super) cached_terminal_theme_palette: Option<(String, String, String, ThemePalette)>,
     pub(super) cached_keyword_highlight_rules: Option<Arc<Vec<ResolvedKeywordHighlightRule>>>,
+    /// Hash of `cached_keyword_highlight_rules`, computed once per cached set.
+    pub(super) cached_keyword_highlight_rules_key: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -257,6 +262,7 @@ impl TerminalFeatureState {
             editing: TerminalEditingState::default(),
             selection: TerminalSelectionState {
                 selection: None,
+                click_anchor: None,
                 session_id: None,
                 all_buffer_text: None,
                 all_buffer_text_task: None,
@@ -296,8 +302,8 @@ impl TerminalFeatureState {
                 action_link_hover_generation: 0,
             },
             paint: TerminalPaintCacheState {
-                cached_terminal_theme_palette: None,
                 cached_keyword_highlight_rules: None,
+                cached_keyword_highlight_rules_key: 0,
             },
             windows: TerminalWindowState {
                 tree: None,
@@ -416,6 +422,7 @@ impl TerminalFeatureState {
     }
 
     pub(in crate::features) fn clear_activation_interaction(&mut self) -> bool {
+        self.selection.click_anchor = None;
         let had_interaction = self.selection.selection.take().is_some()
             || self.selection.dragging
             || self.menus.action_link_menu.is_some()
@@ -449,6 +456,7 @@ impl TerminalFeatureState {
             .is_none_or(TerminalSelection::is_empty)
         {
             self.selection.selection = None;
+            self.selection.click_anchor = None;
             self.selection.session_id = None;
             LostTerminalSelectionRecovery::ClearedEmpty
         } else {
@@ -537,32 +545,24 @@ impl TerminalFeatureState {
         &mut self,
         rules: Arc<Vec<ResolvedKeywordHighlightRule>>,
     ) {
+        self.view.frame_pipeline.set_keyword_rules(rules.clone());
+        self.paint.cached_keyword_highlight_rules_key = terminal_keyword_rules_key(&rules);
         self.paint.cached_keyword_highlight_rules = Some(rules);
     }
 
-    pub(in crate::features) fn cached_terminal_theme_palette(
+    pub(in crate::features) fn keyword_highlight_rules_key(
         &self,
-    ) -> Option<(&str, &str, &str, ThemePalette)> {
-        self.paint.cached_terminal_theme_palette.as_ref().map(
-            |(ui, terminal, contrast, palette)| {
-                (ui.as_str(), terminal.as_str(), contrast.as_str(), *palette)
-            },
-        )
-    }
-
-    pub(in crate::features) fn cache_terminal_theme_palette(
-        &mut self,
-        ui_theme: String,
-        terminal_theme: String,
-        contrast: String,
-        palette: ThemePalette,
-    ) {
-        self.paint.cached_terminal_theme_palette =
-            Some((ui_theme, terminal_theme, contrast, palette));
+        rules: &Arc<Vec<ResolvedKeywordHighlightRule>>,
+    ) -> u64 {
+        match self.paint.cached_keyword_highlight_rules.as_ref() {
+            Some(cached) if Arc::ptr_eq(cached, rules) => {
+                self.paint.cached_keyword_highlight_rules_key
+            }
+            _ => terminal_keyword_rules_key(rules),
+        }
     }
 
     pub(in crate::features) fn invalidate_paint_caches(&mut self) {
-        self.paint.cached_terminal_theme_palette = None;
         self.paint.cached_keyword_highlight_rules = None;
     }
 }
@@ -603,6 +603,7 @@ mod tests {
 
     fn terminal_state() -> TerminalFeatureState {
         let cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         cx.update(|cx| {
             TerminalFeatureState::new(
                 TerminalScreen::new(80, 24),
@@ -656,6 +657,7 @@ mod tests {
     #[test]
     fn terminal_owner_clears_activation_interaction_as_one_transition() {
         let mut state = terminal_state();
+        state.selection.click_anchor = Some(crate::models::TerminalBufferCellPos::new(4, 2).into());
         state.selection.dragging = true;
         state.menus.action_link_hover_pending = Some((
             "https://example.com".to_string(),
@@ -673,6 +675,7 @@ mod tests {
         ));
 
         assert!(state.clear_activation_interaction());
+        assert!(state.selection.click_anchor.is_none());
         assert!(!state.selection.dragging);
         assert!(!state.action_link_hover_is_pending());
         assert!(!state.clear_activation_interaction());
@@ -706,6 +709,38 @@ mod tests {
         );
         assert!(state.selection.selection.is_some());
         assert!(!state.selection.dragging);
+    }
+
+    #[test]
+    fn lost_mouse_up_distinguishes_a_single_cell_from_adjacent_empty_sides() {
+        use zzclawterm_terminal::selection::{
+            TerminalBufferCellPos, TerminalCellSide, TerminalSelection, TerminalSelectionEndpoint,
+        };
+
+        let mut state = terminal_state();
+        state.selection.dragging = true;
+        state.selection.selection = Some(TerminalSelection::from_range(
+            TerminalBufferCellPos::new(4, 2),
+            TerminalBufferCellPos::new(4, 2),
+        ));
+        assert_eq!(
+            state.recover_lost_selection_mouse_up(),
+            LostTerminalSelectionRecovery::Committed
+        );
+        state.selection.dragging = true;
+        state.selection.selection = Some(TerminalSelection {
+            anchor: TerminalSelectionEndpoint::new(
+                TerminalBufferCellPos::new(4, 2),
+                TerminalCellSide::Right,
+            ),
+            head: TerminalBufferCellPos::new(4, 3).into(),
+            all_buffer: false,
+        });
+        assert_eq!(
+            state.recover_lost_selection_mouse_up(),
+            LostTerminalSelectionRecovery::ClearedEmpty
+        );
+        assert!(state.selection.selection.is_none());
     }
 
     #[test]
@@ -893,10 +928,10 @@ mod tests {
         state.assist.command_suggestions_suppressed = true;
         state.assist.pending_command_history_entry = Some("git status".to_string());
         state.assist.credential_autofill_buffer = "login:".to_string();
-        state
-            .assist
-            .credential_autofill_recent
-            .insert("username:login:".to_string(), 42);
+        state.assist.credential_autofill_recent = Some((
+            zzclawterm_core::CredentialPromptKind::Username,
+            "login:".to_string(),
+        ));
         state.assist.credential_autofill_sending = true;
         state.assist.credential_prompt_input_until_ms = 99;
         let search_generation = state.assist.command_suggestion_search_gen;
@@ -907,7 +942,7 @@ mod tests {
         assert!(!state.assist.command_suggestions_suppressed);
         assert!(state.assist.pending_command_history_entry.is_none());
         assert!(state.assist.credential_autofill_buffer.is_empty());
-        assert!(state.assist.credential_autofill_recent.is_empty());
+        assert!(state.assist.credential_autofill_recent.is_none());
         assert!(!state.assist.credential_autofill_sending);
         assert_eq!(state.assist.credential_prompt_input_until_ms, 0);
         assert_eq!(

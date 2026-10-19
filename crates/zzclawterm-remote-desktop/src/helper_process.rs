@@ -67,9 +67,9 @@ impl IpcWriter {
             changed: Condvar::new(),
         });
         let worker_inner = Arc::clone(&inner);
-        let worker = thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || writer_loop(stdin, worker_inner))?;
+        let worker = zzclawterm_core::runtime::worker::spawn(thread_name, move || {
+            writer_loop(stdin, worker_inner)
+        })?;
         Ok(Self {
             inner,
             worker: Some(worker),
@@ -248,14 +248,8 @@ pub(crate) struct HelperProcess {
 ///
 /// `env_var` overrides the search outright. Otherwise the helper must sit beside
 /// the running executable: that is the layout every release package produces,
-/// and `scripts/release/package_native.py` is what guarantees it. `binary` is
-/// the shipped executable name; `package` is the Cargo package that builds it,
-/// named in the missing-helper hint.
-pub(crate) fn resolve_helper(
-    binary: &str,
-    package: &str,
-    env_var: &str,
-) -> Result<PathBuf, String> {
+/// and `scripts/release/package_native.py` is what guarantees it.
+pub(crate) fn resolve_helper(package: &str, env_var: &str) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
         let path = PathBuf::from(path);
         return path
@@ -266,9 +260,9 @@ pub(crate) fn resolve_helper(
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot resolve the ZzClawTerm executable: {error}"))?;
     let filename = if cfg!(windows) {
-        format!("{binary}.exe")
+        format!("{package}.exe")
     } else {
-        binary.to_string()
+        package.to_string()
     };
     let path = executable
         .parent()
@@ -349,11 +343,11 @@ fn configure_child(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Condvar, Mutex};
 
     use crate::{PROTOCOL_VERSION, RdpControlMessage, encode_control};
 
     use super::{IpcWriter, RELIABLE_INPUT_LIMIT, WriterInner, WriterState, resolve_helper};
-    use std::sync::{Arc, Condvar, Mutex};
 
     fn packet(version: u32) -> crate::Packet {
         encode_control(&RdpControlMessage::ClientHello { version }).expect("small control packet")
@@ -373,7 +367,6 @@ mod tests {
     fn env_override_must_name_an_existing_file() {
         let error = resolve_helper(
             "zzclawterm-rdp-helper",
-            "zzclawterm-rdp-helper",
             "ZZCLAWTERM_TEST_HELPER_OVERRIDE_MISSING",
         )
         .expect_err("no helper sits beside the test binary");
@@ -391,7 +384,7 @@ mod tests {
         // SAFETY-adjacent: this test owns a uniquely named variable, so it does
         // not race other tests in the same process.
         unsafe { std::env::set_var(variable, env!("CARGO_MANIFEST_DIR")) };
-        let error = resolve_helper("zzclawterm-vnc-helper", "zzclawterm-vnc-helper", variable)
+        let error = resolve_helper("zzclawterm-vnc-helper", variable)
             .expect_err("a directory is not an executable");
         unsafe { std::env::remove_var(variable) };
         assert_eq!(error, format!("{variable} does not name an existing file"));

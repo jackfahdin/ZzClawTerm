@@ -66,6 +66,18 @@ pub(crate) fn apply_locale(language: &str) {
     rust_i18n::set_locale(&normalize_locale(language));
 }
 
+pub(crate) fn configure_input_labels(cx: &mut gpui::App) {
+    zzclawterm_ui::set_nya_input_label_provider(
+        || {
+            zzclawterm_ui::ZzClawInputLabels::new(
+                rust_i18n::t!("input.showSecret"),
+                rust_i18n::t!("input.hideSecret"),
+            )
+        },
+        cx,
+    );
+}
+
 /// The locales ZzClawTerm ships a catalog for, in a stable, authoritative order.
 ///
 /// Order is fixed by [`CANONICAL_LOCALES`] rather than by
@@ -211,6 +223,21 @@ mod tests {
             text("zh-CN", "missing.translation.key"),
             "missing.translation.key"
         );
+    }
+
+    #[test]
+    fn every_shipped_locale_translates_secret_input_actions() {
+        for (locale, json) in CATALOGS {
+            let catalog = flatten(json);
+            for key in ["input.showSecret", "input.hideSecret"] {
+                let label = catalog
+                    .get(key)
+                    .expect("secret input action must be translated");
+                assert!(!label.trim().is_empty(), "{locale}: {key}");
+                assert_eq!(text(locale, key), label.as_str(), "{locale}: {key}");
+            }
+            assert_ne!(catalog["input.showSecret"], catalog["input.hideSecret"]);
+        }
     }
 
     #[test]

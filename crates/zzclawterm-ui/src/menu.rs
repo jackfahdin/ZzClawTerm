@@ -689,15 +689,11 @@ impl RenderOnce for ZzClawDropdownMenu {
 /// A right-click menu attached to an element.
 ///
 /// Exactly one of these may cover any given point. Nesting a second one inside
-/// the first opens both on a single right-click: `ContextMenu` arms a plain
-/// hitbox-gated mouse listener, and the outer element's listener is registered
-/// last and so runs first, before the inner one - a `cx.stop_propagation()` on
-/// the inner element cannot prevent it. Only the menu that receives the item
-/// click dismisses, and the one left open re-focuses itself on every layout
-/// pass. Anything opened afterwards therefore loses focus on the next frame, and
-/// because a dialog is dismissed by dispatching `Cancel`/`Confirm` along the
-/// focused element's path, its close, cancel and confirm controls all stop
-/// responding for the rest of the session.
+/// the first opens both on a single right-click: list-owned menus capture the
+/// event outermost first, so stopping its bubble on an inner row cannot prevent
+/// the outer menu from opening. Multiple menus then compete for keyboard focus
+/// and dismissal. Input-owned menus instead open during bubble dispatch so the
+/// field can establish its focus before the menu records its restoration target.
 ///
 /// For a list, put the single menu on the list and aim it with
 /// [`ZzClawContextMenu::new_dynamic`]: reset the target from a capture-phase
@@ -713,6 +709,7 @@ where
     items_builder: ContextMenuItemsBuilder,
     enabled: bool,
     min_width: Option<Pixels>,
+    capture_right_click: bool,
 }
 
 impl<E> ZzClawContextMenu<E>
@@ -726,6 +723,7 @@ where
             items_builder: Rc::new(move |_, _| items.clone()),
             enabled: true,
             min_width: None,
+            capture_right_click: true,
         }
     }
 
@@ -738,6 +736,7 @@ where
             items_builder: Rc::new(items_builder),
             enabled: true,
             min_width: None,
+            capture_right_click: true,
         }
     }
 
@@ -748,6 +747,12 @@ where
 
     pub fn min_width(mut self, width: Pixels) -> Self {
         self.min_width = Some(width);
+        self
+    }
+
+    /// Let an input take focus before the menu records its dismissal target.
+    pub(crate) fn bubble_right_click(mut self) -> Self {
+        self.capture_right_click = false;
         self
     }
 
@@ -800,6 +805,7 @@ where
                     .iter()
                     .fold(menu, |menu, item| item.append_to(menu, window, cx))
             })
+            .capture_right_click(self.capture_right_click)
             .into_any_element()
     }
 }

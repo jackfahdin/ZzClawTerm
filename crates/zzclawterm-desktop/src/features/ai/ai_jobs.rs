@@ -17,7 +17,6 @@ use zzclawterm_core::{
     truncate_preview, uuid,
 };
 use zzclawterm_store::{ConnectionStore, StoreBlockingClient, StoreDomain};
-use zzclawterm_transport::RemoteCommandOutput;
 
 use crate::features::{
     mcp::McpEphemeralCredential, runtime_jobs::AiChatJobOutput, runtime_jobs::AiChatWorkerEvent,
@@ -614,19 +613,6 @@ fn record_external_agent_audit(
     }
 }
 
-pub(in crate::features) fn remote_command_observation(
-    output: RemoteCommandOutput,
-    started: Instant,
-) -> CommandObservation {
-    CommandObservation {
-        output: merge_command_output(&output.stdout, &output.stderr),
-        exit_code: output
-            .exit_status
-            .and_then(|status| i32::try_from(status).ok()),
-        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-    }
-}
-
 pub(in crate::features) fn observation_summary(observation: &CommandObservation) -> String {
     let status = observation
         .exit_code
@@ -637,17 +623,6 @@ pub(in crate::features) fn observation_summary(observation: &CommandObservation)
         format!("{status}; {} ms; no output", observation.duration_ms)
     } else {
         format!("{status}; {} ms; {preview}", observation.duration_ms)
-    }
-}
-
-fn merge_command_output(stdout: &str, stderr: &str) -> String {
-    let stdout = stdout.trim_end();
-    let stderr = stderr.trim_end();
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => stdout.to_string(),
-        (true, false) => stderr.to_string(),
-        (false, false) => format!("{stdout}\n{stderr}"),
     }
 }
 

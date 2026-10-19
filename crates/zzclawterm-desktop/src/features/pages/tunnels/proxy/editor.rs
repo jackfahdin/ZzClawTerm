@@ -108,6 +108,7 @@ pub(in crate::features::pages::tunnels) fn network_proxy_editor_content(
             TextInputSetup {
                 placeholder: password_placeholder.into(),
                 masked: true,
+                kind: zzclawterm_ui::ZzClawInputKind::Password,
                 multi_line: false,
                 submit_on_enter: false,
                 code: false,

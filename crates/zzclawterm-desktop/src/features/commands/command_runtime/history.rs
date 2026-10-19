@@ -1,9 +1,8 @@
 use futures::StreamExt as _;
 use gpui::Context;
-use zzclawterm_core::{AiCommandCard, truncate_preview};
+use zzclawterm_core::AiCommandCard;
 
-use crate::features::ai::presentation::AiAgentStepKind;
-use crate::features::{ZzClawTermApp, ai::is_agent_command_card, runtime_jobs::AiAgentStepStatus};
+use crate::features::{ZzClawTermApp, ai::is_agent_command_card};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn run_ai_command_card(
@@ -193,73 +192,23 @@ impl ZzClawTermApp {
             self.defer_ai_panel_snapshot_flush(cx);
             return;
         }
-        if should_continue_agent && self.ai.settings_config().agent_background_execution_enabled {
-            match self.begin_ai_agent_background_execution(&card, &target_session_id, cx) {
-                Ok(()) => {
-                    self.record_ai_command_card_audit(&card, true, false, cx);
-                    self.defer_ai_panel_snapshot_flush(cx);
-                }
-                Err(error) => {
-                    self.ai.set_panel_status(error);
-                    let step_index = self.ai.last_agent_step_index();
-                    self.upsert_ai_agent_step(
-                        step_index,
-                        AiAgentStepStatus::Failed,
-                        AiAgentStepKind::Diagnostic,
-                        "Failed",
-                        self.ai.panel_status().to_string(),
-                    );
-                    self.defer_ai_panel_snapshot_flush(cx);
-                }
+        if should_continue_agent {
+            match self.begin_ai_agent_execution(&card, &target_session_id, cx) {
+                Ok(inserted) => self.record_ai_command_card_audit(&card, true, inserted, cx),
+                Err(error) => self.ai.set_panel_status(error),
             }
+            self.defer_ai_panel_snapshot_flush(cx);
             return;
         }
         if execute && !command.ends_with('\r') && !command.ends_with('\n') {
             command.push('\r');
         }
-        let input_bytes = if should_continue_agent {
-            match self.begin_ai_agent_observation(&card, &target_session_id, cx) {
-                Ok(Some(wrapped_command)) => wrapped_command.into_bytes(),
-                Ok(None) => command.clone().into_bytes(),
-                Err(error) => {
-                    self.ai.set_panel_status(error);
-                    let step_index = self.ai.last_agent_step_index();
-                    self.upsert_ai_agent_step(
-                        step_index,
-                        AiAgentStepStatus::Failed,
-                        AiAgentStepKind::Diagnostic,
-                        "Failed",
-                        self.ai.panel_status().to_string(),
-                    );
-                    self.defer_ai_panel_snapshot_flush(cx);
-                    return;
-                }
-            }
-        } else {
-            command.clone().into_bytes()
-        };
+        let input_bytes = command.clone().into_bytes();
 
         self.record_ai_command_card_audit(&card, execute, true, cx);
 
         self.send_terminal_input_to_session(target_session_id, input_bytes, cx);
-        let status = if should_continue_agent {
-            if let Some(state) = self.ai.agent_loop_snapshot() {
-                self.upsert_ai_agent_step(
-                    state.step_index,
-                    AiAgentStepStatus::Running,
-                    AiAgentStepKind::Command,
-                    "Running",
-                    truncate_preview(&state.command, 140),
-                );
-                format!(
-                    "AI Agent observing command output for step {}/{}",
-                    state.step_index + 1,
-                    state.max_steps
-                )
-            } else {
-                format!("Ran AI command card '{}'", card.title)
-            }
-        } else if execute {
+        let status = if execute {
             format!("Ran AI command card '{}'", card.title)
         } else {
             format!("Inserted AI command card '{}'", card.title)

@@ -11,6 +11,18 @@
       "network": { "proxy_jump_id": "legacy-jump", "future_network": { "enabled": true } },
       "sftp": { "enabled": true, "cwd_follow_mode": "shell_integration", "future_policy": "preserved" },
       "future_connection": { "revision": 7 }
+    },
+    {
+      "id": "connections-telnet",
+      "name": "Legacy Telnet",
+      "type": "telnet",
+      "host": "telnet.example.invalid",
+      "port": 23,
+      "username": "operator",
+      "enter_mode": "cr",
+      "send_naws": true,
+      "send_sga": true,
+      "future_telnet": { "revision": 7 }
     }
   ],
   "groups": []

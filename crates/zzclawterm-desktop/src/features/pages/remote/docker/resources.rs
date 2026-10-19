@@ -61,6 +61,7 @@ pub(in crate::features::pages::remote) fn docker_images_panel(
                                 ),
                                 "icons/fe/delete.svg",
                                 14.,
+                                SharedString::from(row_labels.remove_image.to_string()),
                                 palette,
                                 cx.listener(move |panel, _, window, cx| {
                                     panel.with_app(cx, |this, cx| {
@@ -127,6 +128,7 @@ pub(in crate::features::pages::remote) fn docker_volumes_panel(
                                 format!("docker-volume-remove-{volume_name}"),
                                 "icons/fe/delete.svg",
                                 14.,
+                                SharedString::from(row_labels.remove_volume.to_string()),
                                 palette,
                                 cx.listener(move |panel, _, window, cx| {
                                     panel.with_app(cx, |this, cx| {
@@ -199,6 +201,7 @@ pub(in crate::features::pages::remote) fn docker_networks_panel(
                                 format!("docker-network-remove-{}", compact_id(&network_id)),
                                 "icons/fe/delete.svg",
                                 14.,
+                                SharedString::from(row_labels.remove_network.to_string()),
                                 palette,
                                 cx.listener(move |panel, _, window, cx| {
                                     panel.with_app(cx, |this, cx| {

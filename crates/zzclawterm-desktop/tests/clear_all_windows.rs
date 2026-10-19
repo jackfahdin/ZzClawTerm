@@ -92,6 +92,11 @@ fn cmd_clear_all_preserves_cursor_and_accepts_remaining_command_input() {
     shell.screen.clear_except_input();
     let after = shell.screen.snapshot().cursor;
     assert_eq!((after.row, after.col), (before.row, before.col));
+    assert_eq!(shell.screen.snapshot().leading_cleared_rows(0), before.row);
+    assert_eq!(
+        shell.screen.snapshot().rows()[before.row].display_line_number,
+        Some(1)
+    );
     assert!(
         !shell
             .screen
@@ -106,4 +111,5 @@ fn cmd_clear_all_preserves_cursor_and_accepts_remaining_command_input() {
             .iter()
             .any(|line| line.trim() == "NYA_RESULT_OK")
     });
+    assert_eq!(shell.screen.scrollback_len(), 0);
 }

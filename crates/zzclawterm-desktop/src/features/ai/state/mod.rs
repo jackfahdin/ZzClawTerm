@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::FocusHandle;
 use zzclawterm_core::{
-    AgentCaptureProcessResult, AgentCommandExecutionMode, AgentOutputCaptureProcessor, AiAgentKind,
-    AiCommandCard, AiMessage, AiMessageRole, AiMode, AiSession, AiSettings, truncate_preview, uuid,
+    AgentCommandExecutionMode, AiAgentKind, AiCommandCard, AiMessage, AiMessageRole, AiMode,
+    AiSession, AiSettings, truncate_preview, uuid,
 };
 
 use super::agent_management::{
@@ -219,9 +219,6 @@ struct AiAgentState {
     json_protocol: bool,
     step_index: u16,
     loop_state: Option<AiAgentLoopState>,
-    /// True while the agent-loop observation clock task is alive.
-    loop_clock_armed: bool,
-    capture: AgentOutputCaptureProcessor,
     steps: Vec<AiAgentStepView>,
     thought_expanded: HashSet<u16>,
     output_expanded: HashSet<u16>,
@@ -236,8 +233,6 @@ impl AiAgentState {
             json_protocol: false,
             step_index: 0,
             loop_state: None,
-            loop_clock_armed: false,
-            capture: AgentOutputCaptureProcessor::new(),
             steps: Vec::new(),
             thought_expanded: HashSet::new(),
             output_expanded: HashSet::new(),
@@ -258,19 +253,6 @@ pub(in crate::features) struct AiChatFinishEffect {
     pub(in crate::features) clear_prompt_input: bool,
     pub(in crate::features) refresh_usage_counts: bool,
     pub(in crate::features) auto_execute_first: bool,
-}
-
-pub(in crate::features) enum AiAgentBackgroundEffect {
-    Ignored,
-    MatchedStale,
-    Continue(Box<AiAgentLoopState>, zzclawterm_core::CommandObservation),
-    ContinueAfterFailure(Box<AiAgentLoopState>, String),
-}
-
-pub(in crate::features) enum AiAgentObservationPoll {
-    Waiting,
-    Target(AiAgentLoopState),
-    TimedOut(AiAgentLoopState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,38 +525,6 @@ impl AiFeatureState {
         self.agent = archived.agent;
         self.panel.status = archived.status;
         true
-    }
-
-    pub(in crate::features) fn scope_for_agent_marker(&self, marker_id: &str) -> Option<String> {
-        if self
-            .agent
-            .loop_state
-            .as_ref()
-            .is_some_and(|state| state.marker_id.as_deref() == Some(marker_id))
-        {
-            return Some(self.active_scope_key.clone());
-        }
-        self.inactive_scopes.iter().find_map(|(scope, state)| {
-            state.agent.loop_state.as_ref().and_then(|loop_state| {
-                (loop_state.marker_id.as_deref() == Some(marker_id)).then(|| scope.clone())
-            })
-        })
-    }
-
-    pub(in crate::features) fn scope_for_agent_target(&self, session_id: &str) -> Option<String> {
-        if self
-            .agent
-            .loop_state
-            .as_ref()
-            .is_some_and(|state| state.terminal_session_id == session_id)
-        {
-            return Some(self.active_scope_key.clone());
-        }
-        self.inactive_scopes.iter().find_map(|(scope, state)| {
-            state.agent.loop_state.as_ref().and_then(|loop_state| {
-                (loop_state.terminal_session_id == session_id).then(|| scope.clone())
-            })
-        })
     }
 
     pub(in crate::features) fn any_chat_or_agent_running(&self) -> bool {
@@ -937,7 +887,6 @@ impl AiFeatureState {
         if let Some(native) = &mut self.agent.native {
             native.cancellation.cancel();
             native.run.cancel();
-            native.terminal_reply = None;
         }
         if let Some(cancel) = self.chat.cancel.as_ref() {
             cancel.store(true, Ordering::Relaxed);
@@ -952,12 +901,7 @@ impl AiFeatureState {
             .as_ref()
             .map(|state| state.step_index)
             .or_else(|| self.agent.steps.last().map(|step| step.step_index));
-        if let Some(state) = self.agent.loop_state.take()
-            && let Some(marker_id) = state.marker_id.as_deref()
-        {
-            self.agent.capture.cancel(marker_id);
-        }
-        self.agent.capture = AgentOutputCaptureProcessor::new();
+        self.agent.loop_state = None;
         self.agent.task_prompt = None;
         self.agent.conversation.clear();
         self.agent.json_protocol = false;
@@ -1094,61 +1038,6 @@ impl AiFeatureState {
         self.panel.status = "AI Agent retrying with JSON protocol".to_string();
         self.agent.json_protocol = true;
         true
-    }
-
-    pub(in crate::features) fn finish_agent_background(
-        &mut self,
-        job_id: u64,
-        state: AiAgentLoopState,
-        result: Result<zzclawterm_core::CommandObservation, String>,
-        observation_summary: impl FnOnce(&zzclawterm_core::CommandObservation) -> String,
-    ) -> AiAgentBackgroundEffect {
-        if job_id != self.chat.job_id {
-            return AiAgentBackgroundEffect::Ignored;
-        }
-        let Some(active_state) = self.agent.loop_state.take() else {
-            return AiAgentBackgroundEffect::MatchedStale;
-        };
-        if active_state.background_job_id != Some(job_id)
-            || active_state.command_card_id != state.command_card_id
-            || active_state.ai_session_id != state.ai_session_id
-            || active_state.step_index != state.step_index
-            || active_state.terminal_session_id != state.terminal_session_id
-        {
-            self.agent.loop_state = Some(active_state);
-            return AiAgentBackgroundEffect::MatchedStale;
-        }
-        self.chat.cancel = None;
-        self.chat.response_phase = AiResponsePhase::Ended;
-        match result {
-            Ok(observation) => {
-                self.panel.status = match observation.exit_code {
-                    Some(code) => format!("AI Agent background command exited with {code}"),
-                    None => "AI Agent background command completed".to_string(),
-                };
-                let detail = observation_summary(&observation);
-                self.record_agent_observation(state.step_index, &observation, detail);
-                AiAgentBackgroundEffect::Continue(Box::new(state), observation)
-            }
-            Err(error) => {
-                self.panel.status = format!("AI Agent background command failed: {error}");
-                self.chat.response_preview = self.panel.status.clone();
-                self.upsert_agent_step(
-                    state.step_index,
-                    AiAgentStepStatus::Failed,
-                    AiAgentStepKind::Diagnostic,
-                    "Failed",
-                    truncate_preview(&error, 140),
-                );
-                AiAgentBackgroundEffect::ContinueAfterFailure(
-                    Box::new(state),
-                    format!(
-                        "Command execution failed: {}. Decide the next step or finish the task.",
-                        zzclawterm_core::sanitize_ai_diagnostic(&error, 500)
-                    ),
-                )
-            }
-        }
     }
 
     pub(in crate::features) fn finish_chat_job(
@@ -1919,92 +1808,11 @@ impl AiFeatureState {
         Ok((self.agent_task_prompt_or_preview(), step_index))
     }
 
-    pub(in crate::features) fn register_agent_capture(&mut self, marker_id: String) {
-        self.agent.capture.register(marker_id);
-    }
-
     pub(in crate::features) fn set_agent_loop(&mut self, state: AiAgentLoopState) {
         if let Some(card_id) = state.command_card_id.as_deref() {
             self.associate_agent_command(state.step_index, card_id);
         }
         self.agent.loop_state = Some(state);
-    }
-
-    pub(in crate::features) fn stop_agent_for_closed_target(&mut self) -> Option<u16> {
-        let state = self.agent.loop_state.take()?;
-        if self.ai_native_terminal_closed() {
-            return Some(state.step_index);
-        }
-        self.agent.task_prompt = None;
-        self.agent.conversation.clear();
-        self.chat.command_cards.clear();
-        self.panel.status = "AI Agent loop stopped because the target session closed".to_string();
-        self.upsert_agent_step(
-            state.step_index,
-            AiAgentStepStatus::Failed,
-            AiAgentStepKind::Diagnostic,
-            "Stopped",
-            "Target session closed",
-        );
-        Some(state.step_index)
-    }
-
-    pub(in crate::features) fn poll_agent_observation(
-        &mut self,
-        now: Instant,
-        current_len: usize,
-        quiet: Duration,
-    ) -> AiAgentObservationPoll {
-        if self.chat.pending {
-            return AiAgentObservationPoll::Waiting;
-        }
-        let Some(state) = self.agent.loop_state.as_mut() else {
-            return AiAgentObservationPoll::Waiting;
-        };
-        if state.background_job_id.is_some() {
-            return AiAgentObservationPoll::Waiting;
-        }
-        if current_len != state.last_seen_len {
-            state.last_seen_len = current_len;
-            state.stable_since = now;
-            return AiAgentObservationPoll::Waiting;
-        }
-        if now < state.min_wait_until {
-            return AiAgentObservationPoll::Waiting;
-        }
-        let has_observed_output = current_len > state.output_start_len;
-        let output_is_quiet = now.duration_since(state.stable_since) >= quiet;
-        let timed_out = now >= state.timeout_at;
-        if timed_out && state.marker_id.is_some() {
-            let state = self.agent.loop_state.take().expect("agent loop is present");
-            if let Some(marker_id) = state.marker_id.as_deref() {
-                self.agent.capture.cancel(marker_id);
-            }
-            self.panel.status = format!("AI Agent command capture timed out: {}", state.command);
-            return AiAgentObservationPoll::TimedOut(state);
-        }
-        if !timed_out && (!has_observed_output || !output_is_quiet) {
-            return AiAgentObservationPoll::Waiting;
-        }
-        if state.marker_id.is_some() {
-            return AiAgentObservationPoll::Waiting;
-        }
-        AiAgentObservationPoll::Target(self.agent.loop_state.take().expect("agent loop is present"))
-    }
-
-    pub(in crate::features) fn take_agent_loop_for_marker(
-        &mut self,
-        marker_id: &str,
-    ) -> Option<AiAgentLoopState> {
-        if self
-            .agent
-            .loop_state
-            .as_ref()
-            .is_none_or(|state| state.marker_id.as_deref() != Some(marker_id))
-        {
-            return None;
-        }
-        self.agent.loop_state.take()
     }
 
     pub(in crate::features) fn take_agent_loop_for_session(
@@ -2020,9 +1828,6 @@ impl AiFeatureState {
             return None;
         }
         let state = self.agent.loop_state.take()?;
-        if let Some(marker_id) = state.marker_id.as_deref() {
-            self.agent.capture.cancel(marker_id);
-        }
         Some(state)
     }
 
@@ -2121,14 +1926,6 @@ impl AiFeatureState {
         self.agent.loop_state.clone()
     }
 
-    pub(in crate::features) fn agent_loop_clock_is_armed(&self) -> bool {
-        self.agent.loop_clock_armed
-    }
-
-    pub(in crate::features) fn set_agent_loop_clock_armed(&mut self, armed: bool) {
-        self.agent.loop_clock_armed = armed;
-    }
-
     pub(in crate::features) fn request_panel_refresh(&mut self) -> bool {
         if self.panel.panel_refresh_requested {
             return false;
@@ -2162,44 +1959,8 @@ impl AiFeatureState {
         std::mem::take(&mut self.panel.stream_refresh_pending)
     }
 
-    pub(in crate::features) fn process_agent_output(
-        &mut self,
-        terminal_session_id: &str,
-        text: &str,
-    ) -> AgentCaptureProcessResult {
-        let Some(scope) = self.scope_for_agent_target(terminal_session_id) else {
-            return AgentCaptureProcessResult {
-                visible_text: text.to_string(),
-                completed: Vec::new(),
-            };
-        };
-        let previous_scope = self.active_scope_key.clone();
-        self.switch_scope(&scope);
-        let result = self.agent.capture.process(text);
-        self.switch_scope(&previous_scope);
-        result
-    }
-
     pub(in crate::features) fn reset_agent_runtime(&mut self) {
         self.agent.loop_state = None;
-        self.agent.capture = AgentOutputCaptureProcessor::new();
-    }
-
-    pub(in crate::features) fn agent_capture_is_active_for(&self, session_id: &str) -> bool {
-        (self.agent.capture.has_active()
-            && self
-                .agent
-                .loop_state
-                .as_ref()
-                .is_some_and(|state| state.terminal_session_id == session_id))
-            || self.inactive_scopes.values().any(|scope| {
-                scope.agent.capture.has_active()
-                    && scope
-                        .agent
-                        .loop_state
-                        .as_ref()
-                        .is_some_and(|state| state.terminal_session_id == session_id)
-            })
     }
 
     pub(in crate::features) fn panel_status(&self) -> &str {
@@ -2431,7 +2192,6 @@ impl AiFeatureState {
         self.agent.json_protocol = false;
         self.agent.step_index = 0;
         self.agent.loop_state = None;
-        self.agent.capture = AgentOutputCaptureProcessor::new();
         self.agent.steps.clear();
         self.agent.thought_expanded.clear();
         self.agent.output_expanded.clear();

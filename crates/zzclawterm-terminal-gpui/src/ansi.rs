@@ -15,15 +15,22 @@ pub(super) fn ansi_to_highlight_spans_compiled(
         return ansi
             .iter()
             .filter(|s| !s.text.is_empty())
-            .map(|s| TerminalHighlightSpan {
-                text: s.text.clone(),
-                color: Some(resolve_cell_fg(palette, s.style, bold_default_foreground)),
-                bg: resolve_cell_bg(palette, s.style),
-                keyword: false,
-                underline: s.style.underline,
-                strikeout: s.style.strikeout,
-                bold: s.style.bold,
-                italic: s.style.italic,
+            .map(|s| {
+                let bg = resolve_cell_bg(palette, s.style, bold_default_foreground);
+                TerminalHighlightSpan {
+                    text: s.text.clone(),
+                    color: Some(if s.style.hidden {
+                        bg.unwrap_or(palette.terminal_bg)
+                    } else {
+                        resolve_cell_fg(palette, s.style, bold_default_foreground)
+                    }),
+                    bg,
+                    keyword: false,
+                    underline: s.style.underline,
+                    strikeout: s.style.strikeout,
+                    bold: s.style.bold,
+                    italic: s.style.italic,
+                }
             })
             .collect();
     }
@@ -50,7 +57,7 @@ pub(super) fn ansi_to_highlight_spans_compiled(
         let start = cursor;
         let end = cursor + s.text.len();
         cursor = end;
-        let bg = resolve_cell_bg(palette, s.style);
+        let bg = resolve_cell_bg(palette, s.style, bold_default_foreground);
         let color = resolve_cell_fg(palette, s.style, bold_default_foreground);
         if s.style.hidden {
             push_ansi_segment(
@@ -63,7 +70,7 @@ pub(super) fn ansi_to_highlight_spans_compiled(
             );
             continue;
         }
-        if s.style.fg.is_some() || s.style.fg_rgb.is_some() {
+        if s.style.reverse || s.style.fg.is_some() || s.style.fg_rgb.is_some() {
             push_ansi_segment(&mut out, &s.text, color, None, bg, s.style);
             continue;
         }
@@ -154,6 +161,28 @@ mod tests {
             color,
             priority: 0,
         }]
+    }
+
+    #[test]
+    fn reverse_keyword_overlay_preserves_selected_colors_and_highlights_normal_text() {
+        let palette = zzclawterm_ui::theme_palette("github-dark");
+        let mut screen = zzclawterm_terminal::TerminalScreen::new(24, 2);
+        screen.advance(b"SELECTED\x1b[7mSELECTED\x1b[27mSELECTED");
+        let snapshot = screen.snapshot();
+        let highlighted = ansi_to_highlight_spans_compiled(
+            &snapshot.row(0).unwrap().styled_spans,
+            palette,
+            &compiled("SELECTED", 0xff2244),
+            false,
+        );
+        assert_eq!(highlighted.len(), 3);
+        assert_eq!(highlighted[0].color, Some(0xff2244));
+        assert!(highlighted[0].keyword);
+        assert_eq!(highlighted[1].color, Some(palette.terminal_bg));
+        assert_eq!(highlighted[1].bg, Some(palette.terminal_fg));
+        assert!(!highlighted[1].keyword);
+        assert_eq!(highlighted[2].color, Some(0xff2244));
+        assert!(highlighted[2].keyword);
     }
 
     #[test]

@@ -1,0 +1,47 @@
+//! Transfer workers wait for transport capacity without blocking GPUI.
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use zzclawterm_transport::SessionManager;
+
+#[derive(Clone, Default)]
+pub(super) struct TransferWire {
+    target: Option<(Arc<SessionManager>, String)>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl TransferWire {
+    pub(super) fn connected(manager: Arc<SessionManager>, session_id: String) -> Self {
+        Self {
+            target: Some((manager, session_id)),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn send(&self, bytes: &[u8]) -> Result<bool, String> {
+        let Some((manager, session_id)) = &self.target else {
+            return Ok(false);
+        };
+        manager
+            .write_raw_cancellable(session_id, bytes, &self.stopped)
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    // Cancellation must interrupt a capacity wait, but its final protocol abort
+    // still gets one nonblocking attempt through the same bounded mailbox.
+    pub(super) fn send_abort(&self, bytes: &[u8]) -> Result<bool, String> {
+        let Some((manager, session_id)) = &self.target else {
+            return Ok(false);
+        };
+        manager
+            .write_raw(session_id, bytes)
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+
+    pub(super) fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+}

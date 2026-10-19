@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use gpui::AppContext as _;
+use gpui::{
+    AppContext as _, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    Styled as _, TestAppContext, VisualTestContext, div,
+};
 use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode};
 use zzclawterm_transport::LocalSessionConfig;
 
@@ -8,6 +11,38 @@ use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
 use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
 
 use super::ZzClawTermApp;
+
+struct SessionFocusHost {
+    app: Entity<ZzClawTermApp>,
+}
+
+impl Render for SessionFocusHost {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let app = self.app.read(cx);
+        div()
+            .size_full()
+            .child(div().track_focus(app.terminal.input_focus()))
+            .child(div().track_focus(app.remote_desktop.focus()))
+            .child(div().track_focus(app.session.prompt_credential_focus()))
+            .child(div().track_focus(app.session.dialog_tab_actions_focus()))
+    }
+}
+
+pub(crate) fn session_focus_test_window<'a>(
+    cx: &'a mut TestAppContext,
+    app: &Entity<ZzClawTermApp>,
+) -> &'a mut VisualTestContext {
+    let app = app.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| SessionFocusHost { app });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx
+}
 
 /// Build a visible local terminal session for GPUI tests.
 pub(crate) fn app_with_visible_local_session(

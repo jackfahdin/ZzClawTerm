@@ -6,6 +6,12 @@ use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
 use super::state::{SavedConnectionStartOptions, SessionStartTabPlacement};
 use crate::models::{SessionLaunchConfig, StartupCommandRequest, WorkspaceSplitDirection};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SessionStartFocusTarget {
+    Terminal,
+    RemoteDesktop,
+}
+
 pub(in crate::features) struct MultiplexSshStartRequest {
     pub connection_name: String,
     pub config: SshSessionConfig,

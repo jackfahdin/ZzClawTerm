@@ -15,10 +15,10 @@ use super::{
     RemoteStatsService, SESSION_EVENT_QUEUE_OUTPUT_EVENT_LIMIT, SESSION_EVENT_QUEUE_OUTPUT_LIMIT,
     SerialSessionConfig, SessionError, SessionEvent, SessionEventConsumerId, SessionEventQueue,
     SessionManager, SftpService, SftpSettings, SshAlgorithmListKind, SshAlgorithmMode,
-    SshAlgorithmPreferences, SshAlgorithmRisk, SshAlgorithmValidationError, SshCommand,
-    SshKeyAuthConfig, SshProxyConfig, SshPtyDimensions, SshSessionConfig, SshSessionProfile,
-    TelnetSessionConfig, WILL, cipher, defaults_from_preferred, drain_deferred_ssh_open_commands,
-    expand_proxy_command, forwarded_tcpip_sender_for, has_password_prompt, has_username_prompt,
+    SshAlgorithmPreferences, SshAlgorithmRisk, SshAlgorithmValidationError, SshKeyAuthConfig,
+    SshProxyConfig, SshPtyDimensions, SshSessionConfig, SshSessionProfile, TelnetSessionConfig,
+    WILL, cipher, defaults_from_preferred, drain_deferred_ssh_open_commands, expand_proxy_command,
+    forwarded_tcpip_sender_for, has_password_prompt, has_username_prompt,
     is_process_list_unsupported, kex, local_pty_size, mac, normalize_process_signal,
     parse_process_output, register_x11_sender, remap_del_to_bs, resolve_preferred_algorithms,
     run_local_command, ssh_client_config, ssh_host_identifier, supported_ssh_algorithms,
@@ -153,7 +153,8 @@ fn queued_transport_writer_returns_before_blocking_write_completes() {
         },
         crate::WriterFlushPolicy::AfterWrite,
         SessionEventQueue::new(),
-    );
+    )
+    .unwrap();
 
     writer.write(b"input".to_vec()).expect("queue input");
     started_rx
@@ -174,9 +175,15 @@ fn queued_transport_writer_preserves_character_at_a_time_mode() {
         WriteCapture(writes.clone()),
         crate::WriterFlushPolicy::EachByte,
         SessionEventQueue::new(),
-    );
+    )
+    .unwrap();
 
     writer.write(b"abc".to_vec()).expect("queue input");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while writes.lock().unwrap().len() != 3 {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
     writer.close();
 
     assert_eq!(
@@ -2001,23 +2008,11 @@ fn ssh_pty_dimensions_use_config_size() {
 
 #[test]
 fn deferred_ssh_open_drain_keeps_writes_and_latest_resize() {
-    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
-    tx.send(SshCommand::Write(b"before".to_vec())).unwrap();
-    tx.send(SshCommand::Resize {
-        cols: 100,
-        rows: 30,
-        pixel_width: 800,
-        pixel_height: 600,
-    })
-    .unwrap();
-    tx.send(SshCommand::Resize {
-        cols: 132,
-        rows: 43,
-        pixel_width: 1056,
-        pixel_height: 688,
-    })
-    .unwrap();
-    tx.send(SshCommand::Write(b"after".to_vec())).unwrap();
+    let (tx, mut rx) = crate::ssh_mailbox::channel();
+    tx.write(b"before".to_vec()).unwrap();
+    tx.resize(100, 30, 800, 600);
+    tx.resize(132, 43, 1056, 688);
+    tx.write(b"after".to_vec()).unwrap();
 
     let mut dimensions = SshPtyDimensions::new(80, 24, 0, 0);
     let mut pending_writes = VecDeque::new();
@@ -2027,16 +2022,19 @@ fn deferred_ssh_open_drain_keeps_writes_and_latest_resize() {
     assert!(!should_close);
     assert_eq!(dimensions, SshPtyDimensions::new(132, 43, 1056, 688));
     assert_eq!(
-        pending_writes.into_iter().collect::<Vec<_>>(),
+        pending_writes
+            .into_iter()
+            .map(|write| write.bytes)
+            .collect::<Vec<_>>(),
         vec![b"before".to_vec(), b"after".to_vec()]
     );
 }
 
 #[test]
 fn deferred_ssh_open_drain_closes_before_shell_open() {
-    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
-    tx.send(SshCommand::Write(b"queued".to_vec())).unwrap();
-    tx.send(SshCommand::Close).unwrap();
+    let (tx, mut rx) = crate::ssh_mailbox::channel();
+    tx.write(b"queued".to_vec()).unwrap();
+    tx.close();
 
     let mut dimensions = SshPtyDimensions::new(80, 24, 0, 0);
     let mut pending_writes = VecDeque::new();
@@ -2044,15 +2042,12 @@ fn deferred_ssh_open_drain_closes_before_shell_open() {
         drain_deferred_ssh_open_commands(&mut rx, &mut dimensions, &mut pending_writes);
 
     assert!(should_close);
-    assert_eq!(
-        pending_writes.into_iter().collect::<Vec<_>>(),
-        vec![b"queued".to_vec()]
-    );
+    assert!(pending_writes.is_empty(), "close bypasses queued writes");
 }
 
 #[test]
 fn deferred_ssh_open_drain_closes_on_disconnected_command_channel() {
-    let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::ssh_mailbox::channel();
     drop(tx);
 
     let mut dimensions = SshPtyDimensions::new(80, 24, 0, 0);
@@ -2185,6 +2180,95 @@ fn session_event_queue_keeps_sessions_separate() {
         &drain.events[2],
         SessionEvent::Output { session_id, data } if session_id == "a" && data == b"a2"
     ));
+}
+
+#[test]
+fn consumer_wait_wakes_for_assigned_output_without_removing_events() {
+    let queue = SessionEventQueue::new();
+    let consumer_id = SessionEventConsumerId(1);
+    queue.assign_consumer("assigned", consumer_id);
+    queue.push(SessionEvent::Output {
+        session_id: "other".into(),
+        data: b"unrelated".to_vec(),
+    });
+    let waiter_queue = queue.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let ready = waiter_queue.wait_for_events_for_consumer(consumer_id, Duration::from_secs(30));
+        done_tx.send(ready).expect("report readiness");
+    });
+    wait_for_queue_state(
+        || queue.waiting_consumers() == 1,
+        "the assigned consumer to park",
+    );
+    queue.push(SessionEvent::Output {
+        session_id: "assigned".into(),
+        data: b"ready".to_vec(),
+    });
+    let ready = done_rx.recv_timeout(Duration::from_secs(5));
+    queue.close();
+    waiter.join().expect("readiness waiter");
+    assert!(ready.expect("assigned output must wake the consumer"));
+    let drain = queue.drain(8);
+    assert!(matches!(
+        drain.events.as_slice(),
+        [SessionEvent::Output { session_id: first, data: first_data },
+         SessionEvent::Output { session_id: second, data: second_data }]
+            if first == "other" && first_data == b"unrelated"
+                && second == "assigned" && second_data == b"ready"
+    ));
+}
+
+#[test]
+fn consumer_readiness_does_not_reserve_events_across_reassignment() {
+    let queue = SessionEventQueue::new();
+    let source = SessionEventConsumerId(1);
+    let target = SessionEventConsumerId(2);
+    queue.assign_consumer("moved", source);
+    for data in [b"before".as_slice(), b"after"] {
+        queue.push(SessionEvent::Output {
+            session_id: "moved".into(),
+            data: data.to_vec(),
+        });
+    }
+    assert!(queue.wait_for_events_for_consumer(source, Duration::ZERO));
+    queue.clear_consumer("moved", source);
+    queue.assign_consumer("moved", target);
+    assert!(
+        queue
+            .drain_blocking_for_consumer_with_output_budget(source, 8, Some(1024), Duration::ZERO)
+            .events
+            .is_empty()
+    );
+    assert!(queue.wait_for_events_for_consumer(target, Duration::ZERO));
+    let drain =
+        queue.drain_blocking_for_consumer_with_output_budget(target, 8, Some(1024), Duration::ZERO);
+    assert!(matches!(
+        drain.events.as_slice(),
+        [SessionEvent::Output { data: first, .. }, SessionEvent::Output { data: second, .. }]
+            if first == b"before" && second == b"after"
+    ));
+}
+
+#[test]
+fn consumer_wait_returns_false_on_timeout_and_wakes_on_close() {
+    let queue = SessionEventQueue::new();
+    let consumer_id = SessionEventConsumerId(1);
+    assert!(!queue.wait_for_events_for_consumer(consumer_id, Duration::from_millis(20)));
+    let waiter_queue = queue.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let ready = waiter_queue.wait_for_events_for_consumer(consumer_id, Duration::from_secs(30));
+        done_tx.send(ready).expect("report closed queue");
+    });
+    wait_for_queue_state(
+        || queue.waiting_consumers() == 1,
+        "the idle consumer to park",
+    );
+    queue.close();
+    let ready = done_rx.recv_timeout(Duration::from_secs(5));
+    waiter.join().expect("closed queue waiter");
+    assert!(!ready.expect("closing the queue must wake the consumer"));
 }
 
 #[test]
@@ -2546,9 +2630,10 @@ fn ssh_keepalive_policy_reaches_the_client_configuration() {
 
 #[test]
 fn serial_writer_does_not_flush_on_windows() {
-    struct NoFlushWriter;
+    struct NoFlushWriter(mpsc::Sender<()>);
     impl std::io::Write for NoFlushWriter {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.send(()).unwrap();
             Ok(data.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -2560,17 +2645,17 @@ fn serial_writer_does_not_flush_on_windows() {
     } else {
         crate::WriterFlushPolicy::Never
     };
-    let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(crate::TransportWriterCommand::Write(b"command\r".to_vec()))
-        .unwrap();
-    tx.send(crate::TransportWriterCommand::Close).unwrap();
-    crate::run_transport_writer(
+    let (tx, rx) = mpsc::channel();
+    let mut writer = QueuedTransportWriter::spawn(
         "serial".into(),
-        NoFlushWriter,
+        NoFlushWriter(tx),
         policy,
-        rx,
         SessionEventQueue::new(),
-    );
+    )
+    .unwrap();
+    writer.write(b"command\r".to_vec()).unwrap();
+    rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(writer.close());
 }
 
 #[test]
@@ -2712,4 +2797,642 @@ fn raw_wire_input_bypasses_text_policies_and_only_escapes_telnet_iac() {
         peer.join().unwrap();
         assert_eq!(actual, expected);
     }
+}
+
+// A mock writer exposes completed write calls without depending on TCP buffering.
+struct TimedWriteCapture(mpsc::Sender<(Vec<u8>, Instant)>);
+
+impl Write for TimedWriteCapture {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.send((data.to_vec(), Instant::now())).unwrap();
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn test_telnet_writer<W: Write + Send + 'static>(
+    output: W,
+    interval: Option<Duration>,
+    flush_policy: crate::WriterFlushPolicy,
+    events: SessionEventQueue,
+) -> QueuedTransportWriter {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let _peer = listener.accept().unwrap();
+    QueuedTransportWriter::spawn_with_telnet_policy(
+        "keep-alive-test".into(),
+        output,
+        flush_policy,
+        events,
+        Some(crate::TelnetWriterPolicy {
+            idle_interval: interval,
+            lifecycle: Arc::new(crate::TelnetWriterLifecycle {
+                stopped: std::sync::atomic::AtomicBool::new(false),
+                stream,
+            }),
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn telnet_writer_waits_a_full_interval_between_raw_nops() {
+    let (tx, rx) = mpsc::channel();
+    let interval = Duration::from_millis(150);
+    let started = Instant::now();
+    let mut writer = test_telnet_writer(
+        TimedWriteCapture(tx),
+        Some(interval),
+        crate::WriterFlushPolicy::EachByte,
+        SessionEventQueue::new(),
+    );
+    let (first, first_at) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (second, second_at) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(first, [0xff, 0xf1]);
+    assert_eq!(second, first);
+    assert!(first_at.duration_since(started) >= interval);
+    assert!(second_at.duration_since(first_at) >= interval);
+    let closed_at = Instant::now();
+    writer.close();
+    assert!(closed_at.elapsed() < Duration::from_secs(1));
+    assert!(matches!(
+        rx.recv_timeout(interval),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ));
+}
+
+#[test]
+fn telnet_writer_resets_idle_after_application_control_and_login_sends() {
+    let (tx, rx) = mpsc::channel();
+    let interval = Duration::from_millis(250);
+    let mut writer = test_telnet_writer(
+        TimedWriteCapture(tx),
+        Some(interval),
+        crate::WriterFlushPolicy::EachByte,
+        SessionEventQueue::new(),
+    );
+    let mut last_sent_at = Instant::now();
+    for (payload, control) in [
+        (b"x".to_vec(), false),
+        (vec![IAC, DO, 3], true),
+        (b"login\r".to_vec(), true),
+    ] {
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        if control {
+            writer.write_telnet_control(payload.clone()).unwrap();
+        } else {
+            writer.write(payload.clone()).unwrap();
+        }
+        let (sent, sent_at) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        last_sent_at = sent_at;
+        assert_eq!(sent, payload);
+    }
+    let (nop, nop_at) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(nop_at.duration_since(last_sent_at) >= interval);
+    assert_eq!(nop, crate::telnet_codec::NOP);
+    writer.close();
+}
+
+#[test]
+fn telnet_writer_empty_commands_do_not_reset_idle() {
+    let (tx, rx) = mpsc::channel();
+    let mut writer = test_telnet_writer(
+        TimedWriteCapture(tx),
+        Some(Duration::from_millis(500)),
+        crate::WriterFlushPolicy::AfterWrite,
+        SessionEventQueue::new(),
+    );
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(250)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    writer
+        .command_tx
+        .send(crate::TransportWriterCommand::Write(Vec::new()))
+        .unwrap();
+    let (nop, _) = rx.recv_timeout(Duration::from_millis(400)).unwrap();
+    assert_eq!(nop, crate::telnet_codec::NOP);
+    writer.close();
+}
+
+#[test]
+fn telnet_writer_without_keepalive_blocks_until_close() {
+    let (tx, rx) = mpsc::channel();
+    let mut writer = test_telnet_writer(
+        TimedWriteCapture(tx),
+        None,
+        crate::WriterFlushPolicy::AfterWrite,
+        SessionEventQueue::new(),
+    );
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(150)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    let closed_at = Instant::now();
+    writer.close();
+    assert!(closed_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn telnet_writer_failure_reports_error_and_stops_lifecycle() {
+    struct FailingWriter;
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "test write failure",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let events = SessionEventQueue::new();
+    let mut writer = test_telnet_writer(
+        FailingWriter,
+        Some(Duration::from_millis(20)),
+        crate::WriterFlushPolicy::AfterWrite,
+        events.clone(),
+    );
+    wait_for_queue_state(
+        || writer.worker_thread.as_ref().unwrap().is_finished(),
+        "failed Telnet writer to exit",
+    );
+    assert!(writer.telnet_lifecycle.as_ref().unwrap().is_stopped());
+    assert!(matches!(
+        events.drain(10).events.as_slice(),
+        [SessionEvent::Error { .. }]
+    ));
+    writer.close();
+}
+
+fn loopback_telnet_session(
+    raw_tcp: bool,
+    interval_secs: u32,
+) -> (SessionManager, super::SessionInfo, std::net::TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let manager = SessionManager::new();
+    let info = manager
+        .create_telnet_session(TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            raw_tcp,
+            keep_alive_interval_secs: interval_secs,
+            send_naws: false,
+            auto_login: crate::TelnetAutoLoginConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    (manager, info, peer)
+}
+
+#[test]
+fn telnet_session_sends_nops_while_receiving_output_and_stops_on_close() {
+    let started = Instant::now();
+    let (manager, info, mut peer) = loopback_telnet_session(false, 1);
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut received = Vec::new();
+    let mut nop_times = Vec::new();
+    while nop_times.len() < 2 {
+        assert!(started.elapsed() < Duration::from_secs(6), "NOP deadline");
+        peer.write_all(b"server output").unwrap();
+        let mut buf = [0; 2];
+        match peer.read(&mut buf) {
+            Ok(0) => panic!("unexpected EOF"),
+            Ok(count) => {
+                received.extend_from_slice(&buf[..count]);
+                if received.len() >= (nop_times.len() + 1) * 2 {
+                    nop_times.push(Instant::now());
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    assert_eq!(received, [0xff, 0xf1, 0xff, 0xf1]);
+    assert!(nop_times[0].duration_since(started) >= Duration::from_secs(1));
+    assert!(nop_times[1].duration_since(nop_times[0]) >= Duration::from_millis(900));
+    let closed_at = Instant::now();
+    manager.close(&info.id).unwrap();
+    assert!(closed_at.elapsed() < Duration::from_secs(1));
+    assert_eq!(peer.read(&mut [0; 8]).unwrap(), 0);
+}
+
+#[test]
+fn telnet_disabled_and_raw_tcp_sessions_never_send_nops() {
+    for (raw_tcp, interval_secs) in [(false, 0), (true, 1)] {
+        let (manager, info, mut peer) = loopback_telnet_session(raw_tcp, interval_secs);
+        peer.set_read_timeout(Some(Duration::from_millis(1250)))
+            .unwrap();
+        let error = peer.read(&mut [0; 8]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ));
+        manager.close(&info.id).unwrap();
+    }
+}
+
+#[test]
+fn telnet_peer_disconnect_stops_writer_even_before_manager_removes_session() {
+    let (manager, info, peer) = loopback_telnet_session(false, 1);
+    drop(peer);
+    wait_for_queue_state(
+        || {
+            let sessions = manager.sessions.lock().unwrap();
+            let Some(crate::ManagedSession::Tcp(session)) = sessions.get(&info.id) else {
+                panic!("TCP session");
+            };
+            session.writer.worker_thread.as_ref().unwrap().is_finished()
+                && session.reader_thread.as_ref().unwrap().is_finished()
+        },
+        "Telnet reader and writer after peer EOF",
+    );
+    assert!(
+        manager
+            .drain_events(10)
+            .unwrap()
+            .events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::Exited { .. }))
+    );
+    manager.close(&info.id).unwrap();
+}
+
+#[test]
+fn dropping_telnet_manager_interrupts_idle_writer() {
+    let (manager, _, mut peer) = loopback_telnet_session(false, 60);
+    let started = Instant::now();
+    drop(manager);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(peer.read(&mut [0; 8]).unwrap(), 0);
+}
+
+#[test]
+fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
+    struct FirstWriteGate {
+        started: mpsc::Sender<()>,
+        release: Option<mpsc::Receiver<()>>,
+    }
+    impl Write for FirstWriteGate {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.started.send(()).unwrap();
+            if let Some(release) = self.release.take() {
+                release.recv().unwrap();
+            }
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let interval = Duration::from_millis(100);
+    let mut writer = test_telnet_writer(
+        FirstWriteGate {
+            started: started_tx,
+            release: Some(release_rx),
+        },
+        Some(interval),
+        crate::WriterFlushPolicy::AfterWrite,
+        SessionEventQueue::new(),
+    );
+    writer.write(b"x".to_vec()).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        started_rx.recv_timeout(interval * 2),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    release_tx.send(()).unwrap();
+    assert!(matches!(
+        started_rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    writer.close();
+}
+
+#[test]
+fn telnet_single_writer_keeps_naws_negotiation_login_and_escaped_input_intact() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = TelnetSessionConfig {
+        host: "127.0.0.1".into(),
+        port: listener.local_addr().unwrap().port(),
+        username: "operator".into(),
+        force_character_at_a_time: true,
+        keep_alive_interval_secs: 0,
+        auto_login: crate::TelnetAutoLoginConfig {
+            send_wake_enter: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let manager = SessionManager::new();
+    let info = manager.create_telnet_session(config.clone()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    peer.write_all(&[IAC, WILL, OPT_SUPPRESS_GO_AHEAD]).unwrap();
+    peer.write_all(b"Username: ").unwrap();
+    manager.write_raw(&info.id, b"a\xffb").unwrap();
+    manager.resize(&info.id, 100, 40).unwrap();
+
+    let mut packets = vec![
+        crate::telnet_codec::maybe_build_naws(80, 24, &config).unwrap(),
+        crate::telnet_codec::maybe_build_naws(100, 40, &config).unwrap(),
+        vec![IAC, DO, OPT_SUPPRESS_GO_AHEAD],
+        b"operator\r".to_vec(),
+        b"a\xff\xffb".to_vec(),
+    ];
+    let mut received = vec![0; packets.iter().map(Vec::len).sum()];
+    peer.read_exact(&mut received).unwrap();
+    let mut remaining = received.as_slice();
+    while !remaining.is_empty() {
+        let index = packets
+            .iter()
+            .position(|packet| remaining.starts_with(packet))
+            .expect("whole queued packet");
+        remaining = &remaining[packets.remove(index).len()..];
+    }
+    assert!(packets.is_empty());
+    manager.close(&info.id).unwrap();
+}
+
+#[test]
+fn telnet_local_line_buffer_does_not_delay_idle_nop() {
+    let (manager, info, mut peer) = loopback_telnet_session(false, 1);
+    {
+        let mut sessions = manager.sessions.lock().unwrap();
+        let Some(crate::ManagedSession::Tcp(session)) = sessions.get_mut(&info.id) else {
+            panic!("TCP session");
+        };
+        session.config.local_line_edit = true;
+    }
+    let started = Instant::now();
+    peer.set_read_timeout(Some(Duration::from_millis(600)))
+        .unwrap();
+    assert!(peer.read(&mut [0; 2]).is_err());
+    manager.write(&info.id, b"buffered").unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(800)))
+        .unwrap();
+    let mut nop = [0; 2];
+    peer.read_exact(&mut nop).unwrap();
+    assert_eq!(nop, crate::telnet_codec::NOP);
+    assert!(started.elapsed() < Duration::from_millis(1600));
+    manager.close(&info.id).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn local_connection_worker_failures_roll_back_without_registered_sessions() {
+    for stage in 0..4 {
+        let manager = SessionManager::new();
+        let _failure = zzclawterm_core::runtime::worker::fail_after(stage);
+        let result = manager.create_local_session(LocalSessionConfig {
+            shell_path: Some(super::default_local_shell_path()),
+            ..Default::default()
+        });
+        assert!(
+            result.is_err(),
+            "startup stage {stage} must return an error"
+        );
+        assert!(manager.sessions.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn transfer_backpressure_retries_without_reordering_and_is_cancellable() {
+    for cancel in [false, true] {
+        let manager = Arc::new(SessionManager::new());
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = QueuedTransportWriter::spawn(
+            "transfer-backpressure".into(),
+            GatedWriter {
+                started_tx,
+                release_rx,
+                output: output.clone(),
+            },
+            crate::WriterFlushPolicy::Never,
+            SessionEventQueue::new(),
+        )
+        .unwrap();
+        writer
+            .write(vec![0; crate::writer_mailbox::BYTE_LIMIT])
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Exercise the retry API with a managed local-like writer without creating
+        // a process: the Serial adapter uses the same raw write mailbox.
+        manager.sessions.lock().unwrap().insert(
+            "transfer-backpressure".into(),
+            crate::ManagedSession::Serial(crate::SerialTransport {
+                info: crate::SessionInfo {
+                    id: "transfer-backpressure".into(),
+                    name: String::new(),
+                    kind: crate::SessionKind::Serial,
+                    working_dir: None,
+                    cols: 80,
+                    rows: 24,
+                },
+                writer,
+                backspace_as_bs: false,
+                stop_reader: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reader_thread: None,
+                flow_control: zzclawterm_core::models::connection::SerialFlowControl::None,
+            }),
+        );
+        let worker_manager = manager.clone();
+        let worker_cancel = cancellation.clone();
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done.send(
+                worker_manager
+                    .write_raw_cancellable("transfer-backpressure", b"second", &worker_cancel)
+                    .is_ok(),
+            )
+            .unwrap();
+        });
+        assert!(result.recv_timeout(Duration::from_millis(30)).is_err());
+        if cancel {
+            cancellation.store(true, std::sync::atomic::Ordering::Release);
+            assert!(!result.recv_timeout(Duration::from_secs(1)).unwrap());
+            release_tx.send(()).unwrap();
+        } else {
+            release_tx.send(()).unwrap();
+            assert!(result.recv_timeout(Duration::from_secs(1)).unwrap());
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            release_tx.send(()).unwrap();
+            // Wait for the second accepted write before closing (which discards pending data).
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while output.lock().unwrap().len() < crate::writer_mailbox::BYTE_LIMIT + 6 {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        }
+        worker.join().unwrap();
+        manager.close("transfer-backpressure").unwrap();
+        assert_eq!(
+            output.lock().unwrap().len(),
+            crate::writer_mailbox::BYTE_LIMIT + if cancel { 0 } else { 6 }
+        );
+        if !cancel {
+            assert!(output.lock().unwrap().ends_with(b"second"));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn detached_local_close_returns_before_a_full_pipe_write_finishes() {
+    let manager = SessionManager::new();
+    let info = manager
+        .create_local_session(LocalSessionConfig {
+            shell_path: Some("cmd.exe".into()),
+            shell_args: vec!["/d".into(), "/c".into(), "ping -n 30 127.0.0.1 >nul".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    manager
+        .write_raw(&info.id, &vec![b'x'; 4 * 1024 * 1024])
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    manager.close_detached(&info.id).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(!manager.sessions.lock().unwrap().contains_key(&info.id));
+    // A later session must still start while the former ConPTY is reclaimed.
+    let next = manager
+        .create_local_session(LocalSessionConfig {
+            shell_path: Some("cmd.exe".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    manager.close(&next.id).unwrap();
+}
+
+#[test]
+fn output_boundary_preserves_source_order_across_budgeted_drains() {
+    let manager = SessionManager::new();
+    let consumer = manager.register_event_consumer();
+    manager.assign_session_event_consumer("terminal", consumer);
+    manager.event_queue.push(SessionEvent::Output {
+        session_id: "terminal".into(),
+        data: b"before".to_vec(),
+    });
+    manager.enqueue_output_boundary("terminal", "task");
+    manager.event_queue.push(SessionEvent::Output {
+        session_id: "terminal".into(),
+        data: b"after".to_vec(),
+    });
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        events.extend(
+            manager
+                .drain_events_blocking_for_consumer_with_output_budget(
+                    consumer,
+                    1,
+                    1024,
+                    Duration::ZERO,
+                )
+                .unwrap()
+                .events,
+        );
+    }
+    assert!(matches!(&events[0], SessionEvent::Output { data, .. } if data == b"before"));
+    assert!(matches!(&events[1], SessionEvent::OutputBoundary { token, .. } if token == "task"));
+    assert!(matches!(&events[2], SessionEvent::Output { data, .. } if data == b"after"));
+}
+
+#[test]
+fn async_output_backpressure_keeps_executor_responsive_and_resumes_in_order() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let queue = SessionEventQueue::new();
+        queue.push(SessionEvent::Output {
+            session_id: "async".into(),
+            data: vec![7; SESSION_EVENT_QUEUE_OUTPUT_LIMIT],
+        });
+        let producer = queue.clone();
+        let task = tokio::spawn(async move {
+            producer
+                .push_async(SessionEvent::Output {
+                    session_id: "async".into(),
+                    data: vec![9; 1024],
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!task.is_finished());
+        let first = queue.drain(1000);
+        assert_eq!(
+            first.stats.drained_output_bytes,
+            SESSION_EVENT_QUEUE_OUTPUT_LIMIT
+        );
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let next = queue.drain(1000);
+        assert!(
+            matches!(&next.events[0], SessionEvent::Output { data, .. } if data == &vec![9; 1024])
+        );
+        assert_eq!(queue.peak_output_bytes(), SESSION_EVENT_QUEUE_OUTPUT_LIMIT);
+    });
+}
+
+#[test]
+fn async_output_wait_and_producer_turn_are_released_by_cancellation() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let queue = SessionEventQueue::new();
+            queue.push(SessionEvent::Output {
+                session_id: "a".into(),
+                data: vec![0; SESSION_EVENT_QUEUE_OUTPUT_LIMIT],
+            });
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let producer = queue.clone();
+                tasks.push(tokio::spawn(async move {
+                    producer
+                        .push_async(SessionEvent::Output {
+                            session_id: "a".into(),
+                            data: vec![1; 1024],
+                        })
+                        .await;
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            queue.cancel_session("a");
+            for task in tasks {
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert!(queue.drain(100).events.is_empty());
+        });
 }

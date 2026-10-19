@@ -1,3 +1,4 @@
+use crate::models::ConnectionEditorSection;
 use rust_i18n::t;
 
 use gpui::{
@@ -9,7 +10,7 @@ use gpui::{
 };
 use zzclawterm_ui::{ZzClawPopover, ZzClawScrollable};
 
-use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
+use crate::features::ZzClawTermApp;
 use crate::models::{ConnectionEditorField, ConnectionEditorSelect};
 
 use super::super::super::list::{
@@ -33,6 +34,7 @@ fn serial_baud_picker(
         editor,
         fields,
         baud_popover_open: _,
+        narrow,
     } = section;
     let is_preset = SERIAL_BAUD_PRESETS.contains(&editor.baud_rate.trim());
     let valid = editor
@@ -80,7 +82,7 @@ fn serial_baud_picker(
                 .text_color(rgb(palette.text_muted)),
         );
 
-    let mut preset_grid = div().grid().grid_cols(3).gap_1();
+    let mut preset_grid = div().grid().grid_cols(if narrow { 1 } else { 3 }).gap_1();
     for preset in SERIAL_BAUD_PRESETS {
         let value = preset.to_string();
         let selected = editor.baud_rate == preset;
@@ -226,23 +228,42 @@ pub(super) fn connection_editor_serial_section(
     section: ConnectionEditorSectionContext<'_>,
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
+    let content = match section.editor.section {
+        ConnectionEditorSection::Serial => serial_serial(section, cx),
+        ConnectionEditorSection::Terminal => serial_terminal(section, cx),
+        _ => div(),
+    };
+    div()
+        .debug_selector(|| "connection-editor-serial-section".to_string())
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(content)
+}
+
+fn serial_serial(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
     let ConnectionEditorSectionContext {
         palette,
-        editor,
         fields,
         baud_popover_open,
+        narrow,
+        ..
     } = section;
     let app = cx.weak_entity();
     div()
-        .debug_selector(|| "connection-editor-serial-section".to_string())
         .flex()
         .flex_col()
         .gap_3()
         .child(
             div()
                 .flex()
-                .flex_wrap()
+                .when(!narrow, |this| this.flex_wrap())
+                .when(narrow, |this| this.flex_col())
                 .items_end()
+                .when(narrow, |this| this.items_stretch())
                 .gap_3()
                 .child(
                     div()
@@ -273,7 +294,7 @@ pub(super) fn connection_editor_serial_section(
         .child(
             div()
                 .grid()
-                .grid_cols(3)
+                .grid_cols(if narrow { 1 } else { 3 })
                 .gap_2()
                 .child(connection_editor_select(
                     ConnectionEditorRenderContext {
@@ -316,81 +337,66 @@ pub(super) fn connection_editor_serial_section(
             t!("dialog.serialFlowControl"),
             ConnectionEditorSelect::FlowControl,
         ))
-        .child(
-            div()
-                .id("connection-editor-serial-advanced-toggle")
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(palette.text_muted))
-                .cursor_pointer()
-                .hover(|this| this.text_color(rgb(palette.text)))
-                .child(
-                    svg()
-                        .size(px(14.))
-                        .path(if editor.advanced.serial {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/fe/forward.svg"
-                        })
-                        .text_color(rgb(palette.text_muted)),
-                )
-                .child(t!("dialog.advancedConfig"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_connection_editor_flag(ConnectionEditorToggle::Advanced, cx);
-                })),
-        )
-        .when(editor.advanced.serial, |this| {
-            this.child(
+}
+
+fn serial_terminal(
+    section: ConnectionEditorSectionContext<'_>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> gpui::Div {
+    let ConnectionEditorSectionContext {
+        palette,
+        fields,
+        narrow,
+        ..
+    } = section;
+    div().flex().flex_col().gap_3().child(
+        div()
+            .id("connection-editor-serial-advanced")
+            .debug_selector(|| "connection-editor-serial-advanced".to_string())
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
                 div()
-                    .id("connection-editor-serial-advanced")
-                    .debug_selector(|| "connection-editor-serial-advanced".to_string())
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .p_3()
                     .flex()
-                    .flex_col()
+                    .when(!narrow, |this| this.flex_wrap())
+                    .when(narrow, |this| this.flex_col())
                     .gap_3()
                     .child(
                         div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .min_w(px(180.))
-                                    .flex_1()
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-serial-backspace",
-                                        t!("dialog.backspaceMode"),
-                                        ConnectionEditorSelect::Backspace,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(180.))
-                                    .flex_1()
-                                    .child(connection_editor_select(
-                                        ConnectionEditorRenderContext {
-                                            palette,
-                                            fields,
-                                            cx,
-                                        },
-                                        "connection-editor-serial-encoding",
-                                        t!("connection.encoding"),
-                                        ConnectionEditorSelect::Encoding,
-                                    )),
-                            ),
+                            .min_w(px(180.))
+                            .flex_1()
+                            .child(connection_editor_select(
+                                ConnectionEditorRenderContext {
+                                    palette,
+                                    fields,
+                                    cx,
+                                },
+                                "connection-editor-serial-backspace",
+                                t!("dialog.backspaceMode"),
+                                ConnectionEditorSelect::Backspace,
+                            )),
                     )
-                    .child(connection_editor_recording_section(section, cx)),
+                    .child(
+                        div()
+                            .min_w(px(180.))
+                            .flex_1()
+                            .child(connection_editor_select(
+                                ConnectionEditorRenderContext {
+                                    palette,
+                                    fields,
+                                    cx,
+                                },
+                                "connection-editor-serial-encoding",
+                                t!("connection.encoding"),
+                                ConnectionEditorSelect::Encoding,
+                            )),
+                    ),
             )
-        })
+            .child(connection_editor_recording_section(section, cx)),
+    )
 }

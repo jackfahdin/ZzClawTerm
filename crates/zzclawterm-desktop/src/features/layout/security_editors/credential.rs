@@ -81,32 +81,14 @@ impl ZzClawTermApp {
                         editor.password.expose_secret().to_owned(),
                         TextInputSetup {
                             placeholder: password_placeholder.into(),
-                            masked: !editor.show_password,
+                            masked: true,
+                            kind: zzclawterm_ui::ZzClawInputKind::NewPassword,
                             multi_line: false,
                             submit_on_enter: false,
                             code: false,
                         },
                         cx,
-                    )))
-                    .child(
-                        zzclawterm_ui::ZzClawIconButton::new(
-                            "security-cred-toggle-vis",
-                            if editor.show_password {
-                                "icons/eye-off.svg"
-                            } else {
-                                "icons/eye.svg"
-                            },
-                        )
-                        .tooltip(t!(if editor.show_password {
-                            "passwordManager.hidePassword"
-                        } else {
-                            "passwordManager.showPassword"
-                        }))
-                        .disabled(self.security.editor_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_security_credential_editor_visibility(cx);
-                        })),
-                    ),
+                    ))),
             )
             .child(security_editor_field(
                 self,

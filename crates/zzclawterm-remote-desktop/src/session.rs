@@ -2,10 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use uuid::Uuid;
 
+use crate::heartbeat::{Heartbeat, Supervisor};
 use crate::helper_process;
 use crate::{
     CursorPosition, CursorShape, CursorVisibility, FRAME_PAYLOAD_LIMIT, PROTOCOL_VERSION,
@@ -13,8 +14,9 @@ use crate::{
     RdpErrorKind, RdpFrameEvent, RdpInputEvent, RdpRuntimeEvent, RdpServerCapabilities,
     RdpSessionConfig, RdpSessionDrain, RdpSessionState, RemoteCursorEvent, RemotePointerEvent,
     decode_control, decode_cursor_packet_owned, decode_frame_packet_owned, encode_control,
-    read_packet, validate_committed_text,
+    validate_committed_text,
 };
+use zzclawterm_core::runtime::reaper::Reaper;
 
 const MIN_WIDTH: u32 = 200;
 const MIN_HEIGHT: u32 = 200;
@@ -25,13 +27,10 @@ const FRAME_QUEUE_BYTE_LIMIT: usize = FRAME_PAYLOAD_LIMIT;
 const CONTROL_QUEUE_LIMIT: usize = 256;
 const CONTROL_QUEUE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const HELPER_PACKAGE: &str = "zzclawterm-rdp-helper";
-/// Cargo package that builds the helper; the executable name above is the
-/// `[[bin]]` name, which no longer matches the package name.
-const HELPER_CARGO_PACKAGE: &str = "zzclawterm-rdp-helper";
 const HELPER_ENV_VAR: &str = "ZZCLAWTERM_RDP_HELPER";
 
 pub fn resolve_helper_path() -> Result<PathBuf, RdpError> {
-    helper_process::resolve_helper(HELPER_PACKAGE, HELPER_CARGO_PACKAGE, HELPER_ENV_VAR)
+    helper_process::resolve_helper(HELPER_PACKAGE, HELPER_ENV_VAR)
         .map_err(|message| RdpError::new(RdpErrorKind::HelperMissing, message))
 }
 
@@ -106,6 +105,7 @@ struct EventQueue {
     space_available: Condvar,
     frame_item_limit: usize,
     frame_byte_limit: usize,
+    heartbeat: Arc<Heartbeat>,
 }
 
 impl Default for EventQueue {
@@ -121,6 +121,7 @@ impl EventQueue {
             space_available: Condvar::new(),
             frame_item_limit,
             frame_byte_limit,
+            heartbeat: Arc::new(Heartbeat::default()),
         }
     }
 
@@ -150,10 +151,12 @@ impl EventQueue {
             && (state.control.len() >= CONTROL_QUEUE_LIMIT
                 || state.control_bytes.saturating_add(cost) > CONTROL_QUEUE_BYTE_LIMIT)
         {
+            self.heartbeat.blocked(true);
             state = self
                 .space_available
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.heartbeat.blocked(false);
         }
         if state.closed {
             return false;
@@ -242,10 +245,12 @@ impl EventQueue {
             && (state.frames.len() >= self.frame_item_limit
                 || state.frame_bytes.saturating_add(cost) > self.frame_byte_limit)
         {
+            self.heartbeat.blocked(true);
             state = self
                 .space_available
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.heartbeat.blocked(false);
             if epoch.is_some() && state.current_epoch != epoch {
                 return false;
             }
@@ -324,14 +329,16 @@ struct SessionRecord {
     state: Arc<Mutex<RdpSessionState>>,
     capabilities: Arc<Mutex<Option<RdpServerCapabilities>>>,
     queue: Arc<EventQueue>,
-    writer: helper_process::IpcWriter,
-    child: Option<Child>,
+    writer: Arc<helper_process::IpcWriter>,
+    child: Arc<Mutex<Option<Child>>>,
+    supervisor: Option<Supervisor>,
     reader: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
 pub struct RdpSessionManager {
     sessions: Mutex<HashMap<String, SessionRecord>>,
+    reaper: Mutex<Option<Reaper<SessionRecord>>>,
     pending_certificates: Arc<Mutex<HashMap<String, String>>>,
     /// Installed once by the application; copied into every session queue so
     /// the reader thread can wake the consumer instead of being polled.
@@ -357,6 +364,22 @@ impl RdpSessionManager {
         self.queue_waker.lock().ok()?.clone()
     }
 
+    fn ensure_reaper(&self) -> Result<(), RdpError> {
+        let mut slot = self
+            .reaper
+            .lock()
+            .map_err(|_| RdpError::new(RdpErrorKind::Ipc, "reaper lock poisoned"))?;
+        if slot.is_none() {
+            *slot = Some(
+                Reaper::new("rdp-reaper", 64, |mut record: SessionRecord| {
+                    cleanup_child(&mut record)
+                })
+                .map_err(|error| RdpError::new(RdpErrorKind::Ipc, error.to_string()))?,
+            );
+        }
+        Ok(())
+    }
+
     pub fn create_session(&self, config: RdpSessionConfig) -> Result<String, RdpError> {
         self.create_session_with_id(Uuid::new_v4().to_string(), config)
     }
@@ -373,7 +396,7 @@ impl RdpSessionManager {
             })?;
             if sessions
                 .get(&session_id)
-                .is_some_and(|record| record.child.is_some())
+                .is_some_and(|record| record.reader.is_some())
             {
                 return Err(RdpError::new(
                     RdpErrorKind::Protocol,
@@ -382,6 +405,7 @@ impl RdpSessionManager {
             }
             sessions.remove(&session_id);
         }
+        self.ensure_reaper()?;
         let helper = resolve_helper_path()?;
         let helper_process::HelperProcess {
             mut child,
@@ -410,21 +434,60 @@ impl RdpSessionManager {
         let queue = Arc::new(EventQueue::with_waker(self.queue_waker()));
         let state = Arc::new(Mutex::new(RdpSessionState::Connecting));
         let capabilities = Arc::new(Mutex::new(None));
-        let reader = spawn_reader(
+        let mut record = SessionRecord {
+            state: state.clone(),
+            capabilities: capabilities.clone(),
+            queue: queue.clone(),
+            writer: Arc::new(writer),
+            child: Arc::new(Mutex::new(Some(child))),
+            reader: None,
+            supervisor: None,
+        };
+        record.reader = match spawn_reader(
             session_id.clone(),
             stdout,
             queue.clone(),
             state.clone(),
             capabilities.clone(),
             self.pending_certificates.clone(),
-        );
-        let mut record = SessionRecord {
-            state,
-            capabilities,
-            queue,
-            writer,
-            child: Some(child),
-            reader: Some(reader),
+        ) {
+            Ok(reader) => Some(reader),
+            Err(error) => {
+                cleanup_child(&mut record);
+                return Err(RdpError::new(
+                    RdpErrorKind::Ipc,
+                    format!("failed to start helper reader: {error}"),
+                ));
+            }
+        };
+        let ping_writer = Arc::clone(&record.writer);
+        let timeout_queue = Arc::clone(&queue);
+        let timeout_state = Arc::clone(&state);
+        let timeout_id = session_id.clone();
+        record.supervisor = match Supervisor::spawn(
+            Arc::clone(&queue.heartbeat),
+            Arc::clone(&record.child),
+            move |sequence| {
+                let _ = send_control(&ping_writer, &RdpControlMessage::Ping { sequence });
+            },
+            move || {
+                push_reader_error(
+                    &timeout_id,
+                    &timeout_queue,
+                    &timeout_state,
+                    RdpErrorKind::Timeout,
+                    "helper control loop did not respond within 10 seconds".into(),
+                )
+            },
+        ) {
+            Ok(supervisor) => Some(supervisor),
+            Err(error) => {
+                cleanup_child(&mut record);
+                return Err(RdpError::new(
+                    RdpErrorKind::Ipc,
+                    format!("failed to start helper supervisor: {error}"),
+                ));
+            }
         };
         let start_result = send_control(
             &record.writer,
@@ -734,36 +797,34 @@ impl RdpSessionManager {
     /// Permanently remove the record before reaping its helper in the background.
     /// A reconnect using the same id cannot be overwritten by the old reader.
     pub fn close_detached(&self, session_id: &str) -> Result<(), RdpError> {
-        let Some(mut record) = self
+        self.ensure_reaper()?;
+        let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| RdpError::new(RdpErrorKind::Ipc, "RDP session registry lock is poisoned"))?
-            .remove(session_id)
-        else {
-            return Ok(());
-        };
-        set_state(&record.state, RdpSessionState::Disconnecting);
-        record.queue.close();
-        self.pending_certificates
+            .map_err(|_| RdpError::new(RdpErrorKind::Ipc, "session registry lock poisoned"))?;
+        let slot = self
+            .reaper
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .retain(|_, pending_session| pending_session != session_id);
-        let session_id = session_id.to_owned();
-        thread::spawn(move || {
-            let _ = send_control(
-                &record.writer,
-                &RdpControlMessage::Input {
-                    session_id: session_id.clone(),
-                    events: vec![RdpInputEvent::ReleaseAllInputs],
-                },
-            );
-            let _ = send_control(
-                &record.writer,
-                &RdpControlMessage::Disconnect { session_id },
-            );
-            cleanup_child(&mut record);
-        });
-        Ok(())
+            .map_err(|_| RdpError::new(RdpErrorKind::Ipc, "reaper lock poisoned"))?;
+        slot.as_ref()
+            .ok_or_else(|| RdpError::new(RdpErrorKind::Ipc, "reaper unavailable"))?
+            .try_submit_with(|| {
+                let record = sessions.remove(session_id)?;
+                set_state(&record.state, RdpSessionState::Disconnecting);
+                record.queue.close();
+                self.pending_certificates
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .retain(|_, pending_session| pending_session != session_id);
+                let _ = send_control(
+                    &record.writer,
+                    &RdpControlMessage::Disconnect {
+                        session_id: session_id.to_owned(),
+                    },
+                );
+                Some(record)
+            })
+            .map_err(|error| RdpError::new(RdpErrorKind::Ipc, error.to_string()))
     }
 
     pub fn shutdown(&self) {
@@ -773,7 +834,7 @@ impl RdpSessionManager {
             .map(|sessions| {
                 sessions
                     .iter()
-                    .filter_map(|(id, record)| record.child.is_some().then_some(id.clone()))
+                    .filter_map(|(id, record)| record.reader.is_some().then_some(id.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -844,13 +905,13 @@ fn spawn_reader(
     state: Arc<Mutex<RdpSessionState>>,
     capabilities: Arc<Mutex<Option<RdpServerCapabilities>>>,
     pending_certificates: Arc<Mutex<HashMap<String, String>>>,
-) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name(format!("zzclawterm-rdp-reader-{session_id}"))
-        .spawn(move || {
+) -> std::io::Result<JoinHandle<()>> {
+    zzclawterm_core::runtime::worker::spawn(
+        format!("zzclawterm-rdp-reader-{session_id}"),
+        move || {
             let mut hello_received = false;
             loop {
-                let packet = match read_packet(&mut stdout) {
+                let packet = match crate::ipc::read_packet_budgeted(&mut stdout) {
                     Ok(Some(packet)) => packet,
                     Ok(None) => break,
                     Err(error) => {
@@ -858,7 +919,11 @@ fn spawn_reader(
                             &session_id,
                             &queue,
                             &state,
-                            RdpErrorKind::Ipc,
+                            if error.kind() == std::io::ErrorKind::OutOfMemory {
+                                RdpErrorKind::ResourceExhausted
+                            } else {
+                                RdpErrorKind::Ipc
+                            },
                             error.to_string(),
                         );
                         return;
@@ -868,6 +933,11 @@ fn spawn_reader(
                     PacketType::Control => decode_control(&packet)
                         .map_err(|error| RdpError::new(RdpErrorKind::Protocol, error.to_string()))
                         .and_then(|message| {
+                            if let RdpControlMessage::Pong { sequence } = message {
+                                require_server_hello(hello_received, "Pong")?;
+                                queue.heartbeat.pong(sequence);
+                                return Ok(());
+                            }
                             handle_control(
                                 &session_id,
                                 message,
@@ -902,6 +972,9 @@ fn spawn_reader(
                             }
                         }),
                 };
+                if hello_received {
+                    queue.heartbeat.hello();
+                }
                 if let Err(error) = result {
                     push_reader_error(&session_id, &queue, &state, error.kind, error.message);
                     return;
@@ -924,9 +997,13 @@ fn spawn_reader(
                     RdpErrorKind::HelperCrashed,
                     "RDP helper exited unexpectedly".to_string(),
                 );
+            } else {
+                // EOF after an ordinary disconnect must reap the process without
+                // later turning the completed connection into a heartbeat timeout.
+                queue.heartbeat.fail_once();
             }
-        })
-        .expect("failed to spawn RDP helper reader")
+        },
+    )
 }
 
 fn require_server_hello(received: bool, packet_kind: &str) -> Result<(), RdpError> {
@@ -987,7 +1064,8 @@ fn handle_control(
                 "RDP helper sent duplicate ServerHello",
             ));
         }
-        RdpControlMessage::ClientHello { .. }
+        RdpControlMessage::Ping { .. }
+        | RdpControlMessage::ClientHello { .. }
         | RdpControlMessage::Connect { .. }
         | RdpControlMessage::Input { .. }
         | RdpControlMessage::SecureAttention { .. }
@@ -1077,7 +1155,8 @@ fn handle_control(
             fatal,
         } if event_session == session_id => {
             if fatal {
-                set_state(state, RdpSessionState::Failed(error.clone()));
+                push_reader_error(session_id, queue, state, error.kind, error.message);
+                return Ok(());
             }
             queue.push_control(RdpRuntimeEvent::Error {
                 session_id: session_id.to_string(),
@@ -1097,17 +1176,16 @@ fn push_reader_error(
     kind: RdpErrorKind,
     message: String,
 ) {
+    if !queue.heartbeat.fail_once() {
+        return;
+    }
+    queue.close();
     let error = RdpError::new(kind, message);
     set_state(state, RdpSessionState::Failed(error.clone()));
-    queue.push_control(RdpRuntimeEvent::Error {
+    queue.push_control_force(RdpRuntimeEvent::Error {
         session_id: session_id.to_string(),
         error: error.clone(),
         fatal: true,
-    });
-    queue.push_control(RdpRuntimeEvent::State {
-        session_id: session_id.to_string(),
-        state: RdpSessionState::Failed(error),
-        message: None,
     });
 }
 
@@ -1119,8 +1197,16 @@ fn set_state(state: &Arc<Mutex<RdpSessionState>>, new_state: RdpSessionState) {
 
 fn cleanup_child(record: &mut SessionRecord) {
     record.queue.close();
-    helper_process::cleanup_child(&mut record.child, &mut record.reader);
-    record.writer.shutdown();
+    if let Some(mut supervisor) = record.supervisor.take() {
+        supervisor.stop();
+    }
+    helper_process::cleanup_child(
+        &mut record.child.lock().unwrap_or_else(|p| p.into_inner()),
+        &mut record.reader,
+    );
+    if let Some(writer) = Arc::get_mut(&mut record.writer) {
+        writer.shutdown();
+    }
 }
 
 fn validate_rdp_input(events: &[RdpInputEvent]) -> Result<bool, RdpError> {
@@ -1183,6 +1269,51 @@ mod tests {
     };
 
     #[test]
+    fn pixel_budget_survives_drain_and_releases_on_reset_and_close() {
+        let budget = crate::pixel_memory::PixelBudget::test(1024);
+        let frame = crate::RemoteFrameEvent::Bitmap {
+            epoch: 1,
+            full: true,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: crate::PixelFormat::Bgra8,
+            pixels: vec![0; 4].into(),
+        };
+        let packet = crate::encode_frame_packet_owned("s", frame).unwrap();
+        let mut wire = Vec::new();
+        crate::write_packet(&mut wire, &packet).unwrap();
+        let received = crate::ipc::read_packet_inner(&mut wire.as_slice(), Some(&budget))
+            .unwrap()
+            .unwrap();
+        let (_, frame) = crate::decode_frame_packet_owned(received).unwrap();
+        let queue = EventQueue::default();
+        queue.push_reset("s", 1, 1, 1);
+        queue.push_frame(frame);
+        let allocated = budget.used();
+        assert!(allocated > 0);
+        let drain = queue.drain();
+        assert_eq!(budget.used(), allocated, "draining transfers the lease");
+        let retained = drain.frames.clone();
+        drop(drain);
+        queue.push_reset("s", 2, 1, 1);
+        queue.close();
+        assert_eq!(
+            budget.used(),
+            allocated,
+            "a consumer may still own drained pixels"
+        );
+        drop(retained);
+        assert_eq!(budget.used(), 0);
+        let tiny = crate::pixel_memory::PixelBudget::test(1);
+        let error = crate::ipc::read_packet_inner(&mut wire.as_slice(), Some(&tiny)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(tiny.used(), 0);
+    }
+
+    #[test]
     fn detached_close_removes_resources_before_a_stalled_reader_is_reaped() {
         let manager = RdpSessionManager::new();
         let queue = Arc::new(EventQueue::default());
@@ -1205,8 +1336,9 @@ mod tests {
                 state: Arc::new(Mutex::new(RdpSessionState::Connected)),
                 capabilities: Arc::new(Mutex::new(None)),
                 queue: queue.clone(),
-                writer: crate::helper_process::IpcWriter::test_mailbox(),
-                child: None,
+                writer: Arc::new(crate::helper_process::IpcWriter::test_mailbox()),
+                child: Arc::new(Mutex::new(None)),
+                supervisor: None,
                 reader: Some(reader),
             },
         );
@@ -1222,8 +1354,9 @@ mod tests {
                 state: Arc::new(Mutex::new(RdpSessionState::Connected)),
                 capabilities: Arc::new(Mutex::new(None)),
                 queue: Arc::new(EventQueue::default()),
-                writer: crate::helper_process::IpcWriter::test_mailbox(),
-                child: None,
+                writer: Arc::new(crate::helper_process::IpcWriter::test_mailbox()),
+                child: Arc::new(Mutex::new(None)),
+                supervisor: None,
                 reader: None,
             },
         );
@@ -1439,7 +1572,7 @@ mod tests {
             height: 1,
             stride: 4,
             format: PixelFormat::Bgra8,
-            pixels: vec![x as u8; 4],
+            pixels: vec![x as u8; 4].into(),
         }
     }
 

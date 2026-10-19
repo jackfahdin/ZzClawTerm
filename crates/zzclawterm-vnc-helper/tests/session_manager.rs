@@ -148,3 +148,81 @@ fn sending_input_to_an_unknown_session_is_an_error_not_a_panic() {
     assert_eq!(error.kind, VncErrorKind::Protocol);
     assert!(manager.drain("missing").control.is_empty());
 }
+
+#[test]
+fn auto_security_without_password_connects_to_a_no_auth_server() {
+    use std::io::{Read as _, Write as _};
+
+    use_built_helper();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.write_all(b"RFB 003.008\n")?;
+        let mut version = [0; 12];
+        stream.read_exact(&mut version)?;
+        assert_eq!(&version, b"RFB 003.008\n");
+        stream.write_all(&[1, 1])?;
+        let mut selected = [0; 1];
+        stream.read_exact(&mut selected)?;
+        assert_eq!(selected, [1]);
+        stream.write_all(&0_u32.to_be_bytes())?;
+        let mut shared = [0; 1];
+        stream.read_exact(&mut shared)?;
+        assert_eq!(shared, [1]);
+        // A 1x1 true-colour framebuffer with an empty desktop name.
+        stream.write_all(&[
+            0, 1, 0, 1, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])?;
+        loop {
+            let mut message = [0; 1];
+            stream.read_exact(&mut message)?;
+            match message[0] {
+                0 => stream.read_exact(&mut [0; 19])?,
+                2 => {
+                    let mut header = [0; 3];
+                    stream.read_exact(&mut header)?;
+                    let count = usize::from(u16::from_be_bytes([header[1], header[2]]));
+                    stream.read_exact(&mut vec![0; count * 4])?;
+                }
+                3 => {
+                    stream.read_exact(&mut [0; 9])?;
+                    break;
+                }
+                other => panic!("unexpected client message {other}"),
+            }
+        }
+        // Complete the initial update with one Raw rectangle and one pixel.
+        stream.write_all(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])?;
+        let mut buffer = [0; 1024];
+        while stream.read(&mut buffer)? != 0 {}
+        Ok(())
+    });
+    let manager = VncSessionManager::new();
+    let session_id = manager
+        .create_session_with_id("auto-no-auth".into(), config(port))
+        .unwrap();
+    let event = wait_for_event(&manager, &session_id, |event| {
+        matches!(
+            event,
+            VncRuntimeEvent::State {
+                state: VncSessionState::Connected,
+                ..
+            } | VncRuntimeEvent::Error { fatal: true, .. }
+        )
+    });
+    manager.close(&session_id).unwrap();
+    let server_result = server.join().unwrap();
+    assert!(
+        matches!(
+            event,
+            VncRuntimeEvent::State {
+                state: VncSessionState::Connected,
+                ..
+            }
+        ),
+        "expected a connected session, got {event:?}"
+    );
+    server_result.unwrap();
+}

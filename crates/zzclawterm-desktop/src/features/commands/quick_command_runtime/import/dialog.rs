@@ -57,6 +57,9 @@ impl ZzClawTermApp {
         let scheduler = self.blocking_jobs.clone();
         self.shell
             .set_status("selecting quick command export destination".to_string());
+        let origin_window = cx
+            .active_window()
+            .or_else(|| self.shell.main_window().map(Into::into));
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(path))) => {
@@ -84,6 +87,13 @@ impl ZzClawTermApp {
                             .set_status(format!("quick commands exported to {}", path.display()));
                         this.settings
                             .update_store_status(this.shell.status().to_string(), true);
+                        this.notify_operation_at(
+                            origin_window,
+                            "quick-command-export",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                            t!("quickCommands.exportSuccess").to_string(),
+                            cx,
+                        );
                     }
                     Err(error) if error == "cancelled" => {
                         this.shell
@@ -99,6 +109,13 @@ impl ZzClawTermApp {
                             .set_status(format!("quick command export failed: {error}"));
                         this.settings
                             .update_store_status(this.shell.status().to_string(), false);
+                        this.notify_operation_at(
+                            origin_window,
+                            "quick-command-export",
+                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                            t!("common.operationFailed").to_string(),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -131,6 +148,9 @@ impl ZzClawTermApp {
         let scheduler = self.blocking_jobs.clone();
         self.shell.set_status(kind.selecting_status().to_string());
 
+        let origin_window = cx
+            .active_window()
+            .or_else(|| self.shell.main_window().map(Into::into));
         cx.spawn(async move |this, cx| {
             let result = match receiver.await {
                 Ok(Ok(Some(paths))) => match paths.into_iter().next() {
@@ -177,7 +197,7 @@ impl ZzClawTermApp {
                 Err(_) => QuickCommandImportPathPromptResult::Closed,
             };
             let _ = this.update(cx, |this, cx| {
-                this.apply_quick_command_import_result(result, cx);
+                this.apply_quick_command_import_result(result, origin_window, cx);
                 cx.notify();
             });
         })
@@ -188,6 +208,7 @@ impl ZzClawTermApp {
     fn apply_quick_command_import_result(
         &mut self,
         result: QuickCommandImportPathPromptResult,
+        origin_window: Option<gpui::AnyWindowHandle>,
         cx: &mut Context<Self>,
     ) {
         self.commands.finish_quick_import_path();
@@ -209,6 +230,19 @@ impl ZzClawTermApp {
                 ));
                 self.settings
                     .update_store_status(self.shell.status().to_string(), true);
+                self.notify_operation_at(
+                    origin_window,
+                    "quick-command-import",
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                    t!(
+                        "quickCommands.importSuccess",
+                        imported = imported_commands,
+                        updated = updated_commands,
+                        total = total_commands
+                    )
+                    .to_string(),
+                    cx,
+                );
             }
             QuickCommandImportPathPromptResult::Cancelled => {
                 self.shell
@@ -219,6 +253,13 @@ impl ZzClawTermApp {
                     .set_status(format!("quick command import failed: {error}"));
                 self.settings
                     .update_store_status(self.shell.status().to_string(), false);
+                self.notify_operation_at(
+                    origin_window,
+                    "quick-command-import",
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                    t!("common.operationFailed").to_string(),
+                    cx,
+                );
             }
             QuickCommandImportPathPromptResult::Closed => {
                 self.shell

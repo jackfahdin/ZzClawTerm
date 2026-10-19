@@ -92,6 +92,7 @@ impl SettingsPanel {
                                     format!("ai-action-delete-{}", action.id),
                                     "icons/settings/trash.svg",
                                 )
+                                .form_control()
                                 .tooltip(t!("common.delete"))
                                 .on_click(cx.listener(
                                     move |panel, _, _, cx| {

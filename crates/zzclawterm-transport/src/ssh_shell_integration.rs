@@ -196,24 +196,18 @@ impl SshShellIntegrationState {
         self.last_diagnostic_at = None;
     }
 
-    pub(super) async fn apply_upload_outcome(
+    pub(super) fn apply_upload_outcome(
         &mut self,
         outcome: ScriptUploadOutcome,
         integration: PreparedSshShellIntegration,
-        channel: &mut russh::Channel<client::Msg>,
-    ) {
+    ) -> Vec<u8> {
         let script = if outcome.success {
             integration.uploaded_script(&outcome.remote_path, &outcome.remote_dir)
         } else {
             integration.inline_script()
         };
-        if channel.data_bytes(script).await.is_ok() {
-            self.begin_suppression();
-        } else {
-            self.phase = SshShellIntegrationPhase::Normal;
-            self.suppress_started_at = None;
-            self.suppressed_visible_bytes = 0;
-        }
+        self.begin_suppression();
+        script
     }
 
     pub(super) fn force_normal_after_timeout(&mut self) -> SshIntegrationOutput {

@@ -1,8 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{
-    ClipboardItem, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb, svg,
-};
+use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb, svg};
 use zzclawterm_core::{CloudConflictKind, truncate_preview};
 
 use crate::features::ZzClawTermApp;
@@ -121,8 +119,13 @@ impl ZzClawTermApp {
                         if copy_message.trim().is_empty() {
                             this.shell
                                 .set_status("history entry has no message".to_string());
+                            this.copy_text_with_feedback("copy-sync-history", String::new(), cx);
                         } else {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy_message.clone()));
+                            this.copy_text_with_feedback(
+                                "copy-sync-history",
+                                copy_message.clone(),
+                                cx,
+                            );
                             this.shell
                                 .set_status("sync history message copied".to_string());
                         }
@@ -248,7 +251,9 @@ impl ZzClawTermApp {
             .when_some(conflict, |this, conflict| {
                 let preview = conflict.preview;
                 let remote_inconsistent = preview.kind == CloudConflictKind::RemoteInconsistent;
+                let overwrite_blocked = preview.overwrite_blocked;
                 let recovery_revision = preview.recovery_revision.clone();
+                let has_recovery_candidate = recovery_revision.is_some();
                 this.child(
                     div()
                         .flex_none()
@@ -353,7 +358,7 @@ impl ZzClawTermApp {
                                 .pb_3()
                                 .flex()
                                 .gap_2()
-                                .child(if remote_inconsistent {
+                                .child(if remote_inconsistent && has_recovery_candidate {
                                     small_button(
                                         palette,
                                         "sync-panel-recover-current",
@@ -370,6 +375,12 @@ impl ZzClawTermApp {
                                         }),
                                     )
                                     .into_any_element()
+                                } else if remote_inconsistent {
+                                    // Nothing on the remote can be recovered:
+                                    // pulling would download the same unreadable
+                                    // payload, so only the explicit overwrite is
+                                    // offered.
+                                    div().into_any_element()
                                 } else {
                                     small_button(
                                         palette,
@@ -388,22 +399,33 @@ impl ZzClawTermApp {
                                     )
                                     .into_any_element()
                                 })
-                                .child(dialog_action_button(
-                                    palette,
-                                    "sync-panel-force-push",
-                                    t!("settings.uploadLocalVersion"),
-                                    false,
-                                    cx.listener({
-                                        let provider_action = conflict.provider_action;
-                                        move |this, _, window, cx| {
-                                            this.prompt_cloud_sync_force_push(
-                                                provider_action,
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    }),
-                                )),
+                                .when(!overwrite_blocked, |this| {
+                                    this.child(dialog_action_button(
+                                        palette,
+                                        "sync-panel-force-push",
+                                        t!("settings.uploadLocalVersion"),
+                                        false,
+                                        cx.listener({
+                                            let provider_action = conflict.provider_action;
+                                            move |this, _, window, cx| {
+                                                this.prompt_cloud_sync_force_push(
+                                                    provider_action,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                    ))
+                                })
+                                .when(overwrite_blocked, |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .line_height(px(16.))
+                                            .text_color(rgb(palette.warning))
+                                            .child(t!("settings.overwriteBlockedNotice")),
+                                    )
+                                }),
                         ),
                 )
             })
@@ -541,6 +563,7 @@ mod tests {
     fn sync_sidebar_actions_open_visible_password_dialogs_and_cancel_cleanly() {
         let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         let host_app = app.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -601,6 +624,7 @@ mod tests {
     fn local_backup_restore_requires_confirmation_before_password() {
         let test_dir = TestConfigDir::new("zzclawterm-backup-restore-confirm");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         let host_app = app.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -646,6 +670,7 @@ mod tests {
         let (endpoint, server) = spawn_webdav_service_unavailable_server();
         let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-webdav");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, _| {
             let mut settings = app.cloud_sync.settings().clone();
@@ -699,6 +724,7 @@ mod tests {
     fn sync_sidebar_password_submission_runs_push_and_pull_and_records_history() {
         let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-roundtrip");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         let host_app = app.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {

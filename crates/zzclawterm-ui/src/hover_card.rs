@@ -282,7 +282,11 @@ impl RenderOnce for ZzClawHoverCard {
         let content = div()
             .id("content")
             .occlude()
-            .when(self.appearance, |this| this.popover_style(cx).p_3())
+            .when(self.appearance, |this| {
+                this.popover_style(cx)
+                    .shadow(gpui_base::Theme::global(cx).tokens.shadow.md)
+                    .p_3()
+            })
             .child(self.content)
             .on_hover(window.listener_for(&state, |state, hovered, _, cx| {
                 state.on_content_hover(*hovered, cx)

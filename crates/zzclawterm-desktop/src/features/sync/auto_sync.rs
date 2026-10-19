@@ -1,7 +1,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui::Context;
 use rust_i18n::t;
+
+use super::operation::AutoSyncOperationControls;
+use gpui::Context;
+use zzclawterm_core::cloud_sync::control::CloudSyncOperationControl;
 use zzclawterm_core::{
     AppRuntime, CloudRemoteCheckDecision, CloudSyncError, CloudSyncResult, CloudSyncSettings,
     CloudSyncState, LocalCloudSyncOptions,
@@ -43,7 +46,9 @@ pub(crate) fn run_auto_sync(
     change_elapsed: Duration,
     pull_safe: bool,
     before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+    controls: &AutoSyncOperationControls,
 ) -> Result<AutoSyncResult, CloudSyncError> {
+    controls.sync.checkpoint()?;
     let _operation = match crate::features::cloud_sync_operation_lock().try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => return Ok(AutoSyncResult::Busy),
@@ -95,11 +100,13 @@ pub(crate) fn run_auto_sync(
         master_password: password,
         enabled: true,
     };
-    let (decision, pointer) = check_provider_snapshot(store, &settings, &options, &state)?;
+    let (decision, pointer) =
+        check_provider_snapshot(store, &settings, &options, &state, &controls.sync)?;
     match decision {
         CloudRemoteCheckDecision::LocalChanged if settings.auto_push_on_change => {
-            let result = push_provider_snapshot(store, &settings, &options, &state, false)?;
-            cleanup_if_due(store, &settings, &options, &result);
+            let result =
+                push_provider_snapshot(store, &settings, &options, &state, false, &controls.sync)?;
+            cleanup_if_due(store, &settings, &options, &result, &controls.cleanup);
             Ok(AutoSyncResult::Synced(Box::new(result)))
         }
         CloudRemoteCheckDecision::AutoPull if pull_safe => {
@@ -110,6 +117,7 @@ pub(crate) fn run_auto_sync(
                 &state,
                 false,
                 before_apply,
+                &controls.sync,
             ) {
                 Err(CloudSyncError::AutoPullDeferred) => {
                     return Ok(AutoSyncResult::RemoteAvailable {
@@ -118,7 +126,7 @@ pub(crate) fn run_auto_sync(
                 }
                 result => result?,
             };
-            cleanup_if_due(store, &settings, &options, &result);
+            cleanup_if_due(store, &settings, &options, &result, &controls.cleanup);
             Ok(AutoSyncResult::Synced(Box::new(result)))
         }
         CloudRemoteCheckDecision::AutoPull => Ok(AutoSyncResult::RemoteAvailable {
@@ -141,6 +149,7 @@ pub(crate) fn run_auto_sync(
                 checked.last_applied_remote_revision = Some(pointer.revision_id);
             }
             let persisted = checked.clone();
+            controls.sync.begin_commit()?;
             store
                 .request_fn(StoreDomain::CloudSync, move |database| {
                     database.save_cloud_sync_state(&persisted)
@@ -156,6 +165,7 @@ fn cleanup_if_due(
     settings: &CloudSyncSettings,
     options: &LocalCloudSyncOptions,
     result: &CloudSyncResult,
+    control: &CloudSyncOperationControl,
 ) {
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
     if result
@@ -165,7 +175,10 @@ fn cleanup_if_due(
     {
         return;
     }
-    let _ = cleanup_provider_snapshots(store, settings, options, result.pointer.as_ref());
+    let _ = cleanup_provider_snapshots(store, settings, options, result.pointer.as_ref(), control);
+    if control.begin_commit().is_err() {
+        return;
+    }
     let _ = store.request_fn(StoreDomain::CloudSync, |database| {
         let mut latest = database.load_cloud_sync_state()?;
         latest.last_gc_attempt_at_ms = Some(now_ms());

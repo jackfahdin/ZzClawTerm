@@ -55,7 +55,9 @@ fn resolve_cell_fg(
     match style.fg {
         Some(index) if style.bold && index < 8 => palette.terminal_ansi_color(index + 8),
         Some(index) => palette.terminal_ansi_color(index),
-        None if style.bold && bold_default_foreground => palette.terminal_ansi_color(15),
+        None if style.bold && bold_default_foreground => {
+            palette.terminal_fg_intense.unwrap_or(palette.terminal_fg)
+        }
         None => palette.terminal_fg,
     }
 }
@@ -63,16 +65,19 @@ fn resolve_cell_fg(
 fn resolve_cell_bg(
     palette: zzclawterm_ui::ThemePalette,
     style: zzclawterm_terminal::CellStyle,
+    bold_default_foreground: bool,
 ) -> Option<u32> {
     if style.reverse {
-        if let Some(rgb) = style.fg_rgb {
-            return Some(rgb);
-        }
-        return Some(match style.fg {
-            Some(index) if style.bold && index < 8 => palette.terminal_ansi_color(index + 8),
-            Some(index) => palette.terminal_ansi_color(index),
-            None => palette.terminal_fg,
-        });
+        // Resolve bold on the source foreground, including the user's default
+        // foreground setting, before moving that color to the background.
+        return Some(resolve_cell_fg(
+            palette,
+            zzclawterm_terminal::CellStyle {
+                reverse: false,
+                ..style
+            },
+            bold_default_foreground,
+        ));
     }
     style
         .bg_rgb
@@ -91,6 +96,7 @@ pub use keywords::terminal_buffer_matches;
 pub use keywords::{
     TerminalKeywordHighlightPrecomputeStats, TerminalKeywordHighlightSnapshot,
     TerminalKeywordHighlighter, compile_terminal_keyword_highlighter,
+    precompute_terminal_input_highlights, precompute_terminal_input_highlights_reusing,
     precompute_terminal_keyword_highlights, precompute_terminal_keyword_highlights_for_rows,
     precompute_terminal_keyword_highlights_for_rows_with_stats,
     precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel,

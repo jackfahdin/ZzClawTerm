@@ -26,7 +26,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.theme_palette().ui_terminal_bg))
             .child(connection_spinner(
                 SharedString::from(format!("reconnect-spinner-{session_id}")),
                 rgb(palette.primary).into(),
@@ -72,7 +72,7 @@ impl ZzClawTermApp {
             .items_center()
             .justify_center()
             .gap_3()
-            .bg(self.shell_terminal_surface_color(self.terminal_theme_palette().terminal_bg))
+            .bg(self.shell_terminal_surface_color(self.theme_palette().ui_terminal_bg))
             .child(
                 svg()
                     .size(px(32.))
@@ -291,6 +291,7 @@ mod tests {
     fn connecting_and_reconnecting_preserve_the_painted_workbench_background() {
         let root = TestTempDir::new("zzclawterm-workspace-background");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "s0");
         let (terminal_color, expected_alpha) = cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);

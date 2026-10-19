@@ -5,6 +5,7 @@ pub mod notes;
 pub mod quick_commands;
 pub mod sessions;
 pub mod settings;
+pub mod window_material;
 pub mod window_state;
 pub mod workspace;
 pub mod workspace_manifest;

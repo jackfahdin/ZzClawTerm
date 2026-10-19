@@ -21,6 +21,8 @@ use super::{
     uuid_like_prompt_id,
 };
 
+const MAX_SILENT_TOTP_REUSE_WAIT_SECS: u64 = 5;
+
 pub(in crate::features) struct NativeHostKeyVerifier {
     pub(in crate::features) store: StoreBlockingClient,
     pub(in crate::features) policy: String,
@@ -297,6 +299,11 @@ impl SshOtpProvider for NativeOtpProvider {
         let mut code = self.generate_totp_code(&entry, now)?;
         if self.has_used_totp_code(otp_id, &code)? {
             let wait = seconds_until_next_totp_step(now, code.period);
+            // A long silent wait leaves the connection looking stuck; returning no code
+            // hands the round to the interactive prompt, which shows the countdown.
+            if wait > MAX_SILENT_TOTP_REUSE_WAIT_SECS {
+                return Ok(None);
+            }
             std::thread::sleep(Duration::from_secs(wait));
             now = unix_seconds_now();
             code = self.generate_totp_code(&entry, now)?;

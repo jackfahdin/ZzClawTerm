@@ -1,6 +1,7 @@
 use crate::{TelnetEnterMode, TelnetSessionConfig, telnet_prompts};
 
 pub(super) const IAC: u8 = 255;
+pub(super) const NOP: [u8; 2] = [IAC, 241];
 pub(super) const WILL: u8 = 251;
 const WONT: u8 = 252;
 pub(super) const DO: u8 = 253;

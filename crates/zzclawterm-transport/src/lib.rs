@@ -6,7 +6,6 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{
@@ -33,6 +32,7 @@ mod environment;
 mod file_browser;
 mod gpu;
 mod local_fs;
+mod local_shell;
 mod reconnect_cwd;
 mod recording;
 mod remote_file;
@@ -45,7 +45,11 @@ mod ssh_agent;
 mod ssh_agent_broker;
 mod ssh_algorithms;
 mod ssh_auth;
+mod ssh_mailbox;
 mod telnet_codec;
+mod writer_mailbox;
+use writer_mailbox::WriterMailbox;
+use zzclawterm_core::runtime::reaper::Reaper;
 mod telnet_prompts;
 #[cfg(test)]
 use ssh_algorithms::defaults_from_preferred;
@@ -115,8 +119,8 @@ use session_event_queue::{
     SESSION_EVENT_QUEUE_OUTPUT_EVENT_LIMIT, SESSION_EVENT_QUEUE_OUTPUT_LIMIT,
 };
 pub use session_types::{
-    SessionDrain, SessionDrainStats, SessionError, SessionEvent, SessionEventConsumerId,
-    SessionInfo, SessionKind, TerminalTransport,
+    CleanupOperation, SessionDrain, SessionDrainStats, SessionError, SessionEvent,
+    SessionEventConsumerId, SessionInfo, SessionKind, TerminalTransport,
 };
 pub use sftp::{
     RemoteBinaryFile, RemoteFilePath, SFTP_TRANSFER_CANCELLED, SftpAttributeUpdate, SftpFileEntry,
@@ -599,6 +603,7 @@ pub struct SessionManager {
     event_queue: SessionEventQueue,
     next_event_consumer_id: AtomicU64,
     shell_environment: Arc<ShellEnvironmentCache>,
+    reaper: Mutex<Option<Reaper<ManagedSession>>>,
 }
 
 enum ManagedSession {
@@ -614,6 +619,8 @@ pub struct LocalPtyTransport {
     writer: QueuedTransportWriter,
     child: Box<dyn Child + Send + Sync>,
     reader_thread: Option<JoinHandle<()>>,
+    event_queue: SessionEventQueue,
+    cleanup_consumer: Option<SessionEventConsumerId>,
 }
 
 pub struct TelnetTransport {
@@ -631,7 +638,7 @@ pub struct TelnetTransport {
 pub struct SshChannelTransport {
     info: SessionInfo,
     attempt: connection_attempt::ConnectionAttempt,
-    command_tx: tokio_mpsc::UnboundedSender<SshCommand>,
+    command_tx: ssh_mailbox::Sender,
     backspace_as_bs: bool,
     worker_thread: Option<JoinHandle<()>>,
 }
@@ -646,8 +653,33 @@ pub struct SerialTransport {
 }
 
 struct QueuedTransportWriter {
-    command_tx: mpsc::Sender<TransportWriterCommand>,
+    command_tx: WriterMailbox,
     worker_thread: Option<JoinHandle<()>>,
+    telnet_lifecycle: Option<Arc<TelnetWriterLifecycle>>,
+    cancellation: Option<portable_pty::WriteCancellation>,
+}
+
+// Shared only by a TCP session's reader and writer. Closing the socket also
+// interrupts a blocked write before either thread is joined.
+struct TelnetWriterLifecycle {
+    stopped: AtomicBool,
+    stream: TcpStream,
+}
+
+impl TelnetWriterLifecycle {
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+}
+
+struct TelnetWriterPolicy {
+    idle_interval: Option<Duration>,
+    lifecycle: Arc<TelnetWriterLifecycle>,
 }
 
 #[derive(Clone, Copy)]
@@ -667,9 +699,24 @@ impl WriterFlushPolicy {
     }
 }
 
+enum WriteCapacity {
+    Native(WriterMailbox),
+    Ssh(ssh_mailbox::Sender),
+}
+
+impl WriteCapacity {
+    fn wait(&self, bytes: usize, cancelled: &AtomicBool) -> std::io::Result<()> {
+        match self {
+            Self::Native(mailbox) => mailbox.wait_capacity(bytes, cancelled),
+            Self::Ssh(mailbox) => mailbox.wait_capacity(bytes, cancelled),
+        }
+    }
+}
+
 enum TransportWriterCommand {
     Write(Vec<u8>),
-    Close,
+    // Already encoded wire bytes: never apply application escaping or EachByte.
+    TelnetControl(Vec<u8>),
 }
 
 impl QueuedTransportWriter {
@@ -678,18 +725,51 @@ impl QueuedTransportWriter {
         writer: W,
         flush_policy: WriterFlushPolicy,
         event_queue: SessionEventQueue,
-    ) -> Self
+    ) -> std::io::Result<Self>
     where
         W: Write + Send + 'static,
     {
-        let (command_tx, command_rx) = mpsc::channel();
-        let worker_thread = std::thread::spawn(move || {
-            run_transport_writer(session_id, writer, flush_policy, command_rx, event_queue)
-        });
-        Self {
+        Self::spawn_with_telnet_policy(session_id, writer, flush_policy, event_queue, None)
+    }
+
+    fn spawn_with_telnet_policy<W>(
+        session_id: String,
+        writer: W,
+        flush_policy: WriterFlushPolicy,
+        event_queue: SessionEventQueue,
+        telnet_policy: Option<TelnetWriterPolicy>,
+    ) -> std::io::Result<Self>
+    where
+        W: Write + Send + 'static,
+    {
+        let command_tx = WriterMailbox::default();
+        let command_rx = command_tx.clone();
+        let telnet_lifecycle = telnet_policy
+            .as_ref()
+            .map(|policy| policy.lifecycle.clone());
+        let worker_thread = zzclawterm_core::runtime::worker::spawn(
+            format!("transport-writer-{session_id}"),
+            move || {
+                run_transport_writer(
+                    session_id,
+                    writer,
+                    flush_policy,
+                    command_rx,
+                    event_queue,
+                    telnet_policy,
+                )
+            },
+        )?;
+        Ok(Self {
             command_tx,
             worker_thread: Some(worker_thread),
-        }
+            telnet_lifecycle,
+            cancellation: None,
+        })
+    }
+
+    fn write_telnet_control(&self, data: Vec<u8>) -> anyhow::Result<()> {
+        queue_telnet_control(&self.command_tx, data)
     }
 
     fn write(&self, data: Vec<u8>) -> anyhow::Result<()> {
@@ -698,56 +778,154 @@ impl QueuedTransportWriter {
         }
         self.command_tx
             .send(TransportWriterCommand::Write(data))
-            .map_err(|_| anyhow::anyhow!("transport writer stopped"))
+            .map_err(anyhow::Error::from)
     }
 
-    fn close(&mut self) {
-        let _ = self.command_tx.send(TransportWriterCommand::Close);
-        if let Some(worker_thread) = self.worker_thread.take() {
-            let _ = worker_thread.join();
+    fn write_slice(&self, data: &[u8]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.command_tx.check_capacity(data.len())?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(data.len())?;
+        bytes.extend_from_slice(data);
+        self.write(bytes)
+    }
+
+    fn stop(&self) {
+        self.command_tx.stop();
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
         }
     }
+
+    fn close(&mut self) -> bool {
+        self.stop();
+        if let Some(lifecycle) = &self.telnet_lifecycle {
+            lifecycle.stop();
+        }
+
+        if let Some(worker_thread) = self.worker_thread.take() {
+            while !worker_thread.is_finished() && self.cancellation.is_some() {
+                self.stop();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return worker_thread.join().is_ok();
+        }
+        true
+    }
+}
+
+fn telnet_wire_size(data: &[u8], raw_tcp: bool) -> usize {
+    data.len().saturating_add(if raw_tcp {
+        0
+    } else {
+        data.iter().filter(|byte| **byte == 255).count()
+    })
+}
+
+fn queue_telnet_control(command_tx: &WriterMailbox, data: Vec<u8>) -> anyhow::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    command_tx
+        .send(TransportWriterCommand::TelnetControl(data))
+        .map_err(anyhow::Error::from)
 }
 
 fn run_transport_writer<W>(
     session_id: String,
     mut writer: W,
     flush_policy: WriterFlushPolicy,
-    command_rx: mpsc::Receiver<TransportWriterCommand>,
+    command_rx: WriterMailbox,
     event_queue: SessionEventQueue,
+    telnet_policy: Option<TelnetWriterPolicy>,
 ) where
     W: Write,
 {
-    while let Ok(command) = command_rx.recv() {
-        match command {
-            TransportWriterCommand::Write(data) => {
-                let write_result = if matches!(flush_policy, WriterFlushPolicy::EachByte) {
-                    data.iter().try_for_each(|byte| {
-                        writer
-                            .write_all(std::slice::from_ref(byte))
-                            .and_then(|_| writer.flush())
-                    })
-                } else {
-                    writer.write_all(&data).and_then(|_| {
-                        if matches!(flush_policy, WriterFlushPolicy::Never) {
-                            Ok(())
-                        } else {
-                            writer.flush()
+    let stopped = || {
+        command_rx.is_stopped()
+            || telnet_policy
+                .as_ref()
+                .is_some_and(|policy| policy.lifecycle.is_stopped())
+    };
+    let idle_interval = telnet_policy
+        .as_ref()
+        .and_then(|policy| policy.idle_interval);
+    let mut last_sent = Instant::now();
+    while !stopped() {
+        let (command, _permit) = match command_rx
+            .receive(idle_interval.map(|interval| interval.saturating_sub(last_sent.elapsed())))
+        {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                match command_rx.send(TransportWriterCommand::TelnetControl(
+                    telnet_codec::NOP.to_vec(),
+                )) {
+                    Ok(()) => {}
+                    // Input can race the idle deadline. Consume that accepted
+                    // input before considering another keepalive.
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => {
+                        if !stopped() {
+                            send_session_error(&event_queue, &session_id, error);
                         }
-                    })
-                };
-                if let Err(error) = write_result {
-                    send_session_error(&event_queue, &session_id, error);
-                    break;
+                        break;
+                    }
                 }
+                continue;
             }
-            TransportWriterCommand::Close => break,
+            Err(_) => break,
+        };
+        if stopped() {
+            break;
         }
+        let (data, policy) = match command {
+            TransportWriterCommand::Write(data) => (data, flush_policy),
+            TransportWriterCommand::TelnetControl(data) => (data, WriterFlushPolicy::AfterWrite),
+        };
+        if data.is_empty() {
+            continue;
+        }
+        let write_result = if matches!(policy, WriterFlushPolicy::EachByte) {
+            data.iter().try_for_each(|byte| {
+                if stopped() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "writer stopped",
+                    ));
+                }
+                writer
+                    .write_all(std::slice::from_ref(byte))
+                    .and_then(|_| writer.flush())
+            })
+        } else {
+            writer.write_all(&data).and_then(|_| {
+                if matches!(policy, WriterFlushPolicy::Never) {
+                    Ok(())
+                } else {
+                    writer.flush()
+                }
+            })
+        };
+        if let Err(error) = write_result {
+            if !stopped() {
+                send_session_error(&event_queue, &session_id, error);
+            }
+            break;
+        }
+        // Count completed sends, including negotiation and NOP; never catch up
+        // missed deadlines after a slow write.
+        last_sent = Instant::now();
+    }
+    command_rx.stop();
+    if let Some(policy) = telnet_policy {
+        policy.lifecycle.stop();
     }
 }
 
 enum SshCommand {
-    Write(Vec<u8>),
+    Write(ssh_mailbox::PendingWrite),
     Resize {
         cols: u16,
         rows: u16,
@@ -815,13 +993,64 @@ impl SessionManager {
             event_queue: SessionEventQueue::new(),
             next_event_consumer_id: AtomicU64::new(1),
             shell_environment: ShellEnvironmentCache::global(),
+            reaper: Mutex::new(None),
         }
+    }
+
+    fn ensure_reaper(&self) -> Result<(), SessionError> {
+        let mut reaper = self.reaper.lock().map_err(|_| SessionError::LockPoisoned)?;
+        if reaper.is_none() {
+            *reaper = Some(
+                Reaper::new("transport-reaper", 64, |mut session: ManagedSession| {
+                    session.close()
+                })
+                .map_err(SessionError::Worker)?,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn close_detached(&self, session_id: &str) -> Result<(), SessionError> {
+        self.ensure_reaper()?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
+        let reaper = self.reaper.lock().map_err(|_| SessionError::LockPoisoned)?;
+        reaper
+            .as_ref()
+            .ok_or_else(|| SessionError::Worker(std::io::Error::other("reaper unavailable")))?
+            .try_submit_with(|| {
+                let mut session = sessions.remove(session_id)?;
+                // Clear pending input before waiting behind other cleanup jobs.
+                // Native cancellation and joins remain on the reaper worker.
+                match &session {
+                    ManagedSession::Local(local) => local.writer.command_tx.stop(),
+                    ManagedSession::Tcp(tcp) => tcp.writer.command_tx.stop(),
+                    ManagedSession::Serial(serial) => serial.writer.command_tx.stop(),
+                    ManagedSession::Ssh(ssh) => ssh.command_tx.close(),
+                }
+                if let ManagedSession::Local(local) = &mut session {
+                    local.cleanup_consumer = self.event_queue.consumer_for(session_id);
+                }
+                self.event_queue.cancel_session(session_id);
+                Some(session)
+            })
+            .map_err(SessionError::Worker)
     }
 
     /// Allocate an independent event consumer. Sessions are invisible to the
     /// consumer until explicitly assigned, which lets multiple desktop
     /// workspaces share one transport manager without stealing each other's
     /// output.
+    /// Place an in-process presentation fence after all output already queued.
+    pub fn enqueue_output_boundary(&self, session_id: &str, token: &str) {
+        self.event_queue.push(SessionEvent::OutputBoundary {
+            session_id: session_id.into(),
+            token: token.into(),
+        });
+    }
+
     pub fn register_event_consumer(&self) -> SessionEventConsumerId {
         SessionEventConsumerId(self.next_event_consumer_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -851,6 +1080,20 @@ impl SessionManager {
         &self,
         config: LocalSessionConfig,
     ) -> Result<SessionInfo, SessionError> {
+        let shell = local_shell::ResolvedLocalShell::resolve(&config);
+        self.create_local_session_with_shell(config, shell)
+    }
+
+    fn create_local_session_with_shell(
+        &self,
+        config: LocalSessionConfig,
+        shell: local_shell::ResolvedLocalShell,
+    ) -> Result<SessionInfo, SessionError> {
+        self.ensure_reaper()?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -862,23 +1105,17 @@ impl SessionManager {
             ))
             .map_err(SessionError::OpenPty)?;
 
-        let mut command = build_command(&config);
+        let mut command = shell.command();
         // Startup asynchronously warms the complete shell environment. Copy
         // values from the shared snapshot here without starting another shell.
         // If a terminal is created before warm-up finishes, retain portable-pty's
         // inherited environment as a non-blocking fallback.
-        let requested_shell = config
-            .shell_path
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(default_local_shell_path);
         let shell_snapshot = self
             .shell_environment
             .snapshot()
             .ok()
             .flatten()
-            .filter(|snapshot| snapshot.matches_shell_path(Some(Path::new(&requested_shell))));
+            .filter(|snapshot| shell.matches_environment(snapshot));
         configure_environment(&mut command, shell_snapshot.as_deref());
         if let Some(working_dir) = &config.working_dir {
             command.cwd(working_dir);
@@ -888,11 +1125,11 @@ impl SessionManager {
             .master
             .try_clone_reader()
             .map_err(SessionError::CloneReader)?;
-        let writer = pair
+        let (writer, cancellation) = pair
             .master
-            .take_writer()
+            .take_cancellable_writer()
             .map_err(SessionError::TakeWriter)?;
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(SessionError::Spawn)?;
@@ -906,26 +1143,53 @@ impl SessionManager {
             cols: config.cols,
             rows: config.rows,
         };
-        let reader_thread =
-            spawn_reader_thread(session_id.clone(), reader, self.event_queue.clone());
-        let writer = QueuedTransportWriter::spawn(
+        let mut writer = match QueuedTransportWriter::spawn(
             session_id.clone(),
             writer,
             WriterFlushPolicy::AfterWrite,
             self.event_queue.clone(),
-        );
+        ) {
+            Ok(mut writer) => {
+                writer.cancellation = Some(cancellation);
+                writer
+            }
+            Err(error) => {
+                let killed = child.kill().is_ok();
+                // No reader worker exists. Close its pipe before ConPTY teardown
+                // so flushing buffered output cannot wait for a missing drainer.
+                drop(reader);
+                drop(pair.master);
+                if killed {
+                    let _ = child.wait();
+                }
+                return Err(SessionError::Worker(error));
+            }
+        };
+        let reader_thread =
+            match spawn_reader_thread(session_id.clone(), reader, self.event_queue.clone()) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    writer.stop();
+                    let killed = child.kill().is_ok();
+                    drop(pair.master);
+                    writer.close();
+                    if killed {
+                        let _ = child.wait();
+                    }
+                    return Err(SessionError::Worker(error));
+                }
+            };
         let session = LocalPtyTransport {
             info: info.clone(),
             master: Some(pair.master),
             writer,
             child,
             reader_thread: Some(reader_thread),
+            event_queue: self.event_queue.clone(),
+            cleanup_consumer: None,
         };
 
-        self.sessions
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned)?
-            .insert(session_id, ManagedSession::Local(session));
+        sessions.insert(session_id, ManagedSession::Local(session));
 
         Ok(info)
     }
@@ -942,6 +1206,7 @@ impl SessionManager {
         config: TelnetSessionConfig,
         attempt: connection_attempt::ConnectionAttempt,
     ) -> Result<SessionInfo, SessionError> {
+        self.ensure_reaper()?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let addr = format!("{}:{}", config.host, config.port);
         let connect = || -> Result<TcpStream, std::io::Error> {
@@ -967,23 +1232,28 @@ impl SessionManager {
             .set_read_timeout(Some(Duration::from_millis(250)))
             .ok();
 
-        let mut writer = stream
+        let writer_stream = stream
             .try_clone()
             .map_err(|source| SessionError::CloneTcp {
                 session_id: session_id.clone(),
                 source,
             })?;
-        let response_writer = stream
+        let reader_stream = stream
             .try_clone()
             .map_err(|source| SessionError::CloneTcp {
                 session_id: session_id.clone(),
                 source,
             })?;
-
-        if let Some(naws) = maybe_build_naws(config.cols, config.rows, &config) {
-            writer.write_all(&naws).ok();
-            writer.flush().ok();
-        }
+        let shutdown_stream = stream
+            .try_clone()
+            .map_err(|source| SessionError::CloneTcp {
+                session_id: session_id.clone(),
+                source,
+            })?;
+        let lifecycle = Arc::new(TelnetWriterLifecycle {
+            stopped: AtomicBool::new(false),
+            stream: shutdown_stream,
+        });
 
         let info = SessionInfo {
             id: session_id.clone(),
@@ -998,31 +1268,46 @@ impl SessionManager {
             rows: config.rows,
         };
 
+        // Fail before spawning either worker if session registration is unavailable.
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
         let auto_login =
             TelnetAutoLoginState::new(&config).map(|state| Arc::new(Mutex::new(state)));
-        let reader_thread = spawn_tcp_reader_thread(
+        let mut writer = QueuedTransportWriter::spawn_with_telnet_policy(
             session_id.clone(),
-            stream
-                .try_clone()
-                .map_err(|source| SessionError::CloneTcp {
-                    session_id: session_id.clone(),
-                    source,
-                })?,
-            response_writer,
-            config.clone(),
-            auto_login.clone(),
-            self.event_queue.clone(),
-        );
-        let writer = QueuedTransportWriter::spawn(
-            session_id.clone(),
-            writer,
+            writer_stream,
             if config.force_character_at_a_time {
                 WriterFlushPolicy::EachByte
             } else {
                 WriterFlushPolicy::AfterWrite
             },
             self.event_queue.clone(),
-        );
+            Some(TelnetWriterPolicy {
+                idle_interval: (!config.raw_tcp && config.keep_alive_interval_secs != 0)
+                    .then(|| Duration::from_secs(u64::from(config.keep_alive_interval_secs))),
+                lifecycle: lifecycle.clone(),
+            }),
+        )
+        .map_err(SessionError::Worker)?;
+        if let Some(naws) = maybe_build_naws(config.cols, config.rows, &config) {
+            let _ = writer.write_telnet_control(naws);
+        }
+        let reader_thread = spawn_tcp_reader_thread(
+            session_id.clone(),
+            reader_stream,
+            writer.command_tx.clone(),
+            lifecycle.clone(),
+            config.clone(),
+            auto_login.clone(),
+            self.event_queue.clone(),
+        )
+        .map_err(|error| {
+            lifecycle.stop();
+            writer.close();
+            SessionError::Worker(error)
+        })?;
 
         let session = TelnetTransport {
             info: info.clone(),
@@ -1039,10 +1324,7 @@ impl SessionManager {
             reader_thread: Some(reader_thread),
         };
 
-        self.sessions
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned)?
-            .insert(session_id, ManagedSession::Tcp(Box::new(session)));
+        sessions.insert(session_id, ManagedSession::Tcp(Box::new(session)));
 
         Ok(info)
     }
@@ -1073,6 +1355,11 @@ impl SessionManager {
         config: SshSessionConfig,
         multiplex: Option<SshMultiplexHandle>,
     ) -> Result<SessionInfo, SessionError> {
+        self.ensure_reaper()?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let addr = format!("{}:{}", config.host, config.port);
         validate_ssh_algorithm_preferences(config.ssh_algorithms.as_ref()).map_err(|source| {
@@ -1081,7 +1368,7 @@ impl SessionManager {
                 source: source.into(),
             }
         })?;
-        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
+        let (command_tx, command_rx) = ssh_mailbox::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let event_queue = self.event_queue.clone();
         let attempt = multiplex
@@ -1091,17 +1378,21 @@ impl SessionManager {
         let worker_config = config.clone();
         let worker_session_id = session_id.clone();
         let shell_environment = self.shell_environment();
-        let worker_thread = std::thread::spawn(move || {
-            run_ssh_worker(
-                worker_session_id,
-                worker_config,
-                command_rx,
-                ready_tx,
-                event_queue,
-                multiplex,
-                shell_environment,
-            );
-        });
+        let worker_thread = zzclawterm_core::runtime::worker::spawn(
+            format!("ssh-worker-{session_id}"),
+            move || {
+                run_ssh_worker(
+                    worker_session_id,
+                    worker_config,
+                    command_rx,
+                    ready_tx,
+                    event_queue,
+                    multiplex,
+                    shell_environment,
+                );
+            },
+        )
+        .map_err(SessionError::Worker)?;
 
         match ready_rx.recv() {
             Ok(Ok(())) => {}
@@ -1140,10 +1431,7 @@ impl SessionManager {
             worker_thread: Some(worker_thread),
         };
 
-        self.sessions
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned)?
-            .insert(session_id, ManagedSession::Ssh(session));
+        sessions.insert(session_id, ManagedSession::Ssh(session));
 
         Ok(info)
     }
@@ -1152,6 +1440,7 @@ impl SessionManager {
         &self,
         config: SerialSessionConfig,
     ) -> Result<SessionInfo, SessionError> {
+        self.ensure_reaper()?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let port = open_serial_port(&config).map_err(|source| SessionError::OpenSerial {
             port_name: config.port_name.clone(),
@@ -1172,19 +1461,28 @@ impl SessionManager {
             cols: 80,
             rows: 24,
         };
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?;
+        let mut writer = QueuedTransportWriter::spawn(
+            session_id.clone(),
+            port,
+            WriterFlushPolicy::serial(),
+            self.event_queue.clone(),
+        )
+        .map_err(SessionError::Worker)?;
         let stop_reader = Arc::new(AtomicBool::new(false));
         let reader_thread = spawn_serial_reader_thread(
             session_id.clone(),
             reader,
             stop_reader.clone(),
             self.event_queue.clone(),
-        );
-        let writer = QueuedTransportWriter::spawn(
-            session_id.clone(),
-            port,
-            WriterFlushPolicy::serial(),
-            self.event_queue.clone(),
-        );
+        )
+        .map_err(|error| {
+            writer.close();
+            SessionError::Worker(error)
+        })?;
         let session = SerialTransport {
             flow_control: config.flow_control,
             info: info.clone(),
@@ -1197,10 +1495,7 @@ impl SessionManager {
             reader_thread: Some(reader_thread),
         };
 
-        self.sessions
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned)?
-            .insert(session_id, ManagedSession::Serial(session));
+        sessions.insert(session_id, ManagedSession::Serial(session));
 
         Ok(info)
     }
@@ -1254,7 +1549,119 @@ impl SessionManager {
         })
     }
 
+    pub(crate) fn write_queue_peak_bytes(&self, session_id: &str) -> usize {
+        let Ok(sessions) = self.sessions.lock() else {
+            return 0;
+        };
+        match sessions.get(session_id) {
+            Some(ManagedSession::Local(s)) => s.writer.command_tx.peak_bytes(),
+            Some(ManagedSession::Tcp(s)) => s.writer.command_tx.peak_bytes(),
+            Some(ManagedSession::Serial(s)) => s.writer.command_tx.peak_bytes(),
+            Some(ManagedSession::Ssh(s)) => s.command_tx.peak_bytes(),
+            None => 0,
+        }
+    }
+
+    pub fn zmodem_transfer_options(&self, session_id: &str) -> zmodem::ZmodemTransferOptions {
+        let serial = self.sessions.lock().is_ok_and(|sessions| {
+            matches!(sessions.get(session_id), Some(ManagedSession::Serial(_)))
+        });
+        if serial {
+            zmodem::ZmodemTransferOptions {
+                buffered_files: true,
+                ..Default::default()
+            }
+        } else {
+            zmodem::ZmodemTransferOptions::reliable_transport()
+        }
+    }
+
     /// Send protocol bytes without transport text-input transformations.
+    /// Background transfer path: preserve each frame until accepted, with a
+    /// bounded wait between attempts and cancellation independent of the FIFO.
+    pub fn write_raw_cancellable(
+        &self,
+        session_id: &str,
+        data: &[u8],
+        cancelled: &AtomicBool,
+    ) -> Result<(), SessionError> {
+        self.write_raw_cancellable_measured(session_id, data, cancelled)
+            .map(|_| ())
+    }
+
+    pub(crate) fn write_raw_cancellable_measured(
+        &self,
+        session_id: &str,
+        data: &[u8],
+        cancelled: &AtomicBool,
+    ) -> Result<Duration, SessionError> {
+        let wire_bytes = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| SessionError::LockPoisoned)?;
+            match sessions.get(session_id) {
+                Some(ManagedSession::Tcp(session)) => {
+                    telnet_wire_size(data, session.config.raw_tcp)
+                }
+                _ => data.len(),
+            }
+        };
+        if wire_bytes > writer_mailbox::BYTE_LIMIT {
+            return Err(SessionError::Write {
+                session_id: session_id.to_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "transfer frame exceeds input queue capacity",
+                )
+                .into(),
+            });
+        }
+        let mut waited = Duration::ZERO;
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(SessionError::Write {
+                    session_id: session_id.into(),
+                    source: std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+                });
+            }
+            match self.write_raw(session_id, data) {
+                Err(error) if error.is_backpressure() => {
+                    let target = {
+                        let sessions = self
+                            .sessions
+                            .lock()
+                            .map_err(|_| SessionError::LockPoisoned)?;
+                        match sessions.get(session_id) {
+                            Some(ManagedSession::Local(s)) => {
+                                WriteCapacity::Native(s.writer.command_tx.clone())
+                            }
+                            Some(ManagedSession::Tcp(s)) => {
+                                WriteCapacity::Native(s.writer.command_tx.clone())
+                            }
+                            Some(ManagedSession::Serial(s)) => {
+                                WriteCapacity::Native(s.writer.command_tx.clone())
+                            }
+                            Some(ManagedSession::Ssh(s)) => {
+                                WriteCapacity::Ssh(s.command_tx.clone())
+                            }
+                            None => return Err(SessionError::NotFound(session_id.into())),
+                        }
+                    };
+                    let start = Instant::now();
+                    target
+                        .wait(wire_bytes, cancelled)
+                        .map_err(|source| SessionError::Write {
+                            session_id: session_id.into(),
+                            source: source.into(),
+                        })?;
+                    waited += start.elapsed();
+                }
+                result => return result.map(|()| waited),
+            }
+        }
+    }
+
     pub fn write_raw(&self, session_id: &str, data: &[u8]) -> Result<(), SessionError> {
         let mut sessions = self
             .sessions
@@ -1307,6 +1714,9 @@ impl SessionManager {
             .map_err(|_| SessionError::LockPoisoned)?
             .remove(session_id)
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        if let ManagedSession::Local(local) = &mut session {
+            local.cleanup_consumer = self.event_queue.consumer_for(session_id);
+        }
         self.event_queue.cancel_session(session_id);
         session.close();
         Ok(())
@@ -1346,6 +1756,18 @@ impl SessionManager {
             Some(max_output_bytes),
             timeout,
         ))
+    }
+
+    /// Wait without removing events so a caller can acquire its handoff lock
+    /// before draining. Readiness does not reserve events: the subsequent drain
+    /// must check current consumer ownership again.
+    pub fn wait_for_events_for_consumer(
+        &self,
+        consumer_id: SessionEventConsumerId,
+        timeout: Duration,
+    ) -> bool {
+        self.event_queue
+            .wait_for_events_for_consumer(consumer_id, timeout)
     }
 
     pub fn drain_events_blocking_for_consumer_with_output_budget(
@@ -1427,9 +1849,20 @@ impl ManagedSession {
     }
 }
 
+impl LocalPtyTransport {
+    fn report_cleanup_failure(&self, operation: CleanupOperation) {
+        self.event_queue
+            .push_cleanup_failure(SessionEvent::CleanupFailed {
+                session_id: self.info.id.clone(),
+                consumer_id: self.cleanup_consumer,
+                operation,
+            });
+    }
+}
+
 impl TerminalTransport for LocalPtyTransport {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.writer.write(data.to_vec())
+        self.writer.write_slice(data)
     }
 
     fn resize(
@@ -1449,34 +1882,39 @@ impl TerminalTransport for LocalPtyTransport {
     }
 
     fn close(&mut self) -> anyhow::Result<()> {
-        let _ = self.child.kill();
-        self.writer.close();
-        // On Windows, portable-pty's ConPTY reader is a clone of a pipe owned by
-        // the master. Killing the child does not guarantee EOF while that master
-        // still owns the pseudo console, so release it before joining the reader.
-        drop(self.master.take());
-        if let Some(reader_thread) = self.reader_thread.take() {
-            let _ = reader_thread.join();
+        self.writer.stop();
+        let kill_result = self.child.kill();
+        if kill_result.is_err() {
+            self.report_cleanup_failure(CleanupOperation::Terminate);
         }
-        Ok(())
+        if !self.writer.close() {
+            self.report_cleanup_failure(CleanupOperation::WriterJoin);
+        }
+        drop(self.master.take());
+        if kill_result.is_ok() && self.child.wait().is_err() {
+            self.report_cleanup_failure(CleanupOperation::Wait);
+        }
+        if let Some(reader) = self.reader_thread.take()
+            && reader.join().is_err()
+        {
+            self.report_cleanup_failure(CleanupOperation::ReaderJoin);
+        }
+        kill_result.map_err(anyhow::Error::from)
     }
 }
 
 impl TerminalTransport for TelnetTransport {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        if !data.is_empty()
-            && let Some(auto_login) = self.auto_login.as_ref()
-            && let Ok(mut auto_login) = auto_login.lock()
-        {
-            let _ = auto_login.handle_user_input(false);
-        }
+        let user_input = !data.is_empty();
+        self.writer.command_tx.check_capacity(data.len())?;
         let data = if self.backspace_as_bs {
             remap_del_to_bs(data)
         } else {
             data.to_vec()
         };
+        let mut next_line_buffer = self.local_line_buffer.clone();
         let (data, visible_echo) = if self.config.local_line_edit {
-            edit_telnet_line_input(&data, &mut self.local_line_buffer, &self.config)
+            edit_telnet_line_input(&data, &mut next_line_buffer, &self.config)
         } else {
             let visible_echo = if self.config.local_echo {
                 data.clone()
@@ -1487,6 +1925,13 @@ impl TerminalTransport for TelnetTransport {
         };
         let data = normalize_telnet_input(&data, &self.config);
         self.writer.write(data)?;
+        self.local_line_buffer = next_line_buffer;
+        if user_input
+            && let Some(auto_login) = self.auto_login.as_ref()
+            && let Ok(mut auto_login) = auto_login.lock()
+        {
+            let _ = auto_login.handle_user_input(false);
+        }
         if !visible_echo.is_empty() {
             self.event_queue.push(SessionEvent::Output {
                 session_id: self.info.id.clone(),
@@ -1497,6 +1942,8 @@ impl TerminalTransport for TelnetTransport {
     }
 
     fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        let bytes = telnet_wire_size(data, self.config.raw_tcp);
+        self.writer.command_tx.check_capacity(bytes)?;
         self.writer
             .write(telnet_codec::escape_telnet_application_data(
                 data,
@@ -1514,7 +1961,7 @@ impl TerminalTransport for TelnetTransport {
         self.info.cols = cols;
         self.info.rows = rows;
         if let Some(naws) = maybe_build_naws(cols, rows, &self.config) {
-            self.writer.write(naws)?;
+            self.writer.write_telnet_control(naws)?;
         }
         Ok(())
     }
@@ -1537,17 +1984,15 @@ impl TerminalTransport for SshChannelTransport {
         } else {
             data.to_vec()
         };
-        self.command_tx
-            .send(SshCommand::Write(data))
-            .map_err(|_| anyhow::anyhow!("SSH worker stopped"))?;
+        self.command_tx.write(data)?;
         Ok(())
     }
 
     fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
         self.attempt.ensure_shell_available()?;
         self.command_tx
-            .send(SshCommand::Write(data.to_vec()))
-            .map_err(|_| anyhow::anyhow!("SSH worker stopped"))
+            .write(data.to_vec())
+            .map_err(anyhow::Error::from)
     }
 
     fn resize(
@@ -1560,18 +2005,12 @@ impl TerminalTransport for SshChannelTransport {
         self.info.cols = cols;
         self.info.rows = rows;
         self.command_tx
-            .send(SshCommand::Resize {
-                cols,
-                rows,
-                pixel_width,
-                pixel_height,
-            })
-            .map_err(|_| anyhow::anyhow!("SSH worker stopped"))?;
+            .resize(cols, rows, pixel_width, pixel_height);
         Ok(())
     }
 
     fn close(&mut self) -> anyhow::Result<()> {
-        let _ = self.command_tx.send(SshCommand::Close);
+        self.command_tx.close();
         if let Some(worker_thread) = self.worker_thread.take() {
             let _ = worker_thread.join();
         }
@@ -1581,6 +2020,7 @@ impl TerminalTransport for SshChannelTransport {
 
 impl TerminalTransport for SerialTransport {
     fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.writer.command_tx.check_capacity(data.len())?;
         let data = if self.backspace_as_bs {
             remap_del_to_bs(data)
         } else {
@@ -1590,7 +2030,7 @@ impl TerminalTransport for SerialTransport {
     }
 
     fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.writer.write(data.to_vec())
+        self.writer.write_slice(data)
     }
 
     fn resize(
@@ -1638,8 +2078,8 @@ fn spawn_reader_thread(
     session_id: String,
     mut reader: Box<dyn Read + Send>,
     event_queue: SessionEventQueue,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> std::io::Result<JoinHandle<()>> {
+    zzclawterm_core::runtime::worker::spawn(format!("transport-reader-{session_id}"), move || {
         let mut buffer = [0_u8; 8192];
         loop {
             match reader.read(&mut buffer) {
@@ -1671,16 +2111,20 @@ fn spawn_reader_thread(
 fn spawn_tcp_reader_thread(
     session_id: String,
     mut reader: TcpStream,
-    mut response_writer: TcpStream,
+    command_tx: WriterMailbox,
+    lifecycle: Arc<TelnetWriterLifecycle>,
     config: TelnetSessionConfig,
     auto_login: Option<Arc<Mutex<TelnetAutoLoginState>>>,
     event_queue: SessionEventQueue,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> std::io::Result<JoinHandle<()>> {
+    zzclawterm_core::runtime::worker::spawn(format!("transport-reader-{session_id}"), move || {
         let mut buffer = [0_u8; 8192];
-        loop {
+        while !lifecycle.is_stopped() {
             match reader.read(&mut buffer) {
                 Ok(0) => {
+                    if lifecycle.is_stopped() {
+                        break;
+                    }
                     event_queue.push(SessionEvent::Exited {
                         session_id: session_id.clone(),
                         reason: if config.raw_tcp {
@@ -1702,9 +2146,11 @@ fn spawn_tcp_reader_thread(
                                 config.send_naws,
                                 config.send_sga,
                             );
-                            if !response.is_empty() {
-                                let _ = response_writer.write_all(&response);
-                                let _ = response_writer.flush();
+                            if !response.is_empty()
+                                && let Err(error) = queue_telnet_control(&command_tx, response)
+                            {
+                                send_session_error(&event_queue, &session_id, error);
+                                lifecycle.stop();
                             }
                         })
                     };
@@ -1715,8 +2161,12 @@ fn spawn_tcp_reader_thread(
                             for action in auto_login.handle_visible_output(&visible, &config) {
                                 match action {
                                     TelnetAutoLoginAction::Send(payload) => {
-                                        let _ = response_writer.write_all(&payload);
-                                        let _ = response_writer.flush();
+                                        if let Err(error) =
+                                            queue_telnet_control(&command_tx, payload)
+                                        {
+                                            send_session_error(&event_queue, &session_id, error);
+                                            lifecycle.stop();
+                                        }
                                     }
                                     TelnetAutoLoginAction::Complete
                                     | TelnetAutoLoginAction::Disable => {}
@@ -1738,6 +2188,9 @@ fn spawn_tcp_reader_thread(
                     continue;
                 }
                 Err(error) => {
+                    if lifecycle.is_stopped() {
+                        break;
+                    }
                     event_queue.push(SessionEvent::Error {
                         session_id: session_id.clone(),
                         message: error.to_string(),
@@ -1746,6 +2199,8 @@ fn spawn_tcp_reader_thread(
                 }
             }
         }
+        lifecycle.stop();
+        command_tx.stop();
     })
 }
 
@@ -1937,7 +2392,7 @@ impl TelnetAutoLoginState {
 fn run_ssh_worker(
     session_id: String,
     config: SshSessionConfig,
-    command_rx: tokio_mpsc::UnboundedReceiver<SshCommand>,
+    command_rx: ssh_mailbox::Receiver,
     ready_tx: mpsc::Sender<Result<(), String>>,
     event_queue: SessionEventQueue,
     multiplex: Option<SshMultiplexHandle>,
@@ -2006,7 +2461,7 @@ fn run_ssh_worker(
 async fn run_deferred_ssh_worker(
     session_id: String,
     config: SshSessionConfig,
-    mut command_rx: tokio_mpsc::UnboundedReceiver<SshCommand>,
+    mut command_rx: ssh_mailbox::Receiver,
     ready_tx: mpsc::Sender<Result<(), String>>,
     event_queue: SessionEventQueue,
     multiplex: Option<SshMultiplexHandle>,
@@ -2091,7 +2546,7 @@ async fn run_deferred_ssh_worker(
 
 async fn run_sftp_only_session(
     session_id: &str,
-    mut commands: tokio_mpsc::UnboundedReceiver<SshCommand>,
+    mut commands: ssh_mailbox::Receiver,
     events: &SessionEventQueue,
 ) {
     events.push(SessionEvent::Output {
@@ -2110,9 +2565,9 @@ async fn run_sftp_only_session(
 }
 
 fn drain_deferred_ssh_open_commands(
-    command_rx: &mut tokio_mpsc::UnboundedReceiver<SshCommand>,
+    command_rx: &mut ssh_mailbox::Receiver,
     dimensions: &mut SshPtyDimensions,
-    pending_writes: &mut VecDeque<Vec<u8>>,
+    pending_writes: &mut VecDeque<ssh_mailbox::PendingWrite>,
 ) -> bool {
     loop {
         match command_rx.try_recv() {
@@ -2155,15 +2610,15 @@ async fn cancel_pending_upload(pending_upload: &mut Option<PendingSshIntegration
 async fn run_open_ssh_shell_session(
     session_id: String,
     open_session: OpenSshShellSession,
-    mut command_rx: tokio_mpsc::UnboundedReceiver<SshCommand>,
+    mut command_rx: ssh_mailbox::Receiver,
     event_queue: SessionEventQueue,
-    mut pending_writes: VecDeque<Vec<u8>>,
+    mut pending_writes: VecDeque<ssh_mailbox::PendingWrite>,
 ) {
     let OpenSshShellSession {
         attempt,
         mut post_login,
         handle,
-        mut channel,
+        channel,
         jump_handles,
         disconnect_on_close,
         x11_forwarder,
@@ -2175,36 +2630,27 @@ async fn run_open_ssh_shell_session(
         shell_kind: _shell_kind,
     } = open_session;
     let handle = Arc::new(handle);
+    let (mut channel_rx, channel) = channel.split();
+    let channel = Arc::new(channel);
+    type ChannelOperation = Pin<Box<dyn Future<Output = Result<(), russh::Error>> + Send>>;
+    let mut pending_send: Option<ChannelOperation> = None;
+    let mut pending_resize: Option<ChannelOperation> = None;
+    let mut pending_output: Option<Pin<Box<dyn Future<Output = ()> + Send>>> = None;
     let mut shell_integration = SshShellIntegrationState::new(
         prepared_shell_integration,
         ready_marker,
         legacy_ready_marker,
     );
     if let Some(notice) = local_notice {
-        event_queue.push(SessionEvent::Output {
-            session_id: session_id.clone(),
-            data: notice,
-        });
+        event_queue
+            .push_async(SessionEvent::Output {
+                session_id: session_id.clone(),
+                data: notice,
+            })
+            .await;
     }
     if let Some(forwarder) = x11_forwarder {
         spawn_x11_forwarder(event_queue.clone(), session_id.clone(), forwarder);
-    }
-
-    if shell_integration.is_normal() {
-        while let Some(data) = pending_writes.pop_front() {
-            if let Err(error) = channel.data_bytes(data).await {
-                send_session_error(&event_queue, &session_id, error);
-                disconnect_open_ssh_shell(
-                    &session_id,
-                    &handle,
-                    jump_handles,
-                    disconnect_on_close,
-                    x11_multiplex_registration,
-                )
-                .await;
-                return;
-            }
-        }
     }
 
     let initial_inject_delay = tokio::time::sleep(Duration::from_millis(500));
@@ -2220,6 +2666,17 @@ async fn run_open_ssh_shell_session(
     let mut post_login_armed = false;
 
     loop {
+        if shell_integration.is_normal()
+            && pending_send.is_none()
+            && let Some(mut write) = pending_writes.pop_front()
+        {
+            let channel = channel.clone();
+            pending_send = Some(Box::pin(async move {
+                let result = channel.data_bytes(std::mem::take(&mut write.bytes)).await;
+                drop(write); // Release the capacity permit only after SSH accepted the bytes.
+                result
+            }));
+        }
         if !post_login_armed
             && shell_integration.is_normal()
             && let Some(command) = post_login.as_ref()
@@ -2230,14 +2687,24 @@ async fn run_open_ssh_shell_session(
             post_login_armed = true;
         }
         tokio::select! {
+            result = async { pending_send.as_mut().expect("guarded send").await }, if pending_send.is_some() => {
+                pending_send = None;
+                if let Err(error) = result { event_queue.push_async(SessionEvent::Error { session_id: session_id.clone(), message: error.to_string() }).await; break; }
+            }
+            result = async { pending_resize.as_mut().expect("guarded resize").await }, if pending_resize.is_some() => {
+                pending_resize = None;
+                if result.is_err() { break; }
+            }
+            _ = async { pending_output.as_mut().expect("guarded output").await }, if pending_output.is_some() => {
+                pending_output = None;
+            }
             _ = async { while !attempt.is_cancelled() { tokio::time::sleep(Duration::from_millis(25)).await; } } => break,
-            _ = &mut post_login_timer, if post_login_armed && post_login.is_some() => {
+            _ = &mut post_login_timer, if post_login_armed && post_login.is_some() && pending_send.is_none() => {
                 if let Some(command) = post_login.take() {
                     let mut text = command.command.replace("\r\n", "\r").replace('\n', "\r");
                     if !text.ends_with('\r') { text.push('\r'); }
-                    if let Err(error) = channel.data_bytes(text.into_bytes()).await {
-                        send_session_error(&event_queue, &session_id, error);
-                    }
+                    let channel = channel.clone();
+                    pending_send = Some(Box::pin(async move { channel.data_bytes(text.into_bytes()).await }));
                 }
             }
             _ = &mut initial_inject_delay, if shell_integration.should_inject_on_initial_delay() => {
@@ -2269,7 +2736,7 @@ async fn run_open_ssh_shell_session(
                     Some(pending) => (&mut pending.join).await,
                     None => std::future::pending().await,
                 }
-            }, if pending_upload.is_some() => {
+            }, if pending_upload.is_some() && pending_send.is_none() => {
                 let pending = pending_upload
                     .take()
                     .expect("pending_upload checked Some by the select guard");
@@ -2280,43 +2747,24 @@ async fn run_open_ssh_shell_session(
                     ssh_shell_integration::ScriptUploadOutcome::failed()
                 });
                 let integration = pending.integration;
-                shell_integration
-                    .apply_upload_outcome(outcome, integration, &mut channel)
-                    .await;
+                let script = shell_integration.apply_upload_outcome(outcome, integration);
+                let channel = channel.clone();
+                pending_send = Some(Box::pin(async move { channel.data_bytes(script).await }));
                 inject_timeout
                     .as_mut()
                     .reset(
                         tokio::time::Instant::now()
                             + ssh_shell_integration::SSH_INTEGRATION_TIMEOUT,
                     );
-                if shell_integration.is_normal() {
-                    while let Some(data) = pending_writes.pop_front() {
-                        if let Err(error) = channel.data_bytes(data).await {
-                            send_session_error(&event_queue, &session_id, error);
-                            break;
-                        }
-                    }
-                }
             }
-            _ = &mut inject_timeout, if shell_integration.is_suppressing() => {
+            _ = &mut inject_timeout, if shell_integration.is_suppressing() && pending_output.is_none() => {
                 let output = shell_integration.force_normal_after_timeout();
-                push_ssh_integration_output(&event_queue, &session_id, output);
-                while let Some(data) = pending_writes.pop_front() {
-                    if let Err(error) = channel.data_bytes(data).await {
-                        send_session_error(&event_queue, &session_id, error);
-                        break;
-                    }
-                }
+                pending_output = Some(ssh_output_future(event_queue.clone(), session_id.clone(), output));
             }
             command = command_rx.recv() => {
                 match command {
                     Some(SshCommand::Write(data)) => {
-                        if !shell_integration.is_normal() {
-                            pending_writes.push_back(data);
-                        } else if let Err(error) = channel.data_bytes(data).await {
-                                send_session_error(&event_queue, &session_id, error);
-                                break;
-                        }
+                        pending_writes.push_back(data);
                     }
                     Some(SshCommand::Resize {
                         cols,
@@ -2324,32 +2772,22 @@ async fn run_open_ssh_shell_session(
                         pixel_width,
                         pixel_height,
                     }) => {
-                        if let Err(error) = channel
-                            .window_change(
-                                cols.into(),
-                                rows.into(),
-                                pixel_width.into(),
-                                pixel_height.into(),
-                            )
-                            .await
-                        {
-                            send_session_error(&event_queue, &session_id, error);
-                            break;
-                        }
+                        let channel = channel.clone();
+                        pending_resize = Some(Box::pin(async move {
+                            channel.window_change(cols.into(), rows.into(), pixel_width.into(), pixel_height.into()).await
+                        }));
                     }
                     Some(SshCommand::Close) | None => {
-                        let _ = channel.eof().await;
-                        let _ = channel.close().await;
                         break;
                     }
                 }
             }
-            message = channel.wait() => {
+            message = channel_rx.wait(), if pending_output.is_none() => {
                 match message {
                     Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                         let was_waiting_initial = shell_integration.is_waiting_initial();
                         let output = shell_integration.filter_output(&data);
-                        push_ssh_integration_output(&event_queue, &session_id, output);
+                        pending_output = Some(ssh_output_future(event_queue.clone(), session_id.clone(), output));
                         if was_waiting_initial
                             && shell_integration.is_waiting_initial()
                             && let Some(integration) = shell_integration.take_pending_integration() {
@@ -2374,41 +2812,33 @@ async fn run_open_ssh_shell_session(
                                 join,
                             });
                         }
-                        if shell_integration.is_normal() {
-                            while let Some(data) = pending_writes.pop_front() {
-                                if let Err(error) = channel.data_bytes(data).await {
-                                    send_session_error(&event_queue, &session_id, error);
-                                    break;
-                                }
-                            }
-                        }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        event_queue.push(SessionEvent::Exited {
+                        event_queue.push_async(SessionEvent::Exited {
                             session_id: session_id.clone(),
                             reason: format!("SSH channel exit status {exit_status}"),
-                        });
+                        }).await;
                         break;
                     }
                     Some(ChannelMsg::Eof) => {
-                        event_queue.push(SessionEvent::Exited {
+                        event_queue.push_async(SessionEvent::Exited {
                             session_id: session_id.clone(),
                             reason: "SSH channel EOF".to_string(),
-                        });
+                        }).await;
                         break;
                     }
                     Some(ChannelMsg::Close) => {
-                        event_queue.push(SessionEvent::Exited {
+                        event_queue.push_async(SessionEvent::Exited {
                             session_id: session_id.clone(),
                             reason: "SSH channel closed by remote".to_string(),
-                        });
+                        }).await;
                         break;
                     }
                     None => {
-                        event_queue.push(SessionEvent::Exited {
+                        event_queue.push_async(SessionEvent::Exited {
                             session_id: session_id.clone(),
                             reason: "SSH connection task ended".to_string(),
-                        });
+                        }).await;
                         break;
                     }
                     Some(_) => {}
@@ -2416,6 +2846,17 @@ async fn run_open_ssh_shell_session(
             }
         }
     }
+    drop(pending_send);
+    drop(pending_resize);
+    drop(pending_output);
+    // russh may be parked delivering to its bounded channel queue. Release
+    // that receiver before waiting for EOF/disconnect to reach the SSH task.
+    drop(channel_rx);
+    let _ = tokio::time::timeout(Duration::from_millis(250), async {
+        let _ = channel.eof().await;
+        let _ = channel.close().await;
+    })
+    .await;
     cancel_pending_upload(&mut pending_upload).await;
 
     disconnect_open_ssh_shell(
@@ -2428,28 +2869,44 @@ async fn run_open_ssh_shell_session(
     .await;
 }
 
-fn push_ssh_integration_output(
+fn ssh_output_future(
+    queue: SessionEventQueue,
+    session_id: String,
+    output: SshIntegrationOutput,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        push_ssh_integration_output(&queue, &session_id, output).await;
+    })
+}
+
+async fn push_ssh_integration_output(
     event_queue: &SessionEventQueue,
     session_id: &str,
     output: SshIntegrationOutput,
 ) {
     for cwd in output.cwd_paths {
-        event_queue.push(SessionEvent::CwdChanged {
-            session_id: session_id.to_string(),
-            cwd,
-        });
+        event_queue
+            .push_async(SessionEvent::CwdChanged {
+                session_id: session_id.to_string(),
+                cwd,
+            })
+            .await;
     }
     for command in output.accepted_commands {
-        event_queue.push(SessionEvent::CommandAccepted {
-            session_id: session_id.to_string(),
-            command,
-        });
+        event_queue
+            .push_async(SessionEvent::CommandAccepted {
+                session_id: session_id.to_string(),
+                command,
+            })
+            .await;
     }
     if !output.visible.is_empty() {
-        event_queue.push(SessionEvent::Output {
-            session_id: session_id.to_string(),
-            data: output.visible,
-        });
+        event_queue
+            .push_async(SessionEvent::Output {
+                session_id: session_id.to_string(),
+                data: output.visible,
+            })
+            .await;
     }
 }
 
@@ -3541,8 +3998,8 @@ fn spawn_serial_reader_thread(
     mut reader: Box<dyn SerialPort>,
     stop_reader: Arc<AtomicBool>,
     event_queue: SessionEventQueue,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> std::io::Result<JoinHandle<()>> {
+    zzclawterm_core::runtime::worker::spawn(format!("transport-reader-{session_id}"), move || {
         let mut buffer = [0_u8; 4096];
         while !stop_reader.load(Ordering::Relaxed) {
             match reader.read(&mut buffer) {
@@ -3619,25 +4076,6 @@ fn parse_stop_bits(value: &str) -> StopBits {
         "2" => StopBits::Two,
         _ => StopBits::One,
     }
-}
-
-fn build_command(config: &LocalSessionConfig) -> CommandBuilder {
-    let shell = config
-        .shell_path
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(default_local_shell_path);
-    let mut command = CommandBuilder::new(&shell);
-    if config.shell_args.is_empty() {
-        #[cfg(not(windows))]
-        if should_use_interactive_login_args(&shell) {
-            command.args(["--login", "-i"]);
-        }
-    } else {
-        command.args(config.shell_args.iter().map(String::as_str));
-    }
-    command
 }
 
 fn configure_environment(

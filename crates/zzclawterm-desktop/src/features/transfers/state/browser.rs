@@ -158,6 +158,11 @@ impl TransferFeatureState {
         self.tree.remove_session(session_id);
         self.browser.session_cache.remove(session_id);
         self.file_ops.delete_refresh_pending.remove(session_id);
+        // Dropping the latest-job entry makes the closed session's in-flight
+        // navigation reply stale instead of letting it swap browser context.
+        if let Some(job_id) = self.browser.navigation_jobs.remove(session_id) {
+            self.browser.pending_navigations.remove(&job_id);
+        }
     }
 
     pub(in crate::features) fn has_browser_session_cache(&self, session_id: &str) -> bool {

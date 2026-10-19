@@ -182,8 +182,10 @@ impl ZzClawTermApp {
                                 })),
                         )
                     })
-                    .when_some(self.shell.title_menu_bar(), |this, menu_bar| {
-                        this.child(menu_bar)
+                    .when(!macos, |this| {
+                        this.when_some(self.shell.title_menu_bar(), |this, menu_bar| {
+                            this.child(menu_bar)
+                        })
                     }),
             )
             .child(

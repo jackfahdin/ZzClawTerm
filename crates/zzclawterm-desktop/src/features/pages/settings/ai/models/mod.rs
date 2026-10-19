@@ -299,37 +299,17 @@ impl SettingsPanel {
             false,
             cx,
         );
-        let revealed = view.revealed_id.as_ref() == Some(&id);
+        let key_id = format!("ai.credential.{id}.api-key");
         let key = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div().min_w_0().flex_1().child(
-                    self.existing_text_input_box(format!("ai.credential.{id}.api-key"), false),
-                ),
-            )
-            .child(
-                ZzClawIconButton::new(
-                    "ai-provider-secret",
-                    if revealed {
-                        "icons/settings/eye-off.svg"
-                    } else {
-                        "icons/settings/eye.svg"
-                    },
-                )
-                .tooltip(t!(if revealed {
-                    "ai.hideApiKey"
-                } else {
-                    "ai.showApiKey"
-                }))
-                .on_click(cx.listener({
+            .w_full()
+            .children(self.existing_text_input(&key_id).map(|field| {
+                zzclawterm_ui::ZzClawInputShell::new(key_id, &field).on_mask_toggle(cx.listener({
                     let id = id.clone();
                     move |panel, _, _, cx| {
                         panel.with_app(cx, |app, cx| app.toggle_ai_provider_secret(id.clone(), cx));
                     }
-                })),
-            );
+                }))
+            }));
         let status = view.statuses.get(&id).copied().unwrap_or_default();
         let test = div()
             .flex()
@@ -419,7 +399,7 @@ impl SettingsPanel {
                 )
                 .child(
                     ZzClawButton::new("ai-provider-model-add", t!("common.add"))
-                        .small()
+                        .form_control()
                         .icon("icons/settings/plus.svg")
                         .disabled(draft.trim().is_empty())
                         .on_click(cx.listener({

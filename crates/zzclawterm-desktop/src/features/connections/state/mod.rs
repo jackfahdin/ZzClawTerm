@@ -20,13 +20,12 @@ use crate::features::pages::connections::list::{
     widest_connection_row,
 };
 use crate::models::{
-    ConnectionEditorAdvancedTab, ConnectionEditorCredentialOverlay, ConnectionEditorField,
-    ConnectionEditorPasswordSource, ConnectionEditorRdpTab, ConnectionEditorSelect,
-    ConnectionEditorSshAlgorithmTab, ConnectionEditorState, ConnectionEditorTelnetTab,
-    ConnectionGroupEditorMode, ConnectionGroupEditorState, ConnectionImportSource,
-    ConnectionKindTab, ConnectionListContextTarget, ConnectionSortMode, NetworkGroupEditorState,
-    NetworkMovePickerState, NetworkProxyEditorField, NetworkProxyEditorState, NetworkTab,
-    NetworkTunnelEditorField, NetworkTunnelEditorState,
+    ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorForwardingTab,
+    ConnectionEditorPasswordSource, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
+    ConnectionEditorState, ConnectionGroupEditorMode, ConnectionGroupEditorState,
+    ConnectionImportSource, ConnectionKindTab, ConnectionListContextTarget, ConnectionSortMode,
+    NetworkGroupEditorState, NetworkMovePickerState, NetworkProxyEditorField,
+    NetworkProxyEditorState, NetworkTab, NetworkTunnelEditorField, NetworkTunnelEditorState,
 };
 use zzclawterm_ui::{
     ZzClawInputEvent, ZzClawInputState, ZzClawNumberInputEvent, ZzClawNumberInputOptions,
@@ -39,19 +38,17 @@ mod network_logic;
 
 use self::editor_logic::{
     ConnectionEditorPlaceholder, add_connection_editor_agent_endpoint,
-    advance_connection_editor_focus, apply_connection_editor_shell_path,
-    apply_connection_editor_working_dir, clear_connection_editor_runtime_state,
-    commit_connection_editor_new_group, connection_editor_inline_panel_draft, editor_field_seeds,
-    forwarding_endpoint_field_seeds, insert_connection_editor_description_newline,
-    move_connection_editor_agent_endpoint, move_connection_editor_ssh_algorithm,
-    remove_connection_editor_agent_endpoint, select_connection_editor_agent_endpoint,
-    select_saved_connection_after_editor_save, set_connection_editor_advanced_tab,
+    apply_connection_editor_shell_path, apply_connection_editor_working_dir,
+    clear_connection_editor_runtime_state, commit_connection_editor_new_group,
+    connection_editor_inline_panel_draft, editor_field_seeds, forwarding_endpoint_field_seeds,
+    insert_connection_editor_description_newline, move_connection_editor_agent_endpoint,
+    move_connection_editor_ssh_algorithm, remove_connection_editor_agent_endpoint,
+    select_connection_editor_agent_endpoint, select_saved_connection_after_editor_save,
     set_connection_editor_agent_endpoint_type, set_connection_editor_error,
     set_connection_editor_field_text, set_connection_editor_forwarding_endpoint_field,
     set_connection_editor_icon, set_connection_editor_icon_auto_detect, set_connection_editor_kind,
-    set_connection_editor_password_source, set_connection_editor_rdp_tab,
-    set_connection_editor_select_value, set_connection_editor_ssh_algorithm_enabled,
-    set_connection_editor_ssh_algorithm_tab, set_connection_editor_telnet_tab,
+    set_connection_editor_password_source, set_connection_editor_select_value,
+    set_connection_editor_ssh_algorithm_enabled, set_connection_editor_ssh_algorithm_tab,
     set_connection_group_editor_error, toggle_connection_editor_agent_allowlist_fingerprint,
     toggle_connection_editor_flag,
 };
@@ -201,6 +198,10 @@ struct ConnectionEditorFeatureState {
     forwarding_endpoint_field_subscriptions: Vec<Subscription>,
     window: ChildWindowSlot,
     focus: FocusHandle,
+    navigation_focus: FocusHandle,
+    section_focus: FocusHandle,
+    scroll: gpui::ScrollHandle,
+    anchors: HashMap<crate::models::ConnectionEditorFocusTarget, gpui::ScrollAnchor>,
     icon_picker_open: bool,
     group_select_open: bool,
     agent_identity_picker_open: bool,
@@ -208,6 +209,10 @@ struct ConnectionEditorFeatureState {
     baud_popover_open: bool,
     agent_preview_generation: u64,
     group_select_trigger_bounds: Option<Bounds<Pixels>>,
+    save_generation: u64,
+    /// Generation of the in-flight save; cleared when the draft is replaced or
+    /// closed, so a late store reply cannot finish or fail a different draft.
+    save_in_flight: Option<u64>,
 }
 
 struct ConnectionGroupEditorFeatureState {
@@ -293,6 +298,10 @@ impl ConnectionFeatureState {
                 forwarding_endpoint_field_subscriptions: Vec::new(),
                 window: ChildWindowSlot::default(),
                 focus: focus.editor,
+                navigation_focus: cx.focus_handle(),
+                section_focus: cx.focus_handle(),
+                scroll: gpui::ScrollHandle::new(),
+                anchors: HashMap::new(),
                 icon_picker_open: false,
                 group_select_open: false,
                 agent_identity_picker_open: false,
@@ -300,6 +309,8 @@ impl ConnectionFeatureState {
                 baud_popover_open: false,
                 agent_preview_generation: 0,
                 group_select_trigger_bounds: None,
+                save_generation: 0,
+                save_in_flight: None,
             },
             group_editor: ConnectionGroupEditorFeatureState {
                 draft: None,
@@ -739,6 +750,9 @@ impl ConnectionFeatureState {
                 ConnectionEditorPlaceholder::Literal(value) => Cow::Borrowed(value),
             };
             if let Some(options) = connection_editor_number_options(field) {
+                let options = options.disabled(
+                    field == ConnectionEditorField::TelnetKeepAliveInterval && draft.raw_tcp_cli,
+                );
                 let entity = cx.new(|cx| {
                     ZzClawNumberInputState::new(cx, value, options).placeholder(placeholder)
                 });
@@ -758,6 +772,11 @@ impl ConnectionFeatureState {
             }
             let entity = cx.new(|cx| {
                 let input = ZzClawInputState::new(cx, value)
+                    .kind(if masked {
+                        zzclawterm_ui::ZzClawInputKind::Password
+                    } else {
+                        zzclawterm_ui::ZzClawInputKind::Text
+                    })
                     .masked(masked)
                     .placeholder(placeholder);
                 match field {
@@ -864,6 +883,18 @@ impl ConnectionFeatureState {
                 entity.update(cx, |entity, cx| entity.set_content(&value, cx));
             }
         }
+        self.sync_telnet_keep_alive_field_disabled(cx);
+    }
+
+    pub fn sync_telnet_keep_alive_field_disabled(&self, cx: &mut App) {
+        if let Some(draft) = &self.editor.draft
+            && let Some(entity) = self
+                .editor
+                .number_fields
+                .get(&ConnectionEditorField::TelnetKeepAliveInterval)
+        {
+            entity.update(cx, |entity, cx| entity.set_disabled(draft.raw_tcp_cli, cx));
+        }
     }
 
     pub fn set_editor_field_text(&mut self, field: ConnectionEditorField, text: String) {
@@ -960,6 +991,90 @@ impl ConnectionFeatureState {
 
     pub fn editor_has_draft(&self) -> bool {
         self.editor.has_draft()
+    }
+
+    pub(in crate::features::connections) fn set_editor_validation_location(
+        &mut self,
+        location: super::connection_runtime::validation::ConnectionEditorValidationLocation,
+        message: String,
+    ) {
+        use crate::models::{ConnectionEditorFocusTarget, ConnectionEditorSection};
+        if let ConnectionEditorFocusTarget::Field(field) = location.target {
+            self.set_editor_field_error(field, message.clone());
+        }
+        if matches!(
+            location.target,
+            ConnectionEditorFocusTarget::Field(ConnectionEditorField::BaudRate)
+        ) {
+            self.editor.baud_popover_open = true;
+        }
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.error = Some(message);
+            if !matches!(location.target, ConnectionEditorFocusTarget::Field(_)) {
+                editor.field_errors.clear();
+            }
+            if let Some(tab) = location.algorithm_tab {
+                editor.ssh_algorithm_tab = tab;
+            }
+            if location.section == ConnectionEditorSection::Forwarding {
+                editor.forwarding_tab = ConnectionEditorForwardingTab::Agent;
+            }
+        }
+    }
+
+    pub fn editor_scroll(&self) -> gpui::ScrollHandle {
+        self.editor.scroll.clone()
+    }
+
+    pub fn editor_anchor(
+        &mut self,
+        target: crate::models::ConnectionEditorFocusTarget,
+    ) -> gpui::ScrollAnchor {
+        self.editor
+            .anchors
+            .entry(target)
+            .or_insert_with(|| gpui::ScrollAnchor::for_handle(self.editor.scroll.clone()))
+            .clone()
+    }
+
+    pub fn editor_navigation_focus(&self) -> FocusHandle {
+        self.editor.navigation_focus.clone()
+    }
+
+    pub fn editor_section_focus(&self) -> FocusHandle {
+        self.editor.section_focus.clone()
+    }
+
+    pub fn select_editor_section(
+        &mut self,
+        section: crate::models::ConnectionEditorSection,
+    ) -> bool {
+        let Some(draft) = self.editor.draft.as_mut() else {
+            return false;
+        };
+        if !draft.select_section(section) {
+            return false;
+        }
+        self.editor
+            .scroll
+            .set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
+        self.editor.icon_picker_open = false;
+        self.editor.group_select_open = false;
+        self.editor.group_select_trigger_bounds = None;
+        self.editor.baud_popover_open = false;
+        self.set_editor_agent_identity_picker_open(false);
+        self.editor.credential_overlay = None;
+        true
+    }
+
+    pub fn select_editor_forwarding_tab(&mut self, x11: bool) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.forwarding_tab = if x11 {
+                ConnectionEditorForwardingTab::X11
+            } else {
+                ConnectionEditorForwardingTab::Agent
+            };
+        }
     }
 
     pub fn editor_focus_handle(&self) -> FocusHandle {
@@ -1084,6 +1199,69 @@ impl ConnectionFeatureState {
         self.editor.set_icon_auto_detect(enabled)
     }
 
+    pub fn set_editor_password_edit(
+        &mut self,
+        edit: crate::models::ConnectionPasswordEdit,
+        cx: &mut App,
+    ) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.password_edit = edit;
+            editor.password.expose_secret_mut().clear();
+            editor.error = None;
+            editor.field_errors.clear();
+        }
+        self.reset_editor_field(ConnectionEditorField::Password, "", cx);
+    }
+
+    pub fn set_editor_account_source(&mut self, saved: bool) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.account_source_saved = saved;
+            if !saved {
+                editor.account_id = None;
+                editor.password_id = None;
+                if editor.password_source == ConnectionEditorPasswordSource::Saved {
+                    editor.password_source = ConnectionEditorPasswordSource::Ask;
+                }
+            }
+            editor.error = None;
+            editor.field_errors.clear();
+        }
+    }
+
+    pub fn set_editor_field_error(&mut self, field: ConnectionEditorField, message: String) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.field_errors.clear();
+            editor.field_errors.insert(field, message.clone());
+            editor.error = Some(message);
+            editor.focused_field = field;
+        }
+    }
+
+    pub fn clear_editor_secrets(&mut self, cx: &mut App) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.password.expose_secret_mut().clear();
+            // Ciphertext may remain so saving unrelated metadata cannot remove it.
+            if !editor.existing_password_locked {
+                editor.existing_password = None;
+            }
+            editor.password_edit = crate::models::ConnectionPasswordEdit::Keep;
+        }
+        self.reset_editor_field(ConnectionEditorField::Password, "", cx);
+    }
+
+    pub fn hide_editor_secrets(&self, cx: &mut App) {
+        if let Some(input) = self.editor.fields.get(&ConnectionEditorField::Password) {
+            input.update(cx, |state, cx| state.hide_secret(cx));
+        }
+    }
+
+    pub fn editor_token(&self) -> Option<u64> {
+        self.editor
+            .draft
+            .as_ref()
+            .map(|_| self.editor.save_generation)
+    }
+
     pub fn set_editor_select_value(
         &mut self,
         select: ConnectionEditorSelect,
@@ -1094,10 +1272,6 @@ impl ConnectionFeatureState {
 
     pub fn set_editor_password_source(&mut self, source: ConnectionEditorPasswordSource) -> bool {
         self.editor.set_password_source(source)
-    }
-
-    pub fn set_editor_advanced_tab(&mut self, tab: ConnectionEditorAdvancedTab) -> bool {
-        self.editor.set_advanced_tab(tab)
     }
 
     pub fn set_editor_ssh_algorithm_tab(&mut self, tab: ConnectionEditorSshAlgorithmTab) -> bool {
@@ -1147,14 +1321,6 @@ impl ConnectionFeatureState {
             .toggle_editor_agent_allowlist_fingerprint(fingerprint)
     }
 
-    pub fn set_editor_telnet_tab(&mut self, tab: ConnectionEditorTelnetTab) -> bool {
-        self.editor.set_telnet_tab(tab)
-    }
-
-    pub fn set_editor_rdp_tab(&mut self, tab: ConnectionEditorRdpTab) -> bool {
-        self.editor.set_rdp_tab(tab)
-    }
-
     pub fn set_editor_kind(&mut self, kind: ConnectionKindTab) -> bool {
         self.editor.set_kind(kind)
     }
@@ -1169,10 +1335,6 @@ impl ConnectionFeatureState {
 
     pub fn insert_editor_description_newline(&mut self) -> bool {
         self.editor.insert_description_newline()
-    }
-
-    pub fn advance_editor_focus(&mut self) -> bool {
-        self.editor.advance_focus()
     }
 
     pub fn set_editor_error(&mut self, error: String) -> bool {
@@ -1464,7 +1626,31 @@ impl ConnectionFeatureState {
         self.editor.forwarding_endpoint_field_subscriptions.clear();
     }
 
+    /// Claim the editor's single save slot; `None` while a save is already running.
+    pub fn begin_editor_save(&mut self) -> Option<u64> {
+        if self.editor.draft.is_none() || self.editor.save_in_flight.is_some() {
+            return None;
+        }
+        self.editor.save_generation = self.editor.save_generation.wrapping_add(1);
+        self.editor.save_in_flight = Some(self.editor.save_generation);
+        Some(self.editor.save_generation)
+    }
+
+    /// Release the save slot; false when the reply belongs to a superseded draft.
+    pub fn finish_editor_save_request(&mut self, generation: u64) -> bool {
+        if self.editor.save_in_flight != Some(generation) {
+            return false;
+        }
+        self.editor.save_in_flight = None;
+        true
+    }
+
+    pub fn editor_save_in_flight(&self) -> bool {
+        self.editor.save_in_flight.is_some()
+    }
+
     pub fn finish_editor_save(&mut self, connection_id: String, group_id: Option<String>) {
+        self.editor.save_in_flight = None;
         self.editor.agent_identity_picker_open = false;
         clear_connection_editor_runtime_state(
             &mut self.editor.draft,
@@ -1765,7 +1951,11 @@ impl ConnectionImportState {
 }
 
 impl ConnectionEditorFeatureState {
-    pub fn begin_edit(&mut self, draft: ConnectionEditorState) {
+    pub fn begin_edit(&mut self, mut draft: ConnectionEditorState) {
+        draft.section = crate::models::ConnectionEditorSection::Basic;
+        self.scroll = gpui::ScrollHandle::new();
+        self.anchors.clear();
+        self.save_generation = self.save_generation.wrapping_add(1);
         self.icon_picker_open = false;
         self.group_select_open = false;
         self.agent_identity_picker_open = false;
@@ -1773,6 +1963,7 @@ impl ConnectionEditorFeatureState {
         self.baud_popover_open = false;
         self.agent_preview_generation = self.agent_preview_generation.wrapping_add(1);
         self.group_select_trigger_bounds = None;
+        self.save_in_flight = None;
         self.draft = Some(draft);
     }
 
@@ -1957,14 +2148,6 @@ impl ConnectionEditorFeatureState {
         changed
     }
 
-    pub fn set_advanced_tab(&mut self, tab: ConnectionEditorAdvancedTab) -> bool {
-        let changed = set_connection_editor_advanced_tab(&mut self.draft, tab);
-        if changed {
-            self.close_icon_picker();
-        }
-        changed
-    }
-
     pub fn set_ssh_algorithm_tab(&mut self, tab: ConnectionEditorSshAlgorithmTab) -> bool {
         set_connection_editor_ssh_algorithm_tab(&mut self.draft, tab)
     }
@@ -2011,22 +2194,6 @@ impl ConnectionEditorFeatureState {
         toggle_connection_editor_agent_allowlist_fingerprint(&mut self.draft, fingerprint)
     }
 
-    pub fn set_telnet_tab(&mut self, tab: ConnectionEditorTelnetTab) -> bool {
-        let changed = set_connection_editor_telnet_tab(&mut self.draft, tab);
-        if changed {
-            self.close_icon_picker();
-        }
-        changed
-    }
-
-    pub fn set_rdp_tab(&mut self, tab: ConnectionEditorRdpTab) -> bool {
-        let changed = set_connection_editor_rdp_tab(&mut self.draft, tab);
-        if changed {
-            self.close_icon_picker();
-        }
-        changed
-    }
-
     pub fn set_kind(&mut self, kind: ConnectionKindTab) -> bool {
         self.close_icon_picker();
         self.close_group_select();
@@ -2043,19 +2210,11 @@ impl ConnectionEditorFeatureState {
     }
 
     pub fn toggle_flag(&mut self, flag: ConnectionEditorToggle) -> bool {
-        let changed = toggle_connection_editor_flag(&mut self.draft, flag);
-        if changed && flag == ConnectionEditorToggle::Advanced {
-            self.close_icon_picker();
-        }
-        changed
+        toggle_connection_editor_flag(&mut self.draft, flag)
     }
 
     pub fn insert_description_newline(&mut self) -> bool {
         insert_connection_editor_description_newline(&mut self.draft)
-    }
-
-    pub fn advance_focus(&mut self) -> bool {
-        advance_connection_editor_focus(&mut self.draft)
     }
 
     pub fn set_error(&mut self, error: String) -> bool {
@@ -2071,10 +2230,12 @@ impl ConnectionEditorFeatureState {
     }
 
     pub fn close(&mut self) {
+        self.save_generation = self.save_generation.wrapping_add(1);
         self.agent_identity_picker_open = false;
         self.credential_overlay = None;
         self.baud_popover_open = false;
         self.agent_preview_generation = self.agent_preview_generation.wrapping_add(1);
+        self.save_in_flight = None;
         clear_connection_editor_runtime_state(
             &mut self.draft,
             &mut self.icon_picker_open,
@@ -2133,9 +2294,24 @@ fn connection_editor_number_options(
                 .range(1.0, 65_535.0)
                 .step(1.0),
         ),
+        ConnectionEditorField::SftpShellDetectionTimeout => Some(
+            ZzClawNumberInputOptions::default()
+                .range(100.0, 60_000.0)
+                .step(100.0),
+        ),
+        ConnectionEditorField::VncReconnectAttempts => Some(
+            ZzClawNumberInputOptions::default()
+                .range(0.0, 20.0)
+                .step(1.0),
+        ),
         ConnectionEditorField::PostLoginDelay => Some(
             ZzClawNumberInputOptions::default()
                 .range(0.0, 60_000.0)
+                .step(1.0),
+        ),
+        ConnectionEditorField::TelnetKeepAliveInterval => Some(
+            ZzClawNumberInputOptions::default()
+                .range(0.0, f64::from(u32::MAX))
                 .step(1.0),
         ),
         ConnectionEditorField::TelnetAutoLoginTimeout => Some(

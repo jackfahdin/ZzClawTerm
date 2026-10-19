@@ -81,12 +81,6 @@ impl ZzClawTermApp {
                 ),
                 |this| this.child(self.security_secret_footer(cx)),
             )
-            .when(self.security.unlock_prompt_open(), |this| {
-                this.child(self.security_unlock_prompt(cx))
-            })
-            .when(self.security.master_required_prompt_open(), |this| {
-                this.child(self.security_master_required_prompt(cx))
-            })
     }
 
     fn security_list_compact(&self) -> bool {

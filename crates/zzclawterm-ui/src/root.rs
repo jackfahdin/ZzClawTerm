@@ -18,6 +18,12 @@ pub type ZzClawRoot = gpui_kit::component::Root;
 
 pub type ZzClawWindowHandle = WindowHandle<ZzClawRoot>;
 
+/// Override only this window's component root; restoring removes the override so
+/// subsequent theme changes continue to supply the background normally.
+pub fn set_nya_root_transparent(root: &mut ZzClawRoot, transparent: bool) {
+    root.style().background = transparent.then(|| gpui::rgba(0).into());
+}
+
 struct ZzClawRootContent {
     view: AnyView,
 }
@@ -91,6 +97,30 @@ mod tests {
 
     struct RootContentFixture;
 
+    #[gpui::test]
+    fn native_window_background_override_is_local_and_restores_theme_defaults(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (main, _) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| RootContentFixture);
+            zzclaw_root(content, window, cx)
+        });
+        let (child, _) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| RootContentFixture);
+            zzclaw_root(content, window, cx)
+        });
+        main.update(cx, |root, _| {
+            super::set_nya_root_transparent(root, true);
+            assert_eq!(root.style().background, Some(gpui::rgba(0).into()));
+        });
+        child.update(cx, |root, _| assert!(root.style().background.is_none()));
+        main.update(cx, |root, _| {
+            super::set_nya_root_transparent(root, false);
+            assert!(root.style().background.is_none());
+        });
+    }
+
     #[derive(IntoElement)]
     struct TypographyCapture {
         captured: Rc<RefCell<Option<(gpui::Font, gpui::Pixels)>>>,
@@ -113,6 +143,70 @@ mod tests {
                 .size_full()
                 .debug_selector(|| "nya-root-content".to_string())
         }
+    }
+
+    #[gpui::test]
+    fn dialog_secret_toggle_does_not_submit_and_tracks_its_stack_identity(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| RootContentFixture);
+            zzclaw_root(content, window, cx)
+        });
+        let submitted = Rc::new(std::cell::Cell::new(0));
+        let (field, dialog) = cx.update(|window, cx| {
+            let field = cx.new(|cx| {
+                ZzClawInputState::new(cx, "fixture secret").kind(crate::ZzClawInputKind::Password)
+            });
+            let input = field.clone();
+            let submitted = submitted.clone();
+            let dialog = window.open_tracked_nya_dialog(cx, move |dialog, _, _| {
+                let submitted = submitted.clone();
+                dialog
+                    .title("Password form")
+                    .confirm(ZzClawDialogFooter::new("Cancel", "Save"))
+                    .content(ZzClawInputShell::new("dialog-secret", &input))
+                    .on_ok(move |_, _, _| {
+                        submitted.set(submitted.get() + 1);
+                        false
+                    })
+            });
+            assert!(dialog.is_top(window, cx));
+            (field, dialog)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            window.focus(&field.read(cx).component_focus_handle(cx), cx);
+            window.focus_next(cx);
+            _ = window.draw(cx);
+            assert_ne!(
+                window.focused(cx),
+                Some(field.read(cx).component_focus_handle(cx))
+            );
+        });
+        let key = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: key.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: key });
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0);
+        assert!(!field.read_with(cx, |field, _| field.is_masked()));
+        cx.update(|window, cx| {
+            let above = window.open_tracked_nya_dialog(cx, |dialog, _, _| dialog.title("Above"));
+            assert!(dialog.is_active());
+            assert!(!dialog.is_top(window, cx));
+            assert!(above.is_top(window, cx));
+            window.close_nya_dialog(cx);
+            assert!(!above.is_active());
+            assert!(dialog.is_top(window, cx));
+            window.close_nya_dialog(cx);
+            assert!(!dialog.is_active());
+            window.open_nya_dialog(cx, |dialog, _, _| dialog.title("Replacement"));
+            assert!(!dialog.is_top(window, cx));
+        });
     }
 
     struct PointerContentFixture {
@@ -253,6 +347,131 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
+    }
+
+    struct NotificationDividerFixture {
+        crossing: gpui::Point<gpui::Pixels>,
+        divider_downs: Rc<RefCell<usize>>,
+    }
+
+    impl Render for NotificationDividerFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let vertical_downs = self.divider_downs.clone();
+            let horizontal_downs = self.divider_downs.clone();
+            div()
+                .size_full()
+                .child(gpui::deferred(
+                    div()
+                        .absolute()
+                        .left(self.crossing.x)
+                        .top_0()
+                        .bottom_0()
+                        .w(px(1.))
+                        .bg(gpui::rgb(0xff1234))
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                            *vertical_downs.borrow_mut() += 1;
+                        }),
+                ))
+                .child(gpui::deferred(
+                    div()
+                        .absolute()
+                        .top(self.crossing.y)
+                        .left_0()
+                        .right_0()
+                        .h(px(1.))
+                        .bg(gpui::rgb(0x12ff34))
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                            *horizontal_downs.borrow_mut() += 1;
+                        }),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn notifications_paint_and_receive_pointer_input_above_deferred_dividers(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::notification::Notification;
+
+        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let divider_downs = Rc::new(RefCell::new(0));
+        let fixture = cx.new(|_| NotificationDividerFixture {
+            crossing: point(px(0.), px(0.)),
+            divider_downs: divider_downs.clone(),
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| zzclaw_root(fixture.clone(), window, cx));
+        let toast_clicks = Rc::new(RefCell::new(0));
+        cx.update(|window, cx| {
+            let toast_clicks = toast_clicks.clone();
+            window.push_notification(
+                Notification::new()
+                    .message("Copied")
+                    .bg(gpui::rgb(0x1234ff))
+                    .autohide(false)
+                    .on_click(move |_, _, _| *toast_clicks.borrow_mut() += 1),
+                cx,
+            );
+        });
+        draw(cx);
+        let toast_bounds = cx.update(|window, _| {
+            let scale = window.scale_factor();
+            window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.background == gpui::Background::from(gpui::rgb(0x1234ff)))
+                .expect("notification background must be painted")
+                .bounds
+                .map(|value| px(value.0 / scale))
+        });
+        let crossing = toast_bounds.center();
+        fixture.update(cx, |fixture, cx| {
+            fixture.crossing = crossing;
+            cx.notify();
+        });
+        draw(cx);
+        cx.update(|window, _| {
+            let quads = window.painted_quads();
+            let order = |color| {
+                quads
+                    .iter()
+                    .find(|quad| quad.background == gpui::Background::from(gpui::rgb(color)))
+                    .expect("fixture background must be painted")
+                    .order
+            };
+            assert!(
+                order(0x1234ff) > order(0xff1234),
+                "vertical divider covers toast"
+            );
+            assert!(
+                order(0x1234ff) > order(0x12ff34),
+                "horizontal divider covers toast"
+            );
+        });
+
+        cx.simulate_click(crossing, Modifiers::default());
+        assert_eq!(*toast_clicks.borrow(), 1);
+        assert_eq!(
+            *divider_downs.borrow(),
+            0,
+            "toast click must not start resizing"
+        );
+        cx.simulate_click(
+            point(crossing.x, toast_bounds.bottom() + px(100.)),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            *divider_downs.borrow(),
+            1,
+            "uncovered vertical divider must respond"
+        );
+        cx.simulate_click(point(px(100.), crossing.y), Modifiers::default());
+        assert_eq!(
+            *divider_downs.borrow(),
+            2,
+            "uncovered dividers must remain interactive"
+        );
     }
 
     #[gpui::test]

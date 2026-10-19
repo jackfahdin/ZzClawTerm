@@ -6,6 +6,7 @@
 
 use redb::ReadableTable;
 use std::sync::atomic::{AtomicU64, Ordering};
+use zzclawterm_core::models::credentials::PasswordUpdate;
 
 use super::{
     CREDENTIAL_PREFIX, CREDENTIALS_TABLE, ConnectionStore, OTP_ACCOUNTS_TABLE, OTP_PREFIX,
@@ -411,6 +412,91 @@ impl ConnectionStore {
         )?;
         txn.commit()?;
         Ok(target_id)
+    }
+
+    /// Save an account without overloading an empty input to mean deletion.
+    /// Unknown fields and the existing ciphertext are retained in the transaction.
+    pub fn save_password_with_update(
+        &self,
+        mut entry: SavedPassword,
+        update: PasswordUpdate,
+    ) -> Result<String, StorageError> {
+        if entry.name.trim().is_empty() {
+            return Err(StorageError::InvalidData("account name is required".into()));
+        }
+        let replacement = match &update {
+            PasswordUpdate::Replace(value) => {
+                if value.is_empty() {
+                    return Err(StorageError::InvalidData(
+                        "replacement password is empty".into(),
+                    ));
+                }
+                let crypto = self.credential_crypto()?;
+                let token = self.get_or_create_master_key_token(&crypto)?;
+                Some(crypto.encrypt_secret(&token, value.expose_secret())?)
+            }
+            _ => None,
+        };
+        let is_new = entry.id.is_empty();
+        if is_new {
+            entry.id = uuid::Uuid::new_v4().to_string();
+        }
+        let key = entity_key(PASSWORD_PREFIX, &entry.id);
+        let txn = self.db.begin_write()?;
+        let mut raw: serde_json::Value = {
+            let table = txn.open_table(CREDENTIALS_TABLE)?;
+            let previous = table.get(key.as_str())?;
+            match previous {
+                Some(value) => {
+                    let raw: serde_json::Value = deserialize_json(value.value())?;
+                    let existing: SavedPassword = serde_json::from_value(raw.clone())?;
+                    entry.sort_order = existing.sort_order;
+                    raw
+                }
+                None if !is_new => {
+                    return Err(StorageError::InvalidData(
+                        "saved account was not found".into(),
+                    ));
+                }
+                None => {
+                    let mut order = -1;
+                    for item in table.iter()? {
+                        let (key, value) = item?;
+                        if key.value().starts_with(PASSWORD_PREFIX) {
+                            let existing: SavedPassword = deserialize_json(value.value())?;
+                            order = order.max(existing.sort_order);
+                        }
+                    }
+                    entry.sort_order = order.saturating_add(1);
+                    serde_json::json!({})
+                }
+            }
+        };
+        let secret = match update {
+            PasswordUpdate::Keep => raw
+                .get("password")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            PasswordUpdate::Replace(_) => serde_json::to_value(replacement)?,
+            PasswordUpdate::Remove => serde_json::Value::Null,
+        };
+        if entry.username.trim().is_empty() && secret.is_null() {
+            return Err(StorageError::InvalidData(
+                "username or password is required".into(),
+            ));
+        }
+        // Only known metadata is replaced; extension fields survive account edits.
+        raw["id"] = entry.id.clone().into();
+        raw["name"] = entry.name.trim().into();
+        raw["username"] = entry.username.trim().into();
+        raw["sort_order"] = entry.sort_order.into();
+        raw["password"] = secret;
+        raw.as_object_mut()
+            .expect("validated account object")
+            .remove("has_password");
+        write_json_in_txn(&txn, CREDENTIALS_TABLE, &key, &raw)?;
+        txn.commit()?;
+        Ok(entry.id)
     }
 
     pub fn delete_password(&self, password_id: &str) -> Result<(), StorageError> {
@@ -822,5 +908,126 @@ mod tests {
         ConnectionStore::import_config_database(&target_dir, None, &backup).unwrap();
         let target = ConnectionStore::open(&target_dir).unwrap();
         assert_reordered_catalog(&target);
+    }
+    #[test]
+    fn explicit_account_password_edits_preserve_whitespace_extensions_and_order() {
+        use zzclawterm_core::models::credentials::PasswordUpdate;
+        let dir = TestTempDir::new("zzclawterm-account-password-edits");
+        let store = ConnectionStore::open(&dir).unwrap();
+        seed_encrypted_accounts_and_keys(&store);
+        let mut raw = raw_entry(&store, PASSWORD_PREFIX, "a");
+        raw["future_extension"] = json!({"version": 42});
+        seed_raw(&store, PASSWORD_PREFIX, "a", &raw);
+        let mut metadata = store.list_passwords().unwrap().remove(0);
+        metadata.name = "Renamed".into();
+        metadata.sort_order = 99;
+        store
+            .save_password_with_update(metadata.clone(), PasswordUpdate::Keep)
+            .unwrap();
+        let kept = raw_entry(&store, PASSWORD_PREFIX, "a");
+        assert_eq!(kept["password"], raw["password"]);
+        assert_eq!(kept["sort_order"], 4);
+        assert_eq!(kept["future_extension"], raw["future_extension"]);
+        store
+            .save_password_with_update(
+                metadata.clone(),
+                PasswordUpdate::Replace("  replacement\t".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_decrypted_password_by_id("a")
+                .unwrap()
+                .unwrap()
+                .password
+                .as_deref(),
+            Some("  replacement\t")
+        );
+        assert_ne!(
+            raw_entry(&store, PASSWORD_PREFIX, "a")["password"],
+            "  replacement\t"
+        );
+        store
+            .save_password_with_update(metadata, PasswordUpdate::Remove)
+            .unwrap();
+        let removed = store.load_password_by_id("a").unwrap().unwrap();
+        assert!(!removed.has_password);
+        assert!(removed.password.is_none());
+        assert_eq!(
+            raw_entry(&store, PASSWORD_PREFIX, "a")["future_extension"],
+            raw["future_extension"]
+        );
+        assert_eq!(removed.sort_order, 4);
+    }
+
+    #[test]
+    fn invalid_account_password_edits_leave_the_original_record_unchanged() {
+        use zzclawterm_core::models::credentials::PasswordUpdate;
+        let dir = TestTempDir::new("zzclawterm-account-password-rollback");
+        let store = ConnectionStore::open(&dir).unwrap();
+        seed_encrypted_accounts_and_keys(&store);
+        let before = raw_entry(&store, PASSWORD_PREFIX, "a");
+        let mut metadata = store.list_passwords().unwrap().remove(0);
+        metadata.username.clear();
+        metadata.name = "Must not be written".into();
+        assert!(
+            store
+                .save_password_with_update(metadata.clone(), PasswordUpdate::Remove)
+                .is_err()
+        );
+        assert_eq!(raw_entry(&store, PASSWORD_PREFIX, "a"), before);
+        assert!(
+            store
+                .save_password_with_update(
+                    metadata.clone(),
+                    PasswordUpdate::Replace(Default::default())
+                )
+                .is_err()
+        );
+        assert_eq!(raw_entry(&store, PASSWORD_PREFIX, "a"), before);
+        store.delete_password("a").unwrap();
+        assert!(
+            store
+                .save_password_with_update(metadata, PasswordUpdate::Keep)
+                .is_err()
+        );
+        assert!(store.load_password_by_id("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn metadata_edits_keep_unreadable_passwords_and_legacy_empty_updates_keep_the_secret() {
+        use zzclawterm_core::models::credentials::PasswordUpdate;
+        let dir = TestTempDir::new("zzclawterm-account-password-compat");
+        let store = ConnectionStore::open(&dir).unwrap();
+        seed_encrypted_accounts_and_keys(&store);
+        let mut raw = raw_entry(&store, PASSWORD_PREFIX, "a");
+        raw["password"] = json!("enc:v1:deliberately-corrupted-fixture");
+        seed_raw(&store, PASSWORD_PREFIX, "a", &raw);
+        let mut metadata = store.list_passwords().unwrap().remove(0);
+        metadata.name = "Metadata only".into();
+        store
+            .save_password_with_update(metadata.clone(), PasswordUpdate::Keep)
+            .unwrap();
+        assert_eq!(
+            raw_entry(&store, PASSWORD_PREFIX, "a")["password"],
+            raw["password"]
+        );
+        store.save_password(metadata.clone()).unwrap();
+        assert_eq!(
+            raw_entry(&store, PASSWORD_PREFIX, "a")["password"],
+            raw["password"]
+        );
+        store
+            .save_password_with_update(metadata, PasswordUpdate::Replace("valid-fixture".into()))
+            .unwrap();
+        assert_eq!(
+            store
+                .load_decrypted_password_by_id("a")
+                .unwrap()
+                .unwrap()
+                .password
+                .as_deref(),
+            Some("valid-fixture")
+        );
     }
 }

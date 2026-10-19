@@ -1,4 +1,5 @@
 mod helpers;
+pub(in crate::features::connections) mod validation;
 mod window;
 pub(in crate::features) use helpers::ConnectionEditorToggle;
 

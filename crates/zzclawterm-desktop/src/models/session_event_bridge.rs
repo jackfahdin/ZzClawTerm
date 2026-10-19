@@ -75,24 +75,20 @@ struct SessionEventBridgeState {
     stop: AtomicBool,
 }
 
-#[derive(Clone)]
+#[derive(Default)]
 struct SessionEventBridgeControl {
     owned_sessions: HashSet<String>,
+    protocol_consumers: HashMap<String, SessionEventConsumerId>,
     ui_routed_sessions: HashSet<String>,
+    /// A UI handoff remains ordered until the UI has submitted its whole drain
+    /// to the frame worker, including events already removed from `ui_queue`.
+    pending_ui_sessions: HashSet<String>,
     encoding: String,
     // Read-only projection of launch metadata; default changes cannot alter live streams.
     session_encodings: HashMap<String, String>,
     scrollback_limit: usize,
     source_queued_events: usize,
     source_queued_output_bytes: usize,
-}
-
-#[derive(Clone)]
-struct SessionEventBridgeControlSnapshot {
-    ui_routed_sessions: HashSet<String>,
-    // Read-only projection of launch metadata; default changes cannot alter live streams.
-    session_encodings: HashMap<String, String>,
-    scrollback_limit: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,7 +123,9 @@ impl SessionEventBridge {
         let state = Arc::new(SessionEventBridgeState {
             control: Mutex::new(SessionEventBridgeControl {
                 owned_sessions: HashSet::new(),
+                protocol_consumers: HashMap::new(),
                 ui_routed_sessions: HashSet::new(),
+                pending_ui_sessions: HashSet::new(),
                 encoding,
                 session_encodings: HashMap::new(),
                 scrollback_limit,
@@ -171,9 +169,68 @@ impl SessionEventBridge {
         if session_id.is_empty() {
             return;
         }
+        let mut consumer = self.consumer_id;
         if let Ok(mut control) = self.state.control.lock() {
             control.owned_sessions.insert(session_id.to_string());
+            consumer = control
+                .protocol_consumers
+                .get(session_id)
+                .copied()
+                .unwrap_or(consumer);
         }
+        self.session_manager
+            .assign_session_event_consumer(session_id, consumer);
+    }
+
+    pub(crate) fn protocol_wake(&self) -> zzclawterm_transport::zmodem::runtime::RuntimeWake {
+        let wake = self.state.ui_queue.wake.clone();
+        Arc::new(move || {
+            if let Some(wake) = &wake {
+                wake.signal(ANY_INTEREST);
+            }
+        })
+    }
+
+    pub(crate) fn bind_protocol_consumer(
+        &self,
+        session_id: &str,
+        consumer: SessionEventConsumerId,
+    ) {
+        self.state
+            .control
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .protocol_consumers
+            .insert(session_id.into(), consumer);
+    }
+
+    /// Fence the bridge's complete dequeue/routing turn before transferring input.
+    pub(crate) fn begin_protocol_handoff(
+        &self,
+        session_id: &str,
+        consumer: SessionEventConsumerId,
+    ) -> VecDeque<SessionEvent> {
+        let _gate = self
+            .state
+            .transfer_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.bind_protocol_consumer(session_id, consumer);
+        self.session_manager
+            .assign_session_event_consumer(session_id, consumer);
+        self.state.ui_queue.take_sessions(&[session_id.to_string()])
+    }
+
+    pub(crate) fn finish_protocol_handoff(&self, session_id: &str) {
+        let _gate = self
+            .state
+            .transfer_gate
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut control = self.state.control.lock().unwrap_or_else(|p| p.into_inner());
+        control.protocol_consumers.remove(session_id);
+        control.pending_ui_sessions.insert(session_id.into());
+        drop(control);
         self.session_manager
             .assign_session_event_consumer(session_id, self.consumer_id);
     }
@@ -181,7 +238,9 @@ impl SessionEventBridge {
     pub(crate) fn release_session(&self, session_id: &str) {
         if let Ok(mut control) = self.state.control.lock() {
             control.owned_sessions.remove(session_id);
+            control.protocol_consumers.remove(session_id);
             control.ui_routed_sessions.remove(session_id);
+            control.pending_ui_sessions.remove(session_id);
         }
         self.session_manager
             .clear_session_event_consumer(session_id, self.consumer_id);
@@ -201,7 +260,9 @@ impl SessionEventBridge {
         if let Ok(mut control) = self.state.control.lock() {
             for session_id in session_ids {
                 control.owned_sessions.remove(session_id);
+                control.protocol_consumers.remove(session_id);
                 control.ui_routed_sessions.remove(session_id);
+                control.pending_ui_sessions.remove(session_id);
             }
         }
         for session_id in session_ids {
@@ -226,7 +287,16 @@ impl SessionEventBridge {
     /// and the drain without a live PTY.
     #[cfg(test)]
     pub(crate) fn push_ui_event_for_test(&self, event: SessionEvent) {
-        self.state.ui_queue.push(event);
+        if let Ok(mut control) = self.state.control.lock() {
+            self.state.push_ui_event(&mut control, event);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_requires_ui_for_test(&self, session_id: &str) -> bool {
+        let control = self.state.control.lock().unwrap();
+        control.ui_routed_sessions.contains(session_id)
+            || control.pending_ui_sessions.contains(session_id)
     }
 
     pub(crate) fn configure(
@@ -261,10 +331,39 @@ impl SessionEventBridge {
         }
     }
 
+    pub(crate) fn begin_output_boundary(&self, session_id: &str, token: &str) {
+        // The worker holds this gate through direct-frame submission, so its
+        // previous batch cannot overtake the boundary or the synthetic header.
+        let Ok(_gate) = self.state.transfer_gate.lock() else {
+            return;
+        };
+        let Ok(mut control) = self.state.control.lock() else {
+            return;
+        };
+        control.ui_routed_sessions.insert(session_id.to_string());
+        // Use the source queue: bytes not yet dequeued by the worker must also
+        // precede the fence, including a backlog larger than one worker batch.
+        self.session_manager
+            .enqueue_output_boundary(session_id, token);
+    }
+
     pub(crate) fn resume_session_direct_output(&self, session_id: &str) {
         if let Ok(mut control) = self.state.control.lock() {
             control.ui_routed_sessions.remove(session_id);
         }
+    }
+
+    /// Install the ordering boundary before a transferred session is claimed.
+    pub(crate) fn hold_session_for_ui(&self, session_id: &str) {
+        if let Ok(mut control) = self.state.control.lock() {
+            control.pending_ui_sessions.insert(session_id.to_string());
+        }
+    }
+
+    /// Called only after the UI has submitted all accepted output in its drain.
+    /// Feature routing still protects detector-held bytes and active AI capture.
+    pub(crate) fn complete_ui_drain(&self, pending_sessions: &HashSet<String>) {
+        self.state.complete_ui_drain(pending_sessions);
     }
 
     pub(crate) fn clear_session(&self, session_id: &str) {
@@ -382,13 +481,30 @@ impl Drop for SessionEventBridge {
 }
 
 impl SessionEventBridgeState {
-    fn control_snapshot(&self) -> Option<SessionEventBridgeControlSnapshot> {
-        let control = self.control.lock().ok()?;
-        Some(SessionEventBridgeControlSnapshot {
-            ui_routed_sessions: control.ui_routed_sessions.clone(),
-            session_encodings: control.session_encodings.clone(),
-            scrollback_limit: control.scrollback_limit,
-        })
+    fn push_ui_event(&self, control: &mut SessionEventBridgeControl, event: SessionEvent) {
+        control
+            .pending_ui_sessions
+            .insert(bridge_event_session_id(&event).to_string());
+        self.ui_queue.push(event);
+    }
+
+    fn complete_ui_drain(&self, pending_sessions: &HashSet<String>) {
+        // Routing, enqueue and release use the same lock. A new UI event cannot
+        // be chosen using stale policy and enqueued after its boundary is released.
+        let Ok(mut control) = self.control.lock() else {
+            return;
+        };
+        let Ok(queue) = self.ui_queue.inner.lock() else {
+            return;
+        };
+        let queued_sessions = queue
+            .events
+            .iter()
+            .map(bridge_event_session_id)
+            .collect::<HashSet<_>>();
+        control.pending_ui_sessions.retain(|session_id| {
+            pending_sessions.contains(session_id) || queued_sessions.contains(session_id.as_str())
+        });
     }
 
     fn update_source_stats(&self, stats: &SessionDrainStats) {
@@ -401,11 +517,18 @@ impl SessionEventBridgeState {
             control.source_queued_output_bytes = stats.queued_output_bytes;
         }
     }
+}
 
-    fn route_session_to_ui(&self, session_id: &str) {
-        if let Ok(mut control) = self.control.lock() {
-            control.ui_routed_sessions.insert(session_id.to_string());
-        }
+fn bridge_event_session_id(event: &SessionEvent) -> &str {
+    match event {
+        SessionEvent::Output { session_id, .. }
+        | SessionEvent::OutputBoundary { session_id, .. }
+        | SessionEvent::OutputDropped { session_id, .. }
+        | SessionEvent::CwdChanged { session_id, .. }
+        | SessionEvent::CommandAccepted { session_id, .. }
+        | SessionEvent::Exited { session_id, .. }
+        | SessionEvent::CleanupFailed { session_id, .. }
+        | SessionEvent::Error { session_id, .. } => session_id,
     }
 }
 
@@ -423,10 +546,12 @@ impl SessionEventBridgeQueue {
         while let Some(event) = inner.events.pop_front() {
             let session_id = match &event {
                 SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputBoundary { session_id, .. }
                 | SessionEvent::OutputDropped { session_id, .. }
                 | SessionEvent::CwdChanged { session_id, .. }
                 | SessionEvent::CommandAccepted { session_id, .. }
                 | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if selected.contains(session_id.as_str()) {
@@ -527,10 +652,12 @@ impl SessionEventBridgeQueueInner {
             SessionEvent::Output { data, .. } => {
                 self.queued_output_bytes = self.queued_output_bytes.saturating_add(data.len());
             }
-            SessionEvent::OutputDropped { .. }
+            SessionEvent::OutputBoundary { .. }
+            | SessionEvent::OutputDropped { .. }
             | SessionEvent::CwdChanged { .. }
             | SessionEvent::CommandAccepted { .. }
             | SessionEvent::Exited { .. }
+            | SessionEvent::CleanupFailed { .. }
             | SessionEvent::Error { .. } => {}
         }
         self.events.push_back(event);
@@ -583,9 +710,11 @@ impl SessionEventBridgeQueueInner {
                 SessionEvent::OutputDropped { bytes, .. } => {
                     stats.dropped_output_bytes = stats.dropped_output_bytes.saturating_add(*bytes);
                 }
-                SessionEvent::CwdChanged { .. }
+                SessionEvent::OutputBoundary { .. }
+                | SessionEvent::CwdChanged { .. }
                 | SessionEvent::CommandAccepted { .. }
                 | SessionEvent::Exited { .. }
+                | SessionEvent::CleanupFailed { .. }
                 | SessionEvent::Error { .. } => {}
             }
             events.push(event);
@@ -609,14 +738,6 @@ fn run_session_event_bridge(
         HashMap::new();
     let mut source_drain_backpressured = false;
     while !state.stop.load(Ordering::Relaxed) {
-        let Ok(_transfer_gate) = state.transfer_gate.lock() else {
-            thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
-            continue;
-        };
-        let Some(control) = state.control_snapshot() else {
-            thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
-            continue;
-        };
         source_drain_backpressured = bridge_should_pause_source_drain(
             frame_pipeline.queued_output_bytes(),
             state.ui_queue.queued_output_bytes(),
@@ -626,143 +747,184 @@ fn run_session_event_bridge(
             thread::sleep(SESSION_EVENT_BRIDGE_BUSY_SLEEP);
             continue;
         }
-        // Park on the queue rather than polling it: a PTY read wakes this
-        // thread directly, so the first hop of the echo path no longer spends
-        // an arbitrary slice of the poll interval waiting to notice.
+        // Never hold the transfer gate while waiting or sleeping: repeatedly
+        // reacquiring it after an idle wait can starve a workspace transfer.
+        // Waiting leaves events queued, so a transfer can still change their
+        // owner before the non-blocking drain below.
+        if !session_manager
+            .wait_for_events_for_consumer(consumer_id, SESSION_EVENT_BRIDGE_WAIT_TIMEOUT)
+        {
+            continue;
+        }
+        if state.stop.load(Ordering::Acquire) {
+            break;
+        }
+        let Ok(transfer_gate) = state.transfer_gate.lock() else {
+            thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
+            continue;
+        };
+        // Keep dequeue, routing and frame submission inside the same handoff
+        // boundary. A pause must see every event already removed from transport.
         let Ok(drain) = session_manager.drain_events_blocking_for_consumer_with_output_budget(
             consumer_id,
             SESSION_EVENT_BRIDGE_DRAIN_BATCH,
             SESSION_EVENT_BRIDGE_OUTPUT_BUDGET,
-            SESSION_EVENT_BRIDGE_WAIT_TIMEOUT,
+            Duration::ZERO,
         ) else {
+            drop(transfer_gate);
             thread::sleep(SESSION_EVENT_BRIDGE_IDLE_SLEEP);
             continue;
         };
         state.update_source_stats(&drain.stats);
         if drain.events.is_empty() {
-            // The park above already absorbed the idle wait.
+            // Ownership may have changed since readiness was observed.
             continue;
         }
         let mut pending_direct_outputs = Vec::new();
         for event in drain.events {
-            match event {
-                SessionEvent::Output { session_id, data } => {
-                    let now = Instant::now();
-                    let sideband_probe_active = bridge_sideband_probe_active(
-                        &mut sideband_probe_sessions,
-                        &session_id,
-                        now,
-                    );
-                    let sideband_probe_detected = bridge_output_may_contain_sideband_trigger(&data);
-                    if sideband_probe_detected {
-                        bridge_arm_sideband_probe(&mut sideband_probe_sessions, &session_id, now);
-                    }
-                    let needs_ui_probe = sideband_probe_active || sideband_probe_detected;
-                    let frame_queued_output_bytes = frame_pipeline.queued_output_bytes();
-                    if bridge_output_can_go_direct(
-                        &control,
-                        frame_queued_output_bytes,
-                        &session_id,
-                        needs_ui_probe,
-                    ) {
-                        state.direct_output_events.fetch_add(1, Ordering::Relaxed);
-                        state
-                            .direct_output_bytes
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                        if let Some(writer) = recording_writer.as_ref() {
-                            writer.write_raw_output(&session_id, &data);
-                        }
-                        pending_direct_outputs.push(TerminalFrameOutputSubmission {
-                            raw_already_captured: true,
-                            session_id: session_id.clone(),
-                            data,
-                            encoding: control.session_encodings[&session_id].clone(),
-                            scrollback_limit: control.scrollback_limit,
-                        });
-                    } else if bridge_output_is_backpressured(
-                        frame_queued_output_bytes,
-                        &control,
-                        &session_id,
-                        needs_ui_probe,
-                    ) {
-                        state
-                            .direct_backpressure_events
-                            .fetch_add(1, Ordering::Relaxed);
-                        state
-                            .direct_backpressure_bytes
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                        if let Some(writer) = recording_writer.as_ref() {
-                            writer.write_raw_output(&session_id, &data);
-                        }
-                        pending_direct_outputs.push(TerminalFrameOutputSubmission {
-                            raw_already_captured: true,
-                            session_id: session_id.clone(),
-                            data,
-                            encoding: control.session_encodings[&session_id].clone(),
-                            scrollback_limit: control.scrollback_limit,
-                        });
-                    } else {
-                        flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                        // Ambiguous side-band prefixes such as "*" or ":" are common in normal
-                        // shell output. Probe this chunk on the UI side, but let the detector
-                        // state decide whether future chunks need sticky UI routing.
-                        let routed_session_id = session_id.clone();
-                        state
-                            .ui_queue
-                            .push(SessionEvent::Output { session_id, data });
-                        bridge_consume_sideband_probe(
-                            &mut sideband_probe_sessions,
-                            &routed_session_id,
-                        );
-                    }
+            bridge_route_event(
+                &state,
+                &frame_pipeline,
+                recording_writer.as_ref(),
+                &mut sideband_probe_sessions,
+                &mut pending_direct_outputs,
+                event,
+                Instant::now(),
+            );
+        }
+        flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
+    }
+}
+
+fn bridge_route_event(
+    state: &SessionEventBridgeState,
+    frame_pipeline: &TerminalFramePipeline,
+    recording_writer: Option<&RecordingWriteHandle>,
+    sideband_probe_sessions: &mut HashMap<String, SessionEventBridgeSidebandProbe>,
+    pending_direct_outputs: &mut Vec<TerminalFrameOutputSubmission>,
+    event: SessionEvent,
+    now: Instant,
+) {
+    // Use live policy for every event, and hold it through enqueue. In particular,
+    // a UI handoff earlier in this batch must fence every later event in it.
+    let Ok(mut control) = state.control.lock() else {
+        return;
+    };
+    match event {
+        SessionEvent::Output { session_id, data } => {
+            let sideband_probe_active =
+                bridge_sideband_probe_active(sideband_probe_sessions, &session_id, now);
+            let sideband_probe_detected = bridge_output_may_contain_sideband_trigger(&data);
+            if sideband_probe_detected {
+                bridge_arm_sideband_probe(sideband_probe_sessions, &session_id, now);
+            }
+            let needs_ui_probe = sideband_probe_active || sideband_probe_detected;
+            let frame_queued_output_bytes = frame_pipeline.queued_output_bytes();
+            if bridge_output_can_go_direct(
+                &control,
+                frame_queued_output_bytes,
+                &session_id,
+                needs_ui_probe,
+            ) {
+                state.direct_output_events.fetch_add(1, Ordering::Relaxed);
+                state
+                    .direct_output_bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+                if let Some(writer) = recording_writer {
+                    writer.write_raw_output(&session_id, &data);
                 }
-                SessionEvent::OutputDropped { session_id, bytes } => {
-                    if let Some(writer) = recording_writer.as_ref() {
-                        writer.report_output_gap(&session_id, bytes);
-                    }
-                    flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                    sideband_probe_sessions.remove(&session_id);
-                    state.route_session_to_ui(&session_id);
-                    state
-                        .ui_queue
-                        .push(SessionEvent::OutputDropped { session_id, bytes });
+                pending_direct_outputs.push(TerminalFrameOutputSubmission {
+                    raw_already_captured: true,
+                    session_id: session_id.clone(),
+                    data,
+                    encoding: control.session_encodings[&session_id].clone(),
+                    scrollback_limit: control.scrollback_limit,
+                });
+            } else if bridge_output_is_backpressured(
+                frame_queued_output_bytes,
+                &control,
+                &session_id,
+                needs_ui_probe,
+            ) {
+                state
+                    .direct_backpressure_events
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .direct_backpressure_bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+                if let Some(writer) = recording_writer {
+                    writer.write_raw_output(&session_id, &data);
                 }
-                SessionEvent::CwdChanged { session_id, cwd } => {
-                    flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                    state
-                        .ui_queue
-                        .push(SessionEvent::CwdChanged { session_id, cwd });
-                }
+                pending_direct_outputs.push(TerminalFrameOutputSubmission {
+                    raw_already_captured: true,
+                    session_id: session_id.clone(),
+                    data,
+                    encoding: control.session_encodings[&session_id].clone(),
+                    scrollback_limit: control.scrollback_limit,
+                });
+            } else {
+                flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+                // Probe expiry must not let later bytes overtake this handoff.
+                // Only completion of the UI drain can release its boundary.
+                let routed_session_id = session_id.clone();
+                state.push_ui_event(&mut control, SessionEvent::Output { session_id, data });
+                bridge_consume_sideband_probe(sideband_probe_sessions, &routed_session_id);
+            }
+        }
+        SessionEvent::OutputDropped { session_id, bytes } => {
+            if let Some(writer) = recording_writer {
+                writer.report_output_gap(&session_id, bytes);
+            }
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            sideband_probe_sessions.remove(&session_id);
+            control.ui_routed_sessions.insert(session_id.clone());
+            state.push_ui_event(
+                &mut control,
+                SessionEvent::OutputDropped { session_id, bytes },
+            );
+        }
+        event @ SessionEvent::OutputBoundary { .. } => {
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            state.push_ui_event(&mut control, event);
+        }
+        SessionEvent::CwdChanged { session_id, cwd } => {
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            state.push_ui_event(&mut control, SessionEvent::CwdChanged { session_id, cwd });
+        }
+        SessionEvent::CommandAccepted {
+            session_id,
+            command,
+        } => {
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            state.push_ui_event(
+                &mut control,
                 SessionEvent::CommandAccepted {
                     session_id,
                     command,
-                } => {
-                    flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                    state.ui_queue.push(SessionEvent::CommandAccepted {
-                        session_id,
-                        command,
-                    });
-                }
-                SessionEvent::Exited { session_id, reason } => {
-                    flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                    sideband_probe_sessions.remove(&session_id);
-                    state
-                        .ui_queue
-                        .push(SessionEvent::Exited { session_id, reason });
-                }
+                },
+            );
+        }
+        SessionEvent::Exited { session_id, reason } => {
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            sideband_probe_sessions.remove(&session_id);
+            state.push_ui_event(&mut control, SessionEvent::Exited { session_id, reason });
+        }
+        event @ SessionEvent::CleanupFailed { .. } => {
+            state.push_ui_event(&mut control, event);
+        }
+        SessionEvent::Error {
+            session_id,
+            message,
+        } => {
+            flush_bridge_direct_outputs(frame_pipeline, pending_direct_outputs);
+            state.push_ui_event(
+                &mut control,
                 SessionEvent::Error {
                     session_id,
                     message,
-                } => {
-                    flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
-                    state.ui_queue.push(SessionEvent::Error {
-                        session_id,
-                        message,
-                    });
-                }
-            }
+                },
+            );
         }
-        flush_bridge_direct_outputs(&frame_pipeline, &mut pending_direct_outputs);
     }
 }
 
@@ -790,25 +952,27 @@ fn flush_bridge_direct_outputs(
 }
 
 fn bridge_output_can_go_direct(
-    control: &SessionEventBridgeControlSnapshot,
+    control: &SessionEventBridgeControl,
     frame_pipeline_queued_output_bytes: usize,
     session_id: &str,
     needs_ui_probe: bool,
 ) -> bool {
     control.session_encodings.contains_key(session_id)
         && !control.ui_routed_sessions.contains(session_id)
+        && !control.pending_ui_sessions.contains(session_id)
         && frame_pipeline_queued_output_bytes < SESSION_EVENT_BRIDGE_DIRECT_OUTPUT_BACKPRESSURE
         && !needs_ui_probe
 }
 
 fn bridge_output_is_backpressured(
     frame_pipeline_queued_output_bytes: usize,
-    control: &SessionEventBridgeControlSnapshot,
+    control: &SessionEventBridgeControl,
     session_id: &str,
     needs_ui_probe: bool,
 ) -> bool {
     control.session_encodings.contains_key(session_id)
         && !control.ui_routed_sessions.contains(session_id)
+        && !control.pending_ui_sessions.contains(session_id)
         && frame_pipeline_queued_output_bytes >= SESSION_EVENT_BRIDGE_DIRECT_OUTPUT_BACKPRESSURE
         && !needs_ui_probe
 }
@@ -863,6 +1027,8 @@ fn bridge_consume_sideband_probe(
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use super::{
@@ -870,16 +1036,441 @@ mod tests {
         SESSION_EVENT_BRIDGE_DIRECT_OUTPUT_LOW_WATERMARK,
         SESSION_EVENT_BRIDGE_SIDEBAND_PROBE_EVENTS, SESSION_EVENT_BRIDGE_SIDEBAND_PROBE_WINDOW,
         SESSION_EVENT_BRIDGE_UI_OUTPUT_LIMIT, SESSION_EVENT_BRIDGE_UI_OUTPUT_LOW_WATERMARK,
-        SessionEventBridgeControlSnapshot, SessionEventBridgeQueue, bridge_arm_sideband_probe,
+        SessionEventBridge, SessionEventBridgeControl, SessionEventBridgeQueue,
+        SessionEventBridgeSidebandProbe, SessionEventBridgeState, bridge_arm_sideband_probe,
         bridge_consume_sideband_probe, bridge_output_can_go_direct, bridge_output_is_backpressured,
-        bridge_output_may_contain_sideband_trigger, bridge_should_pause_source_drain,
-        bridge_sideband_probe_active,
+        bridge_output_may_contain_sideband_trigger, bridge_route_event,
+        bridge_should_pause_source_drain, bridge_sideband_probe_active,
+        flush_bridge_direct_outputs,
     };
-    use zzclawterm_transport::SessionEvent;
+    use crate::models::recording::RecordingWritePipeline;
+    use crate::models::terminal::{TerminalFrameOutputSubmission, TerminalFramePipeline};
+    use zzclawterm_transport::{SessionEvent, SessionManager};
+
+    #[test]
+    fn protocol_handoff_extracts_only_its_session_and_keeps_migration_consumer() {
+        let manager = Arc::new(SessionManager::new());
+        let bridge = SessionEventBridge::spawn(
+            manager.clone(),
+            TerminalFramePipeline::default(),
+            None,
+            "UTF-8".into(),
+            1000,
+        );
+        bridge.claim_session("protocol");
+        for (id, bytes) in [
+            ("protocol", b"first".as_slice()),
+            ("other", b"unrelated".as_slice()),
+            ("protocol", b"second".as_slice()),
+        ] {
+            bridge.push_ui_event_for_test(SessionEvent::Output {
+                session_id: id.into(),
+                data: bytes.to_vec(),
+            });
+        }
+        let consumer = manager.register_event_consumer();
+        let pending = bridge.begin_protocol_handoff("protocol", consumer);
+        let bytes: Vec<u8> = pending
+            .into_iter()
+            .flat_map(|event| match event {
+                SessionEvent::Output { data, .. } => data,
+                _ => panic!("output"),
+            })
+            .collect();
+        assert_eq!(bytes, b"firstsecond");
+        bridge.claim_session("protocol");
+        assert_eq!(
+            bridge
+                .state
+                .control
+                .lock()
+                .unwrap()
+                .protocol_consumers
+                .get("protocol"),
+            Some(&consumer)
+        );
+        assert_eq!(
+            bridge.state.ui_queue.take_sessions(&["other".into()]).len(),
+            1
+        );
+        bridge.finish_protocol_handoff("protocol");
+        let control = bridge.state.control.lock().unwrap();
+        assert!(!control.protocol_consumers.contains_key("protocol"));
+        assert!(control.pending_ui_sessions.contains("protocol"));
+    }
+
+    #[test]
+    fn repeated_transfers_finish_while_both_event_bridges_are_idle() {
+        assert_repeated_transfers_finish(false);
+    }
+
+    #[test]
+    fn repeated_transfers_finish_while_both_event_bridges_are_backpressured() {
+        assert_repeated_transfers_finish(true);
+    }
+
+    fn assert_repeated_transfers_finish(backpressured: bool) {
+        let manager = Arc::new(SessionManager::new());
+        let source = SessionEventBridge::spawn(
+            Arc::clone(&manager),
+            TerminalFramePipeline::default(),
+            None,
+            "UTF-8".into(),
+            1000,
+        );
+        let target = SessionEventBridge::spawn(
+            manager,
+            TerminalFramePipeline::default(),
+            None,
+            "UTF-8".into(),
+            1000,
+        );
+        source.claim_session("moved");
+        if backpressured {
+            for bridge in [&source, &target] {
+                bridge.state.ui_queue.push(SessionEvent::Output {
+                    session_id: "unmoved".into(),
+                    data: vec![b'x'; SESSION_EVENT_BRIDGE_UI_OUTPUT_LIMIT],
+                });
+            }
+        }
+        let source_state = Arc::clone(&source.state);
+        let target_state = Arc::clone(&target.state);
+        // Let idle workers enter their event waits before competing for the
+        // transfer gate. The old loop kept the gate locked throughout each wait.
+        std::thread::sleep(Duration::from_millis(20));
+        let (done_tx, done_rx) = mpsc::channel();
+        let mover = std::thread::spawn(move || {
+            let ids = vec!["moved".to_string()];
+            for _ in 0..64 {
+                assert!(source.pause_sessions_for_transfer(&ids).is_empty());
+                target.claim_session("moved");
+                assert!(target.pause_sessions_for_transfer(&ids).is_empty());
+                source.claim_session("moved");
+            }
+            done_tx.send(()).expect("report completed transfers");
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(5));
+        // Stop both workers even on timeout, so a regression cannot leave the
+        // test itself stuck in a starved lock acquisition or worker join.
+        source_state.stop.store(true, Ordering::Release);
+        target_state.stop.store(true, Ordering::Release);
+        mover.join().expect("transfer worker");
+        completed.expect("event waits and backpressure must not starve workspace transfers");
+    }
+
+    struct BridgeFixture {
+        state: SessionEventBridgeState,
+        pipeline: TerminalFramePipeline,
+        recording: RecordingWritePipeline,
+        probes: HashMap<String, SessionEventBridgeSidebandProbe>,
+        outputs: Vec<TerminalFrameOutputSubmission>,
+    }
+
+    impl BridgeFixture {
+        fn new() -> Self {
+            let recording = RecordingWritePipeline::spawn(4096);
+            let pipeline = TerminalFramePipeline::spawn(recording.writer());
+            Self {
+                state: SessionEventBridgeState {
+                    control: Mutex::new(SessionEventBridgeControl {
+                        session_encodings: [
+                            ("s1".into(), "UTF-8".into()),
+                            ("s2".into(), "UTF-8".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        scrollback_limit: 1000,
+                        ..SessionEventBridgeControl::default()
+                    }),
+                    transfer_gate: Mutex::new(()),
+                    ui_queue: SessionEventBridgeQueue::new(),
+                    ui_queue_wake_rx: Mutex::new(None),
+                    source_queued_events: AtomicUsize::new(0),
+                    source_queued_output_bytes: AtomicUsize::new(0),
+                    direct_output_events: AtomicU64::new(0),
+                    direct_output_bytes: AtomicU64::new(0),
+                    direct_backpressure_events: AtomicU64::new(0),
+                    direct_backpressure_bytes: AtomicU64::new(0),
+                    stop: AtomicBool::new(false),
+                },
+                pipeline,
+                recording,
+                probes: HashMap::new(),
+                outputs: Vec::new(),
+            }
+        }
+
+        fn event(&mut self, event: SessionEvent, now: Instant) {
+            bridge_route_event(
+                &self.state,
+                &self.pipeline,
+                None,
+                &mut self.probes,
+                &mut self.outputs,
+                event,
+                now,
+            );
+        }
+
+        fn output(&mut self, session_id: &str, data: &[u8], now: Instant) {
+            self.event(
+                SessionEvent::Output {
+                    session_id: session_id.into(),
+                    data: data.to_vec(),
+                },
+                now,
+            );
+        }
+
+        fn flush(&mut self) {
+            flush_bridge_direct_outputs(&self.pipeline, &mut self.outputs);
+        }
+
+        fn text(&self, session_id: &str) -> String {
+            futures::executor::block_on(self.pipeline.request_all_text(session_id.into()))
+                .unwrap()
+                .unwrap_or_default()
+                .trim_end()
+                .to_string()
+        }
+
+        fn submit_ui_events(&self, events: Vec<SessionEvent>) {
+            self.pipeline.submit_outputs(
+                events
+                    .into_iter()
+                    .filter_map(|event| {
+                        let SessionEvent::Output { session_id, data } = event else {
+                            return None;
+                        };
+                        Some(TerminalFrameOutputSubmission {
+                            session_id,
+                            data,
+                            encoding: "UTF-8".into(),
+                            scrollback_limit: 1000,
+                            raw_already_captured: true,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    impl Drop for BridgeFixture {
+        fn drop(&mut self) {
+            self.pipeline.shutdown();
+            self.recording.shutdown();
+        }
+    }
+
+    #[test]
+    fn delayed_yaml_handoff_keeps_output_and_prompt_in_wire_order_after_probe_expiry() {
+        let mut fixture = BridgeFixture::new();
+        let now = Instant::now();
+        fixture.output("s1", b"kind: ConfigMap\r\n", now);
+        fixture.output("s1", b"---\r\nkind: Deployment\r\nmetadata:", now);
+        for index in 0..8 {
+            fixture.output("s1", format!("\r\n  field{index}: value").as_bytes(), now);
+        }
+        fixture.output(
+            "s1",
+            b"\r\n---\r\nkind: Service\r\n$ ",
+            now + Duration::from_secs(1),
+        );
+        fixture.flush();
+        assert_eq!(fixture.text("s1"), "kind: ConfigMap");
+
+        let drain = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        fixture.submit_ui_events(drain.events);
+        fixture.state.complete_ui_drain(&HashSet::new());
+        fixture.output("s1", b"done\r\n", now + Duration::from_secs(2));
+        assert_eq!(
+            fixture.outputs.len(),
+            1,
+            "normal output must resume the direct path"
+        );
+        fixture.flush();
+        let mut expected = "kind: ConfigMap\n---\nkind: Deployment\nmetadata:".to_string();
+        for index in 0..8 {
+            expected.push_str(&format!("\n  field{index}: value"));
+        }
+        expected.push_str("\n---\nkind: Service\n$ done");
+        assert_eq!(fixture.text("s1"), expected);
+    }
+
+    #[test]
+    fn partial_ui_drains_and_events_already_in_ui_keep_the_session_fenced() {
+        let mut fixture = BridgeFixture::new();
+        let now = Instant::now();
+        fixture.output("s1", b"metadata:", now);
+        let first = fixture.state.ui_queue.drain_with_output_budget(1, 4);
+        fixture.submit_ui_events(first.events);
+        fixture.state.complete_ui_drain(&HashSet::new());
+        assert!(
+            fixture
+                .state
+                .control
+                .lock()
+                .unwrap()
+                .pending_ui_sessions
+                .contains("s1")
+        );
+
+        let rest = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        fixture
+            .state
+            .complete_ui_drain(&HashSet::from(["s1".into()]));
+        fixture
+            .state
+            .control
+            .lock()
+            .unwrap()
+            .ui_routed_sessions
+            .remove("s1");
+        fixture.output("s1", b"\r\nkind: Service\r\n", now + Duration::from_secs(1));
+        fixture.state.complete_ui_drain(&HashSet::new());
+        assert!(
+            fixture
+                .state
+                .control
+                .lock()
+                .unwrap()
+                .pending_ui_sessions
+                .contains("s1")
+        );
+        fixture.submit_ui_events(rest.events);
+        let later = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        fixture.submit_ui_events(later.events);
+        fixture.state.complete_ui_drain(&HashSet::new());
+        assert!(
+            !fixture
+                .state
+                .control
+                .lock()
+                .unwrap()
+                .pending_ui_sessions
+                .contains("s1")
+        );
+        assert_eq!(fixture.text("s1"), "metadata:\nkind: Service");
+    }
+
+    #[test]
+    fn sideband_handoffs_fence_only_their_session_for_trzsz_and_zmodem() {
+        for prefix in [b":".as_slice(), b"*", b"::TRZSZ"] {
+            let mut fixture = BridgeFixture::new();
+            let now = Instant::now();
+            fixture.output("s1", prefix, now);
+            // Queued UI work must survive both limits of the speculative probe.
+            for _ in 0..8 {
+                fixture.output("s1", b" continuation", now);
+            }
+            fixture.output("s1", b" tail", now + Duration::from_secs(1));
+            fixture.output("s2", b"other session\r\n", now);
+            fixture.flush();
+            assert_eq!(fixture.text("s1"), "");
+            assert_eq!(fixture.text("s2"), "other session");
+            assert_eq!(fixture.state.ui_queue.len(), 10);
+        }
+    }
+
+    #[test]
+    fn live_ai_routing_and_metadata_handoffs_apply_between_events_in_one_batch() {
+        let mut fixture = BridgeFixture::new();
+        let now = Instant::now();
+        fixture.output("s1", b"before\r\n", now);
+        fixture
+            .state
+            .control
+            .lock()
+            .unwrap()
+            .ui_routed_sessions
+            .insert("s1".into());
+        fixture.output("s1", b"captured\r\n", now);
+        fixture
+            .state
+            .control
+            .lock()
+            .unwrap()
+            .ui_routed_sessions
+            .remove("s1");
+        fixture.output("s1", b"after\r\n", now);
+        fixture.flush();
+        assert_eq!(fixture.text("s1"), "before");
+        let drain = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        fixture.submit_ui_events(drain.events);
+        fixture.state.complete_ui_drain(&HashSet::new());
+        assert_eq!(fixture.text("s1"), "before\ncaptured\nafter");
+
+        fixture.event(
+            SessionEvent::CwdChanged {
+                session_id: "s1".into(),
+                cwd: "/tmp".into(),
+            },
+            now,
+        );
+        fixture.output("s1", b"after metadata\r\n", now);
+        fixture.flush();
+        assert_eq!(fixture.state.ui_queue.len(), 2);
+        assert_eq!(fixture.text("s1"), "before\ncaptured\nafter");
+    }
+
+    #[test]
+    fn ui_completion_keeps_detector_held_bytes_and_ai_capture_on_the_ui_path() {
+        let mut fixture = BridgeFixture::new();
+        let now = Instant::now();
+        fixture.output("s1", b":", now);
+        let drain = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        assert_eq!(drain.events.len(), 1);
+        // The UI has consumed this event, but a detector still holds its colon.
+        fixture
+            .state
+            .control
+            .lock()
+            .unwrap()
+            .ui_routed_sessions
+            .insert("s1".into());
+        fixture.state.complete_ui_drain(&HashSet::new());
+        fixture.output("s1", b" continuation\r\n", now + Duration::from_secs(1));
+        fixture.flush();
+        assert_eq!(fixture.text("s1"), "");
+        let later = fixture
+            .state
+            .ui_queue
+            .drain_with_output_budget(100, usize::MAX);
+        // A resolved prefix is submitted before the UI requests direct routing.
+        fixture.submit_ui_events(drain.events);
+        fixture.submit_ui_events(later.events);
+        fixture
+            .state
+            .control
+            .lock()
+            .unwrap()
+            .ui_routed_sessions
+            .remove("s1");
+        fixture.state.complete_ui_drain(&HashSet::new());
+        fixture.output("s1", b"$ ", now + Duration::from_secs(2));
+        fixture.flush();
+        assert_eq!(fixture.text("s1"), ": continuation\n$");
+    }
 
     #[test]
     fn bridge_direct_policy_rejects_sideband_triggers() {
-        let control = SessionEventBridgeControlSnapshot {
+        let control = SessionEventBridgeControl {
             ui_routed_sessions: HashSet::new(),
             session_encodings: [
                 ("s1".to_string(), "UTF-8".to_string()),
@@ -888,6 +1479,7 @@ mod tests {
             .into_iter()
             .collect(),
             scrollback_limit: 1000,
+            ..SessionEventBridgeControl::default()
         };
         assert!(bridge_output_can_go_direct(&control, 0, "s1", false));
         assert!(!bridge_output_can_go_direct(&control, 0, "s1", true));
@@ -899,7 +1491,7 @@ mod tests {
     fn bridge_direct_policy_honors_ui_routed_sessions() {
         let mut routed = HashSet::new();
         routed.insert("s1".to_string());
-        let control = SessionEventBridgeControlSnapshot {
+        let control = SessionEventBridgeControl {
             ui_routed_sessions: routed,
             session_encodings: [
                 ("s1".to_string(), "UTF-8".to_string()),
@@ -908,6 +1500,7 @@ mod tests {
             .into_iter()
             .collect(),
             scrollback_limit: 1000,
+            ..SessionEventBridgeControl::default()
         };
         assert!(!bridge_output_can_go_direct(&control, 0, "s1", false));
         assert!(bridge_output_can_go_direct(&control, 0, "s2", false));
@@ -915,7 +1508,7 @@ mod tests {
 
     #[test]
     fn bridge_direct_policy_yields_under_frame_backpressure() {
-        let control = SessionEventBridgeControlSnapshot {
+        let control = SessionEventBridgeControl {
             ui_routed_sessions: HashSet::new(),
             session_encodings: [
                 ("s1".to_string(), "UTF-8".to_string()),
@@ -924,6 +1517,7 @@ mod tests {
             .into_iter()
             .collect(),
             scrollback_limit: 1000,
+            ..SessionEventBridgeControl::default()
         };
 
         assert!(bridge_output_can_go_direct(

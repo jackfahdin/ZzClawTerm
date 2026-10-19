@@ -415,7 +415,9 @@ impl ZzClawTermApp {
         .on_open_change(cx.listener(|this, open, _, cx| {
             this.set_quick_command_editor_icon_picker_open(*open, cx);
         }));
-        let can_save = !editor.label.trim().is_empty() && !editor.command.trim().is_empty();
+        let can_save = !editor.label.trim().is_empty()
+            && !editor.command.trim().is_empty()
+            && !self.commands.quick_editor_save_in_flight();
         let dialog_bg = if native_window {
             rgb(palette.bg)
         } else {

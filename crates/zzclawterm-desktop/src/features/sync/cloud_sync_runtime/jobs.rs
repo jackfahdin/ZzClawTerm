@@ -1,20 +1,22 @@
 use rust_i18n::t;
 
-use futures::future::{Either, select};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::Context;
 use zzclawterm_core::{
     CLOUD_SYNC_HISTORY_LIMIT, CloudSyncError, CloudSyncHistoryEntry, CloudSyncOutcome,
     CloudSyncSettings, CloudSyncState, LocalCloudSyncOptions, LocalDirectoryRemote,
-    RemoteSyncPointer, append_cloud_sync_history, cleanup_sync_snapshots_with_remote,
-    pull_local_snapshot, push_local_snapshot, read_cloud_sync_history,
-    recover_local_current_snapshot,
+    RemoteSyncPointer, append_cloud_sync_history, read_cloud_sync_history,
 };
 
-use crate::blocking_jobs::{BlockingJobScheduler, JobRejected, JobTask};
+use crate::blocking_jobs::BlockingJobScheduler;
 use crate::features::formatting::{cloud_sync_history_status, configured_cloud_sync_provider};
+use crate::features::sync::operation::{await_cloud_sync_job, lock_cloud_sync_operation};
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_result};
+use zzclawterm_core::cloud_sync::{
+    self,
+    control::{CloudSyncCancellation, CloudSyncOperationControl},
+};
 use zzclawterm_store::StoreDomain;
 
 use super::super::{
@@ -23,6 +25,22 @@ use super::super::{
 };
 
 impl ZzClawTermApp {
+    pub(crate) fn show_cloud_sync_timeout(
+        &mut self,
+        phase: CloudSyncCancellation,
+        cx: &mut Context<Self>,
+    ) {
+        let status = match phase {
+            CloudSyncCancellation::Stopping => t!("settings.syncTimeoutStopping").to_string(),
+            CloudSyncCancellation::FinishingCommit => {
+                t!("settings.syncTimeoutFinishing").to_string()
+            }
+        };
+        self.cloud_sync.set_status(status.clone());
+        self.shell.set_status(status);
+        self.request_settings_panel_refresh(cx);
+        cx.notify();
+    }
     pub(in crate::features) fn run_provider_cloud_sync_test(&mut self, cx: &mut Context<Self>) {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
@@ -37,11 +55,12 @@ impl ZzClawTermApp {
             .set_status(t!("settings.syncTestingProvider", provider = provider));
         self.shell
             .set_status(t!("settings.syncConnectionTestStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self.blocking_jobs.submit_task("cloud-sync-test", move |_| {
-            let _operation = crate::features::cloud_sync_operation_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            test_provider_connection(&local_store, &settings)?;
+            let _operation = lock_cloud_sync_operation(&operation_control)?;
+            test_provider_connection(&local_store, &settings, &operation_control)?;
+            operation_control.begin_commit()?;
             record_cloud_sync_connection_check(&local_store, current_time_ms())
         });
         cx.spawn(async move |this, cx| {
@@ -49,6 +68,10 @@ impl ZzClawTermApp {
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -94,20 +117,31 @@ impl ZzClawTermApp {
             t!("settings.syncPushingLocal")
         });
         self.shell.set_status(t!("settings.syncPushStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-local-push", move |_| {
-                let _operation = crate::features::cloud_sync_operation_lock()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
-                push_local_snapshot(&local_store, &options, &state, force)
+                cloud_sync::push_snapshot_with_remote_controlled(
+                    &local_store,
+                    &options,
+                    &LocalDirectoryRemote::new(options.remote_dir.clone()),
+                    &state,
+                    force,
+                    &operation_control,
+                )
             });
         cx.spawn(async move |this, cx| {
             let result = await_cloud_sync_job(
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -201,20 +235,32 @@ impl ZzClawTermApp {
             t!("settings.syncPullingLocal")
         });
         self.shell.set_status(t!("settings.syncPullStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-local-pull", move |_| {
-                let _operation = crate::features::cloud_sync_operation_lock()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
-                pull_local_snapshot(&local_store, &options, &state, force)
+                cloud_sync::pull_snapshot_with_remote_controlled(
+                    &local_store,
+                    &options,
+                    &LocalDirectoryRemote::new(options.remote_dir.clone()),
+                    &state,
+                    force,
+                    &|| Ok(()),
+                    &operation_control,
+                )
             });
         cx.spawn(async move |this, cx| {
             let result = await_cloud_sync_job(
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -308,20 +354,31 @@ impl ZzClawTermApp {
         });
         self.shell
             .set_status(t!("settings.syncProviderPushStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-provider-push", move |_| {
-                let _operation = crate::features::cloud_sync_operation_lock()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
-                push_provider_snapshot(&local_store, &settings, &options, &state, force)
+                push_provider_snapshot(
+                    &local_store,
+                    &settings,
+                    &options,
+                    &state,
+                    force,
+                    &operation_control,
+                )
             });
         cx.spawn(async move |this, cx| {
             let result = await_cloud_sync_job(
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -420,20 +477,31 @@ impl ZzClawTermApp {
         });
         self.shell
             .set_status(t!("settings.syncProviderPullStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-provider-pull", move |_| {
-                let _operation = crate::features::cloud_sync_operation_lock()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
-                pull_provider_snapshot(&local_store, &settings, &options, &state, force)
+                pull_provider_snapshot(
+                    &local_store,
+                    &settings,
+                    &options,
+                    &state,
+                    force,
+                    &operation_control,
+                )
             });
         cx.spawn(async move |this, cx| {
             let result = await_cloud_sync_job(
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -547,16 +615,21 @@ impl ZzClawTermApp {
         let started_at = Instant::now();
         self.cloud_sync.set_status(t!("settings.syncRecovering"));
         self.shell.set_status(t!("settings.syncRecoveryStarted"));
+        let control = CloudSyncOperationControl::default();
+        let operation_control = control.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-recover", move |_| {
-                let _operation = crate::features::cloud_sync_operation_lock()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _operation = lock_cloud_sync_operation(&operation_control)?;
                 if provider_action {
-                    recover_provider_snapshot(&local_store, &settings, &options)
+                    recover_provider_snapshot(&local_store, &settings, &options, &operation_control)
                 } else {
-                    recover_local_current_snapshot(&local_store, &options)
+                    cloud_sync::recover_current_snapshot_with_remote_controlled(
+                        &local_store,
+                        &options,
+                        &LocalDirectoryRemote::new(options.remote_dir.clone()),
+                        &operation_control,
+                    )
                 }
             });
         cx.spawn(async move |this, cx| {
@@ -564,6 +637,10 @@ impl ZzClawTermApp {
                 task,
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(300)),
+                control,
+                |phase| {
+                    let _ = this.update(cx, |this, cx| this.show_cloud_sync_timeout(phase, cx));
+                },
             )
             .await;
             let _ = this.update(cx, |this, cx| {
@@ -695,10 +772,10 @@ fn schedule_cloud_sync_cleanup(
         .map(configured_cloud_sync_provider)
         .unwrap_or_else(|| "local_directory".to_string());
     let latest_revision = latest.as_ref().map(|pointer| pointer.revision_id.clone());
+    let control = CloudSyncOperationControl::default();
+    let operation_control = control.clone();
     let task = scheduler.submit_task("cloud-sync-cleanup", move |_| {
-        let _operation = crate::features::cloud_sync_operation_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _operation = lock_cloud_sync_operation(&operation_control)?;
         let cleanup_due = local_store
             .request_fn(StoreDomain::CloudSync, |store| {
                 Ok(store
@@ -711,11 +788,24 @@ fn schedule_cloud_sync_cleanup(
             return Ok(());
         }
         let result = if let Some(settings) = settings {
-            cleanup_provider_snapshots(&local_store, &settings, &options, latest.as_ref())
+            cleanup_provider_snapshots(
+                &local_store,
+                &settings,
+                &options,
+                latest.as_ref(),
+                &operation_control,
+            )
         } else {
             let remote = LocalDirectoryRemote::new(options.remote_dir.clone());
-            cleanup_sync_snapshots_with_remote(&local_store, &options, &remote, latest.as_ref())
+            cloud_sync::cleanup_sync_snapshots_with_remote_controlled(
+                &local_store,
+                &options,
+                &remote,
+                latest.as_ref(),
+                &operation_control,
+            )
         };
+        operation_control.begin_commit()?;
         // Persist the attempt only if a newer sync has not replaced this revision.
         if let Some(revision) = latest_revision {
             let attempted_at = SystemTime::now()
@@ -738,6 +828,8 @@ fn schedule_cloud_sync_cleanup(
             task,
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(300)),
+            control,
+            |_| {},
         )
         .await
         .is_err()
@@ -749,27 +841,6 @@ fn schedule_cloud_sync_cleanup(
         }
     })
     .detach();
-}
-
-async fn await_cloud_sync_job<T>(
-    task: Result<JobTask<Result<T, CloudSyncError>>, JobRejected>,
-    timeout: impl std::future::Future<Output = ()>,
-) -> Result<T, CloudSyncError> {
-    match task {
-        Ok(task) => match select(Box::pin(task), Box::pin(timeout)).await {
-            Either::Left((result, _)) => {
-                result.map_err(|error| CloudSyncError::Remote(error.to_string()))?
-            }
-            Either::Right((_, task)) => {
-                task.cancel();
-                Err(CloudSyncError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "cloud sync exceeded 300 seconds",
-                )))
-            }
-        },
-        Err(error) => Err(CloudSyncError::Remote(error.to_string())),
-    }
 }
 
 fn current_time_ms() -> u64 {

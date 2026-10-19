@@ -1,6 +1,7 @@
 //! Root GPUI shell boundary.
 
 mod controller;
+pub(crate) use controller::native_menu;
 mod process_state;
 pub(crate) mod session_hub;
 pub(crate) mod tab_drag;
@@ -22,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnimationExt, AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement,
-    KeyBinding, Menu, MenuItem, MouseButton, OsAction, ParentElement, Render, Styled, Subscription,
-    SystemMenuType, WeakEntity, Window, actions, div, prelude::FluentBuilder, px, rgb, svg,
+    KeyBinding, MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
+    actions, div, prelude::FluentBuilder, px, rgb, svg,
 };
 use rust_i18n::t;
 use zzclawterm_core::{
@@ -33,10 +34,7 @@ use zzclawterm_core::{
 use zzclawterm_store::{
     FlushBarrier, StoreOperationError, StoreRuntime, StoreSubmitError, StoreTask,
 };
-use zzclawterm_ui::{
-    ZzClawAppMenu, ZzClawAppMenuBar, ZzClawButton, ZzClawButtonVariant, ZzClawCopy, ZzClawCut,
-    ZzClawPaste, ZzClawRedo, ZzClawSelectAll, ZzClawUndo,
-};
+use zzclawterm_ui::{ZzClawAppMenu, ZzClawAppMenuBar, ZzClawButton, ZzClawButtonVariant};
 
 use crate::{
     entities::{OverlayStore, StartupRestoreStore, UiStoreHandles},
@@ -50,37 +48,17 @@ const SHUTDOWN_STATUS_DELAY: Duration = Duration::from_millis(200);
 actions!(
     zzclawterm_native_menu,
     [
-        NativeAbout,
         NativeHide,
         NativeHideOthers,
         NativeShowAll,
         NativeNewWindow,
-        NativeNewSession,
-        NativeQuickSwitch,
-        NativeImportConfig,
-        NativeExportConfig,
-        NativeOpenDocumentation,
-        NativeCheckUpdates,
-        NativeViewLogs,
-        NativeOpenSettings,
-        NativeToggleLeftSidebar,
-        NativeToggleRightSidebar,
-        NativeZoomIn,
-        NativeZoomOut,
-        NativeResetZoom,
-        NativeRefitTerminals,
-        NativeTerminalCopy,
-        NativeTerminalPaste,
-        NativeTerminalFind,
-        NativeTerminalClear,
-        NativeTerminalSelectAll,
-        NativeManageSyncGroups,
         NativeQuit
     ]
 );
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([native_new_window_key_binding()]);
+    native_menu::init(cx);
 }
 
 fn native_new_window_key_binding() -> KeyBinding {
@@ -90,24 +68,6 @@ fn native_new_window_key_binding() -> KeyBinding {
         "ctrl-shift-n"
     };
     KeyBinding::new(keystroke, NativeNewWindow, None)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeMenuCommand {
-    NewSession,
-    QuickSwitch,
-    OpenSettings,
-    ToggleLeftSidebar,
-    ToggleRightSidebar,
-    ZoomIn,
-    ZoomOut,
-    ResetZoom,
-    TerminalCopy,
-    TerminalPaste,
-    TerminalFind,
-    TerminalClear,
-    TerminalSelectAll,
-    ManageSyncGroups,
 }
 
 #[allow(dead_code)]
@@ -156,7 +116,7 @@ impl AppShell {
     ) -> Self {
         let startup_restore = cx.new(|_| StartupRestoreStore::default());
         let overlays = cx.new(|_| OverlayStore::default());
-        install_native_app_menus(cx);
+
         // Do not observe UI stores for parent notify: AppShell only hosts the
         // ZzClawTermApp entity, and ZzClawTermApp already cx.notify()s on visual dirty.
         // Store observe → AppShell notify was amplifying every snapshot publish
@@ -200,8 +160,13 @@ impl AppShell {
             if window.is_window_active() {
                 controller.update(cx, |controller, _| controller.mark_active(workspace_id));
             }
+            native_menu::request_refresh(cx);
         });
         self._subscriptions.push(activation_subscription);
+        if cfg!(target_os = "macos") {
+            let subscription = cx.observe_self(|_, cx| native_menu::request_refresh(cx));
+            self._subscriptions.push(subscription);
+        }
         self.start_main_window_state_persistence(window, cx);
     }
 
@@ -354,13 +319,16 @@ impl AppShell {
                 cx,
             )
         });
-        let title_menu_bar = build_title_menu_bar(app.downgrade(), cx);
+        let title_menu_bar =
+            (!cfg!(target_os = "macos")).then(|| build_title_menu_bar(app.downgrade(), cx));
         let update_menu_bar = title_menu_bar.clone();
         let screen_locked = self.controller.read(cx).screen_locked();
         app.update(cx, |app, cx| {
             app.set_workspace_identity(self.workspace_id, workspace_revision);
             app.set_desktop_controller(self.controller.downgrade());
-            app.set_title_menu_bar(title_menu_bar);
+            if let Some(bar) = title_menu_bar {
+                app.set_title_menu_bar(bar);
+            }
             app.start_shell_environment_preload(cx);
             if screen_locked {
                 app.apply_shared_screen_lock(true, window, cx);
@@ -427,16 +395,24 @@ impl AppShell {
                         }
                     }
                     AppLifecycleEvent::NewWindowRequested => this.request_new_window(cx),
+                    AppLifecycleEvent::ShutdownCancelled => this.quit_requested = false,
                 });
             });
         });
         self._subscriptions.push(shutdown_subscription);
+        if cfg!(target_os = "macos") {
+            self._subscriptions
+                .push(cx.observe(&app, |_, _, cx| native_menu::request_refresh(cx)));
+        }
         self.app = Some(app);
         let update_subscription = cx.observe(&update_store, move |this, _, cx| {
             if let Some(app) = this.app.clone() {
                 app.update(cx, |_, cx| cx.notify());
             }
-            update_menu_bar.update(cx, |bar, cx| bar.refresh_badges(cx));
+            if let Some(bar) = &update_menu_bar {
+                bar.update(cx, |bar, cx| bar.refresh_badges(cx));
+            }
+            native_menu::request_refresh(cx);
         });
         self._subscriptions.push(update_subscription);
         self.lifecycle = AppShellLifecycle::Ready;
@@ -480,29 +456,6 @@ impl AppShell {
             app.update(cx, |app, cx| {
                 app.start_after_window_open(window, cx);
             });
-        }
-    }
-
-    fn perform_native_menu_command(
-        &mut self,
-        command: NativeMenuCommand,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(app) = &self.app {
-            app.update(cx, |app, cx| {
-                app.perform_native_menu_command(command, window, cx);
-            });
-        }
-    }
-
-    fn update_app(
-        &self,
-        cx: &mut Context<Self>,
-        update: impl FnOnce(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>),
-    ) {
-        if let Some(app) = &self.app {
-            app.update(cx, update);
         }
     }
 
@@ -1110,76 +1063,6 @@ impl AppShell {
     }
 }
 
-fn install_native_app_menus(cx: &mut Context<AppShell>) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    cx.set_menus(native_app_menus());
-}
-
-fn native_app_menus() -> Vec<Menu> {
-    native_app_menus_for(zzclawterm_core::app_identity::AppFlavor::current())
-}
-
-fn native_app_menus_for(flavor: zzclawterm_core::app_identity::AppFlavor) -> Vec<Menu> {
-    let name = flavor.display_name();
-    vec![
-        Menu::new(name).items([
-            MenuItem::action(format!("About {name}"), NativeAbout),
-            MenuItem::os_submenu("Services", SystemMenuType::Services),
-            MenuItem::separator(),
-            MenuItem::action(format!("Hide {name}"), NativeHide),
-            MenuItem::action("Hide Others", NativeHideOthers),
-            MenuItem::action("Show All", NativeShowAll),
-            MenuItem::separator(),
-            MenuItem::action(format!("Quit {name}"), NativeQuit),
-        ]),
-        Menu::new("File").items([
-            MenuItem::action("New Window", NativeNewWindow),
-            MenuItem::action("New Session", NativeNewSession),
-            MenuItem::separator(),
-            MenuItem::action("Import Config", NativeImportConfig),
-            MenuItem::action("Export Config", NativeExportConfig),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", ZzClawUndo, OsAction::Undo),
-            MenuItem::os_action("Redo", ZzClawRedo, OsAction::Redo),
-            MenuItem::separator(),
-            MenuItem::os_action("Cut", ZzClawCut, OsAction::Cut),
-            MenuItem::os_action("Copy", ZzClawCopy, OsAction::Copy),
-            MenuItem::os_action("Paste", ZzClawPaste, OsAction::Paste),
-            MenuItem::os_action("Select All", ZzClawSelectAll, OsAction::SelectAll),
-        ]),
-        Menu::new("View").items([
-            MenuItem::action("Settings", NativeOpenSettings),
-            MenuItem::separator(),
-            MenuItem::action("Toggle Left Sidebar", NativeToggleLeftSidebar),
-            MenuItem::action("Toggle Right Sidebar", NativeToggleRightSidebar),
-            MenuItem::separator(),
-            MenuItem::action("Zoom In", NativeZoomIn),
-            MenuItem::action("Zoom Out", NativeZoomOut),
-            MenuItem::action("Reset Zoom", NativeResetZoom),
-        ]),
-        Menu::new("Terminal").items([
-            MenuItem::action("Command Palette", NativeQuickSwitch),
-            MenuItem::separator(),
-            MenuItem::action("Copy", NativeTerminalCopy),
-            MenuItem::action("Paste", NativeTerminalPaste),
-            MenuItem::action("Find", NativeTerminalFind),
-            MenuItem::action("Clear", NativeTerminalClear),
-            MenuItem::action("Select All", NativeTerminalSelectAll),
-            MenuItem::separator(),
-            MenuItem::action("Manage Sync Groups", NativeManageSyncGroups),
-            MenuItem::action("Refit Terminals", NativeRefitTerminals),
-        ]),
-        Menu::new("Help").items([
-            MenuItem::action("Docs", NativeOpenDocumentation),
-            MenuItem::action("Check Updates", NativeCheckUpdates),
-            MenuItem::action("View Logs", NativeViewLogs),
-        ]),
-    ]
-}
-
 fn build_title_menu_bar(
     app: WeakEntity<ZzClawTermApp>,
     cx: &mut Context<AppShell>,
@@ -1244,118 +1127,11 @@ impl Render for AppShell {
         div()
             .size_full()
             .on_action(cx.listener(|this, _: &NativeNewWindow, _window, cx| {
-                this.request_new_window(cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeNewSession, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::NewSession, window, cx);
-            }))
-            .on_action(|_: &NativeHide, _window, cx| {
-                cx.hide();
-            })
-            .on_action(|_: &NativeHideOthers, _window, cx| {
-                cx.hide_other_apps();
-            })
-            .on_action(|_: &NativeShowAll, _window, cx| {
-                cx.unhide_other_apps();
-            })
-            .on_action(cx.listener(|this, _: &NativeImportConfig, window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.open_connection_import_dialog_for_menu(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &NativeExportConfig, window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.prompt_encrypted_portable_snapshot_export_for_menu(window, cx);
-                });
-            }))
-            .on_action(
-                cx.listener(|this, _: &NativeOpenDocumentation, _window, cx| {
-                    this.update_app(cx, |app, cx| {
-                        app.open_documentation_for_menu(cx);
-                    });
-                }),
-            )
-            .on_action(cx.listener(|this, _: &NativeCheckUpdates, window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.open_update_dialog_for_menu(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &NativeViewLogs, _window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.reveal_log_dir_for_menu(cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &NativeAbout, window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.open_about_for_menu(window, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &NativeQuickSwitch, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::QuickSwitch, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeOpenSettings, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::OpenSettings, window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &NativeToggleLeftSidebar, window, cx| {
-                    this.perform_native_menu_command(
-                        NativeMenuCommand::ToggleLeftSidebar,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &NativeToggleRightSidebar, window, cx| {
-                    this.perform_native_menu_command(
-                        NativeMenuCommand::ToggleRightSidebar,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(cx.listener(|this, _: &NativeZoomIn, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::ZoomIn, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeZoomOut, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::ZoomOut, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeResetZoom, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::ResetZoom, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeRefitTerminals, _window, cx| {
-                this.update_app(cx, |app, cx| {
-                    app.resize_all_known_terminal_surfaces_for_menu(cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &NativeTerminalCopy, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::TerminalCopy, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeTerminalPaste, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::TerminalPaste, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeTerminalFind, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::TerminalFind, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeTerminalClear, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::TerminalClear, window, cx);
-            }))
-            .on_action(
-                cx.listener(|this, _: &NativeTerminalSelectAll, window, cx| {
-                    this.perform_native_menu_command(
-                        NativeMenuCommand::TerminalSelectAll,
-                        window,
-                        cx,
-                    );
-                }),
-            )
-            .on_action(cx.listener(|this, _: &NativeManageSyncGroups, window, cx| {
-                this.perform_native_menu_command(NativeMenuCommand::ManageSyncGroups, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NativeQuit, window, cx| {
-                let _ = window;
-                this.controller
-                    .update(cx, |controller, cx| controller.request_quit(cx));
+                if cfg!(target_os = "macos") {
+                    cx.propagate();
+                } else {
+                    this.request_new_window(cx);
+                }
             }))
             .when_some(self.app.clone().filter(|_| show_app), |root, app| {
                 root.child(app)
@@ -1382,78 +1158,8 @@ fn should_render_app(lifecycle: &AppShellLifecycle, flushing_view_ready: bool) -
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Menu, MenuItem};
 
-    use crate::app_shell::{
-        AppShellLifecycle, native_app_menus_for, native_new_window_key_binding, should_render_app,
-    };
-    use zzclawterm_core::app_identity::AppFlavor;
-
-    fn menu_names(menus: &[Menu]) -> Vec<&str> {
-        menus.iter().map(|menu| menu.name.as_ref()).collect()
-    }
-
-    fn item_name(item: &MenuItem) -> Option<&str> {
-        match item {
-            MenuItem::Action { name, .. } => Some(name.as_ref()),
-            MenuItem::Submenu(menu) => Some(menu.name.as_ref()),
-            MenuItem::SystemMenu(menu) => Some(menu.name.as_ref()),
-            MenuItem::Separator => None,
-        }
-    }
-
-    fn item_names(menu: &Menu) -> Vec<&str> {
-        menu.items.iter().filter_map(item_name).collect()
-    }
-
-    #[test]
-    fn preview_native_menu_uses_preview_application_name() {
-        let menus = native_app_menus_for(AppFlavor::Preview);
-        assert_eq!(menus[0].name.as_ref(), "ZzClawTerm Preview");
-        assert!(item_names(&menus[0]).contains(&"About ZzClawTerm Preview"));
-        assert!(item_names(&menus[0]).contains(&"Hide ZzClawTerm Preview"));
-        assert!(item_names(&menus[0]).contains(&"Quit ZzClawTerm Preview"));
-    }
-
-    #[test]
-    fn native_menu_keeps_tauri_macos_top_level_order() {
-        let menus = native_app_menus_for(AppFlavor::Stable);
-
-        assert_eq!(
-            menu_names(&menus),
-            ["ZzClawTerm", "File", "Edit", "View", "Terminal", "Help"]
-        );
-    }
-
-    #[test]
-    fn native_edit_menu_is_standard_macos_edit_layer() {
-        let menus = native_app_menus_for(AppFlavor::Stable);
-        let edit = menus
-            .iter()
-            .find(|menu| menu.name.as_ref() == "Edit")
-            .expect("edit menu");
-
-        assert_eq!(
-            item_names(edit),
-            ["Undo", "Redo", "Cut", "Copy", "Paste", "Select All"]
-        );
-    }
-
-    #[test]
-    fn native_about_lives_in_app_menu_not_help_menu() {
-        let menus = native_app_menus_for(AppFlavor::Stable);
-        let app = menus
-            .iter()
-            .find(|menu| menu.name.as_ref() == "ZzClawTerm")
-            .expect("app menu");
-        let help = menus
-            .iter()
-            .find(|menu| menu.name.as_ref() == "Help")
-            .expect("help menu");
-
-        assert!(item_names(app).contains(&"About ZzClawTerm"));
-        assert!(!item_names(help).contains(&"About ZzClawTerm"));
-    }
+    use crate::app_shell::{AppShellLifecycle, native_new_window_key_binding, should_render_app};
 
     #[test]
     fn native_new_window_shortcut_is_valid_for_the_current_platform() {

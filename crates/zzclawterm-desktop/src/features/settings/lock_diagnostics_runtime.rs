@@ -6,6 +6,7 @@ use zzclawterm_core::{
 };
 use zzclawterm_store::{StoreDomain, store_request};
 use zzclawterm_transport::SessionKind;
+use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use crate::features::{
     ZzClawTermApp, runtime_jobs::await_blocking_job, text_inputs::TextInputSetup,
@@ -39,13 +40,13 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let lock_status = if self.settings.summary().has_master_password {
-            t!("lockScreen.passwordPlaceholder").to_string()
-        } else {
-            String::new()
-        };
+        self.hide_secret_inputs(cx);
         self.security.remember_screen_lock_focus(window.focused(cx));
-        self.security.activate_screen_lock(lock_status);
+        self.security.activate_screen_lock(String::new());
+        self.forget_text_inputs("security.unlock.password");
+        self.forget_text_inputs("security.editor.");
+        self.connection_state.clear_editor_secrets(cx);
+        window.close_all_nya_dialogs(cx);
         self.forget_text_inputs("lock-screen.password");
         self.shell.set_status("screen locked".to_string());
         if self.settings.summary().has_master_password {
@@ -93,13 +94,18 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn submit_lock_unlock(&mut self, cx: &mut Context<Self>) {
+        if !self.security.screen_locked() {
+            return;
+        }
         if !self.settings.summary().has_master_password {
             self.unlock_app(cx);
             return;
         }
 
-        let password: zzclawterm_core::SecretString =
-            self.security.screen_lock_password_draft().to_owned().into();
+        let Some((request_id, password)) = self.security.begin_screen_lock_unlock() else {
+            return;
+        };
+        cx.notify();
         let request_password = password.clone();
         self.submit_store_request(
             0,
@@ -107,6 +113,9 @@ impl ZzClawTermApp {
                 store.verify_master_password(request_password.expose_secret())
             }),
             move |this, event, cx| {
+                if !this.security.finish_screen_lock_unlock(request_id) {
+                    return;
+                }
                 match event.outcome {
                     Ok(true)
                         if this.security.screen_lock_password_draft()
@@ -121,7 +130,7 @@ impl ZzClawTermApp {
                     {
                         let status = t!("lockScreen.wrongPassword").to_string();
                         this.security.clear_screen_lock_password_with_status(status);
-                        this.reset_text_input("lock-screen.password", "", cx);
+                        this.clear_lock_password_input(cx);
                         this.shell.set_status("screen unlock rejected".to_string());
                     }
                     Ok(false) => {}
@@ -131,7 +140,7 @@ impl ZzClawTermApp {
                     {
                         let status = format!("{}: {error}", t!("lockScreen.unlockFailed"));
                         this.security.clear_screen_lock_password_with_status(status);
-                        this.reset_text_input("lock-screen.password", "", cx);
+                        this.clear_lock_password_input(cx);
                         this.shell.set_status("screen unlock failed".to_string());
                     }
                     Err(_) => {}
@@ -155,10 +164,11 @@ impl ZzClawTermApp {
         match keystroke.key.as_str() {
             "enter" => self.submit_lock_unlock(cx),
             "escape" if !self.settings.summary().has_master_password => self.unlock_app(cx),
+            "escape" if self.security.screen_lock_unlock_busy() => {}
             "escape" => {
-                let status = t!("lockScreen.passwordPlaceholder").to_string();
-                self.security.clear_screen_lock_password_with_status(status);
-                self.reset_text_input("lock-screen.password", "", cx);
+                self.security
+                    .clear_screen_lock_password_with_status(String::new());
+                self.clear_lock_password_input(cx);
                 cx.notify();
             }
             _ => return false,
@@ -166,31 +176,49 @@ impl ZzClawTermApp {
         true
     }
 
+    pub(in crate::features) fn clear_lock_password_input(&mut self, cx: &mut Context<Self>) {
+        // Programmatic clearing must preserve the rejection message until the
+        // user starts typing, rather than emitting a fresh password edit.
+        self.text_input("lock-screen.password", "", TextInputSetup::masked(), cx)
+            .update(cx, |input, cx| input.set_content_silent("", cx));
+    }
+
     pub(in crate::features) fn apply_lock_password_input(
         &mut self,
         text: String,
         cx: &mut Context<Self>,
     ) {
-        let status = t!("lockScreen.passwordPlaceholder").to_string();
-        self.security.set_screen_lock_password_draft(text, status);
+        self.security
+            .set_screen_lock_password_draft(text, String::new());
         cx.notify();
     }
 
     pub(in crate::features) fn reveal_log_dir(&mut self, cx: &mut Context<Self>) {
-        match std::fs::create_dir_all(self.runtime.log_dir()) {
-            Ok(()) => {
-                cx.reveal_path(self.runtime.log_dir());
-                self.shell.set_status(format!(
-                    "opened log directory {}",
-                    self.runtime.log_dir().display()
-                ));
-            }
-            Err(error) => {
-                self.shell
-                    .set_status(format!("failed to prepare log directory: {error}"));
-            }
-        }
-        cx.notify();
+        let log_dir = self.runtime.log_dir().to_path_buf();
+        let job_dir = log_dir.clone();
+        let task = self
+            .blocking_jobs
+            .submit_task("reveal-log-dir", move |_| std::fs::create_dir_all(&job_dir));
+        cx.spawn(async move |this, cx| {
+            let result = await_blocking_job(task)
+                .await
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        cx.reveal_path(&log_dir);
+                        this.shell
+                            .set_status(format!("opened log directory {}", log_dir.display()));
+                    }
+                    Err(error) => {
+                        this.shell
+                            .set_status(format!("failed to prepare log directory: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(in crate::features) fn prompt_diagnostics_export(&mut self, cx: &mut Context<Self>) {

@@ -753,6 +753,7 @@ mod tests {
 
         let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-auto-recording-app");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
         cx.update_entity(&app, |app, _| {
             let mut summary = app.settings.summary().clone();

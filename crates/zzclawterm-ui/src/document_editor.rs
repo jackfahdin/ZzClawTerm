@@ -6,12 +6,13 @@ use gpui::{
 };
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Redo, Undo};
 
-use crate::input_focus::register_nya_input_focus;
+use crate::document_snapshot::ZzClawDocumentSnapshot;
+use crate::input_focus::{preserve_nya_input_focus_on_pointer_down, register_nya_input_focus};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ZzClawDocumentEditorEvent {
-    Changed(String),
-    Blurred(String),
+    Changed(ZzClawDocumentSnapshot),
+    Blurred(ZzClawDocumentSnapshot),
     /// Cursor position changed; visual-only notifications do not emit this.
     Updated,
 }
@@ -84,23 +85,27 @@ impl ZzClawDocumentEditorState {
             }
         });
         register_nya_input_focus(&editor.read(cx).focus_handle(cx), cx);
-        let subscription = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
-            let value = editor.read(cx).value().to_string();
-            match event {
+        let subscription = cx.subscribe(
+            &editor,
+            |this, editor, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
                     if this
                         .silent_content
                         .take()
-                        .is_some_and(|expected| expected.as_ref() == value)
+                        .is_some_and(|expected| editor.read(cx).text() == expected.as_ref())
                     {
                         return;
                     }
-                    cx.emit(ZzClawDocumentEditorEvent::Changed(value));
+                    cx.emit(ZzClawDocumentEditorEvent::Changed(
+                        ZzClawDocumentSnapshot::from_rope(editor.read(cx).text()),
+                    ));
                 }
-                InputEvent::Blur => cx.emit(ZzClawDocumentEditorEvent::Blurred(value)),
+                InputEvent::Blur => cx.emit(ZzClawDocumentEditorEvent::Blurred(
+                    ZzClawDocumentSnapshot::from_rope(editor.read(cx).text()),
+                )),
                 InputEvent::Focus | InputEvent::PressEnter { .. } => {}
-            }
-        });
+            },
+        );
         let observed_cursor = editor.read(cx).cursor();
         let observation = cx.observe(&editor, |this, editor, cx| {
             let cursor = editor.read(cx).cursor();
@@ -145,12 +150,14 @@ impl ZzClawDocumentEditorState {
     }
 
     pub fn cursor_position(&self, cx: &App) -> (usize, usize) {
-        let value = self.editor.read(cx).value();
+        let value = self.editor.read(cx).text();
         let cursor = self.editor.read(cx).cursor().min(value.len());
-        let before = &value[..cursor];
-        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
-        (line, before[line_start..].chars().count() + 1)
+        let line = value.byte_to_line_idx(cursor, ropey::LineType::LF);
+        let line_start = value.line_to_byte_idx(line, ropey::LineType::LF);
+        (
+            line + 1,
+            value.slice(line_start..cursor).chars().count() + 1,
+        )
     }
 
     pub fn open_search(&mut self, replace: bool, cx: &mut Context<Self>) {
@@ -159,11 +166,21 @@ impl ZzClawDocumentEditorState {
     }
 
     pub fn value(&self, cx: &App) -> String {
-        self.editor.read(cx).value().to_string()
+        self.editor.read(cx).text().to_string()
     }
 
     pub fn content_equals(&self, content: &str, cx: &App) -> bool {
-        self.editor.read(cx).value().as_ref() == content
+        if let Some(pending) = &self.pending_content {
+            return pending.as_ref() == content;
+        }
+        self.editor.read(cx).text() == content
+    }
+
+    pub fn snapshot_equals(&self, content: &ZzClawDocumentSnapshot, cx: &App) -> bool {
+        if let Some(pending) = &self.pending_content {
+            return content == &pending.as_ref();
+        }
+        self.editor.read(cx).text() == content.text()
     }
 
     pub fn selected_range(&self, cx: &App) -> Range<usize> {
@@ -171,7 +188,7 @@ impl ZzClawDocumentEditorState {
     }
 
     pub fn move_cursor_to_end(&mut self, cx: &mut Context<Self>) {
-        let end = self.editor.read(cx).value().len();
+        let end = self.editor.read(cx).text().len();
         self.editor
             .update(cx, |editor, cx| editor.set_selected_range(end..end, cx));
     }
@@ -254,7 +271,14 @@ impl Render for ZzClawDocumentEditorState {
         if let Some(font) = &self.font {
             editor = editor.font(font.clone());
         }
-        div().size_full().min_h_0().min_w_0().child(editor)
+        div()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .capture_any_mouse_down(|_, _, cx| {
+                preserve_nya_input_focus_on_pointer_down(cx);
+            })
+            .child(editor)
     }
 }
 
@@ -280,7 +304,118 @@ impl gpui::RenderOnce for ZzClawDocumentEditor {
 #[cfg(test)]
 mod tests {
     use super::{ZzClawDocumentEditorEvent, ZzClawDocumentEditorState};
-    use gpui::TestAppContext;
+    use crate::document_snapshot::ZzClawDocumentSnapshot;
+    use crate::root::zzclaw_root;
+    use gpui::{AppContext as _, Focusable as _, Modifiers, MouseButton, TestAppContext};
+
+    #[gpui::test]
+    fn clicking_another_line_moves_the_document_cursor(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut document = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                ZzClawDocumentEditorState::new_source(
+                    window,
+                    cx,
+                    "abcdefghij\nklmnopqrst\nuvwxyz",
+                    "plain",
+                )
+            });
+            document = Some(editor.clone());
+            zzclaw_root(editor, window, cx)
+        });
+        let document = document.unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let positions = cx.update(|_, cx| {
+            let editor = document.read(cx).editor.read(cx);
+            [2, 13].map(|offset| editor.range_to_bounds(&(offset..offset)).unwrap().center())
+        });
+        for (position, offset) in positions.into_iter().zip([2, 13]) {
+            cx.simulate_click(position, Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+                assert_eq!(document.read(cx).selected_range(cx), offset..offset);
+                assert!(document.read(cx).focus_handle(cx).is_focused(window));
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_on_another_line_starts_a_new_document_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut document = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                ZzClawDocumentEditorState::new_source(
+                    window,
+                    cx,
+                    "abcdefghij\nklmnopqrst\nuvwxyz",
+                    "plain",
+                )
+            });
+            document = Some(editor.clone());
+            zzclaw_root(editor, window, cx)
+        });
+        let document = document.unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let [first, start, end] = cx.update(|_, cx| {
+            let editor = document.read(cx).editor.read(cx);
+            [2, 13, 17].map(|offset| editor.range_to_bounds(&(offset..offset)).unwrap().center())
+        });
+        cx.simulate_click(first, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(document.read(cx).selected_range(cx), 13..17));
+    }
+
+    #[gpui::test]
+    fn queued_replacement_is_compared_before_the_next_render(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (document, window_cx) =
+            cx.add_window_view(|window, cx| ZzClawDocumentEditorState::new(window, cx, "original"));
+        window_cx.update(|_, cx| {
+            document.update(cx, |document, cx| {
+                document.set_content("reload", cx);
+                assert!(document.content_equals("reload", cx));
+                assert!(!document.snapshot_equals(&ZzClawDocumentSnapshot::from("original"), cx));
+                document.set_content("original", cx);
+            });
+        });
+        window_cx.run_until_parked();
+        window_cx.update(|_, cx| assert_eq!(document.read(cx).value(cx), "original"));
+    }
+
+    #[gpui::test]
+    fn document_snapshots_preserve_undo_and_utf8_cursor_positions(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (document, window_cx) =
+            cx.add_window_view(|window, cx| ZzClawDocumentEditorState::new(window, cx, "中\r\n🙂"));
+        window_cx.update(|window, cx| {
+            document.update(cx, |document, cx| {
+                document.move_cursor_to_end(cx);
+                document.apply_edit("猫".to_string(), 12..12, window, cx);
+                assert_eq!(document.cursor_position(cx), (2, 3));
+                let snapshot = ZzClawDocumentSnapshot::from_rope(document.editor.read(cx).text());
+                assert!(document.snapshot_equals(&snapshot, cx));
+                document.undo(window, cx);
+            });
+        });
+        window_cx.run_until_parked();
+        window_cx.update(|_, cx| assert_eq!(document.read(cx).value(cx), "中\r\n🙂"));
+        window_cx
+            .update(|window, cx| document.update(cx, |document, cx| document.redo(window, cx)));
+        window_cx.run_until_parked();
+        window_cx.update(|_, cx| assert_eq!(document.read(cx).value(cx), "中\r\n🙂猫"));
+    }
 
     #[gpui::test]
     fn visual_editor_notifications_do_not_emit_document_activity(cx: &mut TestAppContext) {
@@ -320,7 +455,7 @@ mod tests {
             events
                 .lock()
                 .unwrap()
-                .contains(&ZzClawDocumentEditorEvent::Changed("edited".to_string()))
+                .contains(&ZzClawDocumentEditorEvent::Changed("edited".into()))
         );
         events.lock().unwrap().clear();
         window_cx.update(|_, cx| {

@@ -1,5 +1,8 @@
 use gpui::{Context, PathPromptOptions, SharedString};
-use std::{collections::HashSet, path::PathBuf, sync::mpsc, thread, time::Instant};
+use std::{collections::HashSet, path::PathBuf, time::Instant};
+use zzclawterm_transport::zmodem::runtime::{
+    ZmodemRuntime as ZmodemWorker, ZmodemRuntimeEvent as ZmodemWorkerEvent,
+};
 use zzclawterm_transport::{
     SftpDuplicateDecision, SftpDuplicatePolicy, SftpDuplicateRequest, SftpDuplicateResolver,
     SftpService, SftpTransferDirection, SftpTransferProgress, SshSessionConfig, ZmodemAction,
@@ -15,104 +18,16 @@ use crate::models::{
 
 pub(super) struct ZmodemSessionState {
     detector: ZmodemDetector,
-    transfer: Option<ZmodemTransfer>,
     worker: Option<ZmodemWorker>,
     pending_upload: Option<Vec<PathBuf>>,
     /// Download waiting for user to pick a save directory.
     pending_download: bool,
 }
 
-struct ZmodemWorker {
-    command_tx: mpsc::Sender<ZmodemWorkerCommand>,
-    event_rx: Option<mpsc::Receiver<ZmodemWorkerEvent>>,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-enum ZmodemWorkerCommand {
-    Input(Vec<u8>),
-    AcceptDownload(PathBuf),
-    AcceptUpload(Vec<PathBuf>),
-    Cancel(String),
-    Stop,
-}
-
-struct ZmodemWorkerEvent {
-    actions: Vec<ZmodemAction>,
-    done: bool,
-}
-
-impl ZmodemWorker {
-    fn spawn(transfer: ZmodemTransfer) -> Self {
-        let (command_tx, command_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::sync_channel(ZMODEM_WORKER_EVENT_CHANNEL_CAP);
-        let worker = thread::Builder::new()
-            .name("zzclawterm-zmodem-transfer".to_string())
-            .spawn(move || run_zmodem_worker(transfer, command_rx, event_tx))
-            .expect("failed to spawn zmodem worker");
-        Self {
-            command_tx,
-            event_rx: Some(event_rx),
-            worker: Some(worker),
-        }
-    }
-
-    fn send_input(&self, data: Vec<u8>) {
-        if !data.is_empty() {
-            let _ = self.command_tx.send(ZmodemWorkerCommand::Input(data));
-        }
-    }
-
-    fn accept_download(&self, save_dir: PathBuf) {
-        let _ = self
-            .command_tx
-            .send(ZmodemWorkerCommand::AcceptDownload(save_dir));
-    }
-
-    fn accept_upload(&self, files: Vec<PathBuf>) {
-        let _ = self
-            .command_tx
-            .send(ZmodemWorkerCommand::AcceptUpload(files));
-    }
-
-    fn cancel(&self, reason: impl Into<String>) {
-        let _ = self
-            .command_tx
-            .send(ZmodemWorkerCommand::Cancel(reason.into()));
-    }
-
-    fn try_recv_event(&self) -> Option<ZmodemWorkerEvent> {
-        match self.event_rx.as_ref()?.try_recv() {
-            Ok(event) => Some(event),
-            Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => None,
-        }
-    }
-
-    fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
-        self.event_rx.take();
-        let _ = self.command_tx.send(ZmodemWorkerCommand::Stop);
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("ZMODEM worker panicked during shutdown");
-        }
-    }
-}
-
-impl Drop for ZmodemWorker {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 impl Default for ZmodemSessionState {
     fn default() -> Self {
         Self {
             detector: ZmodemDetector::new(),
-            transfer: None,
             worker: None,
             pending_upload: None,
             pending_download: false,
@@ -121,18 +36,24 @@ impl Default for ZmodemSessionState {
 }
 
 impl ZmodemSessionState {
+    pub(crate) fn runtime_consumer(&self) -> Option<zzclawterm_transport::SessionEventConsumerId> {
+        self.worker.as_ref().map(ZmodemWorker::consumer_id)
+    }
+    pub(crate) fn rebind_wake(&self, wake: zzclawterm_transport::zmodem::runtime::RuntimeWake) {
+        if let Some(worker) = &self.worker {
+            worker.set_wake(wake);
+        }
+    }
+
     fn flush_idle_output(&mut self, now: Instant) -> Vec<u8> {
-        if self.transfer.is_some() || self.worker.is_some() {
+        if self.worker.is_some() {
             return Vec::new();
         }
         self.detector.flush_pending_if_idle(now)
     }
 
     pub(super) fn is_active(&self) -> bool {
-        self.transfer.is_some()
-            || self.worker.is_some()
-            || self.pending_upload.is_some()
-            || self.pending_download
+        self.worker.is_some() || self.pending_upload.is_some() || self.pending_download
     }
     pub(super) fn stop_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
@@ -141,7 +62,6 @@ impl ZmodemSessionState {
     }
 
     fn finish_transfer(&mut self) {
-        self.transfer = None;
         self.worker = None;
         self.detector = ZmodemDetector::new();
         self.pending_download = false;
@@ -156,6 +76,23 @@ impl Drop for ZmodemSessionState {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn rebind_zmodem_recording(&mut self) {
+        let recording = self.recording.writer();
+        for (_, state) in self.session.zmodem_states_mut() {
+            if let Some(worker) = &state.worker {
+                let recording = recording.clone();
+                worker.set_input_observer(std::sync::Arc::new(move |session, data| {
+                    if recording
+                        .capture_policy(session)
+                        .include_binary_transfer_payloads
+                    {
+                        recording.write_raw_output(session, data);
+                    }
+                }));
+            }
+        }
+    }
+
     fn zmodem_state_mut(&mut self, session_id: &str) -> &mut ZmodemSessionState {
         self.session.zmodem_state_mut_or_default(session_id)
     }
@@ -170,7 +107,7 @@ impl ZzClawTermApp {
         &mut self,
         session_id: &str,
         dropped_bytes: usize,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> bool {
         let Some(state) = self.session.zmodem_state_mut(session_id) else {
             return false;
@@ -178,17 +115,7 @@ impl ZzClawTermApp {
         let reason = format!("terminal output dropped {dropped_bytes} byte(s)");
         if let Some(worker) = state.worker.as_ref() {
             worker.cancel(reason);
-        } else if let Some(transfer) = state.transfer.as_mut() {
-            let actions = transfer.cancel_with_reason(reason);
-            state.transfer = None;
-            state.detector = ZmodemDetector::new();
-            state.pending_download = false;
-            if !actions.is_empty() {
-                return self.apply_zmodem_actions(session_id, actions, cx);
-            }
-            return false;
         }
-        state.transfer = None;
         state.detector = ZmodemDetector::new();
         state.pending_download = false;
         false
@@ -211,7 +138,7 @@ impl ZzClawTermApp {
             return;
         }
         let state = self.zmodem_state_mut(&session_id);
-        if state.transfer.is_some() || state.worker.is_some() {
+        if state.worker.is_some() {
             self.shell
                 .set_status("ZMODEM transfer already active".to_string());
             cx.notify();
@@ -333,7 +260,7 @@ impl ZzClawTermApp {
             return;
         }
         let state = self.zmodem_state_mut(&session_id);
-        if state.transfer.is_some() || state.worker.is_some() {
+        if state.worker.is_some() {
             self.shell
                 .set_status("ZMODEM transfer already active".to_string());
             cx.notify();
@@ -376,13 +303,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let actions = state
-            .transfer
-            .as_mut()
-            .map(ZmodemTransfer::cancel)
-            .unwrap_or_default();
         state.finish_transfer();
-        self.apply_zmodem_actions(session_id, actions, cx);
         self.shell
             .set_status("ZMODEM transfer cancelled".to_string());
         cx.notify();
@@ -394,21 +315,12 @@ impl ZzClawTermApp {
         save_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.session.zmodem_state_mut(&session_id) else {
-            return;
-        };
-        state.pending_download = false;
-        if let Some(worker) = state.worker.as_ref() {
-            worker.accept_download(save_dir);
-            cx.notify();
-            return;
+        if let Some(state) = self.session.zmodem_state_mut(&session_id) {
+            state.pending_download = false;
+            if let Some(worker) = state.worker.as_ref() {
+                worker.accept_download(save_dir);
+            }
         }
-        let Some(transfer) = state.transfer.take() else {
-            return;
-        };
-        let worker = ZmodemWorker::spawn(transfer);
-        worker.accept_download(save_dir);
-        state.worker = Some(worker);
         cx.notify();
     }
 
@@ -418,20 +330,13 @@ impl ZzClawTermApp {
         files: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        let Some(state) = self.session.zmodem_state_mut(&session_id) else {
-            return;
-        };
-        if let Some(worker) = state.worker.as_ref() {
+        if let Some(worker) = self
+            .session
+            .zmodem_state(&session_id)
+            .and_then(|state| state.worker.as_ref())
+        {
             worker.accept_upload(files);
-            cx.notify();
-            return;
         }
-        let Some(transfer) = state.transfer.take() else {
-            return;
-        };
-        let worker = ZmodemWorker::spawn(transfer);
-        worker.accept_upload(files);
-        state.worker = Some(worker);
         cx.notify();
     }
 
@@ -474,14 +379,20 @@ impl ZzClawTermApp {
         event: ZmodemWorkerEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        let root_chrome_dirty = self.apply_zmodem_actions(session_id, event.actions, cx);
-        if event.done
-            && let Some(state) = self.session.zmodem_state_mut(session_id)
-            && state.worker.is_some()
-        {
-            state.finish_transfer();
+        if event.done {
+            self.session
+                .finish_zmodem_runtime(session_id, event.pending_events);
+        } else {
+            self.session.extend_pending_events(event.pending_events);
         }
-        root_chrome_dirty
+        let dirty = self.apply_zmodem_actions(session_id, event.actions, cx);
+        if event.done {
+            if let Some(state) = self.session.zmodem_state_mut(session_id) {
+                state.finish_transfer();
+            }
+            self.sync_session_event_bridge_session_policy(session_id);
+        }
+        dirty
     }
 
     /// Process raw session output for ZMODEM interception. Returns bytes that
@@ -502,30 +413,13 @@ impl ZzClawTermApp {
             return (data.to_vec(), false);
         }
 
-        // Active transfer: consume all raw bytes.
-        if let Some(state) = self.session.zmodem_state(session_id)
-            && let Some(worker) = state.worker.as_ref()
-        {
-            worker.send_input(data.to_vec());
-            return (Vec::new(), false);
-        }
-
+        // A live worker owns this session's transport consumer. Startup handoff
+        // extracts every already-dequeued event before it is activated.
         if self
             .session
             .zmodem_state(session_id)
-            .is_some_and(|state| state.transfer.is_some())
+            .is_some_and(|state| state.worker.is_some())
         {
-            if let Some(transfer) = self
-                .session
-                .zmodem_state_mut(session_id)
-                .and_then(|state| state.transfer.take())
-            {
-                let worker = ZmodemWorker::spawn(transfer);
-                worker.send_input(data.to_vec());
-                if let Some(state) = self.session.zmodem_state_mut(session_id) {
-                    state.worker = Some(worker);
-                }
-            }
             return (Vec::new(), false);
         }
 
@@ -548,20 +442,34 @@ impl ZzClawTermApp {
                 };
                 let prompt_for_upload =
                     direction == ZmodemDirection::Upload && prepared_upload.is_none();
-                let transfer = ZmodemTransfer::new(direction, &initial_bytes);
-                {
-                    let state = self.zmodem_state_mut(session_id);
-                    if let Some(files) = prepared_upload {
-                        let worker = ZmodemWorker::spawn(transfer);
-                        worker.accept_upload(files);
-                        state.worker = Some(worker);
-                    } else {
-                        state.transfer = Some(transfer);
-                        if direction == ZmodemDirection::Download {
-                            state.pending_download = true;
-                        }
+                let options = self.session.manager().zmodem_transfer_options(session_id);
+                let transfer = ZmodemTransfer::with_options(direction, &initial_bytes, options);
+                let worker = match self.session.start_zmodem_runtime(session_id, transfer) {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        let actions = ZmodemTransfer::new(direction, &[])
+                            .cancel_with_reason(format!("Failed to start ZMODEM worker: {error}"));
+                        return (
+                            passthrough,
+                            self.apply_zmodem_actions(session_id, actions, cx),
+                        );
                     }
+                };
+                let recording = self.recording.writer();
+                worker.set_input_observer(std::sync::Arc::new(move |session, data| {
+                    if recording
+                        .capture_policy(session)
+                        .include_binary_transfer_payloads
+                    {
+                        recording.write_raw_output(session, data);
+                    }
+                }));
+                if let Some(files) = prepared_upload {
+                    worker.accept_upload(files);
                 }
+                let state = self.zmodem_state_mut(session_id);
+                state.worker = Some(worker);
+                state.pending_download = direction == ZmodemDirection::Download;
                 // Surface detection event status before opening a path picker.
                 self.shell.set_status(match direction {
                     ZmodemDirection::Upload if prompt_for_upload => {
@@ -623,8 +531,7 @@ impl ZzClawTermApp {
         data: &[u8],
     ) -> bool {
         let state_is_idle = self.session.zmodem_state(session_id).is_none_or(|state| {
-            state.transfer.is_none()
-                && state.worker.is_none()
+            state.worker.is_none()
                 && state.pending_upload.is_none()
                 && !state.pending_download
                 && state.detector.is_idle()
@@ -953,40 +860,6 @@ struct ZmodemTransferJobUpdate<'a> {
     fail_reason: Option<&'a str>,
 }
 
-fn run_zmodem_worker(
-    mut transfer: ZmodemTransfer,
-    command_rx: mpsc::Receiver<ZmodemWorkerCommand>,
-    event_tx: mpsc::SyncSender<ZmodemWorkerEvent>,
-) {
-    while let Ok(command) = command_rx.recv() {
-        let Some(event) = process_zmodem_worker_command(&mut transfer, command) else {
-            break;
-        };
-        let done = event.done;
-        let _ = event_tx.send(event);
-        if done {
-            break;
-        }
-    }
-}
-
-fn process_zmodem_worker_command(
-    transfer: &mut ZmodemTransfer,
-    command: ZmodemWorkerCommand,
-) -> Option<ZmodemWorkerEvent> {
-    let actions = match command {
-        ZmodemWorkerCommand::Input(data) => transfer.feed_incoming(&data),
-        ZmodemWorkerCommand::AcceptDownload(save_dir) => transfer.accept_download(save_dir),
-        ZmodemWorkerCommand::AcceptUpload(files) => transfer.accept_upload(files),
-        ZmodemWorkerCommand::Cancel(reason) => transfer.cancel_with_reason(reason),
-        ZmodemWorkerCommand::Stop => return None,
-    };
-    Some(ZmodemWorkerEvent {
-        actions,
-        done: transfer.is_done(),
-    })
-}
-
 fn probe_zmodem_remote_conflicts(
     config: SshSessionConfig,
     remote_dir: String,
@@ -1062,7 +935,6 @@ fn probe_zmodem_remote_conflicts(
     }
 }
 
-const ZMODEM_WORKER_EVENT_CHANNEL_CAP: usize = 256;
 const ZMODEM_WORKER_EVENT_DRAIN_BATCH: usize = 32;
 
 #[cfg(test)]
@@ -1071,16 +943,14 @@ mod tests {
     use gpui::{AppContext as _, Context, Subscription, TestAppContext};
     use std::time::{Duration, Instant};
     use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
-    use zzclawterm_transport::{
-        LocalSessionConfig, ZmodemAction, ZmodemDirection, ZmodemEvent, ZmodemTransfer,
-    };
+    use zzclawterm_transport::{LocalSessionConfig, ZmodemDirection};
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
     use crate::test_support::TestConfigDir;
 
-    use super::{ZmodemTransferJobUpdate, ZmodemWorkerCommand, process_zmodem_worker_command};
+    use super::ZmodemTransferJobUpdate;
 
     const SESSION_ID: &str = "zmodem-panel-session";
 
@@ -1150,6 +1020,7 @@ mod tests {
     fn idle_zmodem_asterisk_reaches_terminal_without_a_second_output_event() {
         let root = TestConfigDir::new("zzclawterm-zmodem-idle-asterisk");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), SESSION_ID);
         cx.update_entity(&app, |app, cx| {
             assert_eq!(
@@ -1175,6 +1046,7 @@ mod tests {
     fn output_discontinuity_discards_zmodem_prefix_before_idle_flush() {
         let root = TestConfigDir::new("zzclawterm-zmodem-idle-reset");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), SESSION_ID);
         cx.update_entity(&app, |app, cx| {
             app.process_zmodem_output(SESSION_ID, b"**", cx);
@@ -1187,25 +1059,9 @@ mod tests {
     }
 
     #[test]
-    fn zmodem_worker_cancel_emits_failed_event_off_ui_state() {
-        let mut transfer = ZmodemTransfer::new(ZmodemDirection::Download, b"");
-
-        let event = process_zmodem_worker_command(
-            &mut transfer,
-            ZmodemWorkerCommand::Cancel("stop".into()),
-        )
-        .expect("cancel should produce a worker event");
-
-        assert!(event.done);
-        assert!(event.actions.iter().any(|action| matches!(
-            action,
-            ZmodemAction::EmitEvent(ZmodemEvent::Failed { reason }) if reason == "stop"
-        )));
-    }
-
-    #[test]
     fn manual_rz_prompts_for_upload_files_and_starts_worker() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
 
         cx.update_entity(&app, |app, cx| {
@@ -1217,7 +1073,7 @@ mod tests {
                 app.session
                     .zmodem_state(SESSION_ID)
                     .unwrap()
-                    .transfer
+                    .worker
                     .is_some()
             );
         });
@@ -1233,7 +1089,6 @@ mod tests {
 
         cx.update_entity(&app, |app, _| {
             let state = app.session.zmodem_state(SESSION_ID).unwrap();
-            assert!(state.transfer.is_none());
             assert!(state.worker.is_some());
         });
     }
@@ -1241,6 +1096,7 @@ mod tests {
     #[test]
     fn prepared_zmodem_upload_starts_without_another_picker() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
 
         cx.update_entity(&app, |app, cx| {
@@ -1250,7 +1106,6 @@ mod tests {
             assert!(dirty);
             let state = app.session.zmodem_state(SESSION_ID).unwrap();
             assert!(state.pending_upload.is_none());
-            assert!(state.transfer.is_none());
             assert!(state.worker.is_some());
         });
 
@@ -1260,6 +1115,7 @@ mod tests {
     #[test]
     fn zmodem_progress_refreshes_transfer_panel_without_root_notify() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         let observer = cx.new(|cx| RootNotifyObserver::new(app.clone(), cx));
 

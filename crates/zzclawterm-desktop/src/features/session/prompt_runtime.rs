@@ -2,7 +2,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use gpui::{ClipboardItem, Context, KeyDownEvent, Window};
+use gpui::{Context, KeyDownEvent, Window};
 use zzclawterm_transport::{
     SftpDuplicateDecision, SftpDuplicateRequest, SshAgentPromptAction, SshCredentialPrompt,
     SshHostKey, SshKeyboardInteractiveRequest,
@@ -14,8 +14,16 @@ use super::{
     KeyboardInteractivePromptState, unix_seconds_now,
 };
 use crate::features::{
-    ZzClawTermApp, text_inputs::TextInputSetup, transfers::duplicate_decision_label,
+    ZzClawTermApp, runtime_jobs::await_blocking_job, text_inputs::TextInputSetup,
+    transfers::duplicate_decision_label,
 };
+
+#[derive(Clone, Copy)]
+enum KeyboardInteractiveOtpPreview {
+    Initial,
+    Generate,
+    Refresh,
+}
 
 impl ZzClawTermApp {
     pub(in crate::features) fn resolve_agent_prompt(
@@ -56,6 +64,7 @@ impl ZzClawTermApp {
         &mut self,
         request_id: String,
         choice: HostKeyPromptChoice,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let request = match self.session.prompts.take_host_key_resolution(&request_id) {
@@ -80,6 +89,7 @@ impl ZzClawTermApp {
             HostKeyPromptChoice::Accept => format!("accepted SSH host key for {host}"),
             HostKeyPromptChoice::Reject => format!("rejected SSH host key for {host}"),
         });
+        self.focus_active_workspace_surface(window, cx);
         cx.notify();
     }
 
@@ -190,19 +200,64 @@ impl ZzClawTermApp {
         let Some(otp_id) = self.session.prompts.keyboard_interactive_otp_id() else {
             return;
         };
-        let result = self
+        self.request_keyboard_interactive_otp_preview(
+            otp_id,
+            KeyboardInteractiveOtpPreview::Generate,
+            cx,
+        );
+    }
+
+    /// Store reads behind an OTP preview wait on the store worker, so they run on the
+    /// blocking pool; the result applies only while the same prompt is still active.
+    fn request_keyboard_interactive_otp_preview(
+        &mut self,
+        otp_id: String,
+        purpose: KeyboardInteractiveOtpPreview,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt_id) = self
             .session
-            .prompts
-            .otp_provider()
-            .preview_otp_code(&otp_id);
-        if self
-            .session
-            .prompts
-            .apply_keyboard_interactive_otp_result(result, false)
-        {
-            self.shell.set_status("OTP code ready".to_string());
-        }
-        cx.notify();
+            .prompt_active_keyboard_interactive()
+            .map(|state| state.id.clone())
+        else {
+            return;
+        };
+        let provider = self.session.prompts.otp_provider();
+        let task = self
+            .blocking_jobs
+            .submit_task("ssh-prompt-otp-preview", move |_| {
+                provider.preview_otp_code(&otp_id)
+            });
+        cx.spawn(async move |this, cx| {
+            let result = await_blocking_job(task).await.and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .session
+                    .prompt_active_keyboard_interactive()
+                    .is_none_or(|state| state.id != prompt_id)
+                {
+                    return;
+                }
+                let result = match (purpose, result) {
+                    (KeyboardInteractiveOtpPreview::Initial, Ok(Some(preview))) => {
+                        Ok(Some(preview))
+                    }
+                    // An initial preview is best effort; the user can still generate one.
+                    (KeyboardInteractiveOtpPreview::Initial, _) => return,
+                    (_, result) => result,
+                };
+                let ready = this.session.prompts.apply_keyboard_interactive_otp_result(
+                    result,
+                    matches!(purpose, KeyboardInteractiveOtpPreview::Refresh),
+                );
+                if ready && matches!(purpose, KeyboardInteractiveOtpPreview::Generate) {
+                    this.shell.set_status("OTP code ready".to_string());
+                }
+                this.ensure_keyboard_interactive_totp_clock(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(in crate::features) fn send_keyboard_interactive_otp_to_input(
@@ -228,9 +283,10 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         let Some(code) = self.session.prompts.keyboard_interactive_otp_code() else {
+            self.copy_text_with_feedback("copy-auth-otp", String::new(), cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        self.copy_text_with_feedback("copy-auth-otp", code, cx);
         self.shell.set_status("OTP code copied".to_string());
         cx.notify();
     }
@@ -288,11 +344,7 @@ impl ZzClawTermApp {
                 else {
                     return false;
                 };
-                let setup = if target.echo {
-                    TextInputSetup::default()
-                } else {
-                    TextInputSetup::masked()
-                };
+                let setup = prompt_input_setup(target.kind, target.echo);
                 let field = self.text_input(target.id, &target.seed, setup, cx);
                 window.focus(&field.read(cx).focus_handle(), cx);
                 cx.notify();
@@ -343,11 +395,7 @@ impl ZzClawTermApp {
         let Some(target) = self.session.prompts.active_input_target() else {
             return false;
         };
-        let setup = if target.echo {
-            TextInputSetup::default()
-        } else {
-            TextInputSetup::masked()
-        };
+        let setup = prompt_input_setup(target.kind, target.echo);
         let field = self.text_input(target.id, &target.seed, setup, cx);
         window.focus(&field.read(cx).focus_handle(), cx);
         true
@@ -384,7 +432,7 @@ impl ZzClawTermApp {
                         let dirty = this.session.prompts.clear_cancelled_attempt_prompts()
                             | this.drain_host_key_prompts()
                             | this.drain_agent_prompts()
-                            | this.drain_credential_prompts();
+                            | this.drain_credential_prompts(cx);
                         let duplicate_activated = this.drain_duplicate_prompts();
                         if duplicate_activated
                             && let Some(prompt) = this.session.prompt_active_duplicate().cloned()
@@ -439,7 +487,7 @@ impl ZzClawTermApp {
         true
     }
 
-    pub(in crate::features) fn drain_credential_prompts(&mut self) -> bool {
+    pub(in crate::features) fn drain_credential_prompts(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some(request) = self.session.prompts.take_next_credential_request() {
             match request {
                 CredentialPromptRequest::Secret {
@@ -479,27 +527,10 @@ impl ZzClawTermApp {
                             .find(|entry| entry.id == otp_id)
                             .map(|entry| entry.otp_type.to_ascii_lowercase())
                     });
-                    let otp_preview = if otp_type.as_deref() == Some("totp") {
-                        request
-                            .otp_id
-                            .as_deref()
-                            .and_then(|otp_id| {
-                                self.session
-                                    .prompts
-                                    .otp_provider()
-                                    .preview_otp_code(otp_id)
-                                    .ok()
-                            })
-                            .flatten()
-                    } else {
-                        None
-                    };
-                    let otp_code = otp_preview.as_ref().map(|preview| preview.code.clone());
-                    let otp_period = otp_preview
-                        .as_ref()
-                        .map(|preview| preview.period)
-                        .unwrap_or(0);
-                    let otp_time_step = otp_preview.as_ref().and_then(|preview| preview.time_step);
+                    let initial_preview_otp_id = request
+                        .otp_id
+                        .clone()
+                        .filter(|_| otp_type.as_deref() == Some("totp"));
                     self.session.prompts.activate_keyboard_interactive(
                         KeyboardInteractivePromptState {
                             id,
@@ -507,13 +538,20 @@ impl ZzClawTermApp {
                             response_tx,
                             responses,
                             focused_index: 0,
-                            otp_code,
+                            otp_code: None,
                             otp_type,
-                            otp_period,
-                            otp_time_step,
+                            otp_period: 0,
+                            otp_time_step: None,
                             otp_error: None,
                         },
                     );
+                    if let Some(otp_id) = initial_preview_otp_id {
+                        self.request_keyboard_interactive_otp_preview(
+                            otp_id,
+                            KeyboardInteractiveOtpPreview::Initial,
+                            cx,
+                        );
+                    }
                 }
             }
             return true;
@@ -555,9 +593,7 @@ impl ZzClawTermApp {
                 };
                 cx.background_executor().timer(delay).await;
                 let Ok(still_showing) = this.update(cx, |this, cx| {
-                    if this.refresh_keyboard_interactive_totp() {
-                        cx.notify();
-                    }
+                    this.refresh_keyboard_interactive_totp(cx);
                     let showing = this
                         .session
                         .prompt_keyboard_totp_seconds_to_next_step(unix_seconds_now())
@@ -577,23 +613,22 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    pub(in crate::features) fn refresh_keyboard_interactive_totp(&mut self) -> bool {
+    pub(in crate::features) fn refresh_keyboard_interactive_totp(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
         let Some(otp_id) = self
             .session
             .prompts
             .keyboard_totp_refresh_otp_id(unix_seconds_now())
         else {
-            return false;
+            return;
         };
-        let result = self
-            .session
-            .prompts
-            .otp_provider()
-            .preview_otp_code(&otp_id);
-        self.session
-            .prompts
-            .apply_keyboard_interactive_otp_result(result, true);
-        true
+        self.request_keyboard_interactive_otp_preview(
+            otp_id,
+            KeyboardInteractiveOtpPreview::Refresh,
+            cx,
+        );
     }
 
     pub(in crate::features) fn drain_duplicate_prompts(&mut self) -> bool {
@@ -679,6 +714,22 @@ pub(in crate::features) fn keyboard_interactive_prompt_target(
     }
 }
 
+/// Server echo controls initial masking; known OTP prompts retain their semantic type.
+pub(in crate::features) fn prompt_input_setup(
+    kind: zzclawterm_ui::ZzClawInputKind,
+    echo: bool,
+) -> TextInputSetup {
+    if kind == zzclawterm_ui::ZzClawInputKind::OneTimeCode {
+        TextInputSetup::one_time_code(!echo)
+    } else {
+        TextInputSetup {
+            kind,
+            masked: !echo,
+            ..TextInputSetup::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod text_input_id_tests {
     use super::{keyboard_interactive_text_input_id, parse_keyboard_interactive_text_input_id};
@@ -702,5 +753,23 @@ mod text_input_id_tests {
             parse_keyboard_interactive_text_input_id("prompt.not-a-number"),
             None
         );
+    }
+    #[test]
+    fn authentication_input_semantics_preserve_server_echo_and_known_otp() {
+        use super::prompt_input_setup;
+        use zzclawterm_ui::ZzClawInputKind;
+        let password = prompt_input_setup(ZzClawInputKind::Password, false);
+        assert!(password.masked);
+        assert_eq!(password.kind, ZzClawInputKind::Password);
+        let echoed = prompt_input_setup(ZzClawInputKind::Secret, true);
+        assert!(!echoed.masked);
+        assert_eq!(echoed.kind, ZzClawInputKind::Secret);
+        let echoed_password = prompt_input_setup(ZzClawInputKind::Password, true);
+        assert!(!echoed_password.masked);
+        assert_eq!(echoed_password.kind, ZzClawInputKind::Password);
+        let otp = prompt_input_setup(ZzClawInputKind::OneTimeCode, false);
+        assert!(otp.masked);
+        assert_eq!(otp.kind, ZzClawInputKind::OneTimeCode);
+        assert!(!prompt_input_setup(ZzClawInputKind::OneTimeCode, true).masked);
     }
 }

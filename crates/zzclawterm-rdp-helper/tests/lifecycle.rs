@@ -86,7 +86,7 @@ fn assert_helper_rejects_frame(after_hello: bool) {
         height: 1,
         stride: 4,
         format: PixelFormat::Bgra8,
-        pixels: vec![0; 4],
+        pixels: vec![0; 4].into(),
     };
     write_packet(
         &mut stdin,
@@ -399,4 +399,53 @@ fn helper_crash_and_hang_processes_can_always_be_reaped() {
     hung.kill().unwrap();
     let status = hung.wait().unwrap();
     assert!(!status.success());
+}
+
+#[test]
+fn heartbeat_responds_on_a_static_session_and_preserves_sequence() {
+    let mut child = spawn_helper();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    send(&mut stdin, &client_hello());
+    assert_server_hello(recv(&mut stdout));
+    for sequence in [1, 7, u64::MAX] {
+        send(&mut stdin, &RdpControlMessage::Ping { sequence });
+        assert!(
+            matches!(recv(&mut stdout), RdpControlMessage::Pong { sequence: received } if received == sequence)
+        );
+    }
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn version_nine_helpers_are_explicitly_incompatible_with_version_ten() {
+    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_helper_rejects(vec![RdpControlMessage::ClientHello { version: 9 }]);
+    assert_helper_rejects(vec![RdpControlMessage::Ping { sequence: 1 }]);
+    assert_helper_rejects(vec![
+        client_hello(),
+        RdpControlMessage::Pong { sequence: 1 },
+    ]);
+}
+
+#[test]
+fn session_start_rolls_back_each_worker_creation_failure() {
+    // The override only selects the same binary used by the other fixtures.
+    unsafe {
+        std::env::set_var(
+            "NYATERM_RDP_HELPER",
+            env!("CARGO_BIN_EXE_zzclawterm-rdp-helper"),
+        );
+    }
+    for stage in 0..5 {
+        let manager = zzclawterm_remote_desktop::RdpSessionManager::new();
+        let _failure = zzclawterm_core::runtime::worker::fail_after(stage);
+        let result = manager.create_session_with_id("spawn-failure".into(), test_config());
+        assert!(
+            matches!(result, Err(error) if error.kind == RdpErrorKind::Ipc),
+            "startup stage {stage} must return Ipc"
+        );
+        assert!(manager.state("spawn-failure").is_none());
+    }
 }

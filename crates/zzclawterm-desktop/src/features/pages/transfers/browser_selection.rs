@@ -1,6 +1,4 @@
-use gpui::{
-    ClickEvent, ClipboardItem, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window,
-};
+use gpui::{ClickEvent, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window};
 use zzclawterm_core::truncate_preview;
 use zzclawterm_transport::SftpFileEntry;
 
@@ -481,10 +479,11 @@ impl ZzClawTermApp {
         let Some(value) = self.selected_transfer_path_part(part) else {
             self.shell
                 .set_status("select a remote item first".to_string());
+            self.copy_text_with_feedback("copy-file-path", String::new(), cx);
             cx.notify();
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+        self.copy_text_with_feedback("copy-file-path", value.clone(), cx);
         self.shell
             .set_status(format!("copied remote {}", part.label()));
         self.transfer

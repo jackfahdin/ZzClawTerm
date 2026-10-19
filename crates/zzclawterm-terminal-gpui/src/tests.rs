@@ -8,6 +8,128 @@ use crate::{
 };
 
 #[test]
+fn reverse_resolves_parsed_ansi_colors_once_and_restores_them() {
+    for theme in ["github-dark", "github-light"] {
+        let palette = zzclawterm_ui::theme_palette(theme);
+        let red = palette.terminal_ansi_color(1);
+        let blue = palette.terminal_ansi_color(4);
+        let cases = [
+            ("", palette.terminal_fg, palette.terminal_bg),
+            ("31;44", red, blue),
+            (
+                "91;104",
+                palette.terminal_ansi_color(9),
+                palette.terminal_ansi_color(12),
+            ),
+            ("38;5;196;48;5;22", 0xff0000, 0x005f00),
+            ("38;2;17;34;51;48;2;68;85;102", 0x112233, 0x445566),
+            ("31", red, palette.terminal_bg),
+            ("44", palette.terminal_fg, blue),
+        ];
+        for (sgr, fg, bg) in cases {
+            let mut screen = zzclawterm_terminal::TerminalScreen::new(16, 2);
+            screen.advance(format!("\x1b[{sgr}mA\x1b[7mB\x1b[27mC\x1b[7mD\x1b[0mE").as_bytes());
+            let snapshot = screen.snapshot();
+            let spans = crate::ansi::ansi_to_highlight_spans_compiled(
+                &snapshot.row(0).unwrap().styled_spans,
+                palette,
+                &[],
+                false,
+            );
+            assert_eq!(spans.len(), 5, "{theme}: {sgr}");
+            for (col, (expected_fg, expected_bg)) in [
+                (fg, bg),
+                (bg, fg),
+                (fg, bg),
+                (bg, fg),
+                (palette.terminal_fg, palette.terminal_bg),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(
+                    spans[col].color,
+                    Some(expected_fg),
+                    "{theme}: {sgr}, col {col}"
+                );
+                assert_eq!(
+                    spans[col].bg.unwrap_or(palette.terminal_bg),
+                    expected_bg,
+                    "{theme}: {sgr}, col {col}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reverse_applies_bold_to_source_foreground_before_swapping() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    for brighten_default in [false, true] {
+        for (sgr, fg, bg) in [
+            (
+                "1;31;44",
+                palette.terminal_ansi_color(9),
+                palette.terminal_ansi_color(4),
+            ),
+            ("1;38;2;17;34;51;48;2;68;85;102", 0x112233, 0x445566),
+            ("1;38;5;196;48;5;22", 0xff0000, 0x005f00),
+            (
+                "1",
+                if brighten_default {
+                    palette.terminal_fg_intense.unwrap_or(palette.terminal_fg)
+                } else {
+                    palette.terminal_fg
+                },
+                palette.terminal_bg,
+            ),
+        ] {
+            let mut screen = zzclawterm_terminal::TerminalScreen::new(8, 2);
+            screen.advance(format!("\x1b[{sgr}mA\x1b[7mB").as_bytes());
+            let snapshot = screen.snapshot();
+            let row = snapshot.row(0).unwrap();
+            let spans = crate::ansi::ansi_to_highlight_spans_compiled(
+                &row.styled_spans,
+                palette,
+                &[],
+                brighten_default,
+            );
+            assert_eq!(spans[0].color, Some(fg));
+            assert_eq!(spans[0].bg.unwrap_or(palette.terminal_bg), bg);
+            assert_eq!(spans[1].color, Some(bg), "{sgr}");
+            assert_eq!(spans[1].bg, Some(fg), "{sgr}, brighten={brighten_default}");
+            let ranges = crate::element::terminal_background_ranges_for_cells(
+                &row.cells,
+                palette,
+                brighten_default,
+            );
+            let selected = ranges.iter().find(|r| r.start <= 1 && r.end > 1).unwrap();
+            assert_eq!(selected.bg, fg);
+        }
+    }
+}
+
+#[test]
+fn reverse_hidden_text_uses_effective_background_with_and_without_keywords() {
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut screen = zzclawterm_terminal::TerminalScreen::new(16, 2);
+    screen.advance(b"\x1b[31;44;7;8mSELECTED");
+    let snapshot = screen.snapshot();
+    let ansi = &snapshot.row(0).unwrap().styled_spans;
+    let rules = [crate::keywords::CompiledKeywordRule {
+        regex: regex::Regex::new("SELECTED").unwrap(),
+        color: 0xff2244,
+        priority: 0,
+    }];
+    for compiled in [rules.as_slice(), &[]] {
+        let spans = crate::ansi::ansi_to_highlight_spans_compiled(ansi, palette, compiled, false);
+        assert_eq!(spans[0].color, Some(palette.terminal_ansi_color(1)));
+        assert_eq!(spans[0].bg, spans[0].color);
+        assert!(!spans[0].keyword);
+    }
+}
+
+#[test]
 fn bold_default_foreground_only_brightens_implicit_foreground() {
     let palette = zzclawterm_ui::theme_palette("github-dark");
     let bold = zzclawterm_terminal::CellStyle {
@@ -371,4 +493,43 @@ fn kitty_keyboard_reports_alternate_keys_and_associated_text() {
         terminal_key_release_bytes_with_mode(&release, mode).unwrap(),
         b"\x1b[97:65:97;2:3u".to_vec()
     );
+}
+
+#[test]
+fn snapshot_tab_spans_agree_with_cell_backgrounds() {
+    // The paint layer feeds `snapshot_row.styled_spans` (already materialized by
+    // the grid: a tab cell plus the blank cells up to the stop) into the span
+    // compiler. These real spans — not hand-built ones — must produce background
+    // ranges identical to the cell path, otherwise colored text drifts outside
+    // its background on repaint.
+    use crate::ansi::ansi_to_highlight_spans_compiled;
+    use crate::element::{
+        terminal_background_ranges_for_cells, terminal_background_ranges_for_spans,
+    };
+
+    let palette = zzclawterm_ui::theme_palette("github-light");
+    let mut screen = zzclawterm_terminal::TerminalScreen::new(40, 2);
+    screen.advance(b"System load:  \t\x1b[0;33;40m0.33\x1b[0m");
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+
+    // The real input: materialized snapshot spans ("System load:  \t " + "0.33").
+    let ansi = row.styled_spans.as_ref();
+    let spans = ansi_to_highlight_spans_compiled(ansi, palette, &[], false);
+    let span_ranges = terminal_background_ranges_for_spans(&spans);
+    let cell_ranges = terminal_background_ranges_for_cells(&row.cells, palette, false);
+
+    assert_eq!(span_ranges.len(), 1, "span path background ranges");
+    assert_eq!(cell_ranges.len(), 1, "cell path background ranges");
+    assert_eq!(
+        (span_ranges[0].start, span_ranges[0].end),
+        (16, 20),
+        "span path columns"
+    );
+    assert_eq!(
+        (cell_ranges[0].start, cell_ranges[0].end),
+        (16, 20),
+        "cell path columns"
+    );
+    assert_eq!(span_ranges[0].bg, cell_ranges[0].bg);
 }

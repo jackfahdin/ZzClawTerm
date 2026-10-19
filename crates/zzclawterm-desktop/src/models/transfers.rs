@@ -627,6 +627,7 @@ pub(crate) enum TransferJobOutput {
         remote_path: String,
         raw_path_token: Option<String>,
         local_path: PathBuf,
+        baseline: crate::models::external_editor::ExternalEditorFileVersion,
     },
     AiFileActionLoaded {
         remote_path: String,

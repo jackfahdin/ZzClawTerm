@@ -48,6 +48,21 @@ impl ZzClawTermApp {
                 outcome.errors[0]
             )
         });
+        self.notify_background_operation(
+            "file-delete-result",
+            if outcome.errors.is_empty() {
+                zzclawterm_ui::notification::ZzClawNotificationKind::Success
+            } else {
+                zzclawterm_ui::notification::ZzClawNotificationKind::Error
+            },
+            t!(if outcome.errors.is_empty() {
+                "common.deletingSuccess"
+            } else {
+                "common.operationFailed"
+            })
+            .to_string(),
+            cx,
+        );
         cx.notify();
     }
 }

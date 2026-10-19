@@ -84,6 +84,8 @@ impl SettingsPanel {
         let provider_action = conflict.provider_action;
         let preview = conflict.preview;
         let remote_inconsistent = preview.kind == CloudConflictKind::RemoteInconsistent;
+        let overwrite_blocked = preview.overwrite_blocked;
+        let has_recovery_candidate = preview.recovery_revision.is_some();
         let local_hash = compact_id(&preview.local_payload_hash);
         let remote_revision = format!(
             "{} / {}",
@@ -170,7 +172,7 @@ impl SettingsPanel {
                     .flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(if remote_inconsistent {
+                    .child(if remote_inconsistent && has_recovery_candidate {
                         small_button(
                             palette,
                             "cloud-conflict-recover-current",
@@ -180,6 +182,11 @@ impl SettingsPanel {
                             }),
                         )
                         .into_any_element()
+                    } else if remote_inconsistent {
+                        // Nothing on the remote can be recovered: pulling would
+                        // download the same unreadable payload, so the explicit
+                        // overwrite below is the only action offered.
+                        div().into_any_element()
                     } else {
                         small_button(
                             palette,
@@ -191,16 +198,27 @@ impl SettingsPanel {
                         )
                         .into_any_element()
                     })
-                    .child(dialog_action_button(
-                        palette,
-                        "cloud-conflict-force-push",
-                        t!("settings.uploadLocalVersion"),
-                        false,
-                        cx.listener(move |this, _, window, cx| {
-                            this.prompt_cloud_sync_force_push(provider_action, window, cx);
-                        }),
-                    )),
+                    .when(!overwrite_blocked, |this| {
+                        this.child(dialog_action_button(
+                            palette,
+                            "cloud-conflict-force-push",
+                            t!("settings.uploadLocalVersion"),
+                            false,
+                            cx.listener(move |this, _, window, cx| {
+                                this.prompt_cloud_sync_force_push(provider_action, window, cx);
+                            }),
+                        ))
+                    }),
             )
+            .when(overwrite_blocked, |this| {
+                this.child(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(rgb(palette.warning))
+                        .child(t!("settings.overwriteBlockedNotice")),
+                )
+            })
     }
 
     pub(in crate::features) fn cloud_sync_settings_section(

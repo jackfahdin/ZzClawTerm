@@ -4,10 +4,10 @@ use std::sync::Arc;
 use rust_i18n::t;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    SharedString, Window, div, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, SharedString, Window, div,
+    prelude::*, px, rgb, rgba,
 };
-use zzclawterm_ui::{NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelectOption, ZzClawSlider};
+use zzclawterm_ui::{NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelectOption};
 
 use crate::features::{
     FontAvailability, FontCatalogLoadState, FontResolutionSource, FontResolutionStatus,
@@ -19,10 +19,10 @@ use crate::features::{
         gpui_ui_font_fallback,
     },
 };
-use crate::theme::{APPEARANCE_THEME_IDS, ThemePalette, appearance_theme_label};
-use zzclawterm_ui::ZzClawTooltip;
+use crate::theme::ThemePalette;
 
 use super::super::{settings_form_row, settings_form_section, settings_switch};
+use super::window_background::AppearanceOpacity;
 
 struct AppearanceFontStackPresentation {
     terminal: bool,
@@ -40,14 +40,16 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
+        let manage_themes = self.theme_designer_entry_button(cx);
         div()
             .flex()
             .flex_col()
             .gap_5()
-            .child(settings_form_section(
+            .child(appearance_form_section_with_action(
                 palette,
-                None,
-                None,
+                t!("themeDesigner.sectionTitle"),
+                t!("themeDesigner.sectionDesc"),
+                manage_themes,
                 div()
                     .flex()
                     .flex_col()
@@ -86,7 +88,17 @@ impl SettingsPanel {
                                 this.toggle_bold_default_foreground(cx);
                             }),
                         ),
-                    ))
+                    )),
+            ))
+            .child(self.window_background_section(cx))
+            .child(settings_form_section(
+                palette,
+                None,
+                None,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_5()
                     .child(settings_form_row(
                         palette,
                         t!("settings.panelMultiOpen"),
@@ -141,11 +153,12 @@ impl SettingsPanel {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .min_h(px(36.))
+                                        .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
+                                        .flex()
+                                        .items_center()
                                         .min_w_0()
                                         .flex_1()
                                         .px_3()
-                                        .py_2()
                                         .rounded_sm()
                                         .border_1()
                                         .border_color(rgb(palette.border))
@@ -157,7 +170,7 @@ impl SettingsPanel {
                                         } else {
                                             palette.text_muted
                                         }))
-                                        .child(path_label),
+                                        .child(div().min_w_0().truncate().child(path_label)),
                                 )
                                 .child(appearance_icon_text_button(
                                     palette,
@@ -188,8 +201,7 @@ impl SettingsPanel {
                             )),
                             self.appearance_background_fit_select(has_image, cx),
                         ))
-                        .child(self.appearance_opacity_slider(false, has_image, cx))
-                        .child(self.appearance_opacity_slider(true, has_image, cx))
+                        .child(self.appearance_opacity_slider(AppearanceOpacity::Image, has_image, cx))
                 },
             ))
             .child(self.appearance_font_stack_settings_section(false, cx))
@@ -535,119 +547,6 @@ impl SettingsPanel {
             .resolve_font_stack(&families, terminal, platform_default)
     }
 
-    fn appearance_opacity_slider(
-        &mut self,
-        content: bool,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let palette = self.theme_palette();
-        let value = if content {
-            self.settings.summary().background_content_opacity
-        } else {
-            self.settings.summary().background_image_opacity
-        };
-        let label = if content {
-            t!("settings.backgroundContentOpacity")
-        } else {
-            t!("settings.backgroundImageOpacity")
-        };
-        let desc = if content {
-            t!("settings.backgroundContentOpacityDesc", value = "82%").to_string()
-        } else {
-            t!("settings.backgroundImageOpacityDesc").to_string()
-        };
-        let slider = if content {
-            &self.content_opacity_slider
-        } else {
-            &self.image_opacity_slider
-        };
-        let focus = if content {
-            self.content_opacity_focus.clone()
-        } else {
-            self.image_opacity_focus.clone()
-        };
-        let mouse_focus = focus.clone();
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .track_focus(&focus)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |_, _, window, cx| {
-                    window.focus(&mouse_focus, cx);
-                }),
-            )
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if !enabled {
-                    return;
-                }
-                let current = if content {
-                    this.settings.summary().background_content_opacity
-                } else {
-                    this.settings.summary().background_image_opacity
-                };
-                let next = match event.keystroke.key.as_str() {
-                    "left" | "down" => current.saturating_sub(1),
-                    "right" | "up" => current.saturating_add(1).min(100),
-                    "home" => 0,
-                    "end" => 100,
-                    _ => return,
-                };
-                if next != current {
-                    if content {
-                        this.set_background_content_opacity(next, cx);
-                    } else {
-                        this.set_background_image_opacity(next, cx);
-                    }
-                }
-                cx.stop_propagation();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight(500.))
-                                    .text_color(rgb(palette.text))
-                                    .child(label),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(palette.text_dimmed))
-                                    .child(desc),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .bg(rgb(palette.input))
-                            .px_2()
-                            .py_1()
-                            .font_family(crate::features::shell::gpui_code_font_family())
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text_muted))
-                            .child(format!("{value}%")),
-                    ),
-            )
-            .child(ZzClawSlider::new(slider).disabled(!enabled).w_full())
-    }
-
     fn appearance_theme_select(
         &mut self,
         terminal: bool,
@@ -674,11 +573,8 @@ impl SettingsPanel {
                 t!("settings.followUiTheme"),
             ));
         }
-        for theme_id in APPEARANCE_THEME_IDS {
-            options.push(ZzClawSelectOption::new(
-                *theme_id,
-                appearance_theme_label(theme_id),
-            ));
+        for (theme_id, name) in self.settings.theme_options.iter().cloned() {
+            options.push(ZzClawSelectOption::new(theme_id, name));
         }
         let selected = current
             .map(|theme| {
@@ -885,40 +781,14 @@ fn appearance_icon_text_button(
     label: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let label: SharedString = label.into();
-    let destructive = icon_path == "icons/fe/delete.svg";
-    let hover = if destructive {
-        rgba((palette.danger << 8) | 0x18)
-    } else {
-        rgb(palette.hover)
-    };
-    div()
-        .id(id)
-        .h(px(28.))
-        .px_2()
-        .rounded_sm()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_size(px(11.))
-        .text_color(rgb(if destructive {
+    zzclawterm_ui::ZzClawButton::new(id, label)
+        .form_control()
+        .icon(icon_path)
+        .text_color(rgb(if icon_path == "icons/fe/delete.svg" {
             palette.danger
         } else {
-            palette.primary
+            palette.text
         }))
-        .cursor_pointer()
-        .hover(move |this| this.bg(hover))
-        .child(
-            svg()
-                .size(px(14.))
-                .path(icon_path)
-                .text_color(rgb(if destructive {
-                    palette.danger
-                } else {
-                    palette.primary
-                })),
-        )
-        .child(label)
         .on_click(on_click)
 }
 
@@ -929,25 +799,10 @@ fn appearance_icon_button(
     tooltip: impl Into<SharedString>,
     on_click: AppearanceClickHandler,
 ) -> impl IntoElement {
-    let tooltip: SharedString = tooltip.into();
-    let hover = rgba((palette.danger << 8) | 0x18);
-    div()
-        .id(SharedString::from(id))
-        .size(px(28.))
-        .flex_none()
-        .rounded_sm()
-        .flex()
-        .items_center()
-        .justify_center()
+    zzclawterm_ui::ZzClawButton::new(id, "")
+        .form_control()
+        .icon(icon_path)
         .text_color(rgb(palette.danger))
-        .cursor_pointer()
-        .hover(move |this| this.bg(hover))
-        .child(
-            svg()
-                .size(px(15.))
-                .path(icon_path)
-                .text_color(rgb(palette.danger)),
-        )
-        .tooltip(move |window, cx| ZzClawTooltip::new(tooltip.clone()).build(window, cx))
+        .tooltip(tooltip)
         .on_click(on_click)
 }

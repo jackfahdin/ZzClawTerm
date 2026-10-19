@@ -1,6 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{ClipboardItem, Context};
+use gpui::Context;
 use zzclawterm_core::{AiAction, AiContext};
 use zzclawterm_transport::{RecordingMode, RecordingStatus, SessionKind};
 use zzclawterm_ui::ZzClawMenuItem;
@@ -75,7 +75,11 @@ impl ZzClawTermApp {
                     .icon("icons/copy.svg")
                     .shortcut(copy_sc)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(selected_for_copy.clone()));
+                        this.copy_text_with_feedback(
+                            "copy-terminal-selection",
+                            selected_for_copy.clone(),
+                            cx,
+                        );
                         this.shell
                             .set_status("copied terminal selection".to_string());
                         cx.notify();
@@ -529,6 +533,7 @@ mod tests {
     #[test]
     fn menu_tree_matches_tauri_for_selection_and_empty_selection() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let (selected, empty) = cx.update_entity(&app, |app, cx| {
             let ai = AiSettings {
@@ -650,6 +655,7 @@ mod tests {
     fn select_all_uses_worker_scrollback_and_reopens_the_selection_menu() {
         let root = TestTempDir::new("zzclawterm-select-all-menu");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "selected-pane");
         cx.update_entity(&app, |app, cx| {
             let empty = app.terminal_context_menu_items_for_session("selected-pane".into(), cx);
@@ -691,6 +697,7 @@ mod tests {
     fn clearing_select_all_discards_an_in_flight_worker_reply() {
         let root = TestTempDir::new("zzclawterm-select-all-cancel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_visible_local_session(&mut cx, root.path(), "selected-pane");
         cx.update_entity(&app, |app, cx| {
             app.terminal
@@ -712,6 +719,7 @@ mod tests {
     #[test]
     fn optional_ai_and_credential_translation_items_match_tauri() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let items = cx.update_entity(&app, |app, cx| {
             let ai = AiSettings {
@@ -781,6 +789,7 @@ mod tests {
     #[test]
     fn recording_submenu_uses_clicked_session_status_and_active_icons() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let recording_path = unique_test_dir("active").join("recording.log");
         let (clicked_items, other_items) = cx.update_entity(&app, |app, cx| {
@@ -839,6 +848,7 @@ mod tests {
     #[test]
     fn active_recording_without_a_path_keeps_open_and_reveal_actions_visible() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let items = cx.update_entity(&app, |app, cx| {
             app.terminal_recording_menu_items_for_status(

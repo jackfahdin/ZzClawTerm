@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{
     App, AppContext, Context, FontFallbacks, FontWeight, PathPromptOptions, RenderImage,
-    SharedString, font, px, rgb, rgba,
+    SharedString, font, px,
 };
 use zzclawterm_core::{
     AppSettingsSummary, ResolvedKeywordHighlightRule, merge_keyword_highlight_rules_for_paint,
@@ -17,7 +17,7 @@ use crate::features::{
     FontCatalogSnapshot, FontResolutionSource, FontResolutionStatus, ZzClawTermApp,
     font_names_fingerprint, normalize_font_family, runtime_jobs::await_blocking_job,
 };
-pub(in crate::features) use crate::theme::{ThemePalette, apply_component_theme, theme_palette};
+pub(in crate::features) use crate::theme::{ThemePalette, apply_component_theme};
 
 const TERMINAL_FONT_SIZE_MIN: i16 = 8;
 const TERMINAL_FONT_SIZE_MAX: i16 = 72;
@@ -38,6 +38,14 @@ impl ZzClawTermApp {
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
         self.settings.replace_summary(settings);
+        self.sync_native_window_material(cx);
+        if !self
+            .settings
+            .summary()
+            .interaction_credential_autofill_enabled
+        {
+            self.cancel_credential_autofill(cx);
+        }
         let selected = self
             .settings
             .summary()
@@ -53,13 +61,10 @@ impl ZzClawTermApp {
             self.invalidate_terminal_cell_metrics(cx);
         }
         self.invalidate_paint_theme_caches();
-        // Flush boundary: the theme and wallpaper feed `PanelChrome` and
-        // `ConnectionChrome`.
-        self.flush_remote_panel_snapshots(cx);
-        self.flush_connection_panel_snapshot(cx);
-        self.flush_transfer_panel_snapshot(cx);
-        self.flush_ai_panel_snapshot(cx);
+        // A material or content-opacity change must refresh resolved panel
+        // colours even when the wallpaper path is unchanged.
         self.queue_wallpaper_refresh(cx);
+        self.refresh_background_surfaces(cx);
     }
 
     pub(in crate::features) fn sync_component_theme(&self, cx: &mut App) {
@@ -146,7 +151,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn theme_palette(&self) -> ThemePalette {
-        theme_palette(&self.settings.summary().theme)
+        self.settings.theme_palette()
     }
 
     pub(in crate::features) fn wallpaper_enabled(&self) -> bool {
@@ -165,7 +170,7 @@ impl ZzClawTermApp {
         if !self.shell.request_wallpaper(path.clone()) {
             return;
         }
-        self.refresh_wallpaper_surfaces(cx);
+        self.refresh_background_surfaces(cx);
         let Some(path) = path else {
             return;
         };
@@ -181,7 +186,7 @@ impl ZzClawTermApp {
                 match result {
                     Ok((image, width, height)) => {
                         if this.shell.cache_wallpaper(path, image, width, height) {
-                            this.refresh_wallpaper_surfaces(cx);
+                            this.refresh_background_surfaces(cx);
                         }
                     }
                     Err(()) if this.shell.wallpaper_is_requested(&path) => {
@@ -196,7 +201,7 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    fn refresh_wallpaper_surfaces(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::features) fn refresh_background_surfaces(&mut self, cx: &mut Context<Self>) {
         // Cached panel entities retain their resolved colours until their own
         // snapshots are flushed; notifying only the shell leaves them stale.
         self.flush_remote_panel_snapshots(cx);
@@ -329,32 +334,20 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    /// Wallpaper opacity applies to surface backgrounds, not their contents.
+    /// Content opacity applies to surface backgrounds, not their contents.
     pub(in crate::features) fn shell_surface_color(&self, color: u32) -> gpui::Rgba {
-        if !self.wallpaper_enabled() {
-            return rgb(color);
-        }
-        let alpha = ((self.settings.summary().background_content_opacity.min(100) as f32 / 100.0)
-            * 255.0)
-            .round() as u32;
-        rgba((color << 8) | alpha.min(0xff))
+        self.shell_background().surface_color(color)
     }
 
-    /// Preserve the workbench's two-layer shading with one background, including
-    /// connection and reconnect placeholders, so state changes cannot alter opacity.
+    /// Use the same background for terminals and their lifecycle placeholders.
+    /// Opaque windows retain the legacy wallpaper shading.
     pub(in crate::features) fn shell_terminal_surface_color(&self, color: u32) -> gpui::Rgba {
-        let mut background = self.shell_surface_color(color);
-        background.a += (1.0 - background.a) * background.a;
-        background
+        self.shell_background().terminal_color(color)
     }
 
-    /// Explicitly transparent surfaces reveal wallpaper.
+    /// Structural containers reveal wallpaper and the native window backdrop.
     pub(in crate::features) fn shell_transparent_color(&self, color: u32) -> gpui::Rgba {
-        if self.wallpaper_enabled() {
-            rgba(color << 8)
-        } else {
-            rgb(color)
-        }
+        self.shell_background().transparent_color(color)
     }
 
     pub(in crate::features) fn terminal_theme_is_dark(&self) -> bool {
@@ -388,14 +381,19 @@ impl ZzClawTermApp {
 
     /// Populate paint caches used by every terminal/chrome rebuild.
     pub(in crate::features) fn ensure_paint_theme_caches(&mut self) {
-        self.ensure_terminal_theme_palette_cache();
         self.ensure_keyword_highlight_rules_cache();
     }
 
     fn ensure_keyword_highlight_rules_cache(&mut self) {
         if self.settings.summary().terminal_low_latency_mode {
-            self.terminal
-                .cache_keyword_highlight_rules(Arc::new(Vec::new()));
+            if !self
+                .terminal
+                .cached_keyword_highlight_rules()
+                .is_some_and(|rules| rules.is_empty())
+            {
+                self.terminal
+                    .cache_keyword_highlight_rules(Arc::new(Vec::new()));
+            }
             return;
         }
         if self.terminal.cached_keyword_highlight_rules().is_some() {
@@ -404,8 +402,6 @@ impl ZzClawTermApp {
         let rules = if !self.settings.keyword_config().enabled {
             Arc::new(Vec::new())
         } else {
-            // terminal_theme_is_dark uses palette; ensure palette first.
-            self.ensure_terminal_theme_palette_cache();
             Arc::new(merge_keyword_highlight_rules_for_paint(
                 &self.settings.keyword_config().rules,
                 &self.settings.keyword_config().builtin_rules,
@@ -417,82 +413,7 @@ impl ZzClawTermApp {
 
     /// Terminal surface palette: follows optional `terminal_theme`, else UI theme.
     pub(in crate::features) fn terminal_theme_palette(&self) -> ThemePalette {
-        let ui_theme = self.settings.summary().theme.as_str();
-        let terminal_theme = self
-            .settings
-            .summary()
-            .terminal_theme
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
-        let contrast = self.settings.summary().minimum_contrast_ratio.as_str();
-        if let Some((cached_ui, cached_term, cached_contrast, palette)) =
-            self.terminal.cached_terminal_theme_palette()
-            && cached_ui == ui_theme
-            && cached_term == terminal_theme
-            && cached_contrast == contrast
-        {
-            return palette;
-        }
-        Self::compute_terminal_theme_palette(
-            ui_theme,
-            if terminal_theme.is_empty() {
-                None
-            } else {
-                Some(terminal_theme)
-            },
-            contrast,
-        )
-    }
-
-    fn ensure_terminal_theme_palette_cache(&mut self) {
-        let ui_theme = self.settings.summary().theme.clone();
-        let terminal_theme = self
-            .settings
-            .summary()
-            .terminal_theme
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
-        let contrast = self.settings.summary().minimum_contrast_ratio.clone();
-        if let Some((cached_ui, cached_term, cached_contrast, _)) =
-            self.terminal.cached_terminal_theme_palette()
-            && cached_ui == ui_theme
-            && cached_term == terminal_theme
-            && cached_contrast == contrast
-        {
-            return;
-        }
-        let palette = Self::compute_terminal_theme_palette(
-            &ui_theme,
-            if terminal_theme.is_empty() {
-                None
-            } else {
-                Some(terminal_theme.as_str())
-            },
-            &contrast,
-        );
-        self.terminal
-            .cache_terminal_theme_palette(ui_theme, terminal_theme, contrast, palette);
-    }
-
-    fn compute_terminal_theme_palette(
-        ui_theme: &str,
-        terminal_theme: Option<&str>,
-        minimum_contrast_ratio: &str,
-    ) -> ThemePalette {
-        let id = terminal_theme.unwrap_or(ui_theme);
-        let id = if id == "catppuccin" {
-            "catppuccin-mocha"
-        } else {
-            id
-        };
-        let mut palette = theme_palette(id);
-        palette.apply_minimum_contrast_ratio(parse_minimum_contrast_ratio(minimum_contrast_ratio));
-        palette
+        self.settings.terminal_palette()
     }
 
     pub(in crate::features) fn invalidate_paint_theme_caches(&mut self) {
@@ -527,6 +448,18 @@ impl ZzClawTermApp {
         self.settings.set_appearance_theme(theme.to_string());
         self.sync_component_theme(cx);
         self.save_appearance_settings(cx);
+        // The side panels (connections, remote monitor, transfers, AI) render
+        // from snapshots whose key embeds the panel chrome -- palette included.
+        // Their flush boundaries are interactions, input subscriptions, store
+        // replies, session switches, and their own clocks; a theme change is
+        // not one of them, so the panels kept painting the old palette until
+        // the next poll or relayout, surfacing as "the sidebars only follow
+        // after Apply". Queue their flushes so the chrome follows the theme
+        // immediately; each is a key comparison when nothing else moved.
+        self.defer_connection_panel_snapshot_flush(cx);
+        self.defer_remote_panel_snapshot_flush(cx);
+        self.defer_transfer_panel_snapshot_flush(cx);
+        self.defer_ai_panel_snapshot_flush(cx);
     }
 
     pub(in crate::features) fn update_terminal_font_family(
@@ -910,10 +843,11 @@ impl ZzClawTermApp {
         if !self.settings.set_background_content_opacity(next) {
             return;
         }
+        self.refresh_background_surfaces(cx);
         self.save_appearance_settings(cx);
     }
 
-    fn save_appearance_settings(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::features) fn save_appearance_settings(&mut self, cx: &mut Context<Self>) {
         if self.defer_settings_domain_persistence(
             crate::features::settings::SettingsPersistenceDomain::Appearance,
             cx,
@@ -1026,16 +960,6 @@ fn push_unique_font(fonts: &mut Vec<String>, family: String) {
         .any(|existing| normalize_font_family(existing) == normalize_font_family(&family))
     {
         fonts.push(family);
-    }
-}
-
-fn parse_minimum_contrast_ratio(raw: &str) -> f32 {
-    match raw.trim() {
-        "3" => 3.0,
-        "4.5" => 4.5,
-        "7" => 7.0,
-        "21" => 21.0,
-        _ => 1.0,
     }
 }
 

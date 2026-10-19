@@ -11,6 +11,175 @@ use zzclawterm_core::{
 };
 
 #[test]
+fn theme_commits_are_atomic_and_preserve_unrelated_settings_and_unknown_fields() {
+    use crate::storage::ThemeCommitOutcome;
+    use zzclawterm_core::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
+    let dir = unique_temp_dir("theme-only-commit");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut theme = zzclawterm_core::themes::builtins()[0].copy_as_custom();
+    theme
+        .extra
+        .insert("future".into(), serde_json::json!({"version": 99}));
+    let id = theme.id.clone();
+    store
+        .save_settings_value(&serde_json::json!({
+            "appearance": {"font_size": 19, "future": 42, "custom_themes": [{"unsupported": true}]},
+            "future": {"keep": true}
+        }))
+        .unwrap();
+    let base = ThemeSettings::from(&store.load_app_settings_summary().unwrap());
+    let mutation = ThemeMutation::Save {
+        theme: Box::new(theme),
+        target: Some(ThemeApplyTarget::BothFollowUi),
+    };
+    let ThemeCommitOutcome::Committed(commit) =
+        store.commit_theme_mutation(&base, &mutation).unwrap()
+    else {
+        panic!("unexpected conflict");
+    };
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(raw["appearance"]["font_size"], 19);
+    assert_eq!(raw["appearance"]["future"], 42);
+    assert_eq!(raw["future"], serde_json::json!({"keep": true}));
+    assert_eq!(
+        raw["appearance"]["custom_themes"][0],
+        serde_json::json!({"unsupported": true})
+    );
+    assert_eq!(
+        raw["appearance"]["custom_themes"][1]["future"],
+        serde_json::json!({"version": 99})
+    );
+    assert_eq!(raw["appearance"]["theme"], id);
+    assert!(raw["appearance"]["terminal_theme"].is_null());
+    assert!(matches!(
+        store.commit_theme_mutation(&base, &mutation).unwrap(),
+        ThemeCommitOutcome::Conflict
+    ));
+    assert_eq!(store.load_settings_value().unwrap(), raw);
+    let mut invalid = commit.settings.catalog.resolve(&id).unwrap();
+    invalid.colors.primary = "invalid".into();
+    assert!(
+        store
+            .commit_theme_mutation(
+                &commit.settings,
+                &ThemeMutation::Save {
+                    theme: Box::new(invalid),
+                    target: Some(ThemeApplyTarget::Ui)
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(store.load_settings_value().unwrap(), raw);
+    let ThemeCommitOutcome::Committed(deleted) = store
+        .commit_theme_mutation(&commit.settings, &ThemeMutation::Delete { id })
+        .unwrap()
+    else {
+        panic!("unexpected conflict");
+    };
+    assert_eq!(deleted.settings.ui, "github-dark");
+    assert!(deleted.settings.catalog.available().is_empty());
+    assert_eq!(
+        store.load_settings_value().unwrap()["appearance"]["custom_themes"],
+        serde_json::json!([{"unsupported": true}])
+    );
+}
+
+#[test]
+fn applying_themes_preserves_an_unsupported_catalog_and_concurrent_unrelated_edits() {
+    use crate::storage::ThemeCommitOutcome;
+    use zzclawterm_core::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
+    let dir = unique_temp_dir("theme-only-future");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let future = serde_json::json!({"format": 99});
+    store
+        .save_settings_value(&serde_json::json!({"appearance": {"custom_themes": future}}))
+        .unwrap();
+    let base = ThemeSettings::from(&store.load_app_settings_summary().unwrap());
+    let mut raw = store.load_settings_value().unwrap();
+    raw["appearance"]["font_size"] = serde_json::json!(25);
+    store.save_settings_value(&raw).unwrap();
+    assert!(matches!(
+        store
+            .commit_theme_mutation(
+                &base,
+                &ThemeMutation::Apply {
+                    id: "dracula".into(),
+                    target: ThemeApplyTarget::Ui
+                }
+            )
+            .unwrap(),
+        ThemeCommitOutcome::Committed(_)
+    ));
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(raw["appearance"]["custom_themes"], future);
+    assert_eq!(raw["appearance"]["font_size"], 25);
+}
+
+#[test]
+fn custom_themes_preserve_tauri_records_and_unknown_data_when_saving_appearance() {
+    let dir = unique_temp_dir("custom-themes-compatibility");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let theme = zzclawterm_core::themes::builtins()[0].copy_as_custom();
+    let mut raw = serde_json::to_value(&theme).unwrap();
+    raw["future"] = serde_json::json!({"keep":true});
+    raw["colors"]["terminal"]["future"] = serde_json::json!("keep");
+    raw["colors"]["terminal"]
+        .as_object_mut()
+        .unwrap()
+        .remove("foregroundIntense");
+    let unsupported = serde_json::json!({"id":"future-theme", "format":99});
+    store
+        .save_settings_value(&serde_json::json!({"appearance":{
+            "theme":theme.id, "custom_themes":[raw,unsupported], "future":42
+        }}))
+        .unwrap();
+    let mut summary = store.load_app_settings_summary().unwrap();
+    assert!(summary.custom_themes.resolve(&theme.id).is_some());
+    summary.ui_font_size = 18;
+    store.save_appearance_settings(&summary).unwrap();
+    let mut edited = summary.custom_themes.resolve(&theme.id).unwrap();
+    edited.colors.primary = "#123456".into();
+    summary.custom_themes.upsert(edited).unwrap();
+    store.save_appearance_settings(&summary).unwrap();
+    let result = store.load_settings_value().unwrap();
+    assert_eq!(
+        result["appearance"]["custom_themes"][0]["future"],
+        serde_json::json!({"keep":true})
+    );
+    assert_eq!(
+        result["appearance"]["custom_themes"][0]["colors"]["terminal"]["future"],
+        "keep"
+    );
+    assert_eq!(result["appearance"]["custom_themes"][1], unsupported);
+    assert_eq!(result["appearance"]["future"], 42);
+    let before = result.clone();
+    summary.custom_themes.0[0]["colors"]["primary"] = serde_json::json!("invalid");
+    assert!(store.save_appearance_settings(&summary).is_err());
+    assert_eq!(store.load_settings_value().unwrap(), before);
+    drop(store);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn unsupported_catalog_shape_survives_unrelated_appearance_edits() {
+    let dir = unique_temp_dir("future-theme-catalog");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let future = serde_json::json!({"version":2,"records":[]});
+    store
+        .save_settings_value(&serde_json::json!({"appearance":{"custom_themes":future}}))
+        .unwrap();
+    let mut summary = store.load_app_settings_summary().unwrap();
+    summary.ui_font_size = 19;
+    store.save_appearance_settings(&summary).unwrap();
+    assert_eq!(
+        store.load_settings_value().unwrap()["appearance"]["custom_themes"],
+        future
+    );
+    drop(store);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn settings_migrate_right_click_and_lock_keys_without_losing_unknown_fields() {
     let dir = unique_temp_dir("settings-interaction-lock-migration");
     let store = ConnectionStore::open(&dir).expect("store");
@@ -2659,6 +2828,114 @@ fn save_appearance_theme_and_contrast_roundtrip() {
 }
 
 #[test]
+fn window_material_defaults_ignore_legacy_preferences_and_preserve_unknown_fields() {
+    use zzclawterm_core::models::window_material::WindowMaterial;
+
+    let dir = unique_temp_dir("window-material-compatibility");
+    let store = ConnectionStore::open(&dir).expect("store");
+    let legacy = serde_json::json!({"appearance": {
+        "window_transparency": "acrylic", "window_transparency_tint": 0.3,
+        "window_transparency_blur": true, "background_opacity": 0.45,
+        "future_field": {"enabled": true}
+    }});
+    store.save_settings_value(&legacy).expect("legacy document");
+    let mut summary = store.load_app_settings_summary().expect("read legacy");
+    assert_eq!(summary.window_material, WindowMaterial::Opaque);
+    assert_eq!(summary.window_background_opacity, 20);
+    assert_eq!(summary.background_content_opacity, 45);
+    summary.window_material = WindowMaterial::Blurred;
+    summary.window_background_opacity = 0;
+    let saved = store
+        .save_appearance_settings(&summary)
+        .expect("save material");
+    assert_eq!(saved.window_material, WindowMaterial::Blurred);
+    assert_eq!(saved.window_background_opacity, 0);
+    let raw = store.load_settings_value().expect("raw document");
+    for key in [
+        "window_transparency",
+        "window_transparency_tint",
+        "window_transparency_blur",
+        "future_field",
+        "background_opacity",
+    ] {
+        assert_eq!(raw["appearance"][key], legacy["appearance"][key]);
+    }
+    let mut future = raw;
+    future["appearance"]["window_material"] = serde_json::json!("future_backdrop");
+    future["appearance"]["window_background_opacity"] = serde_json::json!(150);
+    store.save_settings_value(&future).expect("future document");
+    let summary = store.load_app_settings_summary().expect("future material");
+    assert_eq!(
+        summary.window_material,
+        WindowMaterial::Unknown("future_backdrop".into())
+    );
+    assert_eq!(summary.window_background_opacity, 100);
+    store
+        .save_appearance_settings(&summary)
+        .expect("unrelated save");
+    assert_eq!(
+        store.load_settings_value().unwrap()["appearance"]["window_material"],
+        "future_backdrop"
+    );
+}
+
+#[test]
+fn native_window_material_is_restored_from_backup_and_preserved_during_sync() {
+    use zzclawterm_core::models::window_material::WindowMaterial;
+    use zzclawterm_core::portable_snapshot::PortableSnapshotKind;
+    let dir = unique_temp_dir("native-material-snapshots");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    settings.window_material = WindowMaterial::Blurred;
+    settings.window_background_opacity = 35;
+    store.save_appearance_settings(&settings).unwrap();
+    let mut backup = store
+        .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "device", "test")
+        .unwrap();
+    backup.recalculate_hash().unwrap();
+    let mut sync = store
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "device", "test")
+        .unwrap();
+    sync.recalculate_hash().unwrap();
+    let synced: serde_json::Value = serde_json::from_str(&sync.entities["settings"]).unwrap();
+    assert!(synced["appearance"].get("window_material").is_none());
+    assert!(
+        synced["appearance"]
+            .get("window_background_opacity")
+            .is_none()
+    );
+    settings.window_material = WindowMaterial::Transparent;
+    settings.window_background_opacity = 75;
+    store.save_appearance_settings(&settings).unwrap();
+    store.apply_raw_portable_snapshot(&sync).unwrap();
+    let local = store.load_app_settings_summary().unwrap();
+    assert_eq!(local.window_material, WindowMaterial::Transparent);
+    assert_eq!(local.window_background_opacity, 75);
+    store.apply_raw_portable_snapshot(&backup).unwrap();
+    let restored = store.load_app_settings_summary().unwrap();
+    assert_eq!(restored.window_material, WindowMaterial::Blurred);
+    assert_eq!(restored.window_background_opacity, 35);
+}
+
+#[test]
+fn malformed_native_window_settings_are_rejected_without_overwriting_user_data() {
+    let dir = unique_temp_dir("native-material-malformed");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let settings = store.load_app_settings_summary().unwrap();
+    for appearance in [
+        serde_json::json!({"window_material": {"future": "format"}}),
+        serde_json::json!({"window_background_opacity": "invalid"}),
+        serde_json::json!({"window_background_opacity": 0.2}),
+    ] {
+        let raw = serde_json::json!({"appearance": appearance});
+        store.save_settings_value(&raw).unwrap();
+        assert!(store.load_app_settings_summary().is_err());
+        assert!(store.save_appearance_settings(&settings).is_err());
+        assert_eq!(store.load_settings_value().unwrap(), raw);
+    }
+}
+
+#[test]
 fn save_empty_search_engine_list_roundtrip() {
     let dir = unique_temp_dir("settings-empty-search-engines");
     let store = ConnectionStore::open(&dir).expect("store");
@@ -3240,6 +3517,8 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(summary.interaction_allow_osc52_clipboard_write);
     assert!(!summary.interaction_terminal_zoom_enabled);
     assert!(!summary.interaction_command_suggestions_enabled);
+    // The stored fixture predates the field, so it must default on.
+    assert!(summary.interaction_credential_autofill_enabled);
     assert_eq!(summary.interaction_command_suggestion_min_chars, 3);
     assert_eq!(summary.interaction_command_suggestion_max_chars, 80);
     assert_eq!(summary.interaction_word_separators, " .,:");
@@ -3673,6 +3952,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     interaction_update.interaction_duplicate_session_command_delay_ms = 2_500;
     interaction_update.interaction_allow_osc52_clipboard_write = false;
     interaction_update.interaction_terminal_zoom_enabled = true;
+    interaction_update.interaction_credential_autofill_enabled = false;
     interaction_update.interaction_alt_as_meta = false;
     interaction_update.interaction_tab_double_click_action = "reconnect_session".to_string();
     interaction_update.interaction_default_encoding = "utf-8".to_string();
@@ -3694,6 +3974,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     );
     assert!(!saved_interaction.interaction_allow_osc52_clipboard_write);
     assert!(saved_interaction.interaction_terminal_zoom_enabled);
+    assert!(!saved_interaction.interaction_credential_autofill_enabled);
     assert!(!saved_interaction.interaction_alt_as_meta);
     assert_eq!(
         saved_interaction.interaction_tab_double_click_action,
@@ -7180,4 +7461,55 @@ fn recording_input_opt_in_preserves_legacy_unknown_fields_sync_and_backup() {
     for dir in [source_dir, backup_dir, restore_dir] {
         std::fs::remove_dir_all(dir).ok();
     }
+}
+
+#[test]
+fn telnet_keepalive_survives_storage_backup_and_sync_round_trips() {
+    let dir = unique_temp_dir("telnet-keepalive");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let config: SessionsConfig = serde_json::from_value(serde_json::json!({
+        "groups": [], "connections": [
+            {"id":"old", "name":"Old Telnet", "type":"telnet", "host":"old.invalid", "future_telnet":{"retained":true}},
+            {"id":"disabled", "name":"Disabled", "type":"telnet", "host":"disabled.invalid", "keep_alive_interval_secs":0},
+            {"id":"custom", "name":"Custom", "type":"telnet", "host":"custom.invalid", "keep_alive_interval_secs":45}
+        ]
+    })).unwrap();
+    store.replace_sessions(&config).unwrap();
+    let assert_connections = |store: &ConnectionStore| {
+        let loaded = store.load_sessions().unwrap();
+        for expected in &config.connections {
+            let actual = loaded
+                .connections
+                .iter()
+                .find(|connection| connection.id == expected.id)
+                .unwrap();
+            assert_eq!(actual.config, expected.config);
+        }
+        let old = loaded
+            .connections
+            .iter()
+            .find(|connection| connection.id == "old")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["future_telnet"]["retained"],
+            true
+        );
+    };
+    assert_connections(&store);
+    for kind in [
+        zzclawterm_core::portable_snapshot::PortableSnapshotKind::Backup,
+        zzclawterm_core::portable_snapshot::PortableSnapshotKind::Sync,
+    ] {
+        let mut snapshot = store
+            .build_raw_portable_snapshot(kind, "telnet-test", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        let encoded = crate::portable_codec::encode_raw_portable_snapshot(&snapshot).unwrap();
+        let decoded = crate::portable_codec::decode_raw_portable_snapshot(&encoded).unwrap();
+        store.replace_sessions(&SessionsConfig::default()).unwrap();
+        store.apply_raw_portable_snapshot(&decoded).unwrap();
+        assert_connections(&store);
+    }
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
 }

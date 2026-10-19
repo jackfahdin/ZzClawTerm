@@ -2,6 +2,7 @@
 
 use gpui::{App, KeyBinding, actions};
 
+pub(in crate::features) mod ai_execution;
 mod assist_state;
 mod command_suggestions;
 mod credential_autofill;

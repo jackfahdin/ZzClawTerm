@@ -6,6 +6,7 @@ use gpui::{
 };
 
 use crate::features::ZzClawTermApp;
+use crate::features::terminal::terminal_surface_entity::terminal_snapshot_anchor_row_for_display_offset;
 
 fn terminal_input_selection() -> UTF16Selection {
     UTF16Selection {
@@ -160,6 +161,12 @@ impl EntityInputHandler for ZzClawTermApp {
         let insets = self.terminal_content_insets();
         let gutter = self.terminal_gutter_width_px();
         let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), 0);
+        let anchor = terminal_snapshot_anchor_row_for_display_offset(
+            &snapshot,
+            0,
+            self.terminal_viewport_rows_for_session(self.session.active_id()),
+            self.terminal_scrollback_len_for_session(self.session.active_id()),
+        );
         let row = if snapshot.cursor.row == usize::MAX {
             snapshot.row_count().saturating_sub(1)
         } else {
@@ -168,6 +175,7 @@ impl EntityInputHandler for ZzClawTermApp {
                 .row
                 .min(snapshot.row_count().saturating_sub(1))
         };
+        let row = row.saturating_sub(anchor + snapshot.leading_cleared_rows(anchor));
         let col = snapshot.cursor.col.min(snapshot.cols.saturating_sub(1));
         let origin_x = f32::from(element_bounds.origin.x);
         let origin_y = f32::from(element_bounds.origin.y);

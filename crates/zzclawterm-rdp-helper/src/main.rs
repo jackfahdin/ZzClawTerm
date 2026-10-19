@@ -66,7 +66,8 @@ fn validate_control_phase(message: &RdpControlMessage, hello_received: bool) -> 
         RdpControlMessage::ClientHello { .. } => {
             anyhow::bail!("duplicate RDP IPC ClientHello")
         }
-        RdpControlMessage::ServerHello { .. }
+        RdpControlMessage::Pong { .. }
+        | RdpControlMessage::ServerHello { .. }
         | RdpControlMessage::DesktopReset { .. }
         | RdpControlMessage::State { .. }
         | RdpControlMessage::ClipboardTransfer { .. }
@@ -75,7 +76,8 @@ fn validate_control_phase(message: &RdpControlMessage, hello_received: bool) -> 
         | RdpControlMessage::Error { .. } => {
             anyhow::bail!("RDP IPC helper-only message received from application")
         }
-        RdpControlMessage::Connect { .. }
+        RdpControlMessage::Ping { .. }
+        | RdpControlMessage::Connect { .. }
         | RdpControlMessage::Input { .. }
         | RdpControlMessage::SecureAttention { .. }
         | RdpControlMessage::Resize { .. }
@@ -147,6 +149,9 @@ async fn run(provider_error: Option<String>) -> anyhow::Result<()> {
         let message = message?;
         validate_control_phase(&message, hello_received)?;
         match message {
+            RdpControlMessage::Ping { sequence } => {
+                send_control(&output_tx, RdpControlMessage::Pong { sequence })?;
+            }
             RdpControlMessage::ClientHello { version } => {
                 if version != PROTOCOL_VERSION {
                     anyhow::bail!("RDP IPC protocol version mismatch");
@@ -394,7 +399,8 @@ async fn run(provider_error: Option<String>) -> anyhow::Result<()> {
                 )?;
                 break;
             }
-            RdpControlMessage::ServerHello { .. }
+            RdpControlMessage::Pong { .. }
+            | RdpControlMessage::ServerHello { .. }
             | RdpControlMessage::DesktopReset { .. }
             | RdpControlMessage::State { .. }
             | RdpControlMessage::ClipboardTransfer { .. }
@@ -704,7 +710,7 @@ impl DesktopOutputState {
                 height: payload.height,
                 stride,
                 format: PixelFormat::Bgra8,
-                pixels: payload.pixels,
+                pixels: payload.pixels.into(),
             },
         })
     }
@@ -841,7 +847,7 @@ async fn forward_output(
         width: 0,
         height: 0,
         hotspot: RemotePoint { x: 0, y: 0 },
-        pixels: Vec::new(),
+        pixels: Default::default(),
     };
     let mut cursor_position = CursorPosition::default();
     let mut cursor_visible = true;
@@ -930,7 +936,7 @@ async fn forward_output(
                     cursor_shape.width = 0;
                     cursor_shape.height = 0;
                     cursor_shape.hotspot = RemotePoint { x: 0, y: 0 };
-                    cursor_shape.pixels.clear();
+                    cursor_shape.pixels = Default::default();
                     send_cursor(
                         &output_tx,
                         &session_id,
@@ -990,7 +996,7 @@ async fn forward_output(
                     cursor_shape.width = width;
                     cursor_shape.height = height;
                     cursor_shape.hotspot = hotspot;
-                    cursor_shape.pixels = pixels;
+                    cursor_shape.pixels = pixels.into();
                     send_cursor(
                         &output_tx,
                         &session_id,

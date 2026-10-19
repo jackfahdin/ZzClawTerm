@@ -234,6 +234,20 @@ impl ZzClawTermApp {
                             break;
                         }
                     }
+                    SessionEvent::OutputBoundary { session_id, token } => {
+                        self.flush_pending_session_frame_outputs(
+                            &mut pending_frame_outputs,
+                            &mut drain_timings,
+                        );
+                        if let Some(event) = self
+                            .mcp
+                            .capabilities
+                            .terminal_executions
+                            .begin_capture(&session_id, &token)
+                        {
+                            self.present_terminal_execution(event);
+                        }
+                    }
                     SessionEvent::OutputDropped { session_id, bytes } => {
                         self.flush_pending_session_frame_outputs(
                             &mut pending_frame_outputs,
@@ -275,6 +289,11 @@ impl ZzClawTermApp {
                         );
                         root_chrome_dirty |=
                             self.handle_session_exited_event(session_id, reason, cx);
+                    }
+                    SessionEvent::CleanupFailed { operation, .. } => {
+                        self.shell
+                            .set_status(format!("Local session cleanup failed: {operation:?}"));
+                        root_chrome_dirty = true;
                     }
                     SessionEvent::Error {
                         session_id,
@@ -341,6 +360,7 @@ impl ZzClawTermApp {
             }
         }
         self.flush_pending_session_frame_outputs(&mut pending_frame_outputs, &mut drain_timings);
+        self.session.complete_event_bridge_ui_drain();
 
         let queued_events =
             transport_queued_events.saturating_add(self.session.pending_event_count());
@@ -405,7 +425,7 @@ impl ZzClawTermApp {
         self.note_trzsz_output_discontinuity(&session_id);
         self.cancel_xymodem_transfer(&session_id);
         let mut root_chrome_dirty = self.note_zmodem_output_discontinuity(&session_id, bytes, cx);
-        self.note_ai_agent_output_discontinuity(&session_id, bytes, cx);
+        self.note_terminal_execution_output_dropped(&session_id, cx);
         self.session.route_session_events_to_ui(&session_id);
         let encoding = self.effective_session_encoding(&session_id);
         self.terminal
@@ -525,6 +545,8 @@ impl ZzClawTermApp {
             if let Some(data) = self.process_xymodem_output(&session_id, &data)
                 && data.is_empty()
             {
+                self.flush_pending_session_frame_outputs(pending_frame_outputs, drain_timings);
+                self.sync_session_event_bridge_session_policy(&session_id);
                 let chunk_duration = chunk_started_at.elapsed();
                 drain_timings.output_total += chunk_duration;
                 chunk_timings.output_total += chunk_duration;
@@ -541,6 +563,8 @@ impl ZzClawTermApp {
             drain_timings.zmodem += stage_duration;
             chunk_timings.zmodem += stage_duration;
             if data.is_empty() {
+                self.flush_pending_session_frame_outputs(pending_frame_outputs, drain_timings);
+                self.sync_session_event_bridge_session_policy(&session_id);
                 let chunk_duration = chunk_started_at.elapsed();
                 drain_timings.output_total += chunk_duration;
                 chunk_timings.output_total += chunk_duration;
@@ -563,6 +587,8 @@ impl ZzClawTermApp {
             drain_timings.trzsz += stage_duration;
             chunk_timings.trzsz += stage_duration;
             if data.is_empty() {
+                self.flush_pending_session_frame_outputs(pending_frame_outputs, drain_timings);
+                self.sync_session_event_bridge_session_policy(&session_id);
                 let chunk_duration = chunk_started_at.elapsed();
                 drain_timings.output_total += chunk_duration;
                 chunk_timings.output_total += chunk_duration;
@@ -627,7 +653,11 @@ impl ZzClawTermApp {
             drain_timings.decode += stage_duration;
             chunk_timings.decode += stage_duration;
             let stage_started_at = Instant::now();
-            let result = self.ai.process_agent_output(session_id, &text);
+            let result = self
+                .mcp
+                .capabilities
+                .terminal_executions
+                .process_output(session_id, &text);
             let stage_duration = stage_started_at.elapsed();
             drain_timings.ai_capture += stage_duration;
             chunk_timings.ai_capture += stage_duration;
@@ -639,8 +669,31 @@ impl ZzClawTermApp {
                 chunk_timings.terminal_append += stage_duration;
             }
             let stage_started_at = Instant::now();
+            self.sync_session_event_bridge_session_policy(session_id);
             for captured in result.completed {
-                self.handle_ai_agent_captured_output(captured, cx);
+                let Some(id) = self
+                    .mcp
+                    .capabilities
+                    .terminal_executions
+                    .execution_id_for_capture(session_id, &captured.marker_id)
+                else {
+                    continue;
+                };
+                self.finish_terminal_execution(
+                    session_id,
+                    &id,
+                    Ok(zzclawterm_mcp_protocol::TerminalExecuteResult {
+                        output:
+                            zzclawterm_terminal::recording_sanitizer::RecordingSanitizer::default()
+                                .feed(&captured.output),
+                        exit_code: captured.exit_code,
+                        duration_ms: captured.duration_ms,
+                        timed_out: false,
+                        source_truncated: captured.source_truncated,
+                    }),
+                    crate::features::terminal::ai_execution::TerminalExecutionStatus::Completed,
+                    cx,
+                );
             }
             let stage_duration = stage_started_at.elapsed();
             drain_timings.ai_capture += stage_duration;
@@ -710,7 +763,10 @@ impl ZzClawTermApp {
     }
 
     pub(super) fn session_has_active_ai_capture(&self, session_id: &str) -> bool {
-        self.ai.agent_capture_is_active_for(session_id)
+        self.mcp
+            .capabilities
+            .terminal_executions
+            .intercepting(session_id)
     }
 
     pub(super) fn flush_pending_session_frame_outputs(
@@ -769,6 +825,7 @@ mod recording_tests {
         for include_binary in [false, true] {
             let root = TestTempDir::new("zzclawterm-raw-ui-filter");
             let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
             let app = app_with_visible_local_session(&mut cx, root.path(), "raw");
             cx.update_entity(&app, |app, cx| {
                 let path = root.join("output.log");

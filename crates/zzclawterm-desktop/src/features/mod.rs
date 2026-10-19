@@ -9,7 +9,7 @@ mod font_catalog;
 mod formatting;
 mod icons;
 mod inspector;
-mod layout;
+pub(crate) mod layout;
 mod mcp;
 mod notes;
 mod pages;
@@ -25,7 +25,7 @@ mod selects;
 mod session;
 mod settings;
 pub(crate) mod shell;
-mod sync;
+pub(crate) mod sync;
 
 pub(crate) fn cloud_sync_operation_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -54,6 +54,7 @@ pub(crate) fn init(cx: &mut gpui::App) {
 
 pub(crate) fn init_protection_key_bindings(cx: &mut gpui::App) {
     terminal::init_key_bindings(cx);
+    remote_desktop::init_key_bindings(cx);
     view_widgets::init_child_window_key_bindings(cx);
 }
 

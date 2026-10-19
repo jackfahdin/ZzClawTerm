@@ -1,31 +1,24 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::Context;
+use zzclawterm_core::network_cli_prompt::{
+    resolve_ssh_execution_profile, ssh_allows_background_execution,
+};
 use zzclawterm_core::{
-    AgentApprovalOutcome, AgentCapturedOutput, AiAction, AiChatRequest, AiCommandCard,
-    AiExecutionProfile, AiMode, AppendAiAuditRequest, CommandObservation,
-    build_agent_capture_command, build_observation_message, truncate_preview, uuid,
+    AgentApprovalOutcome, AiAction, AiChatRequest, AiCommandCard, AiExecutionProfile, AiMode,
+    AppendAiAuditRequest, CommandObservation, build_observation_message, uuid,
 };
 use zzclawterm_store::StoreDomain;
-use zzclawterm_transport::{SessionKind, SshProcessService, run_local_command};
+use zzclawterm_transport::SessionKind;
 
 use crate::features::{
-    ZzClawTermApp, runtime_jobs::AiAgentBackgroundTarget, runtime_jobs::AiAgentLoopState,
-    runtime_jobs::AiAgentStepStatus, runtime_jobs::AiChatJobResult,
-    runtime_jobs::AiChatWorkerEvent, runtime_jobs::await_blocking_job,
+    ZzClawTermApp, runtime_jobs::AiAgentLoopState, runtime_jobs::AiAgentStepStatus,
+    runtime_jobs::AiChatJobResult, runtime_jobs::AiChatWorkerEvent,
+    runtime_jobs::await_blocking_job,
 };
-use crate::models::SessionLaunchConfig;
 
-use super::ai_jobs::{
-    AiJobRunOptions, ai_job_cancelled, observation_summary, remote_command_observation,
-    run_ai_ask_job,
-};
+use super::ai_jobs::{AiJobRunOptions, observation_summary, run_ai_ask_job};
 use super::presentation::AiAgentStepKind;
-use super::state::AiAgentObservationPoll;
-use super::{
-    AGENT_DEFAULT_STEP_TIMEOUT, AGENT_OBSERVATION_MIN_WAIT, AGENT_OBSERVATION_POLL_INTERVAL,
-    AGENT_OBSERVATION_QUIET,
-};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn upsert_ai_agent_step(
@@ -128,444 +121,108 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    pub(in crate::features) fn begin_ai_agent_observation(
+    pub(in crate::features) fn begin_ai_agent_execution(
         &mut self,
         card: &AiCommandCard,
         terminal_session_id: &str,
         cx: &mut Context<Self>,
-    ) -> Result<Option<String>, String> {
-        let command = card.command.as_str();
-        let before = self.ai_header_presentation();
-        let terminal_session_id = terminal_session_id.to_string();
-        if self.session.session_info(&terminal_session_id).is_none()
-            || self.session.is_disconnected(&terminal_session_id)
+    ) -> Result<bool, String> {
+        use crate::features::capability_runtime::terminal_execution::{
+            TerminalExecutionPolicy, TerminalExecutionRequest,
+        };
+        if self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .busy(terminal_session_id)
         {
-            return Err("AI Agent target terminal is unavailable".to_string());
+            return Err("Another automatic command is using this terminal".into());
         }
-        let max_steps = self.ai.settings_max_agent_steps();
-        let (_, step_index) = match self.ai.begin_agent_step(max_steps) {
-            Ok(step) => step,
-            Err(error) => {
-                self.ai.set_panel_status(error);
-                return Err(self.ai.panel_status().to_string());
-            }
-        };
-        let now = Instant::now();
-        let timeout = self
+        let (_, step_index) = self
             .ai
-            .settings_config()
-            .agent_step_timeout_ms
-            .map(|timeout| self.ai.native_step_timeout().unwrap_or(timeout))
-            .or_else(|| self.ai.native_step_timeout())
-            .map(Duration::from_millis)
-            .unwrap_or(AGENT_DEFAULT_STEP_TIMEOUT);
-        let profile = self.ai_execution_profile_for_session(&terminal_session_id);
-        if profile == AiExecutionProfile::Disabled {
-            return Err("AI Agent command execution is disabled for this session".to_string());
-        }
-        let marker_id = format!("agent-{}", uuid());
-        let (marker_id, wrapped_command) =
-            match build_agent_capture_command(profile, &marker_id, command.trim()) {
-                Some(wrapped) => {
-                    self.ai.register_agent_capture(marker_id.clone());
-                    (Some(marker_id), Some(wrapped))
-                }
-                None => (None, None),
-            };
-        let output_start_len = self
-            .terminal_buffer_text_for_session(&terminal_session_id)
-            .len();
-        let available_target_ids = self.ai_effective_target_session_ids();
-        let available_targets = self.ai_terminal_targets_for_sessions(&available_target_ids);
-        self.ai.set_agent_loop(AiAgentLoopState {
-            command_card_id: Some(card.id.clone()),
-            ai_session_id: self.ai.chat_session_id().to_string(),
-            terminal_session_id: terminal_session_id.clone(),
-            available_targets,
-            default_target_session_id: Some(terminal_session_id),
-            command: command.trim().to_string(),
-            marker_id,
-            background_job_id: None,
-            step_index,
-            max_steps,
-            output_start_len,
-            started_at: now,
-            min_wait_until: now + AGENT_OBSERVATION_MIN_WAIT,
-            timeout_at: now + timeout,
-            last_seen_len: output_start_len,
-            stable_since: now,
-        });
-        self.ensure_ai_agent_loop_clock(cx);
-        self.sync_session_event_bridge_policy();
-        self.ai.set_panel_status(format!(
-            "AI Agent observing command output for step {}/{}",
-            step_index + 1,
-            max_steps
-        ));
-        self.upsert_ai_agent_step(
-            step_index,
-            AiAgentStepStatus::Running,
-            AiAgentStepKind::Command,
-            "Running",
-            truncate_preview(command.trim(), 140),
+            .begin_agent_step(self.ai.settings_max_agent_steps())?;
+        let timeout = Duration::from_millis(
+            self.ai
+                .settings_config()
+                .agent_step_timeout_ms
+                .unwrap_or(30_000),
         );
-        self.notify_root_if_ai_header_changed(before, cx);
-        Ok(wrapped_command)
-    }
-
-    pub(in crate::features) fn begin_ai_agent_background_execution(
-        &mut self,
-        card: &AiCommandCard,
-        terminal_session_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let command = card.command.as_str();
-        let before = self.ai_header_presentation();
-        let terminal_session_id = terminal_session_id.to_string();
-        let session = self
-            .session
-            .session_info(&terminal_session_id)
-            .filter(|_| !self.session.is_disconnected(&terminal_session_id))
-            .ok_or_else(|| "Active terminal session was not found".to_string())?;
-        let (target, target_label) = match session.kind {
-            SessionKind::Ssh => {
-                let config = self
-                    .session
-                    .metadata(&terminal_session_id)
-                    .and_then(|metadata| match &metadata.launch_config {
-                        SessionLaunchConfig::Ssh(config) => Some(config.as_ref().clone()),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        (self.session.active_id() == Some(terminal_session_id.as_str()))
-                            .then(|| self.session.active_ssh_config_owned())
-                            .flatten()
-                    })
-                    .ok_or_else(|| "Target SSH session is missing its exec config".to_string())?;
-                (AiAgentBackgroundTarget::Ssh(Box::new(config)), "SSH")
-            }
-            SessionKind::LocalPty => (
-                AiAgentBackgroundTarget::Local {
-                    working_dir: session.working_dir.clone(),
-                },
-                "local",
-            ),
-            SessionKind::Telnet
-            | SessionKind::RawTcp
-            | SessionKind::Serial
-            | SessionKind::Rdp
-            | SessionKind::Vnc => {
-                return Err(format!(
-                    "AI Agent background execution is not supported for {:?} sessions",
-                    session.kind
-                ));
-            }
-        };
-        let max_steps = self.ai.settings_max_agent_steps();
-        let (_, step_index) = self.ai.begin_agent_step(max_steps)?;
-        let now = Instant::now();
-        let timeout = self
-            .ai
-            .settings_config()
-            .agent_step_timeout_ms
-            .map(|timeout| self.ai.native_step_timeout().unwrap_or(timeout))
-            .or_else(|| self.ai.native_step_timeout())
-            .map(Duration::from_millis)
-            .unwrap_or(AGENT_DEFAULT_STEP_TIMEOUT);
-        let launch = self.ai.begin_chat_job();
-        let job_id = launch.job_id;
-        let cancel = launch.cancel;
-        let output_start_len = self
-            .terminal_buffer_text_for_session(&terminal_session_id)
-            .len();
-        let available_target_ids = self.ai_effective_target_session_ids();
-        let available_targets = self.ai_terminal_targets_for_sessions(&available_target_ids);
+        let ai_session_id = self.ai.chat_session_id().to_string();
+        let execution_id = format!("agent-{}", uuid());
         let state = AiAgentLoopState {
+            execution_id: execution_id.clone(),
             command_card_id: Some(card.id.clone()),
-            ai_session_id: self.ai.chat_session_id().to_string(),
-            terminal_session_id: terminal_session_id.clone(),
-            available_targets,
-            default_target_session_id: Some(terminal_session_id),
-            command: command.trim().to_string(),
-            marker_id: None,
-            background_job_id: Some(job_id),
+            ai_session_id: ai_session_id.clone(),
+            terminal_session_id: terminal_session_id.into(),
+            available_targets: self
+                .ai_terminal_targets_for_sessions(&self.ai_effective_target_session_ids()),
+            default_target_session_id: Some(terminal_session_id.into()),
+            command: card.command.clone(),
             step_index,
-            max_steps,
-            output_start_len,
-            started_at: now,
-            min_wait_until: now,
-            timeout_at: now + timeout,
-            last_seen_len: output_start_len,
-            stable_since: now,
+            max_steps: self.ai.settings_max_agent_steps(),
         };
-        self.ai.set_agent_loop(state.clone());
-        self.ensure_ai_agent_loop_clock(cx);
-        self.ai.set_panel_status(format!(
-            "AI Agent running {target_label} background command for step {}/{}",
-            step_index + 1,
-            max_steps
-        ));
-        self.upsert_ai_agent_step(
-            step_index,
-            AiAgentStepStatus::Running,
-            AiAgentStepKind::Command,
-            format!("{target_label} background"),
-            truncate_preview(command.trim(), 140),
-        );
-        let tx = launch.tx;
-        let command = state.command.clone();
-        let rejected_tx = tx.clone();
-        let rejected_state = state.clone();
-        if let Err(error) = self.blocking_jobs.submit_detached(
-            "ai-agent-background-command",
-            move |scheduler_cancel| {
-                let started = Instant::now();
-                let result = if scheduler_cancel.is_cancelled() || ai_job_cancelled(&cancel) {
-                    Err("AI Agent background command cancelled".to_string())
-                } else {
-                    match target {
-                        AiAgentBackgroundTarget::Ssh(config) => SshProcessService::new(*config)
-                            .run_command(&command, timeout)
-                            .map(|output| remote_command_observation(output, started))
-                            .map_err(|error| error.to_string()),
-                        AiAgentBackgroundTarget::Local { working_dir } => {
-                            run_local_command(&command, working_dir, timeout)
-                                .map(|output| remote_command_observation(output, started))
-                                .map_err(|error| error.to_string())
+        self.ai.set_agent_loop(state);
+        let (reply, result) = tokio::sync::oneshot::channel::<
+            Result<serde_json::Value, zzclawterm_mcp_protocol::RpcError>,
+        >();
+        let policy = TerminalExecutionPolicy {
+            background: self.ai.settings_config().agent_background_execution_enabled,
+            max_lines: self.ai.settings_config().terminal_output_lines,
+        };
+        let session_id = terminal_session_id.to_string();
+        let callback_id = execution_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = result.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(scope) = this.ai.scope_for_ai_session(&ai_session_id) else { return; };
+                let visible = this.ai.active_scope_key().to_string();
+                this.ai.switch_scope(&scope);
+                if this.ai.agent_loop_snapshot().is_some_and(|state| state.execution_id == callback_id)
+                    && let Some(state) = this.ai.take_agent_loop_for_session(&session_id) {
+                    match result {
+                        Ok(Ok(value)) if value["timedOut"] != true && value["sourceTruncated"] != true => {
+                            let value: zzclawterm_mcp_protocol::TerminalExecuteResult = serde_json::from_value(value).expect("terminal execution result");
+                            let observation = CommandObservation { output: value.output, exit_code: value.exit_code, duration_ms: value.duration_ms };
+                            this.ai.record_agent_observation(state.step_index, &observation, observation_summary(&observation));
+                            this.start_ai_agent_continuation(state, observation, cx);
+                        }
+                        _ => {
+                            this.ai.upsert_agent_step(state.step_index, AiAgentStepStatus::Failed,
+                                AiAgentStepKind::Diagnostic, "Execution stopped", "Terminal execution is incomplete; review the terminal before starting another command.");
+                            this.ai.set_panel_status("Terminal execution is incomplete; automatic execution stopped. Review the terminal.");
                         }
                     }
-                };
-                if !scheduler_cancel.is_cancelled() && !ai_job_cancelled(&cancel) {
-                    let _ = tx.unbounded_send(AiChatWorkerEvent::AgentBackgroundFinished {
-                        job_id,
-                        state,
-                        result,
-                    });
                 }
-            },
-        ) {
-            let _ = rejected_tx.unbounded_send(AiChatWorkerEvent::AgentBackgroundFinished {
-                job_id,
-                state: rejected_state,
-                result: Err(error.to_string()),
+                this.ai.switch_scope(&visible);
+                this.defer_ai_panel_snapshot_flush(cx);
             });
-        }
-        self.defer_ai_panel_snapshot_flush(cx);
-        self.notify_root_if_ai_header_changed(before, cx);
-        Ok(())
-    }
-
-    /// Watch for the terminal to fall quiet while an agent loop is running.
-    ///
-    /// This one stays a poll on purpose, and the honest reason is that it is watching
-    /// for the *absence* of output: `poll_agent_observation` waits for the output
-    /// length to hold still for `AGENT_OBSERVATION_QUIET`, and nothing emits an event
-    /// when output stops. What changes is the scope -- it polls only while an agent
-    /// loop exists, at its own cadence, instead of riding a global tick that also had
-    /// to name `ai.has_background_work()` in its quiet gate to stay responsive.
-    ///
-    /// Idempotent, and retires itself when the loop ends.
-    pub(in crate::features) fn ensure_ai_agent_loop_clock(&mut self, cx: &mut Context<Self>) {
-        if self.ai.agent_loop_clock_is_armed() || self.ai.agent_loop_snapshot().is_none() {
-            return;
-        }
-        let scope = self.ai.active_scope_key().to_string();
-        self.ai.set_agent_loop_clock_armed(true);
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(AGENT_OBSERVATION_POLL_INTERVAL)
-                    .await;
-                let Ok(keep_running) = this.update(cx, |this, cx| {
-                    let before = this.ai_header_presentation();
-                    let visible_scope = this.ai.active_scope_key().to_string();
-                    this.ai.switch_scope(&scope);
-                    if this.drive_ai_agent_loop(cx) {
-                        this.defer_ai_panel_snapshot_flush(cx);
-                    }
-                    let running = this.ai.agent_loop_snapshot().is_some();
-                    if !running {
-                        this.ai.set_agent_loop_clock_armed(false);
-                    }
-                    this.ai.switch_scope(&visible_scope);
-                    this.notify_root_if_ai_header_changed(before, cx);
-                    running
-                }) else {
-                    break;
-                };
-                if !keep_running {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    pub(in crate::features) fn drive_ai_agent_loop(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(snapshot) = self.ai.agent_loop_snapshot() else {
-            return false;
-        };
-        if self.ai.chat_is_pending() || snapshot.background_job_id.is_some() {
-            return false;
-        }
-        let terminal_session_id = snapshot.terminal_session_id.clone();
-        if self.session.session_info(&terminal_session_id).is_none()
-            || self.session.is_disconnected(&terminal_session_id)
-        {
-            self.ai.stop_agent_for_closed_target();
-            let _ = cx;
-            return true;
-        }
-        let now = Instant::now();
-        let current_len = self
-            .terminal
-            .session_output_len_or_default(&terminal_session_id);
-        match self
-            .ai
-            .poll_agent_observation(now, current_len, AGENT_OBSERVATION_QUIET)
-        {
-            AiAgentObservationPoll::Waiting => false,
-            AiAgentObservationPoll::TimedOut(state) => {
-                self.sync_session_event_bridge_policy();
-                let duration_ms = now
-                    .duration_since(state.started_at)
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                let observation = CommandObservation {
-                    output:
-                        "(command timed out; capture markers were not detected in terminal output)"
-                            .to_string(),
-                    exit_code: None,
-                    duration_ms,
-                };
-                self.upsert_ai_agent_step(
-                    state.step_index,
-                    AiAgentStepStatus::Failed,
-                    AiAgentStepKind::Diagnostic,
-                    "Timed out",
-                    observation_summary(&observation),
-                );
-                if !self.complete_native_terminal_observation(&observation, true, false) {
-                    self.start_ai_agent_continuation(state, observation, cx);
-                }
-                true
-            }
-            AiAgentObservationPoll::Target(state) => {
-                let terminal_output =
-                    self.terminal_buffer_text_for_session(&state.terminal_session_id);
-                let captured = terminal_output.get(state.output_start_len..);
-                let source_truncated = captured.is_none();
-                let output = captured.unwrap_or_default().to_string();
-                let duration_ms = now
-                    .duration_since(state.started_at)
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                let observation = CommandObservation {
-                    output,
-                    exit_code: None,
-                    duration_ms,
-                };
-                self.ai.record_agent_observation(
-                    state.step_index,
-                    &observation,
-                    observation_summary(&observation),
-                );
-                if !self.complete_native_terminal_observation(&observation, false, source_truncated)
-                {
-                    self.start_ai_agent_continuation(state, observation, cx);
-                }
-                true
-            }
-        }
-    }
-
-    pub(in crate::features) fn handle_ai_agent_captured_output(
-        &mut self,
-        captured: AgentCapturedOutput,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scope) = self.ai.scope_for_agent_marker(&captured.marker_id) else {
-            return;
-        };
-        let visible_scope = self.ai.active_scope_key().to_string();
-        self.ai.switch_scope(&scope);
-        let Some(state) = self.ai.take_agent_loop_for_marker(&captured.marker_id) else {
-            self.ai.switch_scope(&visible_scope);
-            return;
-        };
-        let observation = CommandObservation {
-            output: captured.output,
-            exit_code: captured.exit_code,
-            duration_ms: captured.duration_ms,
-        };
-        self.ai.set_panel_status(match observation.exit_code {
-            Some(code) => format!("AI Agent captured command output with exit code {code}"),
-            None => "AI Agent captured command output".to_string(),
-        });
-        self.ai.record_agent_observation(
-            state.step_index,
-            &observation,
-            observation_summary(&observation),
+        }).detach();
+        self.start_terminal_execution(
+            TerminalExecutionRequest {
+                id: execution_id.clone(),
+                owner: format!("ai-session:{}", self.ai.chat_session_id()),
+                source: "ZzClawTerm Agent".into(),
+                track_insertion: true,
+                session_id: terminal_session_id.into(),
+                command: card.command.clone(),
+                timeout,
+                cancellation: tokio_util::sync::CancellationToken::new(),
+                policy,
+                reply,
+            },
+            cx,
         );
-        if !self.complete_native_terminal_observation(&observation, false, false) {
-            self.start_ai_agent_continuation(state, observation, cx);
-        }
-        self.defer_ai_panel_snapshot_flush(cx);
-        self.ai.switch_scope(&visible_scope);
+        Ok(self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .take_inserted(&execution_id))
     }
 
-    pub(in crate::features) fn note_ai_agent_output_discontinuity(
-        &mut self,
+    pub(in crate::features) fn ai_execution_profile_for_session(
+        &self,
         session_id: &str,
-        dropped_bytes: usize,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(scope) = self.ai.scope_for_agent_target(session_id) else {
-            return false;
-        };
-        let visible_scope = self.ai.active_scope_key().to_string();
-        self.ai.switch_scope(&scope);
-        let Some(state) = self.ai.take_agent_loop_for_session(session_id) else {
-            self.ai.switch_scope(&visible_scope);
-            return false;
-        };
-        if state.marker_id.is_some() {
-            self.sync_session_event_bridge_policy();
-        }
-        let duration_ms = state
-            .started_at
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        let observation = CommandObservation {
-            output: format!(
-                "(terminal output dropped {dropped_bytes} byte(s); command output is incomplete)"
-            ),
-            exit_code: None,
-            duration_ms,
-        };
-        self.ai.set_panel_status(
-            "AI Agent command observation stopped because terminal output was dropped".to_string(),
-        );
-        self.upsert_ai_agent_step(
-            state.step_index,
-            AiAgentStepStatus::Failed,
-            AiAgentStepKind::Diagnostic,
-            "Output dropped",
-            observation_summary(&observation),
-        );
-        if !self.complete_native_terminal_observation(&observation, false, true) {
-            self.start_ai_agent_continuation(state, observation, cx);
-        }
-        self.defer_ai_panel_snapshot_flush(cx);
-        self.ai.switch_scope(&visible_scope);
-        true
-    }
-
-    fn ai_execution_profile_for_session(&self, session_id: &str) -> AiExecutionProfile {
+    ) -> AiExecutionProfile {
         let configured = if self.session.active_id() == Some(session_id) {
             self.session.active_ai_execution_profile()
         } else {
@@ -581,15 +238,52 @@ impl ZzClawTermApp {
             .session_info(session_id)
             .filter(|_| !self.session.is_disconnected(session_id))
             .map(|session| match session.kind {
-                SessionKind::LocalPty
-                | SessionKind::Ssh
-                | SessionKind::Telnet
-                | SessionKind::RawTcp => AiExecutionProfile::Posix,
+                SessionKind::Ssh => resolve_ssh_execution_profile(
+                    configured,
+                    self.ssh_session_is_configured_network_device(session_id),
+                    self.terminal_buffer_tail_for_session(session_id),
+                ),
+                SessionKind::LocalPty | SessionKind::Telnet | SessionKind::RawTcp => {
+                    AiExecutionProfile::Posix
+                }
                 SessionKind::Serial | SessionKind::Rdp | SessionKind::Vnc => {
                     AiExecutionProfile::SendOnly
                 }
             })
             .unwrap_or(AiExecutionProfile::SendOnly)
+    }
+
+    fn ssh_session_is_configured_network_device(&self, session_id: &str) -> bool {
+        self.session.metadata(session_id).is_some_and(|metadata| {
+            matches!(&metadata.launch_config,
+                crate::models::SessionLaunchConfig::Ssh(config)
+                if config.profile == zzclawterm_transport::SshSessionProfile::NetworkDevice)
+        })
+    }
+
+    pub(in crate::features) fn validate_ai_background_execution(
+        &self,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let profile = self.ai_execution_profile_for_session(session_id);
+        if matches!(
+            profile,
+            AiExecutionProfile::Disabled | AiExecutionProfile::SendOnly
+        ) || self
+            .session
+            .session_info(session_id)
+            .is_some_and(|session| {
+                session.kind == SessionKind::Ssh
+                    && !ssh_allows_background_execution(
+                        profile,
+                        self.ssh_session_is_configured_network_device(session_id),
+                        self.terminal_buffer_tail_for_session(session_id),
+                    )
+            })
+        {
+            return Err("Background execution is unavailable for raw CLI or disabled sessions; disable Background Execution to use the existing terminal.".into());
+        }
+        Ok(())
     }
 
     pub(in crate::features) fn start_ai_agent_continuation(
@@ -598,9 +292,6 @@ impl ZzClawTermApp {
         observation: CommandObservation,
         cx: &mut Context<Self>,
     ) {
-        if self.complete_native_terminal_observation(&observation, false, false) {
-            return;
-        }
         let observation_message = build_observation_message(
             &observation,
             &state.command,
@@ -615,15 +306,6 @@ impl ZzClawTermApp {
         observation_message: String,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .ai
-            .complete_native_terminal(Err(zzclawterm_mcp_protocol::RpcError {
-                code: "execution_failed".into(),
-                message: observation_message.clone(),
-            }))
-        {
-            return;
-        }
         let conversation = self.ai.agent_conversation_snapshot();
         let Some(launch) = self
             .ai
@@ -711,18 +393,21 @@ impl ZzClawTermApp {
                             },
                         )
                     };
-                    let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
-                        job_id,
-                        session_id,
-                        result,
-                    }));
+                    let _ =
+                        tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
+                            job_id,
+                            session_id,
+                            result,
+                        })));
                 })
         {
-            let _ = rejected_tx.unbounded_send(AiChatWorkerEvent::Finished(AiChatJobResult {
-                job_id,
-                session_id: rejected_session_id,
-                result: Err(error.to_string()),
-            }));
+            let _ = rejected_tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(
+                AiChatJobResult {
+                    job_id,
+                    session_id: rejected_session_id,
+                    result: Err(error.to_string()),
+                },
+            )));
         }
         self.defer_ai_panel_snapshot_flush(cx);
     }
@@ -800,25 +485,18 @@ impl ZzClawTermApp {
             },
             cx,
         );
-        let now = Instant::now();
         let target_ids = self.ai_effective_target_session_ids();
         let state = AiAgentLoopState {
+            execution_id: format!("rejected-{}", uuid()),
             command_card_id: Some(card.id.clone()),
             ai_session_id: self.ai.chat_session_id().to_string(),
             terminal_session_id: terminal_session_id.clone(),
             available_targets: self.ai_terminal_targets_for_sessions(&target_ids),
             default_target_session_id: Some(terminal_session_id),
             command: card.command.clone(),
-            marker_id: None,
-            background_job_id: None,
+
             step_index,
             max_steps,
-            output_start_len: 0,
-            started_at: now,
-            min_wait_until: now,
-            timeout_at: now,
-            last_seen_len: 0,
-            stable_since: now,
         };
         self.start_ai_agent_continuation_with_message(
             state,

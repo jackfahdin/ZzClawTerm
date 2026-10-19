@@ -199,6 +199,7 @@ mod tests {
     fn no_clock_runs_for_a_header_that_shows_no_time() {
         let test_dir = TestConfigDir::new("zzclawterm-status-clocks");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_header_mode(&mut cx, test_dir.path(), HeaderStatusMode::Session);
         cx.update_entity(&app, |app, cx| {
             assert!(!app.header_status_clock_should_run());
@@ -216,6 +217,7 @@ mod tests {
     fn the_header_clock_stops_when_the_header_stops_showing_time() {
         let test_dir = TestConfigDir::new("zzclawterm-status-clocks");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_header_mode(&mut cx, test_dir.path(), HeaderStatusMode::DateTime);
         cx.update_entity(&app, |app, cx| {
             app.ensure_header_status_clock(cx);
@@ -243,6 +245,7 @@ mod tests {
     fn no_pending_status_clock_runs_without_a_pending_start() {
         let test_dir = TestConfigDir::new("zzclawterm-status-clocks");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app_with_header_mode(&mut cx, test_dir.path(), HeaderStatusMode::Session);
         cx.update_entity(&app, |app, cx| {
             assert!(app.session.start_pending_status_source().is_none());

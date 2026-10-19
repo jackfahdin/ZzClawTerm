@@ -245,7 +245,7 @@ impl ZzClawTermApp {
         if state.mapping.as_ref() != Some(&mapping) {
             return None;
         }
-        let (start, end) = selection.ordered();
+        let (start, end) = selection.cell_range(snapshot.cols)?;
         let start_row = snapshot.rows().iter().enumerate().find_map(|(row, _)| {
             (terminal_absolute_line_for_snapshot_row(&snapshot, row) == Some(start.line))
                 .then_some(row)

@@ -26,6 +26,7 @@ use super::{
     SftpTransferProgress, SftpTransferSummary, SshClientHandler, SshMultiplexHandle,
     SshProcessService, SshSessionConfig, open_authenticated_ssh_handle,
 };
+use crate::remote_file::copy_progress::CopyProgress;
 use crate::remote_file::{
     RemoteTextDocument, RemoteTextMetadata, RemoteTextRevision, RemoteTextWriteResult,
     metadata_is_stable,
@@ -818,6 +819,7 @@ impl SftpService {
         destination_path: &RemoteFilePath,
         control: SftpTransferControl,
         options: SftpTransferOptions,
+        progress: CopyProgress,
     ) -> anyhow::Result<u64> {
         if !destination.config.remote_file_browser_enabled() {
             anyhow::bail!("SFTP is disabled for the destination SSH profile");
@@ -892,6 +894,7 @@ impl SftpService {
                 destination_raw,
                 &control,
                 &options,
+                &progress,
             )
             .await;
             close_sftp_session(destination_session).await;
@@ -1569,18 +1572,8 @@ impl SftpService {
                     if temporary_attrs.size != Some(content.len() as u64) {
                         anyhow::bail!("Remote temporary file size verification failed");
                     }
-                    if original_attrs.permissions.is_some() {
-                        session
-                            .sftp
-                            .set_metadata_bytes(
-                                temporary_path.clone(),
-                                russh_sftp::protocol::FileAttributes {
-                                    permissions: original_attrs.permissions,
-                                    ..russh_sftp::protocol::FileAttributes::empty()
-                                },
-                            )
-                            .await?;
-                    }
+                    preserve_editor_metadata(&session.sftp, &temporary_path, &original_attrs)
+                        .await?;
                     session
                         .sftp
                         .rename_bytes(temporary_path.clone(), remote_path_bytes.clone())
@@ -1717,19 +1710,8 @@ impl SftpService {
                     {
                         return Ok(RemoteTextWriteResult::Conflict);
                     }
-                    if replacement_attrs.permissions.is_some() {
-                        session
-                            .sftp
-                            .set_metadata_bytes(
-                                temporary_path.clone(),
-                                russh_sftp::protocol::FileAttributes {
-                                    permissions: replacement_attrs.permissions,
-                                    ..russh_sftp::protocol::FileAttributes::empty()
-                                },
-                            )
-                            .await
-                            .map_err(|error| editor_save_error("copy original permissions", error))?;
-                    }
+                    preserve_editor_metadata(&session.sftp, &temporary_path, &replacement_attrs)
+                        .await?;
                     // SFTP has no portable conditional rename. The full revision and final
                     // metadata check above narrow the race to this replacement operation.
                     let backup_suffix =
@@ -2571,6 +2553,7 @@ async fn copy_remote_path_between_sftp(
     destination_path: Vec<u8>,
     control: &SftpTransferControl,
     options: &SftpTransferOptions,
+    progress: &CopyProgress,
 ) -> anyhow::Result<u64> {
     control.wait_if_paused().await?;
     let source_attrs = source.metadata_bytes(source_path.clone()).await?;
@@ -2582,6 +2565,7 @@ async fn copy_remote_path_between_sftp(
             destination_path,
             control,
             options,
+            progress,
         )
         .await;
     }
@@ -2613,6 +2597,7 @@ async fn copy_remote_path_between_sftp(
                         destination_child,
                         control,
                         options,
+                        progress,
                     )
                     .await?,
                 );
@@ -2631,6 +2616,7 @@ async fn copy_remote_path_between_sftp(
             ..russh_sftp::protocol::FileAttributes::empty()
         };
         destination.set_metadata_bytes(path, attrs).await?;
+        progress.finish_item();
     }
     Ok(total_bytes)
 }
@@ -2653,6 +2639,7 @@ async fn copy_remote_file_between_sftp(
     destination_path: Vec<u8>,
     control: &SftpTransferControl,
     options: &SftpTransferOptions,
+    progress: &CopyProgress,
 ) -> anyhow::Result<u64> {
     control.wait_if_paused().await?;
     let source_attrs = source.metadata_bytes(source_path.clone()).await?;
@@ -2673,6 +2660,7 @@ async fn copy_remote_file_between_sftp(
             }
             destination_file.write_all(&buffer[..read]).await?;
             bytes = bytes.saturating_add(read as u64);
+            progress.add_bytes(read as u64);
         }
         destination_file.flush().await?;
         destination_file.shutdown().await?;
@@ -2698,6 +2686,7 @@ async fn copy_remote_file_between_sftp(
         destination
             .rename_bytes(temporary_path.clone(), destination_path)
             .await?;
+        progress.finish_item();
         Ok::<u64, anyhow::Error>(bytes)
     }
     .await;
@@ -2729,6 +2718,63 @@ fn log_sftp_upload_failure(operation: &'static str, attempts: u32, error: &anyho
         category = sftp_error_category(error),
         "SFTP upload failed"
     );
+}
+
+async fn preserve_editor_metadata(
+    session: &SftpSession,
+    temporary_path: &[u8],
+    original: &russh_sftp::protocol::FileAttributes,
+) -> anyhow::Result<()> {
+    use russh_sftp::protocol::FileAttributes;
+
+    let (Some(uid), Some(gid), Some(permissions)) =
+        (original.uid, original.gid, original.permissions)
+    else {
+        anyhow::bail!("Remote save refused: original ownership or permissions are unavailable");
+    };
+    let temporary = session
+        .metadata_bytes(temporary_path.to_vec())
+        .await
+        .map_err(|error| editor_save_error("check temporary ownership", error))?;
+    // Avoid chown for an ordinary user's own file. Some servers reject even
+    // a no-op ownership change; a real change must succeed before replacement.
+    if temporary.uid != Some(uid) || temporary.gid != Some(gid) {
+        session
+            .set_metadata_bytes(
+                temporary_path.to_vec(),
+                FileAttributes {
+                    uid: Some(uid),
+                    gid: Some(gid),
+                    ..FileAttributes::empty()
+                },
+            )
+            .await
+            .map_err(|error| editor_save_error("preserve original ownership", error))?;
+    }
+    // chown can clear setuid/setgid, so restore the mode afterwards.
+    session
+        .set_metadata_bytes(
+            temporary_path.to_vec(),
+            FileAttributes {
+                permissions: Some(permissions & 0o7777),
+                ..FileAttributes::empty()
+            },
+        )
+        .await
+        .map_err(|error| editor_save_error("copy original permissions", error))?;
+    let verified = session
+        .metadata_bytes(temporary_path.to_vec())
+        .await
+        .map_err(|error| editor_save_error("verify temporary attributes", error))?;
+    if verified.uid != Some(uid)
+        || verified.gid != Some(gid)
+        || verified.permissions.map(|mode| mode & 0o7777) != Some(permissions & 0o7777)
+    {
+        anyhow::bail!(
+            "Remote save refused: temporary ownership or permissions verification failed"
+        );
+    }
+    Ok(())
 }
 
 fn editor_save_error(
@@ -2819,6 +2865,8 @@ fn sftp_error_is_stream_closed(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod compatibility_tests;
+#[cfg(test)]
+mod copy_tests;
 #[cfg(test)]
 mod editor_save_tests;
 #[cfg(test)]

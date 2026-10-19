@@ -6,7 +6,10 @@ use gpui::{
     AnyElement, AppContext as _, Context, Entity, ParentElement as _, Render, Subscription, Window,
     div,
 };
-use zzclawterm_ui::{ZzClawConfirmDialog, ZzClawDialog, ZzClawDialogFooter, ZzClawDialogWindowExt};
+use zzclawterm_ui::{
+    ZzClawConfirmDialog, ZzClawDialog, ZzClawDialogFooter, ZzClawDialogHandle,
+    ZzClawDialogWindowExt,
+};
 
 use crate::features::ZzClawTermApp;
 
@@ -23,6 +26,7 @@ struct AppDialogContent {
     app: Entity<ZzClawTermApp>,
     renderer: Rc<FormRenderer>,
     _app_subscription: Subscription,
+    _release_subscription: Option<Subscription>,
 }
 
 impl AppDialogContent {
@@ -32,6 +36,7 @@ impl AppDialogContent {
             app,
             renderer,
             _app_subscription: app_subscription,
+            _release_subscription: None,
         }
     }
 }
@@ -48,6 +53,7 @@ struct AppDialogFooter {
     cancel_label: String,
     action_label: String,
     busy: Rc<FormBusyPredicate>,
+    cancel_while_busy: bool,
     _app_subscription: Subscription,
 }
 
@@ -65,6 +71,7 @@ impl AppDialogFooter {
             cancel_label,
             action_label,
             busy,
+            cancel_while_busy: false,
             _app_subscription: app_subscription,
         }
     }
@@ -74,7 +81,8 @@ impl Render for AppDialogFooter {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let busy = (self.busy)(self.app.read(cx));
         ZzClawDialogFooter::new(self.cancel_label.clone(), self.action_label.clone())
-            .disabled(busy)
+            .disabled(busy && !self.cancel_while_busy)
+            .action_disabled(busy)
             .loading(busy)
             .into_element()
     }
@@ -162,6 +170,38 @@ impl ZzClawTermApp {
         C: Fn(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) + 'static,
         B: Fn(&ZzClawTermApp) -> bool + 'static,
     {
+        self.open_guarded_form_dialog_impl(spec, false, window, cx);
+    }
+
+    /// A modal asynchronous form whose request can be invalidated by cancelling.
+    pub(in crate::features) fn open_cancellable_form_dialog<R, S, C, B>(
+        &mut self,
+        spec: (String, f32, String, R, S, C, B),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ZzClawDialogHandle
+    where
+        R: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> AnyElement + 'static,
+        S: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> bool + 'static,
+        C: Fn(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) + 'static,
+        B: Fn(&ZzClawTermApp) -> bool + 'static,
+    {
+        self.open_guarded_form_dialog_impl(spec, true, window, cx)
+    }
+
+    fn open_guarded_form_dialog_impl<R, S, C, B>(
+        &mut self,
+        spec: (String, f32, String, R, S, C, B),
+        cancel_while_busy: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ZzClawDialogHandle
+    where
+        R: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> AnyElement + 'static,
+        S: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> bool + 'static,
+        C: Fn(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) + 'static,
+        B: Fn(&ZzClawTermApp) -> bool + 'static,
+    {
         let (title, width, action_label, render, on_submit, on_cancel, busy) = spec;
         let cancel_label = t!("common.cancel").to_string();
         let app = cx.entity();
@@ -169,18 +209,30 @@ impl ZzClawTermApp {
             .new(|cx| AppDialogContent::new(app.clone(), Rc::new(render) as Rc<FormRenderer>, cx));
         let busy = Rc::new(busy) as Rc<FormBusyPredicate>;
         let footer = cx.new(|cx| {
-            AppDialogFooter::new(
+            let mut footer = AppDialogFooter::new(
                 app.clone(),
                 cancel_label.clone(),
                 action_label.clone(),
                 busy.clone(),
                 cx,
-            )
+            );
+            footer.cancel_while_busy = cancel_while_busy;
+            footer
         });
         let on_submit = Rc::new(on_submit) as Rc<FormSubmitHandler>;
         let on_cancel = Rc::new(on_cancel) as Rc<AppDialogHandler>;
 
-        window.open_nya_dialog(cx, move |dialog, _, _| {
+        if cancel_while_busy {
+            let weak_app = app.downgrade();
+            let on_cancel = on_cancel.clone();
+            content.update(cx, |content, cx| {
+                content._release_subscription = Some(cx.on_release(move |_, cx| {
+                    let _ = weak_app.update(cx, |app, cx| on_cancel(app, cx));
+                }));
+            });
+        }
+
+        window.open_tracked_nya_dialog(cx, move |dialog, window, _| {
             let submit_app = app.clone();
             let cancel_app = app.clone();
             let submit_busy = busy.clone();
@@ -188,8 +240,19 @@ impl ZzClawTermApp {
             let on_submit = on_submit.clone();
             let on_cancel = on_cancel.clone();
             let button_props = ZzClawDialogFooter::new(cancel_label.clone(), action_label.clone());
+            let dialog_width = if cancel_while_busy {
+                width
+                    .min(f32::from(window.viewport_size().width) - 24.)
+                    .max(1.)
+            } else {
+                width
+            };
             ZzClawDialog::confirm_with_footer(
-                dialog.title(title.clone()).width(width).close_button(false),
+                dialog
+                    .title(title.clone())
+                    .width(dialog_width)
+                    .overlay_closable(!cancel_while_busy)
+                    .close_button(false),
                 button_props,
                 footer.clone(),
             )
@@ -205,7 +268,7 @@ impl ZzClawTermApp {
             })
             .on_cancel(move |_, _, cx| {
                 cancel_app.update(cx, |app, cx| {
-                    if cancel_busy(app) {
+                    if cancel_busy(app) && !cancel_while_busy {
                         false
                     } else {
                         on_cancel(app, cx);
@@ -213,7 +276,7 @@ impl ZzClawTermApp {
                     }
                 })
             })
-        });
+        })
     }
 
     pub(in crate::features) fn open_confirm_dialog<F>(

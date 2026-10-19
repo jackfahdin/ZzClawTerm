@@ -1,24 +1,179 @@
 use gpui::{
-    Action as _, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _,
-    Render, RenderOnce, SharedString, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    Action as _, AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityInputHandler as _,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
+    MouseButton, ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::input::InputContextMenuCapabilities;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
-    Copy, Cut, Editor, EditorState, Enter, Input, InputEvent, InputState, Paste, SelectAll,
-    Textarea, TextareaState,
+    Copy, Cut, Editor, EditorState, Enter, Escape, Input, InputContentType, InputEvent, InputState,
+    Paste, SelectAll, Textarea, TextareaState,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable, Size};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable, Size};
 
 use crate::input_focus::{preserve_nya_input_focus_on_pointer_down, register_nya_input_focus};
 use crate::menu::{ZzClawContextMenu, ZzClawMenuItem};
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ZzClawInputEvent {
     Changed(String),
     Submitted(String),
     Blurred(String),
+}
+
+/// Semantic purpose stays stable while the user reveals or hides the value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ZzClawInputKind {
+    #[default]
+    Text,
+    Password,
+    NewPassword,
+    Secret,
+    OneTimeCode,
+}
+
+impl ZzClawInputKind {
+    fn initially_masked(self) -> bool {
+        matches!(self, Self::Password | Self::NewPassword | Self::Secret)
+    }
+
+    fn content_type(self) -> Option<InputContentType> {
+        match self {
+            Self::Password => Some(InputContentType::Password),
+            Self::NewPassword => Some(InputContentType::NewPassword),
+            Self::OneTimeCode => Some(InputContentType::OneTimeCode),
+            Self::Text | Self::Secret => None,
+        }
+    }
+}
+
+type MaskToggleHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+/// Application-owned text shared by all input presentations.
+pub struct ZzClawInputLabels {
+    show_secret: SharedString,
+    hide_secret: SharedString,
+}
+
+impl ZzClawInputLabels {
+    pub fn new(show_secret: impl Into<SharedString>, hide_secret: impl Into<SharedString>) -> Self {
+        Self {
+            show_secret: show_secret.into(),
+            hide_secret: hide_secret.into(),
+        }
+    }
+
+    fn mask_toggle_label(self, masked: bool) -> SharedString {
+        if masked {
+            self.show_secret
+        } else {
+            self.hide_secret
+        }
+    }
+}
+
+impl Default for ZzClawInputLabels {
+    fn default() -> Self {
+        Self::new("Show value", "Hide value")
+    }
+}
+
+struct InputLabelsProvider(Box<dyn Fn() -> ZzClawInputLabels>);
+impl gpui::Global for InputLabelsProvider {}
+
+/// Resolve labels at render time so existing inputs follow language changes.
+pub fn set_nya_input_label_provider(
+    provider: impl Fn() -> ZzClawInputLabels + 'static,
+    cx: &mut App,
+) {
+    cx.set_global(InputLabelsProvider(Box::new(provider)));
+}
+
+fn input_labels(cx: &App) -> ZzClawInputLabels {
+    cx.try_global::<InputLabelsProvider>()
+        .map(|provider| (provider.0)())
+        .unwrap_or_default()
+}
+
+struct SecretInputPresentation {
+    kind: ZzClawInputKind,
+    masked: bool,
+    disabled: bool,
+}
+
+gpui::actions!(nya_input, [ToggleMask]);
+
+struct MaskToggleBindings;
+impl gpui::Global for MaskToggleBindings {}
+
+/// Keep all input presentations on the wrapper's authoritative mask state.
+fn configure_secret_input(
+    input: Input,
+    owner: Entity<ZzClawInputState>,
+    presentation: SecretInputPresentation,
+    on_toggle: Option<MaskToggleHandler>,
+    mut trailing: Vec<AnyElement>,
+    cx: &App,
+) -> Input {
+    let SecretInputPresentation {
+        kind,
+        masked,
+        disabled,
+    } = presentation;
+    let input = input.when_some(kind.content_type(), |input, kind| input.content_type(kind));
+    if kind.initially_masked() || kind == ZzClawInputKind::OneTimeCode {
+        let toggle = Rc::new(
+            move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                cx.stop_propagation();
+                if owner.read(cx).disabled {
+                    return;
+                }
+                if let Some(handler) = &on_toggle {
+                    handler(event, window, cx);
+                } else {
+                    owner.update(cx, |state, cx| state.set_masked(!state.masked, cx));
+                }
+                window.refresh();
+            },
+        );
+        let keyboard_toggle = toggle.clone();
+        let label = input_labels(cx).mask_toggle_label(masked);
+        trailing.insert(
+            0,
+            Button::new("nya-input-mask-toggle")
+                .icon(if masked {
+                    IconName::Eye
+                } else {
+                    IconName::EyeOff
+                })
+                .xsmall()
+                .text()
+                .tab_stop(true)
+                .debug_selector(|| "nya-input-mask-toggle".to_string())
+                .accessibility_label(label.clone())
+                .tooltip(label)
+                .disabled(disabled)
+                .key_context("ZzClawSecretToggle")
+                .on_action(move |_: &ToggleMask, window, cx| {
+                    // This binding takes precedence over a dialog's Enter-to-submit.
+                    cx.stop_propagation();
+                    if !disabled {
+                        keyboard_toggle(&ClickEvent::default(), window, cx);
+                    }
+                })
+                .on_click(move |event, window, cx| {
+                    toggle(event, window, cx);
+                })
+                .into_any_element(),
+        );
+    }
+    if trailing.is_empty() {
+        input
+    } else {
+        input.suffix(div().flex().items_center().gap_1().children(trailing))
+    }
 }
 
 #[derive(Clone)]
@@ -77,6 +232,28 @@ impl ComponentState {
         }
     }
 
+    fn is_composing(&self, window: &mut Window, cx: &mut App) -> bool {
+        match self {
+            Self::Input(state) => state.update(cx, |state, cx| {
+                state.marked_text_range(window, cx).is_some()
+            }),
+            Self::Textarea(state) => state.update(cx, |state, cx| {
+                state.marked_text_range(window, cx).is_some()
+            }),
+            Self::Editor(state) => state.update(cx, |state, cx| {
+                state.marked_text_range(window, cx).is_some()
+            }),
+        }
+    }
+
+    fn finish_composition(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Input(state) => state.update(cx, |state, cx| state.unmark_text(window, cx)),
+            Self::Textarea(state) => state.update(cx, |state, cx| state.unmark_text(window, cx)),
+            Self::Editor(state) => state.update(cx, |state, cx| state.unmark_text(window, cx)),
+        }
+    }
+
     fn set_value(&self, value: SharedString, window: &mut Window, cx: &mut App) {
         match self {
             Self::Input(state) => {
@@ -115,6 +292,7 @@ pub struct ZzClawInputState {
     placeholder: SharedString,
     placeholder_pending: bool,
     masked: bool,
+    kind: ZzClawInputKind,
     applied_masked: bool,
     multi_line: bool,
     submit_on_enter: bool,
@@ -132,6 +310,13 @@ pub struct ZzClawInputState {
 
 impl ZzClawInputState {
     pub fn new(cx: &mut Context<Self>, seed: impl Into<SharedString>) -> Self {
+        if !cx.has_global::<MaskToggleBindings>() {
+            cx.set_global(MaskToggleBindings);
+            cx.bind_keys([
+                gpui::KeyBinding::new("enter", ToggleMask, Some("ZzClawSecretToggle")),
+                gpui::KeyBinding::new("space", ToggleMask, Some("ZzClawSecretToggle")),
+            ]);
+        }
         Self {
             state: None,
             seed: seed.into(),
@@ -140,6 +325,7 @@ impl ZzClawInputState {
             placeholder: SharedString::default(),
             placeholder_pending: false,
             masked: false,
+            kind: ZzClawInputKind::Text,
             applied_masked: false,
             multi_line: false,
             submit_on_enter: false,
@@ -207,6 +393,22 @@ impl ZzClawInputState {
     pub fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
         self
+    }
+
+    pub fn kind(mut self, kind: ZzClawInputKind) -> Self {
+        self.kind = kind;
+        self.masked = kind.initially_masked();
+        self
+    }
+
+    pub fn input_kind(&self) -> ZzClawInputKind {
+        self.kind
+    }
+
+    pub fn hide_secret(&mut self, cx: &mut Context<Self>) {
+        if self.kind != ZzClawInputKind::Text {
+            self.set_masked(true, cx);
+        }
     }
 
     pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
@@ -345,7 +547,9 @@ impl ZzClawInputState {
         self.placeholder_pending = false;
         let placeholder = component_placeholder(self.placeholder.clone(), multi_line);
         let language = self.language.clone();
-        let rows = self.rows;
+        // The shell supplies a definite height, including a resizable footer.
+        // Kit 0.7.1 treats rows as a minimum and would force that viewport taller.
+        let rows = self.rows.unwrap_or(1).min(1);
         let submit_on_enter = self.submit_on_enter;
         let (state, subscription) = if multi_line && self.code {
             let state = cx.new(|cx| {
@@ -366,14 +570,11 @@ impl ZzClawInputState {
             (ComponentState::Editor(state), subscription)
         } else if multi_line {
             let state = cx.new(|cx| {
-                let mut input = TextareaState::new(window, cx)
+                TextareaState::new(window, cx)
                     .default_value(value)
                     .placeholder(placeholder)
-                    .submit_on_enter(submit_on_enter);
-                if let Some(rows) = rows {
-                    input = input.rows(rows);
-                }
-                input
+                    .submit_on_enter(submit_on_enter)
+                    .rows(rows)
             });
             let subscription = cx.subscribe(&state, |this, input, event: &InputEvent, cx| {
                 forward_input_event(this, input.read(cx).value().to_string(), event, cx)
@@ -474,10 +675,21 @@ impl Render for ZzClawInputState {
         }
         self.focused = self.focus.is_focused(window) || component_focus.is_focused(window);
         match state {
-            ComponentState::Input(state) => Input::new(&state)
-                .disabled(self.disabled)
-                .readonly(self.readonly)
-                .into_any_element(),
+            ComponentState::Input(state) => configure_secret_input(
+                Input::new(&state)
+                    .disabled(self.disabled)
+                    .readonly(self.readonly),
+                cx.entity(),
+                SecretInputPresentation {
+                    kind: self.kind,
+                    masked: self.masked,
+                    disabled: self.disabled,
+                },
+                None,
+                Vec::new(),
+                cx,
+            )
+            .into_any_element(),
             ComponentState::Textarea(state) => Textarea::new(&state)
                 .disabled(self.disabled)
                 .readonly(self.readonly)
@@ -496,6 +708,7 @@ impl Render for ZzClawInputState {
 pub struct ZzClawInput {
     state: Entity<ZzClawInputState>,
     font_size: Option<gpui::Pixels>,
+    on_mask_toggle: Option<MaskToggleHandler>,
 }
 
 impl ZzClawInput {
@@ -503,6 +716,7 @@ impl ZzClawInput {
         Self {
             state: state.clone(),
             font_size: None,
+            on_mask_toggle: None,
         }
     }
 
@@ -511,27 +725,51 @@ impl ZzClawInput {
         self.font_size = Some(font_size);
         self
     }
+
+    pub fn on_mask_toggle(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_mask_toggle = Some(Box::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for ZzClawInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (state, disabled, readonly, multi_line) =
             prepare_input_component(&self.state, window, cx);
+        let kind = self.state.read(cx).kind;
+        let masked = self.state.read(cx).masked;
         let focus_state = state.clone();
+        let composition_state = state.clone();
+        let enter_composition_state = state.clone();
+        let escape_composition_state = state.clone();
         let input = match state {
-            ComponentState::Input(state) => Input::new(&state)
-                .xsmall()
-                .when_some(self.font_size, |this, font_size| {
-                    this.text_size(font_size)
-                        .line_height(font_size * 1.5)
-                        .h_full()
-                })
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .disabled(disabled)
-                .readonly(readonly)
-                .into_any_element(),
+            ComponentState::Input(state) => configure_secret_input(
+                Input::new(&state)
+                    .xsmall()
+                    .when_some(self.font_size, |this, font_size| {
+                        this.text_size(font_size)
+                            .line_height(font_size * 1.5)
+                            .h_full()
+                    })
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .disabled(disabled)
+                    .readonly(readonly),
+                self.state.clone(),
+                SecretInputPresentation {
+                    kind,
+                    masked,
+                    disabled,
+                },
+                self.on_mask_toggle,
+                Vec::new(),
+                cx,
+            )
+            .into_any_element(),
             ComponentState::Textarea(state) => Textarea::new(&state)
                 .appearance(false)
                 .bordered(false)
@@ -556,6 +794,26 @@ impl RenderOnce for ZzClawInput {
             .when(!multi_line, |this| this.flex().items_center())
             .capture_any_mouse_down(|_, _, cx| {
                 preserve_nya_input_focus_on_pointer_down(cx);
+            })
+            .capture_action(move |_: &Enter, window, cx| {
+                if enter_composition_state.is_composing(window, cx) {
+                    enter_composition_state.finish_composition(window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .capture_action(move |_: &Escape, window, cx| {
+                if escape_composition_state.is_composing(window, cx) {
+                    escape_composition_state.finish_composition(window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .capture_key_down(move |event, window, cx| {
+                // Form shortcuts must not submit or dismiss while the IME owns Enter/Escape.
+                if matches!(event.keystroke.key.as_str(), "enter" | "escape" | "tab")
+                    && composition_state.is_composing(window, cx)
+                {
+                    cx.stop_propagation();
+                }
             })
             .on_any_mouse_down(move |_, window, cx| {
                 if !disabled {
@@ -617,6 +875,7 @@ pub struct ZzClawInputShell {
     on_key_down: Option<KeyDownHandler>,
     on_secondary_enter: Option<SecondaryEnterHandler>,
     context_menu_labels: Option<[SharedString; 4]>,
+    on_mask_toggle: Option<MaskToggleHandler>,
 }
 
 impl ZzClawInputShell {
@@ -635,6 +894,7 @@ impl ZzClawInputShell {
             on_key_down: None,
             on_secondary_enter: None,
             context_menu_labels: None,
+            on_mask_toggle: None,
         }
     }
 
@@ -685,6 +945,15 @@ impl ZzClawInputShell {
         self
     }
 
+    /// Override revealing a draft when the feature must first load a saved secret.
+    pub fn on_mask_toggle(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_mask_toggle = Some(Box::new(handler));
+        self
+    }
+
     /// Add a fixed action row inside a textarea's frame, outside its scroll viewport.
     pub fn footer(mut self, child: impl IntoElement) -> Self {
         self.footer = Some(child.into_any_element());
@@ -724,7 +993,11 @@ impl RenderOnce for ZzClawInputShell {
             on_key_down,
             on_secondary_enter,
             context_menu_labels,
+            on_mask_toggle,
         } = self;
+        let owner = state.clone();
+        let kind = owner.read(cx).kind;
+        let masked = owner.read(cx).masked;
         let (state, disabled, readonly, state_multi_line) =
             prepare_input_component(&state, window, cx);
         state.set_context_menu_enabled(context_menu_labels.is_none(), cx);
@@ -756,9 +1029,18 @@ impl RenderOnce for ZzClawInputShell {
                             .child(Icon::new(IconName::Search).small()),
                     );
                 }
-                if !trailing.is_empty() {
-                    input = input.suffix(div().flex().items_center().gap_1().children(trailing));
-                }
+                input = configure_secret_input(
+                    input,
+                    owner,
+                    SecretInputPresentation {
+                        kind,
+                        masked,
+                        disabled,
+                    },
+                    on_mask_toggle,
+                    trailing,
+                    cx,
+                );
                 input.into_any_element()
             }
             ComponentState::Textarea(state) if has_footer => {
@@ -827,8 +1109,8 @@ impl RenderOnce for ZzClawInputShell {
             .when(fill_height, |this| this.h_full().min_h_0())
             .capture_any_mouse_down(move |event, window, cx| {
                 preserve_nya_input_focus_on_pointer_down(cx);
-                // ContextMenu captures the focus to restore before bubble handlers.
-                // Right-clicking an unfocused field must restore this input on Esc.
+                // The input menu opens during bubble dispatch, after this capture
+                // handler establishes the input as its dismissal focus target.
                 if gpui_context_menu && !disabled && event.button == MouseButton::Right {
                     capture_focus_state.focus(window, cx);
                 }
@@ -892,6 +1174,7 @@ impl RenderOnce for ZzClawInputShell {
                 }
                 items
             })
+            .bubble_right_click()
             .min_width(px(144.))
             .enabled(!disabled)
             .into_any_element()
@@ -960,6 +1243,233 @@ mod tests {
     use gpui_kit::component::highlighter::LanguageRegistry;
 
     use super::{ComponentState, ZzClawInputShell, ZzClawInputState, component_placeholder};
+
+    struct SecretInputFixture {
+        field: gpui::Entity<ZzClawInputState>,
+        presentation: u8,
+        changes: Rc<Cell<usize>>,
+        custom_toggles: Rc<Cell<usize>>,
+        custom: bool,
+        _subscription: gpui::Subscription,
+    }
+
+    impl SecretInputFixture {
+        fn new(presentation: u8, cx: &mut gpui::Context<Self>) -> Self {
+            let field = cx.new(|cx| {
+                ZzClawInputState::new(cx, "fixture secret").kind(super::ZzClawInputKind::Password)
+            });
+            let changes = Rc::new(Cell::new(0));
+            let change_count = changes.clone();
+            let subscription = cx.subscribe(&field, move |_, _, event, _| {
+                if matches!(event, super::ZzClawInputEvent::Changed(_)) {
+                    change_count.set(change_count.get() + 1);
+                }
+            });
+            Self {
+                field,
+                presentation,
+                changes,
+                custom_toggles: Rc::new(Cell::new(0)),
+                custom: false,
+                _subscription: subscription,
+            }
+        }
+    }
+
+    impl Render for SecretInputFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let input = match self.presentation {
+                0 => {
+                    let shell = ZzClawInputShell::new("secret-input", &self.field).trailing(
+                        div()
+                            .debug_selector(|| "secret-trailing".into())
+                            .child("suffix"),
+                    );
+                    if self.custom {
+                        let count = self.custom_toggles.clone();
+                        shell
+                            .on_mask_toggle(move |_, _, _| count.set(count.get() + 1))
+                            .into_any_element()
+                    } else {
+                        shell.into_any_element()
+                    }
+                }
+                1 => super::ZzClawInput::new(&self.field).into_any_element(),
+                _ => self.field.clone().into_any_element(),
+            };
+            div().w(px(320.)).h(px(36.)).child(input)
+        }
+    }
+
+    #[gpui::test]
+    fn secret_toggle_preserves_value_selection_and_mask_state_in_every_presentation(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::EntityInputHandler as _;
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| SecretInputFixture::new(0, cx));
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        for presentation in 0..3 {
+            fixture.update(cx, |fixture, cx| {
+                fixture.presentation = presentation;
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                field.update(cx, |field, cx| field.set_masked(true, cx));
+                _ = window.draw(cx);
+                field
+                    .read(cx)
+                    .component_state()
+                    .unwrap()
+                    .update(cx, |state, cx| {
+                        state.set_selected_range(2..7, cx);
+                        state.focus(window, cx);
+                    });
+            });
+            cx.run_until_parked();
+            let button = cx
+                .debug_bounds("nya-input-mask-toggle")
+                .expect("eye button");
+            if presentation == 0 {
+                assert!(cx.debug_bounds("secret-trailing").is_some());
+            }
+            cx.simulate_click(button.center(), Default::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+                assert!(!field.read(cx).is_masked());
+                assert_eq!(field.read(cx).value(cx), "fixture secret");
+                let selection = field
+                    .read(cx)
+                    .component_state()
+                    .unwrap()
+                    .update(cx, |state, cx| {
+                        state.selected_text_range(false, window, cx).unwrap().range
+                    });
+                assert_eq!(selection, 2..7);
+                assert_eq!(fixture.read(cx).changes.get(), 0);
+            });
+            // The button remains present after revealing; a second click hides again.
+            let button = cx.debug_bounds("nya-input-mask-toggle").unwrap();
+            cx.simulate_click(button.center(), Default::default());
+            cx.run_until_parked();
+            assert!(field.read_with(cx, |state, _| state.is_masked()));
+        }
+    }
+
+    #[gpui::test]
+    fn secret_toggle_is_keyboard_accessible_and_disabled_with_its_input(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| SecretInputFixture::new(0, cx));
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            window.focus(&field.read(cx).component_focus_handle(cx), cx);
+            window.focus_next(cx);
+            _ = window.draw(cx);
+            assert_ne!(
+                window.focused(cx),
+                Some(field.read(cx).component_focus_handle(cx)),
+                "Tab should reach the reveal button"
+            );
+        });
+        let key = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: key.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: key });
+        cx.run_until_parked();
+        assert!(!field.read_with(cx, |field, _| field.is_masked()));
+        cx.update(|window, cx| {
+            field.update(cx, |field, cx| {
+                field.set_disabled(true, cx);
+                field.hide_secret(cx);
+            });
+            window.refresh();
+            _ = window.draw(cx);
+        });
+        let button = cx.debug_bounds("nya-input-mask-toggle").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        assert!(field.read_with(cx, |field, _| field.is_masked()));
+    }
+
+    #[gpui::test]
+    fn custom_secret_toggle_does_not_reveal_placeholders_or_change_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (fixture, cx) = cx.add_window_view(|_, cx| SecretInputFixture::new(0, cx));
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        fixture.update(cx, |fixture, cx| {
+            fixture.custom = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            field.update(cx, |field, cx| {
+                field.clear(cx);
+                field.set_placeholder("••••••••", cx);
+            });
+            _ = window.draw(cx);
+        });
+        let button = cx.debug_bounds("nya-input-mask-toggle").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.read_with(cx, |fixture, _| fixture.custom_toggles.get()),
+            1
+        );
+        assert!(field.read_with(cx, |field, _| field.is_masked()));
+        assert_eq!(field.read_with(cx, |field, cx| field.value(cx)), "");
+    }
+
+    #[test]
+    fn secret_semantics_are_independent_of_masking() {
+        use super::ZzClawInputKind;
+        assert!(ZzClawInputKind::Password.content_type().is_some());
+        assert!(ZzClawInputKind::NewPassword.content_type().is_some());
+        assert!(ZzClawInputKind::Secret.content_type().is_none());
+    }
+
+    #[gpui::test]
+    fn application_labels_update_without_recreating_or_remasking_inputs(cx: &mut TestAppContext) {
+        let translated = Rc::new(Cell::new(false));
+        let current_language = translated.clone();
+        cx.update(|cx| {
+            super::set_nya_input_label_provider(
+                move || {
+                    if current_language.get() {
+                        super::ZzClawInputLabels::new("显示内容", "隐藏内容")
+                    } else {
+                        super::ZzClawInputLabels::default()
+                    }
+                },
+                cx,
+            );
+        });
+        let field = cx.new(|cx| {
+            ZzClawInputState::new(cx, "fixture secret").kind(super::ZzClawInputKind::Password)
+        });
+        field.update(cx, |field, cx| field.set_masked(false, cx));
+        for (language, show, hide) in [
+            (false, "Show value", "Hide value"),
+            (true, "显示内容", "隐藏内容"),
+        ] {
+            translated.set(language);
+            cx.update(|cx| {
+                assert_eq!(super::input_labels(cx).mask_toggle_label(true), show);
+                assert_eq!(super::input_labels(cx).mask_toggle_label(false), hide);
+                assert!(!field.read(cx).is_masked());
+                assert_eq!(field.read(cx).value(cx), "fixture secret");
+            });
+        }
+    }
 
     struct InputHeightFixture {
         height: f32,
@@ -1262,6 +1772,82 @@ mod tests {
                 .child(self.plain.clone())
                 .child(self.masked.clone())
         }
+    }
+
+    struct CompositionFormFixture {
+        field: gpui::Entity<ZzClawInputState>,
+        submitted: Rc<Cell<usize>>,
+    }
+
+    impl Render for CompositionFormFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let submitted = self.submitted.clone();
+            div()
+                .w(px(300.))
+                .h(px(36.))
+                .on_key_down(move |event, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "escape") {
+                        submitted.set(submitted.get() + 1);
+                        cx.stop_propagation();
+                    }
+                })
+                .child(super::ZzClawInput::new(&self.field))
+        }
+    }
+
+    #[gpui::test]
+    fn composing_text_does_not_submit_or_dismiss_the_form(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        cx.update(gpui_kit::init);
+        let submitted = Rc::new(Cell::new(0));
+        let (fixture, cx) = cx.add_window_view({
+            let submitted = submitted.clone();
+            move |_, cx| CompositionFormFixture {
+                field: cx.new(|cx| ZzClawInputState::new(cx, "")),
+                submitted,
+            }
+        });
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+            window.focus(&field.read(cx).component_focus_handle(cx), cx);
+            field
+                .read(cx)
+                .component_state()
+                .unwrap()
+                .update(cx, |state, cx| {
+                    state.replace_and_mark_text_in_range(None, "拼", Some(0..1), window, cx);
+                });
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0, "Enter must confirm composition first");
+        cx.update(|window, cx| {
+            field
+                .read(cx)
+                .component_state()
+                .unwrap()
+                .update(cx, |state, cx| {
+                    state.replace_and_mark_text_in_range(None, "音", Some(0..1), window, cx);
+                });
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0, "Escape must cancel composition first");
+        cx.update(|window, cx| {
+            field
+                .read(cx)
+                .component_state()
+                .unwrap()
+                .update(cx, |state, cx| state.unmark_text(window, cx))
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 1);
     }
 
     #[test]

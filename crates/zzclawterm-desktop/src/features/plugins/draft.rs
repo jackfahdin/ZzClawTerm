@@ -87,6 +87,7 @@ mod tests {
     #[test]
     fn application_adapter_only_fills_draft_and_preserves_session_history_and_user_templates() {
         let mut cx = gpui::TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = TestTempDir::new("zzclawterm-plugin-draft-app");
         let app = app_with_visible_local_session(&mut cx, root.path(), "plugin-draft-session");
         cx.update_entity(&app, |app, cx| {

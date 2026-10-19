@@ -1,8 +1,6 @@
 use rust_i18n::t;
 
-use gpui::{
-    ClipboardItem, Context, IntoElement as _, KeyDownEvent, PathPromptOptions, SharedString, Window,
-};
+use gpui::{Context, IntoElement as _, KeyDownEvent, PathPromptOptions, SharedString, Window};
 use std::time::Duration;
 use zzclawterm_core::OtpEntry;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
@@ -516,6 +514,7 @@ impl ZzClawTermApp {
         let request_id = self.security.begin_otp_request(otp_id.clone());
         let provider = self.session.prompt_otp_provider();
         let scheduler = self.blocking_jobs.clone();
+        let origin_window = Some(window.window_handle());
         cx.spawn_in(window, async move |this, cx| {
             let task =
                 scheduler.submit_task("otp-preview", move |_| provider.preview_otp_code(&otp_id));
@@ -547,7 +546,12 @@ impl ZzClawTermApp {
                                 this.shell.set_status("OTP code ready".to_string());
                             }
                             SecurityOtpCodeAction::Copy => {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                this.copy_text_with_feedback_at(
+                                    origin_window,
+                                    "copy-otp",
+                                    code,
+                                    cx,
+                                );
                                 this.security.set_status(format!(
                                     "OTP code copied ({})",
                                     compact_id(&request_otp_id)
@@ -557,8 +561,30 @@ impl ZzClawTermApp {
                             SecurityOtpCodeAction::Send => send_code = Some(code),
                         }
                     }
-                    Ok(None) => this.security.set_status("OTP entry not found"),
-                    Err(error) => this.security.set_status(error),
+                    Ok(None) => {
+                        this.security.set_status("OTP entry not found");
+                        if matches!(action, SecurityOtpCodeAction::Copy) {
+                            this.notify_operation_at(
+                                origin_window,
+                                "copy-otp",
+                                zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                                rust_i18n::t!("common.copyFailed").to_string(),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        this.security.set_status(error);
+                        if matches!(action, SecurityOtpCodeAction::Copy) {
+                            this.notify_operation_at(
+                                origin_window,
+                                "copy-otp",
+                                zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                                rust_i18n::t!("common.copyFailed").to_string(),
+                                cx,
+                            );
+                        }
+                    }
                 }
                 if refresh_catalog {
                     this.refresh_security_catalog(cx);
@@ -620,7 +646,7 @@ impl ZzClawTermApp {
             && code != "------"
             && !code.trim().is_empty()
         {
-            cx.write_to_clipboard(ClipboardItem::new_string(code));
+            self.copy_text_with_feedback("copy-otp", code, cx);
             self.security
                 .set_status(format!("OTP code copied ({})", compact_id(&otp_id)));
             self.shell.set_status("OTP code copied".to_string());

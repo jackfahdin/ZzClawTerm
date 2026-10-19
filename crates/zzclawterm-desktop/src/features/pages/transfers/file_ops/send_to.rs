@@ -8,6 +8,7 @@ use zzclawterm_transport::{
 };
 
 use crate::features::ZzClawTermApp;
+use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
@@ -184,12 +185,10 @@ impl ZzClawTermApp {
         let cached_target_dir = context.cached_target_dir.clone();
         let options = context.options.clone();
         let transfer_tx = self.transfer.transfer_event_sender();
-        self.submit_transfer_blocking_job(
-            "sftp-send-to",
-            id.clone(),
-            transfer_tx.clone(),
-            move || {
-                let result = run_send_to(SendToRequest {
+        self.submit_bulk_transfer_job("sftp-send-to", id.clone(), transfer_tx.clone(), move || {
+            let mut progress = TransferProgressEventSender::new(id.clone(), transfer_tx.clone());
+            let result = run_send_to(
+                SendToRequest {
                     source_service,
                     source_remote,
                     target_service,
@@ -198,13 +197,14 @@ impl ZzClawTermApp {
                     target_session_id,
                     control,
                     options,
-                });
-                let _ = transfer_tx.unbounded_send(TransferJobResult {
-                    id,
-                    event: TransferJobEvent::Finished(result),
-                });
-            },
-        );
+                },
+                move |value| progress.send(value),
+            );
+            let _ = transfer_tx.unbounded_send(TransferJobResult {
+                id,
+                event: TransferJobEvent::Finished(result),
+            });
+        });
         cx.notify();
     }
 }
@@ -234,7 +234,10 @@ struct SendToRequest {
 ///
 /// Backend selection is left to `FileCopyRequest`: SFTP-to-SFTP copies directly,
 /// mixed backends stage through a local temp directory.
-fn run_send_to(request: SendToRequest) -> Result<TransferJobOutput, String> {
+fn run_send_to(
+    request: SendToRequest,
+    progress: impl FnMut(zzclawterm_transport::SftpTransferProgress) + Send + 'static,
+) -> Result<TransferJobOutput, String> {
     let SendToRequest {
         source_service,
         source_remote,
@@ -270,7 +273,7 @@ fn run_send_to(request: SendToRequest) -> Result<TransferJobOutput, String> {
         options,
     };
     let summary = request
-        .execute()
+        .execute_with_progress(progress)
         .map_err(|error| t!("fileTransfer.errorSend", error = error.to_string()).to_string())?;
     let target_path = summary.destination_path;
     let target_parent_path = file_browser_parent(target_service.kind(), &target_path);
@@ -292,4 +295,55 @@ fn run_send_to(request: SendToRequest) -> Result<TransferJobOutput, String> {
         used_local_staging: summary.used_local_staging,
         entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SendToRequest, run_send_to};
+    use crate::models::TransferJobOutput;
+    use std::sync::{Arc, Mutex};
+    use zzclawterm_transport::{
+        FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
+    };
+
+    #[test]
+    fn send_to_reports_partial_progress_and_keeps_the_content_size_in_its_output() {
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-send-progress");
+        std::fs::create_dir_all(root.path()).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let payload = vec![7_u8; 512 * 1024];
+        std::fs::write(&source, &payload).unwrap();
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let record = values.clone();
+        let output = run_send_to(
+            SendToRequest {
+                source_service: FileBrowserService::local(),
+                target_service: FileBrowserService::local(),
+                source_remote: RemoteFilePath::new(source.to_string_lossy()),
+                cached_target_dir: Some(target.to_string_lossy().into_owned()),
+                entry_name: "copy".into(),
+                target_session_id: "target".into(),
+                control: SftpTransferControl::new(),
+                options: SftpPathTransferOptions::default(),
+            },
+            move |p| record.lock().unwrap().push(p),
+        )
+        .unwrap();
+        assert!(
+            matches!(output, TransferJobOutput::Sent { bytes, .. } if bytes == payload.len() as u64)
+        );
+        let values = values.lock().unwrap();
+        assert!(
+            values
+                .iter()
+                .any(|p| p.bytes_transferred > 0 && p.bytes_transferred < payload.len() as u64)
+        );
+        assert_eq!(
+            values.last().unwrap().bytes_transferred,
+            payload.len() as u64
+        );
+        assert_eq!(std::fs::read(target.join("copy")).unwrap(), payload);
+    }
 }

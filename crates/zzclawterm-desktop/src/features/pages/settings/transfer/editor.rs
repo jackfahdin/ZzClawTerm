@@ -4,7 +4,6 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*};
 use zzclawterm_ui::ZzClawSelectOption;
 
 use crate::features::pages::settings::panel::SettingsPanel;
-use crate::widgets::small_button;
 
 use super::super::{settings_form_row, settings_input_action_control};
 
@@ -79,14 +78,14 @@ impl SettingsPanel {
                     settings_input_action_control(
                         260.,
                         default_editor_input,
-                        small_button(
-                            palette,
+                        zzclawterm_ui::ZzClawButton::new(
                             "settings-transfer-editor-browse",
                             t!("settings.browse"),
-                            cx.listener(|this, _, _, cx| {
-                                this.prompt_transfer_default_editor_setting(cx);
-                            }),
-                        ),
+                        )
+                        .form_control()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.prompt_transfer_default_editor_setting(cx);
+                        })),
                     ),
                 ))
             })

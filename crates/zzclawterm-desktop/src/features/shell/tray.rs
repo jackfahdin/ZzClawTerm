@@ -320,7 +320,11 @@ impl ZzClawTermApp {
             cx.hide();
             true
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            crate::platform::linux::hide_to_tray(window)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (window, cx);
             false
@@ -329,6 +333,9 @@ impl ZzClawTermApp {
 }
 
 pub(crate) fn show_window(window: &mut Window, cx: &mut gpui::App) {
+    #[cfg(target_os = "linux")]
+    crate::platform::linux::restore_from_tray(window);
+
     #[cfg(windows)]
     if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window)
         && let raw_window_handle::RawWindowHandle::Win32(handle) = handle.as_raw()
@@ -518,6 +525,7 @@ mod tests {
     #[test]
     fn opening_tray_panels_repeatedly_keeps_them_visible_in_each_layout() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = std::env::temp_dir().join(format!("zzclawterm-tray-panels-{}", uuid()));
         let app = app_with_visible_local_session(&mut cx, &root, "session");
         cx.update_entity(&app, |app, _| {

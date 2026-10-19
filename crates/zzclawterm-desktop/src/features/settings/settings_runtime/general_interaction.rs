@@ -239,6 +239,14 @@ impl ZzClawTermApp {
         self.save_interaction_settings(cx);
     }
 
+    pub(in crate::features) fn toggle_credential_autofill(&mut self, cx: &mut Context<Self>) {
+        let autofill_enabled = self.settings.toggle_credential_autofill();
+        if !autofill_enabled {
+            self.cancel_credential_autofill(cx);
+        }
+        self.save_interaction_settings(cx);
+    }
+
     pub(in crate::features) fn set_command_suggestion_min_chars(
         &mut self,
         value: u32,

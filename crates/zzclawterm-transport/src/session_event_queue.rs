@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{SessionDrain, SessionDrainStats, SessionEvent, SessionEventConsumerId};
@@ -25,12 +25,14 @@ struct SessionEventQueueShared {
     /// Signalled after a drain crosses the low watermark, or when cancellation
     /// makes a producer ineligible to enqueue more output.
     output_space: Condvar,
+    async_changed: tokio::sync::Notify,
 }
 
 #[derive(Default)]
 struct SessionEventQueueInner {
     events: VecDeque<SessionEvent>,
     queued_output_bytes: usize,
+    peak_output_bytes: usize,
     output_backpressured: bool,
     producer_active: bool,
     closed: bool,
@@ -54,10 +56,37 @@ impl Drop for ProducerOrderGuard<'_> {
         inner.producer_active = false;
         drop(inner);
         self.shared.producer_order.notify_all();
+        self.shared.async_changed.notify_waiters();
     }
 }
 
 impl SessionEventQueue {
+    pub(super) fn peak_output_bytes(&self) -> usize {
+        self.shared
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .peak_output_bytes
+    }
+
+    pub(super) fn session_cancelled(&self, session_id: &str) -> bool {
+        let inner = self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.closed || inner.cancelled_sessions.contains(session_id)
+    }
+
+    /// Inspect lifecycle without removing data while a file picker owns input.
+    pub(super) fn session_ended(&self, session_id: &str) -> bool {
+        let inner = self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.closed
+            || inner.cancelled_sessions.contains(session_id)
+            || inner.events.iter().any(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Exited { .. } | SessionEvent::Error { .. }
+                ) && event_session_id(event) == session_id
+            })
+    }
+
     pub(super) fn new() -> Self {
         Self {
             shared: Arc::new(SessionEventQueueShared {
@@ -65,8 +94,39 @@ impl SessionEventQueue {
                 producer_order: Condvar::new(),
                 ready: Condvar::new(),
                 output_space: Condvar::new(),
+                async_changed: tokio::sync::Notify::new(),
             }),
         }
+    }
+
+    pub(super) fn consumer_for(&self, session_id: &str) -> Option<SessionEventConsumerId> {
+        self.shared
+            .inner
+            .lock()
+            .ok()?
+            .consumers
+            .get(session_id)
+            .copied()
+    }
+
+    pub(super) fn push_cleanup_failure(&self, event: SessionEvent) {
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.closed {
+            return;
+        }
+        // At most one bounded diagnostic per failed cleanup operation. No user
+        // output is retained after cancellation.
+        if inner
+            .events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::CleanupFailed { .. }))
+            .count()
+            >= 256
+        {
+            return;
+        }
+        inner.events.push_back(event);
+        self.shared.ready.notify_all();
     }
 
     pub(super) fn push(&self, event: SessionEvent) {
@@ -94,7 +154,87 @@ impl SessionEventQueue {
                 }
                 inner.events.push_back(other);
                 drop(inner);
-                self.shared.ready.notify_one();
+                self.shared.ready.notify_all();
+            }
+        }
+    }
+
+    /// The SSH receive task must park without blocking the Tokio executor. It
+    /// shares the synchronous producers' ordering turn and byte accounting.
+    pub(super) async fn push_async(&self, event: SessionEvent) {
+        let session_id = event_session_id(&event).to_string();
+        let _turn = loop {
+            let changed = self.shared.async_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let acquired = {
+                let mut inner = self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+                if !inner.accepts(&session_id) {
+                    return;
+                }
+                if inner.producer_active {
+                    false
+                } else {
+                    inner.producer_active = true;
+                    true
+                }
+            };
+            if acquired {
+                break ProducerOrderGuard {
+                    shared: &self.shared,
+                };
+            }
+            changed.await;
+        };
+        match event {
+            SessionEvent::Output { session_id, data } => {
+                for chunk in data.chunks(SESSION_EVENT_QUEUE_OUTPUT_EVENT_LIMIT) {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    loop {
+                        let changed = self.shared.async_changed.notified();
+                        tokio::pin!(changed);
+                        changed.as_mut().enable();
+                        let pushed = {
+                            let mut inner =
+                                self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+                            if !inner.accepts(&session_id) {
+                                return;
+                            }
+                            let fits = inner.queued_output_bytes.saturating_add(chunk.len())
+                                <= SESSION_EVENT_QUEUE_OUTPUT_LIMIT;
+                            if !inner.output_backpressured && fits {
+                                inner.queued_output_bytes += chunk.len();
+                                inner.peak_output_bytes =
+                                    inner.peak_output_bytes.max(inner.queued_output_bytes);
+                                inner.events.push_back(SessionEvent::Output {
+                                    session_id: session_id.clone(),
+                                    data: chunk.to_vec(),
+                                });
+                                inner.output_backpressured =
+                                    inner.queued_output_bytes >= SESSION_EVENT_QUEUE_OUTPUT_LIMIT;
+                                true
+                            } else {
+                                inner.output_backpressured = true;
+                                false
+                            }
+                        };
+                        if pushed {
+                            self.shared.ready.notify_all();
+                            break;
+                        }
+                        changed.await;
+                    }
+                }
+            }
+            other => {
+                let mut inner = self.shared.inner.lock().unwrap_or_else(|p| p.into_inner());
+                if inner.accepts(&session_id) {
+                    inner.events.push_back(other);
+                }
+                drop(inner);
+                self.shared.ready.notify_all();
             }
         }
     }
@@ -132,6 +272,7 @@ impl SessionEventQueue {
                 <= SESSION_EVENT_QUEUE_OUTPUT_LIMIT;
             if !inner.output_backpressured && fits {
                 inner.queued_output_bytes = inner.queued_output_bytes.saturating_add(data.len());
+                inner.peak_output_bytes = inner.peak_output_bytes.max(inner.queued_output_bytes);
                 inner
                     .events
                     .push_back(SessionEvent::Output { session_id, data });
@@ -139,7 +280,7 @@ impl SessionEventQueue {
                     inner.output_backpressured = true;
                 }
                 drop(inner);
-                self.shared.ready.notify_one();
+                self.shared.ready.notify_all();
                 return true;
             }
             inner.output_backpressured = true;
@@ -180,6 +321,7 @@ impl SessionEventQueue {
         drop(inner);
         self.shared.producer_order.notify_all();
         self.shared.output_space.notify_all();
+        self.shared.async_changed.notify_waiters();
         self.shared.ready.notify_all();
     }
 
@@ -214,6 +356,7 @@ impl SessionEventQueue {
         drop(inner);
         self.shared.producer_order.notify_all();
         self.shared.output_space.notify_all();
+        self.shared.async_changed.notify_waiters();
         self.shared.ready.notify_all();
     }
 
@@ -234,6 +377,7 @@ impl SessionEventQueue {
         drop(inner);
         if resumed {
             self.shared.output_space.notify_all();
+            self.shared.async_changed.notify_waiters();
         }
         drain
     }
@@ -276,6 +420,7 @@ impl SessionEventQueue {
         drop(inner);
         if resumed {
             self.shared.output_space.notify_all();
+            self.shared.async_changed.notify_waiters();
         }
         drain
     }
@@ -287,10 +432,41 @@ impl SessionEventQueue {
         max_output_bytes: Option<usize>,
         timeout: Duration,
     ) -> SessionDrain {
-        let wait_started = Instant::now();
-        let Ok(mut inner) = self.shared.inner.lock() else {
+        let Ok(inner) = self.shared.inner.lock() else {
             return SessionDrain::default();
         };
+        let Some(mut inner) = self.wait_for_consumer(inner, consumer_id, timeout) else {
+            return SessionDrain::default();
+        };
+        let drain = inner.drain_for_consumer(consumer_id, max_events, max_output_bytes);
+        let resumed = inner.resume_output_if_below_low_watermark();
+        drop(inner);
+        if resumed {
+            self.shared.output_space.notify_all();
+            self.shared.async_changed.notify_waiters();
+        }
+        drain
+    }
+
+    pub(super) fn wait_for_events_for_consumer(
+        &self,
+        consumer_id: SessionEventConsumerId,
+        timeout: Duration,
+    ) -> bool {
+        let Ok(inner) = self.shared.inner.lock() else {
+            return false;
+        };
+        self.wait_for_consumer(inner, consumer_id, timeout)
+            .is_some_and(|inner| inner.has_event_for_consumer(consumer_id))
+    }
+
+    fn wait_for_consumer<'a>(
+        &self,
+        mut inner: MutexGuard<'a, SessionEventQueueInner>,
+        consumer_id: SessionEventConsumerId,
+        timeout: Duration,
+    ) -> Option<MutexGuard<'a, SessionEventQueueInner>> {
+        let wait_started = Instant::now();
         while !inner.has_event_for_consumer(consumer_id) && !inner.closed {
             let remaining = timeout.saturating_sub(wait_started.elapsed());
             if remaining.is_zero() {
@@ -299,7 +475,7 @@ impl SessionEventQueue {
             inner.consumer_wait_started();
             let waited = self.shared.ready.wait_timeout(inner, remaining);
             let Ok((mut waited, wait_result)) = waited else {
-                return SessionDrain::default();
+                return None;
             };
             waited.consumer_wait_finished();
             inner = waited;
@@ -307,13 +483,7 @@ impl SessionEventQueue {
                 break;
             }
         }
-        let drain = inner.drain_for_consumer(consumer_id, max_events, max_output_bytes);
-        let resumed = inner.resume_output_if_below_low_watermark();
-        drop(inner);
-        if resumed {
-            self.shared.output_space.notify_all();
-        }
-        drain
+        Some(inner)
     }
 
     #[cfg(test)]
@@ -341,6 +511,12 @@ impl SessionEventQueueInner {
         event: &SessionEvent,
         consumer_id: SessionEventConsumerId,
     ) -> bool {
+        if let SessionEvent::CleanupFailed {
+            consumer_id: owner, ..
+        } = event
+        {
+            return *owner == Some(consumer_id);
+        }
         self.consumers.get(event_session_id(event)) == Some(&consumer_id)
     }
 
@@ -446,6 +622,8 @@ impl SessionEventQueueInner {
                 SessionEvent::CwdChanged { .. }
                 | SessionEvent::CommandAccepted { .. }
                 | SessionEvent::Exited { .. }
+                | SessionEvent::CleanupFailed { .. }
+                | SessionEvent::OutputBoundary { .. }
                 | SessionEvent::Error { .. } => {}
             }
             events.push(event);
@@ -513,6 +691,8 @@ impl SessionEventQueueInner {
                 SessionEvent::CwdChanged { .. }
                 | SessionEvent::CommandAccepted { .. }
                 | SessionEvent::Exited { .. }
+                | SessionEvent::CleanupFailed { .. }
+                | SessionEvent::OutputBoundary { .. }
                 | SessionEvent::Error { .. } => {}
             }
             events.push(event);
@@ -538,10 +718,12 @@ impl SessionEventQueueInner {
 fn event_session_id(event: &SessionEvent) -> &str {
     match event {
         SessionEvent::Output { session_id, .. }
+        | SessionEvent::OutputBoundary { session_id, .. }
         | SessionEvent::OutputDropped { session_id, .. }
         | SessionEvent::CwdChanged { session_id, .. }
         | SessionEvent::CommandAccepted { session_id, .. }
         | SessionEvent::Exited { session_id, .. }
+        | SessionEvent::CleanupFailed { session_id, .. }
         | SessionEvent::Error { session_id, .. } => session_id,
     }
 }

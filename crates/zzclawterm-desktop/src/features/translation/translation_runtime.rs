@@ -1,7 +1,7 @@
 use rust_i18n::t;
 
 use futures::StreamExt as _;
-use gpui::{ClipboardItem, Context, IntoElement, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, SharedString, Window, div, prelude::*, px, rgb};
 use zzclawterm_core::TranslationSettings;
 use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
@@ -305,9 +305,11 @@ impl ZzClawTermApp {
                                 copy_label,
                                 cx.listener(move |this, _, _, cx| {
                                     if let Some(result) = this.translation.result_snapshot() {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                        this.copy_text_with_feedback(
+                                            "copy-translation",
                                             result.translated,
-                                        ));
+                                            cx,
+                                        );
                                         this.translation
                                             .mark_result_copied(copied_label.to_string());
                                         cx.notify();

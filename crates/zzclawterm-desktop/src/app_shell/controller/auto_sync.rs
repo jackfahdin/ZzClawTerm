@@ -2,9 +2,8 @@ use super::DesktopController;
 use crate::features::AutoSyncResult;
 use crate::features::AutoSyncTrigger;
 use crate::features::run_auto_sync;
+use crate::features::sync::operation::{AutoSyncOperationControls, await_cloud_sync_job};
 use futures::StreamExt as _;
-use futures::future::Either;
-use futures::future::select;
 use gpui::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,6 +81,8 @@ impl DesktopController {
         let guard_request = Mutex::new(Some(guard_request));
         let expired = Arc::new(AtomicBool::new(false));
         let task_expired = expired.clone();
+        let controls = AutoSyncOperationControls::default();
+        let worker_controls = controls.clone();
         let task = scheduler.submit_task("cloud-sync-auto", move |_| {
             let before_apply = || {
                 if task_expired.load(Ordering::Acquire) {
@@ -112,6 +113,7 @@ impl DesktopController {
                 change_elapsed,
                 pull_safe,
                 &before_apply,
+                &worker_controls,
             )
         });
         let guard_expired = expired.clone();
@@ -128,25 +130,27 @@ impl DesktopController {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            let result = match task {
-                Ok(task) => {
-                    let timeout = cx.background_executor().timer(Duration::from_secs(300));
-                    match select(Box::pin(task), Box::pin(timeout)).await {
-                        Either::Left((result, _)) => result.unwrap_or_else(|error| {
-                            Err(zzclawterm_core::CloudSyncError::Remote(error.to_string()))
-                        }),
-                        Either::Right((_, task)) => {
-                            expired.store(true, Ordering::Release);
-                            task.cancel();
-                            Err(zzclawterm_core::CloudSyncError::Io(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "automatic cloud sync exceeded 300 seconds",
-                            )))
+            let result = await_cloud_sync_job(
+                task,
+                cx.background_executor().timer(Duration::from_secs(300)),
+                controls.sync,
+                |phase| {
+                    expired.store(true, Ordering::Release);
+                    controls.cleanup.request_cancel();
+                    let _ = this.update(cx, |controller, cx| {
+                        for entry in controller.windows.values() {
+                            let _ = entry.shell.update(cx, |shell, cx| {
+                                if let Some(app) = shell.app.as_ref() {
+                                    app.update(cx, |app, cx| {
+                                        app.show_cloud_sync_timeout(phase, cx)
+                                    });
+                                }
+                            });
                         }
-                    }
-                }
-                Err(error) => Err(zzclawterm_core::CloudSyncError::Remote(error.to_string())),
-            };
+                    });
+                },
+            )
+            .await;
             let _ = this.update(cx, |controller, cx| {
                 controller.complete_auto_sync(trigger, result, cx);
             });

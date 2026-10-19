@@ -17,6 +17,7 @@ use zzclawterm_store::{StoreDomain, store_request};
 
 use crate::features::ZzClawTermApp;
 use crate::features::terminal::terminal_runtime::TERMINAL_INPUT_LATENCY_WINDOW;
+use crate::features::terminal::terminal_surface_entity::terminal_snapshot_anchor_row_for_display_offset;
 use crate::models::{CommandSuggestionItem, CommandSuggestionState};
 use crate::terminal::terminal_byte_index_for_cell_col;
 
@@ -32,7 +33,7 @@ pub(in crate::features) const SUGGESTION_OVERLAY_HEADER_HEIGHT: f32 = 24.0;
 pub(in crate::features) const SUGGESTION_OVERLAY_FOOTER_HEIGHT: f32 = 24.0;
 const SUGGESTION_OVERLAY_CHROME_HEIGHT: f32 =
     SUGGESTION_OVERLAY_HEADER_HEIGHT + SUGGESTION_OVERLAY_FOOTER_HEIGHT;
-const SUGGESTION_OVERLAY_MAX_HEIGHT: f32 = 320.0;
+const SUGGESTION_OVERLAY_MAX_HEIGHT: f32 = 272.0;
 const SUGGESTION_OVERLAY_CURSOR_GAP: f32 = 4.0;
 const SUGGESTION_OVERLAY_VIEWPORT_MARGIN: f32 = 8.0;
 
@@ -843,15 +844,27 @@ impl ZzClawTermApp {
         }
     }
 
+    /// Capture a viewport-relative anchor using one snapshot. History padding can
+    /// change between frames even when the shell cursor has not moved.
     pub(in crate::features) fn active_terminal_cursor_cell(&self) -> (usize, usize) {
+        let session_id = self.session.active_id();
         let offset = self.active_terminal_display_offset();
-        let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), offset);
+        let snapshot = self.terminal_snapshot_for_session(session_id, offset);
+        let anchor = terminal_snapshot_anchor_row_for_display_offset(
+            &snapshot,
+            offset,
+            self.terminal_viewport_rows_for_session(session_id),
+            self.terminal_scrollback_len_for_session(session_id),
+        );
         let row = if snapshot.cursor.row == usize::MAX {
             snapshot.row_count().saturating_sub(1)
         } else {
             snapshot.cursor.row
         };
-        (row, snapshot.cursor.col)
+        (
+            row.saturating_sub(anchor + snapshot.leading_cleared_rows(anchor)),
+            snapshot.cursor.col,
+        )
     }
 
     /// Handle suggestion popup keys. Returns true when the key was consumed.
@@ -1366,21 +1379,21 @@ pub(in crate::features) fn suggestion_overlay_position(
     let (cell_w, cell_h) = cell_size;
     let bounds_x = f32::from(bounds.origin.x);
     let bounds_y = f32::from(bounds.origin.y);
-    let bounds_height = f32::from(bounds.size.height);
     let base_x = bounds_x + pad_left + gutter + cursor_col as f32 * cell_w;
     let cursor_top = bounds_y + pad_top + cursor_row as f32 * cell_h;
     let cursor_bottom = cursor_top + cell_h;
     let (viewport_w, viewport_h) = viewport_size;
     let surface_top = bounds_y.max(SUGGESTION_OVERLAY_VIEWPORT_MARGIN);
-    let surface_bottom =
-        (bounds_y + bounds_height).min(viewport_h - SUGGESTION_OVERLAY_VIEWPORT_MARGIN);
-    if surface_bottom <= surface_top || menu_h <= 0.0 {
+    // Suggestions live in the window overlay, so panels below the terminal do
+    // not limit the available space. Keep the terminal bounds only as the anchor.
+    let overlay_bottom = viewport_h - SUGGESTION_OVERLAY_VIEWPORT_MARGIN;
+    if overlay_bottom <= surface_top || menu_h <= 0.0 {
         return None;
     }
 
     let below_y = cursor_bottom + SUGGESTION_OVERLAY_CURSOR_GAP;
     let above_bottom = cursor_top - SUGGESTION_OVERLAY_CURSOR_GAP;
-    let space_below = (surface_bottom - below_y).max(0.0);
+    let space_below = (overlay_bottom - below_y).max(0.0);
     let space_above = (above_bottom - surface_top).max(0.0);
     let (y, height) = if menu_h <= space_below {
         (below_y, menu_h)
@@ -1488,7 +1501,7 @@ mod overlay_position_tests {
                 cell_size: (8.0, 16.0),
                 content_origin: (0.0, 0.0),
                 gutter: 0.0,
-                viewport_size: (1024.0, 768.0),
+                viewport_size: (1024.0, 280.0),
             },
             SuggestionOverlayTarget {
                 cursor: (6, 4),
@@ -1503,7 +1516,7 @@ mod overlay_position_tests {
     }
 
     #[test]
-    fn suggestion_overlay_position_uses_terminal_surface_bottom() {
+    fn suggestion_overlay_position_uses_space_below_terminal_surface() {
         let placement = suggestion_overlay_position(
             SuggestionOverlayGeometry {
                 bounds: Bounds::new(point(px(20.0), px(100.0)), size(px(600.0), px(200.0))),
@@ -1513,23 +1526,44 @@ mod overlay_position_tests {
                 viewport_size: (1024.0, 768.0),
             },
             SuggestionOverlayTarget {
-                cursor: (8, 4),
-                menu_size: (300.0, 120.0),
+                cursor: (11, 4),
+                menu_size: (380.0, 320.0),
             },
         )
-        .expect("surface has room above but not below the cursor");
+        .expect("window has room below the terminal over the bottom panel");
 
-        assert_eq!(placement.y, 104.0);
-        assert_eq!(placement.height, 120.0);
-        assert_eq!(placement.y + placement.height, 224.0);
+        assert_eq!(placement.y, 296.0);
+        assert_eq!(placement.height, 320.0);
+    }
+
+    #[test]
+    fn suggestion_overlay_position_limits_height_at_window_bottom() {
+        let placement = suggestion_overlay_position(
+            SuggestionOverlayGeometry {
+                bounds: Bounds::new(point(px(20.0), px(100.0)), size(px(600.0), px(120.0))),
+                cell_size: (8.0, 16.0),
+                content_origin: (0.0, 0.0),
+                gutter: 0.0,
+                viewport_size: (1024.0, 330.0),
+            },
+            SuggestionOverlayTarget {
+                cursor: (6, 4),
+                menu_size: (300.0, 140.0),
+            },
+        )
+        .expect("window has more room below the cursor than above");
+
+        assert_eq!(placement.y, 216.0);
+        assert_eq!(placement.height, 106.0);
+        assert_eq!(placement.y + placement.height, 322.0);
     }
 
     #[test]
     fn suggestion_overlay_height_is_content_sized_and_capped() {
         assert_eq!(suggestion_overlay_desired_height(1, 28.0), 76.0);
-        assert_eq!(suggestion_overlay_desired_height(10, 28.0), 320.0);
+        assert_eq!(suggestion_overlay_desired_height(10, 28.0), 272.0);
         assert_eq!(suggestion_overlay_desired_height(1, 36.0), 84.0);
-        assert_eq!(suggestion_overlay_desired_height(8, 36.0), 320.0);
+        assert_eq!(suggestion_overlay_desired_height(8, 36.0), 272.0);
     }
 }
 
@@ -1562,9 +1596,40 @@ mod tests {
     };
 
     #[test]
+    fn disabling_credential_autofill_releases_command_suggestions_and_smart_input() {
+        let dir = TestConfigDir::new("zzclawterm-credential-mode-cancel");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+        cx.update_entity(&app, |app, cx| {
+            app.note_shell_editing_input(b"echo abc", cx);
+            app.terminal
+                .seed_session_view("s1".into(), "$ echo abc".into(), "UTF-8");
+            app.reconcile_shell_editing("s1", cx);
+            assert!(app.prepare_command_suggestion_search(1, cx).is_some());
+            assert!(app.can_use_smart_cursor_selection());
+            app.terminal.assist.credential_prompt_input_until_ms = u64::MAX;
+            assert!(app.is_credential_prompt_input_mode());
+            assert!(app.prepare_command_suggestion_search(1, cx).is_none());
+            assert!(!app.can_use_smart_cursor_selection());
+
+            // The toggle must release these gates without waiting for output or a timeout.
+            app.toggle_credential_autofill(cx);
+            assert!(!app.is_credential_prompt_input_mode());
+            assert!(app.prepare_command_suggestion_search(1, cx).is_some());
+            assert!(app.can_use_smart_cursor_selection());
+        });
+    }
+
+    #[test]
     fn uncertain_input_cannot_start_or_publish_a_suggestion_search() {
         let dir = TestConfigDir::new("zzclawterm-suggestions-confidence");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = crate::features::test_support::app_with_visible_local_session(
             &mut cx,
             dir.path(),
@@ -1755,6 +1820,7 @@ mod tests {
     #[test]
     fn failed_suggestion_write_does_not_leave_a_pending_history_command() {
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = std::env::temp_dir().join(format!(
             "zzclawterm-suggestion-write-{}-{}",
             std::process::id(),
@@ -1844,9 +1910,91 @@ mod tests {
     }
 
     #[test]
+    fn selecting_suggestions_keeps_position_when_snapshot_history_window_changes() {
+        let dir = TestConfigDir::new("zzclawterm-suggestion-anchor");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+
+        cx.update_entity(&app, |app, cx| {
+            show_surface_for_session(app, "s1");
+            let view = app.terminal.view.views.get_mut("s1").unwrap();
+            view.screen.resize(80, 24);
+            view.screen.advance_decoded_text(&"output\r\n".repeat(100));
+            view.frame_snapshot = Some(std::sync::Arc::new(view.screen.viewport_snapshot(0)));
+
+            let (cursor_row, cursor_col) = app.active_terminal_cursor_cell();
+            let mut state = open_suggestions_popup("s1");
+            state.selected_index = None;
+            state.cursor_row = cursor_row;
+            state.cursor_col = cursor_col;
+            app.terminal.assist.command_suggestions = Some(state);
+            let before = app
+                .suggestion_overlay_position_for_session(
+                    Some("s1"),
+                    cursor_row,
+                    cursor_col,
+                    380.0,
+                    272.0,
+                )
+                .unwrap();
+
+            // Worker frames may grow or shrink history padding without moving the cursor.
+            for (older_rows, key) in [(64, "down"), (0, "up"), (96, "down")] {
+                let view = app.terminal.view.views.get_mut("s1").unwrap();
+                view.frame_snapshot = Some(std::sync::Arc::new(
+                    view.screen.viewport_snapshot_with_window(0, older_rows, 0),
+                ));
+                assert_eq!(app.active_terminal_cursor_cell(), (cursor_row, cursor_col));
+                let mut event = escape_key_event();
+                event.keystroke.key = key.to_string();
+                assert!(app.handle_command_suggestion_key(&event, cx));
+                let state = app.terminal.assist.command_suggestions.as_ref().unwrap();
+                assert_eq!(state.selected_index, (key == "down").then_some(0));
+                let after = app
+                    .suggestion_overlay_position_for_session(
+                        Some("s1"),
+                        state.cursor_row,
+                        state.cursor_col,
+                        380.0,
+                        272.0,
+                    )
+                    .unwrap();
+                assert_eq!(after, before);
+            }
+        });
+    }
+
+    #[test]
+    fn suggestion_cursor_anchor_accounts_for_leading_cleared_rows() {
+        let dir = TestConfigDir::new("zzclawterm-suggestion-cleared-anchor");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+        cx.update_entity(&app, |app, _| {
+            let view = app.terminal.view.views.get_mut("s1").unwrap();
+            view.screen.resize(80, 24);
+            view.screen.advance(b"\x1b[24;1Hroot# draft");
+            view.screen.clear_except_input();
+            view.frame_snapshot = Some(std::sync::Arc::new(view.screen.viewport_snapshot(0)));
+
+            assert_eq!(app.active_terminal_cursor_cell(), (0, 11));
+        });
+    }
+
+    #[test]
     fn alternate_screen_keeps_command_suggestions_from_intercepting_keys() {
         let dir = TestConfigDir::new("zzclawterm-alt-screen-suggestions");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = crate::features::test_support::app_with_visible_local_session(
             &mut cx,
             dir.path(),
@@ -1904,6 +2052,7 @@ mod tests {
     fn alternate_screen_blocks_the_manual_trigger_and_the_deferred_publisher() {
         let dir = TestConfigDir::new("zzclawterm-alt-screen-manual");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = crate::features::test_support::app_with_visible_local_session(
             &mut cx,
             dir.path(),
@@ -1941,6 +2090,7 @@ mod tests {
     fn alternate_screen_drops_a_search_that_was_already_in_flight() {
         let dir = TestConfigDir::new("zzclawterm-alt-screen-inflight");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = crate::features::test_support::app_with_visible_local_session(
             &mut cx,
             dir.path(),
@@ -1985,6 +2135,7 @@ mod tests {
     fn leaving_the_alternate_screen_restores_shell_line_suggestions() {
         let dir = TestConfigDir::new("zzclawterm-alt-screen-return");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = crate::features::test_support::app_with_visible_local_session(
             &mut cx,
             dir.path(),

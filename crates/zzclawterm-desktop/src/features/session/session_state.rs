@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use std::borrow::Cow;
 
-use gpui::{ClipboardItem, Context, Window};
+use gpui::{Context, Window};
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::{session_kind_label, short_id};
@@ -169,6 +169,7 @@ impl ZzClawTermApp {
         }
 
         self.session.select_active_session(session_id);
+        self.remote_desktop.release_inactive_textures(session_id);
         self.sync_ai_active_scope(cx);
         if switching_sessions {
             self.transfer.reset_transfer_queue_interaction();
@@ -382,10 +383,16 @@ impl ZzClawTermApp {
         let Some(name) = self.session.display_name(session_id) else {
             self.shell
                 .set_status("active session name is unavailable".to_string());
+            self.notify_operation(
+                "copy-session-name",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                rust_i18n::t!("common.nothingToCopy").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
+        self.copy_text_with_feedback("copy-session-name", name.clone(), cx);
         self.shell.set_status(format!("copied tab name '{name}'"));
         cx.notify();
     }
@@ -394,16 +401,28 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id() else {
             self.shell
                 .set_status("no active SSH host to copy".to_string());
+            self.notify_operation(
+                "copy-session-host",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                rust_i18n::t!("common.nothingToCopy").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
         let Some(host) = self.session.ssh_host(session_id) else {
             self.shell
                 .set_status("active session is not SSH".to_string());
+            self.notify_operation(
+                "copy-session-host",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                rust_i18n::t!("common.nothingToCopy").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(host.clone()));
+        self.copy_text_with_feedback("copy-session-host", host.clone(), cx);
         self.shell.set_status(format!("copied SSH host '{host}'"));
         cx.notify();
     }
@@ -437,6 +456,12 @@ impl ZzClawTermApp {
         let Some(details) = self.active_session_info_details() else {
             self.shell
                 .set_status("no active session info to copy".to_string());
+            self.notify_operation(
+                "copy-session-info",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                rust_i18n::t!("common.nothingToCopy").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
@@ -445,7 +470,7 @@ impl ZzClawTermApp {
             .map(|(label, value)| format!("{label}: {value}"))
             .collect::<Vec<_>>()
             .join("\n");
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copy_text_with_feedback("copy-session-info", text, cx);
         self.shell.set_status("copied session info".to_string());
         cx.notify();
     }

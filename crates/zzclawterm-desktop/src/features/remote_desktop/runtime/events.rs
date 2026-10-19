@@ -243,6 +243,12 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        for (id, session) in &self.remote_desktop.sessions {
+            if session.uploads_stopped {
+                let _ = self.remote_desktop.manager.close_detached(id);
+                let _ = self.remote_desktop.vnc_manager.close_detached(id);
+            }
+        }
         let mut dirty = self.drive_rdp_pointer_flush();
         dirty |= self.drive_rdp_resize_debounce();
         dirty |= self.drive_rdp_reconnects(cx);
@@ -342,13 +348,33 @@ impl ZzClawTermApp {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
-            VncRuntimeEvent::Error { error, .. } => {
+            VncRuntimeEvent::Error { error, fatal, .. } => {
+                if fatal && error.kind == zzclawterm_remote_desktop::VncErrorKind::ResourceExhausted
+                {
+                    self.stop_remote_desktop_uploads(
+                        session_id,
+                        window,
+                        RdpErrorKind::ResourceExhausted,
+                        error.message.clone(),
+                    );
+                }
+                let retry = fatal
+                    && matches!(
+                        error.kind,
+                        zzclawterm_remote_desktop::VncErrorKind::Timeout
+                            | zzclawterm_remote_desktop::VncErrorKind::HelperCrashed
+                    )
+                    && self.schedule_vnc_helper_reconnect(session_id);
                 if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
                     session.keys = Default::default();
                     session.modifiers = Default::default();
                     session.vnc_server_capabilities = None;
                     session.vnc_key_request = None;
-                    set_remote_view_error(session, error.into());
+                    if retry {
+                        session.error = Some(error.into());
+                    } else {
+                        set_remote_view_error(session, error.into());
+                    }
                 }
             }
         }
@@ -516,6 +542,14 @@ impl ZzClawTermApp {
                 }
             }
             RdpRuntimeEvent::Error { error, fatal, .. } => {
+                if fatal && error.kind == RdpErrorKind::ResourceExhausted {
+                    self.stop_remote_desktop_uploads(
+                        session_id,
+                        window,
+                        error.kind,
+                        error.message.clone(),
+                    );
+                }
                 if fatal {
                     self.stop_rdp_clipboard_jobs(session_id, cx);
                 }

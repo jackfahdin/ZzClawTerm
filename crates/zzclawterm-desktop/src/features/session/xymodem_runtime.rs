@@ -1,3 +1,4 @@
+use super::transfer_wire::TransferWire;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -25,8 +26,9 @@ pub(in crate::features) enum SerialUploadProtocol {
 }
 
 struct XymodemWorker {
+    wire: TransferWire,
     command_tx: mpsc::Sender<XymodemWorkerCommand>,
-    event_rx: mpsc::Receiver<XymodemWorkerEvent>,
+    event_rx: Option<mpsc::Receiver<XymodemWorkerEvent>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -46,7 +48,13 @@ struct XymodemJobFailure {
 }
 
 impl XymodemWorker {
+    #[cfg(test)]
     fn spawn(protocol: XymodemProtocol, files: Vec<PathBuf>) -> Self {
+        Self::spawn_connected(protocol, files, TransferWire::default())
+    }
+
+    fn spawn_connected(protocol: XymodemProtocol, files: Vec<PathBuf>, wire: TransferWire) -> Self {
+        let worker_wire = wire.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::sync_channel(64);
         let worker = thread::Builder::new()
@@ -65,16 +73,45 @@ impl XymodemWorker {
                     };
                 let started = Instant::now();
                 loop {
-                    let actions = match command_rx.recv_timeout(Duration::from_millis(50)) {
+                    let mut cancelling = false;
+                    let mut actions = match command_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(XymodemWorkerCommand::Input(data)) => {
                             sender.feed(&data, started.elapsed())
                         }
-                        Ok(XymodemWorkerCommand::Cancel) => sender.cancel(),
+                        Ok(XymodemWorkerCommand::Cancel) => {
+                            cancelling = true;
+                            sender.cancel()
+                        }
                         Ok(XymodemWorkerCommand::Stop)
                         | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => sender.tick(started.elapsed()),
                     };
-                    let done = sender.is_done();
+                    let mut remaining = Vec::new();
+                    let mut failed = false;
+                    for action in actions {
+                        if let XymodemAction::Send(bytes) = action {
+                            match if cancelling {
+                                worker_wire.send_abort(&bytes)
+                            } else {
+                                worker_wire.send(&bytes)
+                            } {
+                                Ok(true) => {}
+                                Ok(false) => remaining.push(XymodemAction::Send(bytes)),
+                                Err(_) => {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            remaining.push(action);
+                        }
+                    }
+                    actions = if failed {
+                        vec![XymodemAction::Finished(Err(XymodemError::WriteFailed))]
+                    } else {
+                        remaining
+                    };
+                    let done = sender.is_done() || failed;
                     if !actions.is_empty()
                         && event_tx.send(XymodemWorkerEvent { actions, done }).is_err()
                     {
@@ -87,8 +124,9 @@ impl XymodemWorker {
             })
             .expect("failed to spawn X/YMODEM worker");
         Self {
+            wire,
             command_tx,
-            event_rx,
+            event_rx: Some(event_rx),
             worker: Some(worker),
         }
     }
@@ -99,12 +137,15 @@ impl XymodemWorker {
         }
     }
     fn cancel(&self) {
+        self.wire.stop();
         let _ = self.command_tx.send(XymodemWorkerCommand::Cancel);
     }
     fn try_recv(&self) -> Option<XymodemWorkerEvent> {
-        self.event_rx.try_recv().ok()
+        self.event_rx.as_ref()?.try_recv().ok()
     }
     fn shutdown(&mut self) {
+        self.wire.stop();
+        self.event_rx.take();
         let _ = self.command_tx.send(XymodemWorkerCommand::Stop);
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
@@ -338,7 +379,11 @@ impl ZzClawTermApp {
         self.session.insert_xymodem_state(
             session_id.clone(),
             XymodemSessionState {
-                worker: XymodemWorker::spawn(protocol, files),
+                worker: XymodemWorker::spawn_connected(
+                    protocol,
+                    files,
+                    TransferWire::connected(self.session.manager_handle(), session_id.clone()),
+                ),
             },
         );
         self.sync_session_event_bridge_session_policy(&session_id);
@@ -507,6 +552,7 @@ fn xymodem_job_failure(error: XymodemError) -> XymodemJobFailure {
         XymodemError::NoFiles => t!("terminalCtx.xymodemNoFiles"),
         XymodemError::InvalidFilename => t!("terminalCtx.xymodemInvalidFilename"),
         XymodemError::OpenFailed => t!("terminalCtx.xymodemOpenFailed"),
+        XymodemError::WriteFailed => "Unable to write transfer data".into(),
         XymodemError::ReadFailed => t!("terminalCtx.xymodemReadFailed"),
         XymodemError::SizeOverflow => t!("terminalCtx.xymodemSizeOverflow"),
         XymodemError::TimedOut => t!("terminalCtx.xymodemTimedOut"),

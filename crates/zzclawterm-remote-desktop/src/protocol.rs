@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use zzclawterm_core::SecretString;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Maximum UTF-8 payload accepted for a single committed-text event.
 ///
@@ -282,7 +282,7 @@ pub enum RemoteFrameEvent {
         height: u32,
         stride: u32,
         format: PixelFormat,
-        pixels: Vec<u8>,
+        pixels: crate::pixel_memory::PixelBuffer,
     },
 }
 
@@ -295,7 +295,7 @@ pub struct CursorShape {
     pub width: u32,
     pub height: u32,
     pub hotspot: RemotePoint,
-    pub pixels: Vec<u8>,
+    pub pixels: crate::pixel_memory::PixelBuffer,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -357,6 +357,7 @@ pub enum RdpCapability {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RdpErrorKind {
+    ResourceExhausted,
     Authentication,
     CertificateRejected,
     Timeout,
@@ -588,6 +589,8 @@ pub enum VncSessionState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VncErrorKind {
+    Timeout,
+    ResourceExhausted,
     Transport,
     Authentication,
     Protocol,
@@ -631,6 +634,7 @@ pub enum RemoteDesktopViewState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteDesktopErrorCategory {
+    ResourceExhausted,
     Authentication,
     Certificate,
     Timeout,
@@ -672,6 +676,7 @@ impl From<RdpError> for RemoteDesktopError {
             RdpErrorKind::HelperCrashed => RemoteDesktopErrorCategory::HelperCrashed,
             RdpErrorKind::Ipc => RemoteDesktopErrorCategory::Ipc,
             RdpErrorKind::Protocol => RemoteDesktopErrorCategory::Protocol,
+            RdpErrorKind::ResourceExhausted => RemoteDesktopErrorCategory::ResourceExhausted,
             RdpErrorKind::Unsupported => RemoteDesktopErrorCategory::Unsupported,
         };
         Self {
@@ -692,6 +697,8 @@ impl From<VncError> for RemoteDesktopError {
             VncErrorKind::Internal => RemoteDesktopErrorCategory::Internal,
             VncErrorKind::HelperMissing => RemoteDesktopErrorCategory::HelperMissing,
             VncErrorKind::HelperCrashed => RemoteDesktopErrorCategory::HelperCrashed,
+            VncErrorKind::Timeout => RemoteDesktopErrorCategory::Timeout,
+            VncErrorKind::ResourceExhausted => RemoteDesktopErrorCategory::ResourceExhausted,
             VncErrorKind::Ipc => RemoteDesktopErrorCategory::Ipc,
         };
         Self {
@@ -778,6 +785,12 @@ pub struct VncSessionDrain {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RdpControlMessage {
+    Ping {
+        sequence: u64,
+    },
+    Pong {
+        sequence: u64,
+    },
     ClientHello {
         version: u32,
     },
@@ -857,6 +870,12 @@ pub enum RdpControlMessage {
 /// and cursor payloads reuse the protocol-neutral binary packets in `crate::ipc`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum VncControlMessage {
+    Ping {
+        sequence: u64,
+    },
+    Pong {
+        sequence: u64,
+    },
     ServerKeyRequest(VncServerKeyRequest),
     ServerKeyAuthenticated(VncServerKeyRequest),
     ServerKeyResponse {

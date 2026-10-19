@@ -151,6 +151,7 @@ impl ZzClawTermApp {
         self.ai.cancel_chat_and_agent();
         let agent_worker = self.ai.shutdown_agent_management_worker();
         let stop_jobs = self.blocking_jobs.begin_shutdown();
+        let stop_transfers = self.transfer.begin_bulk_shutdown();
         let ssh_connections = self.session.ssh_connection_pool();
         self.remote_desktop.routes.clear();
         self.remote_desktop.prepared_routes.clear();
@@ -161,8 +162,9 @@ impl ZzClawTermApp {
         let session_shutdown = self.session.take_shutdown();
         let frame_worker = self.terminal.take_frame_shutdown();
         let recording_shutdown = self.recording.take_shutdown();
-        self.transfer.shutdown_external_editor_watchers();
+        let stop_editor_watchers = self.transfer.begin_external_editor_shutdown();
         cx.background_spawn(async move {
+            stop_editor_watchers.await;
             session_shutdown();
             if let Some(shutdown) = frame_worker {
                 shutdown();
@@ -176,6 +178,7 @@ impl ZzClawTermApp {
                 let _ = worker.join();
             }
             stop_jobs();
+            stop_transfers();
             ssh_connections.finish_disconnects();
         })
     }

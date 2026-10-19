@@ -42,7 +42,93 @@ fn transfer_state(cx: &TestAppContext) -> TransferFeatureState {
         SftpDuplicatePolicy::Ask,
         180.,
         transfer_focus(cx),
+        cx.background_executor.clone(),
     )
+}
+
+#[test]
+fn dropping_transfer_state_cancels_jobs_and_defers_joining_to_its_cleanup_owner() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut state = transfer_state(&cx);
+    let cleanup = state.worker_cleanup.clone();
+    let job = transfer_job("held", "session", TransferJobStatus::Paused, true);
+    let control = job.control.as_ref().unwrap().clone();
+    control.pause();
+    state.enqueue_transfer_job(job);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    state
+        .bulk_executor()
+        .unwrap()
+        .submit_detached("held", move |_| {
+            started_tx.send(()).unwrap();
+            let released = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            finished_tx.send(released).unwrap();
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    drop(state);
+    assert!(control.is_cancelled());
+    assert!(!control.is_paused());
+    release_tx.send(()).unwrap();
+    cx.foreground_executor().block_test(cleanup.drain());
+    assert!(
+        finished_rx.try_recv().unwrap(),
+        "drop blocked on the worker"
+    );
+}
+
+#[test]
+fn bulk_executor_is_lazy_and_shutdown_wakes_paused_transfers() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut state = transfer_state(&cx);
+    assert!(state.bulk_executor.is_none());
+    let job = transfer_job("paused", "session", TransferJobStatus::Paused, true);
+    let control = job.control.as_ref().unwrap().clone();
+    control.pause();
+    state.enqueue_transfer_job(job);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let worker_control = control.clone();
+    state
+        .bulk_executor()
+        .unwrap()
+        .submit_detached("paused", move |_| {
+            started_tx.send(()).unwrap();
+            while worker_control.is_paused() && !worker_control.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            finished_tx.send(()).unwrap();
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let external_upload = state.external_editor_upload_control();
+    let overlapping_upload = state.external_editor_upload_control();
+    external_upload.pause();
+    let cleanup = state.begin_bulk_shutdown();
+    assert!(control.is_cancelled());
+    assert!(!control.is_paused());
+    assert!(external_upload.is_cancelled());
+    assert!(overlapping_upload.is_cancelled());
+    let reaper = crate::thread_owner::spawn_joinable("transfer-cleanup-test", cleanup).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    reaper.join().unwrap();
+    assert!(
+        state
+            .bulk_executor()
+            .unwrap()
+            .submit_detached("late", |_| {})
+            .is_err()
+    );
 }
 
 #[test]
@@ -50,6 +136,7 @@ fn inactive_delete_invalidates_cached_directory_until_its_session_is_restored() 
     use zzclawterm_transport::{FileBrowserBackendKind, RemoteFilePath};
 
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.store_browser_session_cache(
         "inactive".into(),
@@ -99,6 +186,7 @@ fn inactive_delete_invalidates_cached_directory_until_its_session_is_restored() 
 #[test]
 fn each_browser_filter_input_invalidates_the_memo_and_nothing_else_does() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut state = transfer_state(&cx);
     state.replace_browser_entries_for_test(vec![
         file_entry("/srv/alpha.txt"),
@@ -177,6 +265,7 @@ fn file_entry(path: &str) -> SftpFileEntry {
 #[test]
 fn cut_clipboard_only_settles_successful_jobs_from_the_current_generation() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.set_file_clipboard(
         "session-a".into(),
@@ -218,6 +307,7 @@ fn cut_clipboard_only_settles_successful_jobs_from_the_current_generation() {
 #[test]
 fn browser_rename_click_requires_selection_before_mouse_down() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
 
     assert!(!transfer.arm_browser_rename_click("/first.txt", true));
@@ -243,6 +333,7 @@ fn browser_rename_click_requires_selection_before_mouse_down() {
 #[test]
 fn browser_context_target_cancels_armed_rename_click() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.select_browser_entry("/first.txt".to_string());
     assert!(transfer.arm_browser_rename_click("/first.txt", true));
@@ -261,6 +352,7 @@ fn browser_context_target_cancels_armed_rename_click() {
 #[test]
 fn browser_external_drop_hover_tracks_overlay_visibility() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
 
     assert!(!transfer.browser_view().external_drop_hover);
@@ -276,6 +368,7 @@ fn browser_external_drop_hover_tracks_overlay_visibility() {
 #[test]
 fn browser_entry_context_target_preserves_an_existing_multi_selection() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let selected = HashSet::from(["/first.txt".to_string(), "/second.txt".to_string()]);
     transfer.replace_browser_selection(selected.clone(), Some("/second.txt".to_string()));
@@ -295,6 +388,7 @@ fn browser_entry_context_target_preserves_an_existing_multi_selection() {
 #[test]
 fn browser_entry_context_on_unmarked_path_collapses_to_a_single_selection() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let selected = HashSet::from(["/first.txt".to_string(), "/second.txt".to_string()]);
     transfer.replace_browser_selection(selected, Some("/second.txt".to_string()));
@@ -317,6 +411,7 @@ fn browser_entry_context_on_unmarked_path_collapses_to_a_single_selection() {
 #[test]
 fn send_to_refreshes_only_a_matching_target_session_cache() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.store_browser_session_cache(
         "target".to_string(),
@@ -373,6 +468,7 @@ fn send_to_refreshes_only_a_matching_target_session_cache() {
 #[test]
 fn browser_navigation_clears_the_rename_click_candidate() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.select_browser_entry("/first.txt".to_string());
     assert!(transfer.arm_browser_rename_click("/first.txt", true));
@@ -409,6 +505,7 @@ fn file_properties(path: &str) -> SftpFileProperties {
 #[test]
 fn browser_history_discards_the_forward_branch_and_tracks_visits() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.browser.history =
         VecDeque::from(["/three".to_string(), "/two".to_string(), "/one".to_string()]);
@@ -430,6 +527,7 @@ fn browser_history_discards_the_forward_branch_and_tracks_visits() {
 #[test]
 fn browser_session_restore_clamps_history_and_clears_interaction() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.select_browser_entry("/stale.txt".to_string());
     assert!(
@@ -470,6 +568,7 @@ fn browser_session_restore_clamps_history_and_clears_interaction() {
 #[test]
 fn browser_session_restore_preserves_the_raw_directory_token() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let remote =
         zzclawterm_transport::RemoteFilePath::from_raw("/srv/non-utf8-?", b"/srv/non-utf8-\xff");
@@ -494,6 +593,7 @@ fn browser_session_restore_preserves_the_raw_directory_token() {
 #[test]
 fn transfer_moves_sftp_cache_and_invalidates_source_navigation() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut source = transfer_state(&cx);
     let mut target = transfer_state(&cx);
     source.store_browser_session_cache(
@@ -531,6 +631,7 @@ fn transfer_moves_sftp_cache_and_invalidates_source_navigation() {
 #[test]
 fn browser_navigation_restores_the_stable_pending_snapshot() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.browser.path = "/optimistic".to_string();
     transfer
@@ -575,6 +676,7 @@ fn browser_navigation_restores_the_stable_pending_snapshot() {
 #[test]
 fn browser_navigation_and_filters_reset_horizontal_scroll() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
 
     transfer
@@ -609,6 +711,7 @@ fn browser_navigation_and_filters_reset_horizontal_scroll() {
 #[test]
 fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let cache = TransferBrowserSessionCacheState {
         entries: Arc::new(vec![file_entry("/srv/app.txt")]),
@@ -776,6 +879,7 @@ fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
 #[test]
 fn browser_selection_replacement_preserves_the_explicit_active_path() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.select_browser_entry("/active".to_string());
 
@@ -842,7 +946,7 @@ fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
         remote_path: remote_path.to_string(),
         raw_path_token: None,
         name: remote_path.rsplit('/').next().unwrap().to_string(),
-        content: String::new(),
+        content: Default::default(),
         search_query: String::new(),
         active_match: 0,
         revision: Some(RemoteTextRevision::from_bytes(
@@ -863,6 +967,72 @@ fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
         backup_warning_path: None,
         focused_field: TransferEditorField::Content,
     }
+}
+
+#[test]
+fn editor_preview_cache_tracks_content_query_match_and_tab_changes() {
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut transfer = transfer_state(&cx);
+    let mut tab = editor_tab("session-a", "/a.txt");
+    tab.content = "中 a a".into();
+    transfer.open_editor_tab(tab);
+    let builds = std::cell::Cell::new(0);
+    let build = |content: &str, query: &str, active_match: usize| {
+        builds.set(builds.get() + 1);
+        format!("{content}/{query}/{active_match}")
+    };
+    assert_eq!(transfer.editor_content_preview(build).as_ref(), "中 a a//0");
+    transfer.active_editor_tab_mut().unwrap().dirty = true;
+    transfer.editor_content_preview(build);
+    assert_eq!(builds.get(), 1);
+    transfer.active_editor_tab_mut().unwrap().search_query = "a".to_string();
+    assert_eq!(
+        transfer.editor_content_preview(build).as_ref(),
+        "中 a a/a/0"
+    );
+    transfer.active_editor_tab_mut().unwrap().active_match = 1;
+    assert_eq!(
+        transfer.editor_content_preview(build).as_ref(),
+        "中 a a/a/1"
+    );
+    transfer.active_editor_tab_mut().unwrap().content.push('🙂');
+    assert_eq!(
+        transfer.editor_content_preview(build).as_ref(),
+        "中 a a🙂/a/1"
+    );
+    transfer.open_editor_tab(editor_tab("session-b", "/b.txt"));
+    assert_eq!(transfer.editor_content_preview(build).as_ref(), "//0");
+    assert_eq!(builds.get(), 5);
+}
+
+#[test]
+fn editor_changes_keep_save_snapshots_independent_and_reject_busy_tabs() {
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut transfer = transfer_state(&cx);
+    let mut tab = editor_tab("session-a", "/a.txt");
+    tab.content = "original".into();
+    let tab_id = tab.id.clone();
+    transfer.open_editor_tab(tab);
+    let saved = transfer.editor_tab_snapshot(&tab_id).unwrap();
+    assert!(!transfer.sync_editor_content(&tab_id, "original"));
+    assert!(!transfer.active_editor_tab().unwrap().dirty);
+    let mut edited = saved.content.clone();
+    edited.push('🙂');
+    assert!(transfer.sync_editor_content(&tab_id, edited.clone()));
+    assert!(
+        transfer
+            .active_editor_tab()
+            .unwrap()
+            .content
+            .same_version(&edited)
+    );
+    assert!(!transfer.sync_editor_content(&tab_id, edited.clone()));
+    assert_eq!(saved.content, "original");
+    assert!(transfer.begin_editor_tab_save(&tab_id));
+    assert!(!transfer.sync_editor_content(&tab_id, "during save"));
+    assert_eq!(transfer.active_editor_tab().unwrap().content, "original🙂");
 }
 
 #[test]
@@ -896,6 +1066,7 @@ fn transfer_paths_own_endpoints_policy_and_prompt_admission() {
 #[test]
 fn transfer_job_retry_keeps_the_original_policy_and_releases_it_after_success() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let initial = transfer.bind_transfer_job_path_options(
         "sftp-upload-1",
@@ -946,6 +1117,7 @@ fn transfer_panel_owns_height_and_resize_lifecycle() {
 #[test]
 fn transfer_file_ops_track_real_rename_input_focus_and_creation_options() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
 
     transfer.schedule_rename_focus();
@@ -993,6 +1165,7 @@ fn transfer_file_ops_track_real_rename_input_focus_and_creation_options() {
 #[test]
 fn external_sync_prompts_are_filtered_by_session_and_window_admission() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.insert_external_sync_prompt(
         "prompt-a".to_string(),
@@ -1039,6 +1212,7 @@ fn external_sync_prompts_are_filtered_by_session_and_window_admission() {
 #[test]
 fn external_sync_upload_resolution_cleans_tracking_and_records_policy() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.insert_external_sync_prompt(
         "prompt-a".to_string(),
@@ -1067,6 +1241,7 @@ fn external_sync_upload_resolution_cleans_tracking_and_records_policy() {
 #[test]
 fn external_sync_session_cleanup_preserves_other_sessions_and_policy() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.insert_external_sync_prompt(
         "prompt-a-1".to_string(),
@@ -1103,6 +1278,7 @@ fn external_sync_session_cleanup_preserves_other_sessions_and_policy() {
 #[test]
 fn transfer_editor_owns_tab_activation_and_close_confirmation() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab_a = editor_tab("session-a", "/srv/a.txt");
     let tab_a_id = tab_a.id.clone();
@@ -1145,6 +1321,7 @@ fn transfer_editor_owns_tab_activation_and_close_confirmation() {
 #[test]
 fn editor_file_tabs_group_by_session_and_close_back_to_related_tab() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let a1 = editor_tab("session-a", "/a1.txt");
     let a2 = editor_tab("session-a", "/a2.txt");
@@ -1174,6 +1351,7 @@ fn editor_file_tabs_group_by_session_and_close_back_to_related_tab() {
 #[test]
 fn transfer_editor_save_completion_closes_requested_tab_atomically() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab = editor_tab("session-a", "/srv/a.txt");
     let tab_id = tab.id.clone();
@@ -1206,6 +1384,7 @@ fn transfer_editor_save_completion_closes_requested_tab_atomically() {
 #[test]
 fn transfer_editor_save_all_waits_for_every_dirty_tab() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab_a = editor_tab("session-a", "/srv/a.txt");
     let tab_a_id = tab_a.id.clone();
@@ -1255,6 +1434,7 @@ fn transfer_editor_save_all_waits_for_every_dirty_tab() {
 #[test]
 fn transfer_editor_conflict_and_session_cleanup_preserve_other_tabs() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab_a = editor_tab("session-a", "/srv/a.txt");
     let tab_a_id = tab_a.id.clone();
@@ -1293,6 +1473,7 @@ fn transfer_editor_conflict_and_session_cleanup_preserve_other_tabs() {
 #[test]
 fn transfer_properties_ignore_stale_results_and_close_for_the_owner_session() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.open_properties_dialog(TransferPropertiesState {
         symlink_target_value: String::new(),
@@ -1388,6 +1569,7 @@ fn transfer_properties_ignore_stale_results_and_close_for_the_owner_session() {
 #[test]
 fn transfer_queue_owns_admission_events_and_job_removal() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut queue = transfer_queue(&cx);
     queue.enqueue(transfer_job(
         "job-1",
@@ -1433,6 +1615,7 @@ fn pausing_and_resuming_visible_jobs_discard_old_speed_samples() {
     use std::time::{Duration, Instant};
 
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut queue = transfer_queue(&cx);
     let mut job = transfer_job("running-a", "session-a", TransferJobStatus::Running, true);
     let start = Instant::now();
@@ -1459,6 +1642,7 @@ fn pausing_and_resuming_visible_jobs_discard_old_speed_samples() {
 #[test]
 fn transfer_queue_batches_are_scoped_to_the_visible_session() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut queue = transfer_queue(&cx);
     queue.enqueue(transfer_job(
         "running-a",
@@ -1506,6 +1690,7 @@ fn transfer_queue_batches_are_scoped_to_the_visible_session() {
 #[test]
 fn transfer_editor_ignores_stale_load_and_failure_generations() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let mut tab = editor_tab("session-a", "/srv/a.txt");
     tab.loading = true;
@@ -1518,7 +1703,7 @@ fn transfer_editor_ignores_stale_load_and_failure_generations() {
     {
         let tab = transfer.active_editor_tab_mut().unwrap();
         tab.generation = current_generation;
-        tab.content = "new incarnation".to_string();
+        tab.content = "new incarnation".into();
     }
     let stale_revision = RemoteTextRevision::from_bytes(
         b"stale",
@@ -1561,6 +1746,7 @@ fn transfer_editor_ignores_stale_load_and_failure_generations() {
 #[test]
 fn transfer_editor_conflict_preserves_baseline_and_stale_save_is_ignored() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab = editor_tab("session-a", "/srv/a.txt");
     let tab_id = tab.id.clone();
@@ -1585,7 +1771,7 @@ fn transfer_editor_conflict_preserves_baseline_and_stale_save_is_ignored() {
         tab.generation = current_generation;
         tab.saving = false;
         tab.dirty = true;
-        tab.content = "newer edit".to_string();
+        tab.content = "newer edit".into();
     }
     let stale_saved_revision = RemoteTextRevision::from_bytes(
         b"local edit",
@@ -1613,6 +1799,7 @@ fn transfer_editor_conflict_preserves_baseline_and_stale_save_is_ignored() {
 #[test]
 fn transfer_editor_cannot_discard_a_save_in_flight() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab = editor_tab("session-a", "/srv/a.txt");
     let tab_id = tab.id.clone();
@@ -1635,6 +1822,7 @@ fn transfer_editor_cannot_discard_a_save_in_flight() {
 #[test]
 fn transfer_editor_keeps_warning_visible_after_successful_save() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab = editor_tab("session-a", "/srv/a.txt");
     let tab_id = tab.id.clone();
@@ -1707,6 +1895,7 @@ fn preview_tab(session_id: &str, remote_path: &str) -> crate::models::TransferPr
 #[test]
 fn preview_workspace_opens_activates_and_closes_tabs() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let first = preview_tab("session", "/a.txt");
     let second = preview_tab("session", "/b.txt");
@@ -1746,6 +1935,7 @@ fn preview_workspace_opens_activates_and_closes_tabs() {
 #[test]
 fn preview_file_tabs_group_by_session_and_close_back_to_related_tab() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let a1 = preview_tab("session-a", "/a1.txt");
     let a2 = preview_tab("session-a", "/a2.txt");
@@ -1774,6 +1964,7 @@ fn preview_file_tabs_group_by_session_and_close_back_to_related_tab() {
 #[test]
 fn preview_completion_is_dropped_for_a_stale_generation() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let tab = preview_tab("session", "/a.txt");
     let tab_id = tab.id.clone();
@@ -1808,6 +1999,7 @@ fn preview_completion_is_dropped_for_a_stale_generation() {
 #[test]
 fn preview_tabs_are_removed_when_their_session_ends() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.open_preview_tab(preview_tab("session-a", "/a.txt"));
     transfer.open_preview_tab(preview_tab("session-b", "/b.txt"));
@@ -1825,6 +2017,7 @@ fn preview_tabs_are_removed_when_their_session_ends() {
 #[test]
 fn preview_zoom_clamps_and_reset_restores_defaults() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     transfer.open_preview_tab(preview_tab("session", "/a.txt"));
 
@@ -1859,6 +2052,7 @@ fn preview_zoom_clamps_and_reset_restores_defaults() {
 #[test]
 fn preview_pdf_navigation_requests_pages_and_applies_under_generation() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let mut tab = preview_tab("session", "/doc.pdf");
     tab.category = zzclawterm_core::PreviewCategory::Pdf;
@@ -1913,6 +2107,7 @@ fn dummy_pdf_page() -> crate::models::PreviewPdfPage {
 #[test]
 fn promised_retry_keeps_original_source_and_execution_contract_until_released() {
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let source = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
         zzclawterm_transport::SshSessionConfig::default(),

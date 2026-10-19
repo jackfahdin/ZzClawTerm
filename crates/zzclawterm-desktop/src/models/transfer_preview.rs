@@ -171,14 +171,14 @@ pub(crate) enum DelimitedSort {
 pub(crate) struct PreviewDelimited {
     /// Every parsed record, header row included. The header is drawn from
     /// `records[0]` when `first_row_is_header` is set.
-    pub(crate) records: Vec<Vec<String>>,
+    pub(crate) records: Arc<Vec<Vec<String>>>,
     /// Whether the first record is treated as a header row.
     pub(crate) first_row_is_header: bool,
     /// Current sort, or `None` for original file order.
     pub(crate) sort: Option<DelimitedSort>,
     /// Order of *body* row indices (into `records`), reflecting the current
     /// sort. Recomputed by [`Self::resort`].
-    pub(crate) order: Vec<usize>,
+    pub(crate) order: Arc<Vec<usize>>,
     /// Whether the body was truncated at the row ceiling during parsing.
     pub(crate) truncated: bool,
     /// Widest column count across all records, so ragged rows still lay out.
@@ -194,10 +194,10 @@ impl PreviewDelimited {
             .unwrap_or(0)
             .max(1);
         let mut data = Self {
-            records,
+            records: Arc::new(records),
             first_row_is_header: true,
             sort: None,
-            order: Vec::new(),
+            order: Arc::new(Vec::new()),
             truncated,
             column_count,
         };
@@ -271,54 +271,62 @@ impl PreviewDelimited {
     /// both directions.
     pub(crate) fn resort(&mut self) {
         let start = self.body_start();
-        self.order = (start..self.records.len()).collect();
+        let mut order: Vec<usize> = (start..self.records.len()).collect();
         let Some(sort) = self.sort else {
+            self.order = Arc::new(order);
             return;
         };
         let (column, descending) = match sort {
             DelimitedSort::Ascending(column) => (column, false),
             DelimitedSort::Descending(column) => (column, true),
         };
-        // `sort_by` is a stable sort, so equal keys keep their file order and a
-        // cleared sort (above) restores it exactly. Emptiness is decided before
-        // the direction is applied, so blanks stay last ascending *and*
-        // descending; only the value comparison between two non-empty cells is
-        // reversed.
-        self.order.sort_by(|left, right| {
-            let left_cell = self.records[*left]
-                .get(column)
-                .map(|cell| cell.trim())
-                .unwrap_or("");
-            let right_cell = self.records[*right]
-                .get(column)
-                .map(|cell| cell.trim())
-                .unwrap_or("");
-            match (left_cell.is_empty(), right_cell.is_empty()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                (false, false) => {
-                    let ordering = compare_non_empty_cells(left_cell, right_cell);
-                    if descending {
-                        ordering.reverse()
-                    } else {
-                        ordering
-                    }
-                }
-            }
-        });
+        // Parse once per cell, not once per comparison. Replacing the immutable
+        // index snapshot leaves in-flight views valid without copying records.
+        let keys: Vec<_> = self.records[start..]
+            .iter()
+            .map(|row| DelimitedSortKey::new(row.get(column).map_or("", String::as_str)))
+            .collect();
+        order.sort_by(|left, right| keys[*left - start].compare(&keys[*right - start], descending));
+        self.order = Arc::new(order);
     }
 }
 
-/// Compare two non-empty cells: numbers numerically, everything else
-/// case-insensitively.
-fn compare_non_empty_cells(left: &str, right: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (left.parse::<f64>(), right.parse::<f64>()) {
-        (Ok(left_num), Ok(right_num)) => {
-            left_num.partial_cmp(&right_num).unwrap_or(Ordering::Equal)
+enum DelimitedSortKey {
+    Number(f64),
+    Text(String),
+    Empty,
+}
+
+impl DelimitedSortKey {
+    fn new(value: &str) -> Self {
+        let value = value.trim();
+        if value.is_empty() {
+            Self::Empty
+        } else if let Ok(number) = value.parse::<f64>()
+            && number.is_finite()
+        {
+            Self::Number(number)
+        } else {
+            Self::Text(value.to_ascii_lowercase())
         }
-        _ => left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()),
+    }
+
+    fn compare(&self, other: &Self, descending: bool) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Category ordering must be independent of the other cell's value:
+        // pairwise numeric-or-text comparisons produce cycles like 2 < 10 < 1a < 2.
+        let order = match (self, other) {
+            (Self::Empty, Self::Empty) => return Ordering::Equal,
+            (Self::Empty, _) => return Ordering::Greater,
+            (_, Self::Empty) => return Ordering::Less,
+            (Self::Number(left), Self::Number(right)) => {
+                left.partial_cmp(right).expect("finite sort keys")
+            }
+            (Self::Number(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Number(_)) => Ordering::Greater,
+            (Self::Text(left), Self::Text(right)) => left.cmp(right),
+        };
+        if descending { order.reverse() } else { order }
     }
 }
 
@@ -783,6 +791,90 @@ mod tests {
             .map(|position| data.row(position).unwrap()[0].as_str())
             .collect();
         assert_eq!(descending, vec!["b", "a", ""]);
+    }
+
+    #[test]
+    fn mixed_sort_keys_are_transitive_in_both_directions() {
+        use super::DelimitedSortKey;
+        let values = [
+            "2", "10", "1a", "", " ", "-2", "1e2", "NaN", "inf", "-inf", "A", "a", "0", "-0",
+        ];
+        let keys: Vec<_> = values
+            .iter()
+            .map(|value| DelimitedSortKey::new(value))
+            .collect();
+        for descending in [false, true] {
+            for a in &keys {
+                for b in &keys {
+                    assert_eq!(a.compare(b, descending), b.compare(a, descending).reverse());
+                    for c in &keys {
+                        if a.compare(b, descending).is_le() && b.compare(c, descending).is_le() {
+                            assert!(a.compare(c, descending).is_le());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_column_sort_preserves_equal_values_and_restores_original_order() {
+        let mut data = delimited(&[
+            &["v"],
+            &["10"],
+            &["1a"],
+            &["2"],
+            &["-2"],
+            &["2.0"],
+            &["NaN"],
+            &[""],
+            &["1e2"],
+        ]);
+        data.cycle_sort(0);
+        assert_eq!(data.order.as_slice(), &[4, 3, 5, 1, 8, 2, 6, 7]);
+        data.cycle_sort(0);
+        assert_eq!(data.order.as_slice(), &[6, 2, 8, 1, 3, 5, 4, 7]);
+        data.cycle_sort(0);
+        assert_eq!(data.order.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn ten_thousand_mixed_rows_sort_without_panicking() {
+        let mut state = 42_u64;
+        let records = std::iter::once(vec!["value".to_string()])
+            .chain((0..10_000).map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let value = (state >> 32) % 1000;
+                vec![if value.is_multiple_of(3) {
+                    format!("{value}a")
+                } else {
+                    value.to_string()
+                }]
+            }))
+            .collect();
+        let mut data = PreviewDelimited::new(records, false);
+        for _ in 0..3 {
+            data.cycle_sort(0);
+        }
+        assert_eq!(data.order.as_slice(), &(1..=10_000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn large_preview_snapshots_share_cells_and_order() {
+        use std::sync::Arc;
+        let mut data = PreviewDelimited::new(vec![vec!["abc".to_string(); 8]; 200_001], false);
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            let snapshot = std::hint::black_box(data.clone());
+            assert!(Arc::ptr_eq(&data.records, &snapshot.records));
+            assert!(Arc::ptr_eq(&data.order, &snapshot.order));
+        }
+        eprintln!("100 shared preview snapshots: {:?}", started.elapsed());
+        let snapshot = data.clone();
+        data.cycle_sort(0);
+        assert!(Arc::ptr_eq(&data.records, &snapshot.records));
+        assert!(!Arc::ptr_eq(&data.order, &snapshot.order));
+        assert_eq!(snapshot.sort, None);
     }
 
     fn dummy_pdf_page() -> super::PreviewPdfPage {

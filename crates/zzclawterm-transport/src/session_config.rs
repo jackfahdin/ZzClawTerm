@@ -136,6 +136,8 @@ pub struct TelnetSessionConfig {
     pub force_character_at_a_time: bool,
     pub send_naws: bool,
     pub send_sga: bool,
+    /// Outbound idle seconds before a Telnet NOP. Zero disables it; Raw TCP ignores it.
+    pub keep_alive_interval_secs: u32,
     pub auto_login: TelnetAutoLoginConfig,
     pub encoding: String,
     pub cols: u16,
@@ -159,6 +161,7 @@ impl std::fmt::Debug for TelnetSessionConfig {
             .field("force_character_at_a_time", &self.force_character_at_a_time)
             .field("send_naws", &self.send_naws)
             .field("send_sga", &self.send_sga)
+            .field("keep_alive_interval_secs", &self.keep_alive_interval_secs)
             .field("auto_login", &self.auto_login)
             .field("encoding", &self.encoding)
             .field("cols", &self.cols)
@@ -720,6 +723,8 @@ impl Default for TelnetSessionConfig {
             force_character_at_a_time: false,
             send_naws: true,
             send_sga: true,
+            keep_alive_interval_secs:
+                zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS,
             auto_login: TelnetAutoLoginConfig::default(),
             encoding: "UTF-8".to_string(),
             cols: 80,

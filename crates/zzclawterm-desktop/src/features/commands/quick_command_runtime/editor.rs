@@ -177,23 +177,31 @@ impl ZzClawTermApp {
             sort_order: original.as_ref().and_then(|command| command.sort_order),
         };
 
+        let Some(save_generation) = self.commands.begin_quick_editor_save() else {
+            return;
+        };
         let label = command.label.clone();
-        self.submit_store_request(
+        let submitted = self.submit_store_request(
             0,
             zzclawterm_store::store_mutation(StoreDomain::Commands, move |store| {
                 store.upsert_quick_command(command, new_category)
             }),
             move |this, event, cx| {
+                let current = this.commands.finish_quick_editor_save(save_generation);
                 match event.outcome {
                     Ok(config) => {
                         this.replace_quick_command_catalog(config.commands, config.categories, cx);
-                        this.commands.close_quick_editor();
+                        if current {
+                            this.commands.close_quick_editor();
+                        }
                         this.settings
                             .update_store_status(format!("quick command '{label}' saved"), true);
                     }
                     Err(error) => {
-                        this.commands
-                            .set_quick_editor_error(error.to_string(), None);
+                        if current {
+                            this.commands
+                                .set_quick_editor_error(error.to_string(), None);
+                        }
                         this.settings.update_store_status(
                             format!("quick command save failed: {error}"),
                             false,
@@ -206,6 +214,10 @@ impl ZzClawTermApp {
             },
             cx,
         );
+        if !submitted {
+            self.commands.finish_quick_editor_save(save_generation);
+        }
+        cx.notify();
     }
 
     pub(in crate::features) fn handle_quick_command_editor_key_down(

@@ -1,9 +1,11 @@
 use gpui::{
-    AnyElement, App, ClickEvent, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, prelude::FluentBuilder as _,
+    AnyElement, App, ClickEvent, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels,
+    RenderOnce, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Disableable, Icon, Selectable, Sizable};
+
+use crate::sizing::{form_control_height, form_control_size};
 
 type ZzClawButtonClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -23,9 +25,14 @@ pub struct ZzClawButton {
     content: Option<AnyElement>,
     variant: ZzClawButtonVariant,
     height: Option<Pixels>,
+    text_color: Option<Hsla>,
+    text_size: Option<Pixels>,
+    font_weight: Option<FontWeight>,
     small: bool,
     compact: bool,
+    form_control: bool,
     full_width: bool,
+    label_left: bool,
     selected: bool,
     disabled: bool,
     loading: bool,
@@ -43,9 +50,14 @@ impl ZzClawButton {
             content: None,
             variant: ZzClawButtonVariant::Secondary,
             height: None,
+            text_color: None,
+            text_size: None,
+            font_weight: None,
             small: false,
             compact: false,
+            form_control: false,
             full_width: false,
+            label_left: false,
             selected: false,
             disabled: false,
             loading: false,
@@ -75,6 +87,21 @@ impl ZzClawButton {
         self
     }
 
+    pub fn text_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.text_color = Some(color.into());
+        self
+    }
+
+    pub fn text_size(mut self, size: Pixels) -> Self {
+        self.text_size = Some(size);
+        self
+    }
+
+    pub fn font_weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = Some(weight);
+        self
+    }
+
     pub fn small(mut self) -> Self {
         self.small = true;
         self
@@ -85,8 +112,20 @@ impl ZzClawButton {
         self
     }
 
+    /// Matches ordinary single-line inputs, with room for a readable action label.
+    pub fn form_control(mut self) -> Self {
+        self.form_control = true;
+        self
+    }
+
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
+        self
+    }
+
+    /// Align the single button label to the start of the available content width.
+    pub fn label_left(mut self) -> Self {
+        self.label_left = true;
         self
     }
 
@@ -127,6 +166,7 @@ impl ZzClawButton {
 
 impl RenderOnce for ZzClawButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let icon_only = self.label.is_empty() && self.icon_path.is_some() && self.content.is_none();
         if self.autofocus && !self.disabled && !self.loading {
             // Initialize the same keyed focus state used by gpui-kit's Button.
             // Render it in this scope below so its focus ring and keyboard clicks
@@ -137,7 +177,33 @@ impl RenderOnce for ZzClawButton {
                 focus
             });
         }
-        let mut button = Button::new(self.id).label(self.label).loading(self.loading);
+        let mut button = Button::new(self.id).loading(self.loading);
+        if icon_only {
+            // An empty label would create a second content slot and offset the icon.
+            if let Some(tooltip) = &self.tooltip {
+                button = button.accessibility_label(tooltip.clone());
+            }
+        } else if self.text_color.is_some()
+            || self.text_size.is_some()
+            || self.font_weight.is_some()
+            || self.label_left
+        {
+            // Kit's label container sets its own size. Style the label itself,
+            // retaining one visible label and its accessible name.
+            button = button.accessibility_label(self.label.clone()).child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .when(self.label_left, |this| this.flex_1().text_left())
+                    .when_some(self.text_color, |this, color| this.text_color(color))
+                    .when_some(self.text_size, |this, size| this.text_size(size))
+                    .when_some(self.font_weight, |this, weight| this.font_weight(weight))
+                    .child(self.label),
+            );
+        } else {
+            button = button.label(self.label);
+        }
         if let Some(icon_path) = self.icon_path {
             button = button.icon(Icon::default().path(icon_path));
         }
@@ -149,6 +215,15 @@ impl RenderOnce for ZzClawButton {
         }
         if self.compact {
             button = button.compact();
+        }
+        if self.form_control {
+            button = button
+                .with_size(form_control_size())
+                .h(form_control_height())
+                .min_w(form_control_height())
+                .px_3()
+                .flex_none()
+                .when(icon_only, |this| this.w(form_control_height()).px_0());
         }
         if self.full_width {
             button = button.w_full();
@@ -170,6 +245,9 @@ impl RenderOnce for ZzClawButton {
         }
         if let Some(height) = self.height {
             button = button.h(height);
+        }
+        if let Some(color) = self.text_color {
+            button = button.text_color(color);
         }
         button.disabled(self.disabled).render(window, cx)
     }
@@ -209,6 +287,11 @@ impl ZzClawIconButton {
         self
     }
 
+    /// Gives a trailing input action the same height and a square hit target.
+    pub fn form_control(self) -> Self {
+        self.size(form_control_height())
+    }
+
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -235,7 +318,7 @@ impl RenderOnce for ZzClawIconButton {
             .when_some(self.icon_size, |icon, size| icon.with_size(size));
         let mut button = Button::new(self.id).icon(icon).ghost().small();
         if let Some(size) = self.size {
-            button = button.size(size);
+            button = button.size(size).flex_none();
         }
         if let Some(tooltip) = self.tooltip {
             button = button.tooltip(tooltip);

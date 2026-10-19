@@ -151,7 +151,7 @@ impl ZzClawTermApp {
         tab: SettingsTab,
         cx: &mut Context<Self>,
     ) {
-        self.hide_ai_provider_secret(cx);
+        self.hide_secret_inputs(cx);
         self.ai.invalidate_provider_jobs();
         self.ensure_settings_tab_inputs(tab, cx);
         self.shell.set_settings_active_tab(tab);
@@ -246,7 +246,11 @@ impl ZzClawTermApp {
             self.ensure_text_input(
                 format!("cloud-sync.input.{}", field.input_key()),
                 &value,
-                secret_input_setup(field.is_secret()),
+                if field == CloudSyncInputField::WebdavPassword {
+                    TextInputSetup::masked()
+                } else {
+                    secret_input_setup(field.is_secret())
+                },
                 cx,
             );
         }
@@ -536,7 +540,7 @@ impl ZzClawTermApp {
         self.ensure_text_input(
             "settings.security.master-password",
             &master_password_draft,
-            crate::features::text_inputs::secret_input_setup(true),
+            TextInputSetup::new_password(),
             cx,
         );
         let idle_minutes = self.settings.summary().idle_lock_minutes;
@@ -580,7 +584,11 @@ impl ZzClawTermApp {
             self.ensure_text_input(
                 format!("ai.input.{}", field.input_key()),
                 &value,
-                secret_input_setup(field == AiInputField::ProxyPassword),
+                if field == AiInputField::ProxyPassword {
+                    TextInputSetup::masked()
+                } else {
+                    TextInputSetup::default()
+                },
                 cx,
             );
         }
@@ -837,6 +845,7 @@ mod tests {
     fn every_settings_tab_builds_its_inputs_and_snapshot_handles() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = hosted(&mut cx, test_dir.path());
 
         for tab in ALL_SETTINGS_TABS {
@@ -888,6 +897,7 @@ mod tests {
     fn cancelling_ai_settings_restores_existing_text_and_number_buffers() {
         let test_dir = TestConfigDir::new("zzclawterm-ai-input-rollback");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = hosted(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.begin_settings_draft(cx);
@@ -935,6 +945,7 @@ mod tests {
     fn static_settings_inputs_outlive_the_page() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = hosted(&mut cx, test_dir.path());
 
         cx.update_entity(&app, |app, cx| {
@@ -1032,6 +1043,7 @@ mod tests {
     fn reveal_boundaries_build_the_inputs_their_rows_draw() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = hosted(&mut cx, test_dir.path());
         let (_, vcx) = cx.add_window_view(|_, _| BareHost);
         let vcx: &mut VisualTestContext = vcx;
@@ -1156,6 +1168,7 @@ mod tests {
 
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
 
         // A master password must be persisted first, matching the reported state
@@ -1265,6 +1278,7 @@ mod tests {
     fn master_password_keystroke_enables_the_flushed_panel_apply_button() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
 
         let persisted = cx.update_entity(&app, |app, _| {
@@ -1341,6 +1355,7 @@ mod tests {
     fn finished_cloud_sync_connection_test_reflushes_the_panel_snapshot() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
 
         let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
@@ -1423,6 +1438,7 @@ mod tests {
     fn successful_cloud_sync_connection_test_records_check_time_only() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-inputs");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
 
         let (endpoint, server) = crate::test_support::spawn_webdav_healthy_server();

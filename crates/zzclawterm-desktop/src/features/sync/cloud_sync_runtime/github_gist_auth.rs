@@ -1,7 +1,7 @@
 use rust_i18n::t;
 
 use futures::StreamExt as _;
-use gpui::{ClipboardItem, Context};
+use gpui::Context;
 
 use crate::features::ZzClawTermApp;
 use crate::http::cloud_sync::run_github_gist_device_flow;
@@ -42,9 +42,10 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn copy_github_gist_user_code(&mut self, cx: &mut Context<Self>) {
         let Some(code) = self.cloud_sync.github_auth().user_code.clone() else {
+            self.copy_text_with_feedback("copy-github-device-code", String::new(), cx);
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        self.copy_text_with_feedback("copy-github-device-code", code, cx);
         self.cloud_sync
             .set_status(t!("settings.githubGistUserCodeCopied").to_string());
         cx.notify();

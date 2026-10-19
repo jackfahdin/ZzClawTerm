@@ -3,7 +3,7 @@
 
 /// Shell chrome palette keyed by appearance.theme (Tauri theme ids).
 /// Field names map to Tauri `ThemeColors` / CSS vars (`--df-*`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ThemePalette {
     pub bg: u32,
     pub surface: u32,
@@ -30,6 +30,15 @@ pub struct ThemePalette {
     pub terminal_selection: u32,
     /// ANSI 0..=15 (normal + bright), Tauri `ThemeColors.terminal`.
     pub terminal_ansi: [u32; 16],
+    pub ui_terminal_bg: u32,
+    pub danger_hover: u32,
+    /// RGBA, unlike the opaque RGB surface tokens.
+    pub shadow: u32,
+    pub scroll_thumb: u32,
+    pub terminal_fg_intense: Option<u32>,
+    pub terminal_line_highlight: u32,
+    pub terminal_find_bg: u32,
+    pub terminal_find_border: u32,
 }
 
 impl ThemePalette {
@@ -44,6 +53,9 @@ impl ThemePalette {
         }
         let bg = self.terminal_bg;
         self.terminal_fg = ensure_contrast(self.terminal_fg, bg, ratio);
+        self.terminal_fg_intense = self
+            .terminal_fg_intense
+            .map(|fg| ensure_contrast(fg, bg, ratio));
         self.terminal_cursor = ensure_contrast(self.terminal_cursor, bg, ratio.min(4.5));
         for color in &mut self.terminal_ansi {
             *color = ensure_contrast(*color, bg, ratio);
@@ -158,9 +170,17 @@ pub fn appearance_theme_label(theme: &str) -> &'static str {
     }
 }
 
-pub fn theme_palette(theme: &str) -> ThemePalette {
+fn builtin_palette(theme: &str) -> ThemePalette {
     match theme {
         "github-dark" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x0d1117,
             surface: 0x161b22,
             surface_elevated: 0x21262d,
@@ -190,6 +210,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "nya-high-contrast" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x03070d,
             surface: 0x07111c,
             surface_elevated: 0x102337,
@@ -219,6 +247,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "nya-high-contrast-white" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xffffff,
             surface: 0xf3f6fb,
             surface_elevated: 0xdbe5f2,
@@ -248,6 +284,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "dracula" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x251b33,
             surface: 0x1d1828,
             surface_elevated: 0x342743,
@@ -277,6 +321,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "nord" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x253040,
             surface: 0x334154,
             surface_elevated: 0x41506a,
@@ -306,6 +358,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "monokai-pro" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x2f271f,
             surface: 0x24201b,
             surface_elevated: 0x44392b,
@@ -335,6 +395,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "solarized-light" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xfff4d6,
             surface: 0xf1dfb8,
             surface_elevated: 0xe7d19f,
@@ -364,6 +432,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "catppuccin-mocha" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x221827,
             surface: 0x1a1420,
             surface_elevated: 0x33263c,
@@ -393,6 +469,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "tokyo-night" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x111827,
             surface: 0x0f1524,
             surface_elevated: 0x1f2d4d,
@@ -422,6 +506,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "one-dark-pro" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x252a32,
             surface: 0x1f242b,
             surface_elevated: 0x333b47,
@@ -451,6 +543,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "rose-pine" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x21121d,
             surface: 0x2b1a28,
             surface_elevated: 0x3b2638,
@@ -480,6 +580,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "gruvbox-dark" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x2b2118,
             surface: 0x211b14,
             surface_elevated: 0x443322,
@@ -509,6 +617,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "github-light" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xffffff,
             surface: 0xf2f5f8,
             surface_elevated: 0xe6edf5,
@@ -538,6 +654,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "catppuccin-latte" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xf3effa,
             surface: 0xe6e0f0,
             surface_elevated: 0xd8cee8,
@@ -567,6 +691,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "rose-pine-dawn" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xfff0e8,
             surface: 0xf7dfd2,
             surface_elevated: 0xebcdbf,
@@ -596,6 +728,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "nord-light" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xeef6fb,
             surface: 0xdce8f2,
             surface_elevated: 0xc9d9e7,
@@ -625,6 +765,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         "one-light" => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0xfafafa,
             surface: 0xececec,
             surface_elevated: 0xdedfe3,
@@ -654,6 +802,14 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
         _ => ThemePalette {
+            ui_terminal_bg: 0,
+            danger_hover: 0,
+            shadow: 0,
+            scroll_thumb: 0,
+            terminal_fg_intense: None,
+            terminal_line_highlight: 0,
+            terminal_find_bg: 0,
+            terminal_find_border: 0,
             bg: 0x0d1117,
             surface: 0x161b22,
             surface_elevated: 0x21262d,
@@ -683,6 +839,115 @@ pub fn theme_palette(theme: &str) -> ThemePalette {
             ],
         },
     }
+}
+
+/// Resolve custom colors without changing the long-standing built-in RGB palette.
+pub fn resolve_theme_palette(
+    id: &str,
+    catalog: &zzclawterm_core::themes::ThemeCatalog,
+) -> ThemePalette {
+    if let Some(theme) = catalog.resolve(id) {
+        return palette_from_theme(&theme);
+    }
+    theme_palette(if zzclawterm_core::themes::is_builtin(id) {
+        id
+    } else {
+        "github-dark"
+    })
+}
+pub fn available_themes(catalog: &zzclawterm_core::themes::ThemeCatalog) -> Vec<(String, String)> {
+    APPEARANCE_THEME_IDS
+        .iter()
+        .map(|id| ((*id).to_string(), appearance_theme_label(id).to_string()))
+        .chain(
+            catalog
+                .available()
+                .into_iter()
+                .map(|theme| (theme.id, theme.name)),
+        )
+        .collect()
+}
+pub fn theme_palette(id: &str) -> ThemePalette {
+    let mut palette = builtin_palette(id);
+    let theme = zzclawterm_core::themes::resolve_theme(id, &Default::default());
+    fill_extended_tokens(&mut palette, &theme);
+    palette
+}
+fn rgb_value(value: &str) -> u32 {
+    let [r, g, b, _] = zzclawterm_core::themes::parse_color(value).expect("validated theme color");
+    (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+}
+fn fill_extended_tokens(p: &mut ThemePalette, theme: &zzclawterm_core::themes::ThemeConfig) {
+    let c = &theme.colors;
+    let t = &c.terminal;
+    p.ui_terminal_bg = rgb_value(&c.bg_terminal);
+    p.danger_hover = rgb_value(&c.danger_hover);
+    let [r, g, b, a] = zzclawterm_core::themes::parse_color(&c.shadow).expect("validated shadow");
+    p.shadow = u32::from_be_bytes([r, g, b, a]);
+    p.scroll_thumb = rgb_value(&c.scroll_thumb);
+    p.terminal_fg_intense = t.foreground_intense.as_deref().map(rgb_value);
+    p.terminal_line_highlight = rgb_value(&t.line_highlight);
+    // The terminal cell cache uses opaque RGB. Composite translucent search color
+    // over the terminal surface once, rather than dropping alpha during painting.
+    let [r, g, b, a] = zzclawterm_core::themes::parse_color(&t.find_match_background)
+        .expect("validated search color");
+    let blend = |v: u8, shift: u32| {
+        (u32::from(v) * u32::from(a)
+            + ((p.terminal_bg >> shift) & 255) * (255 - u32::from(a))
+            + 127)
+            / 255
+    };
+    p.terminal_find_bg = (blend(r, 16) << 16) | (blend(g, 8) << 8) | blend(b, 0);
+    p.terminal_find_border = rgb_value(&t.find_match_border);
+}
+pub fn palette_from_theme(theme: &zzclawterm_core::themes::ThemeConfig) -> ThemePalette {
+    let c = &theme.colors;
+    let t = &c.terminal;
+    let mut p = builtin_palette("github-dark");
+    p.bg = rgb_value(&c.bg);
+    p.surface = rgb_value(&c.bg_panel);
+    p.surface_elevated = rgb_value(&c.bg_hover);
+    p.section_header = rgb_value(&c.bg_section_header);
+    p.hover = rgb_value(&c.bg_hover);
+    p.input = rgb_value(&c.bg_input);
+    p.border = rgb_value(&c.border);
+    p.text = rgb_value(&c.text);
+    p.text_muted = rgb_value(&c.text_muted);
+    p.text_dimmed = rgb_value(&c.text_dimmed);
+    p.primary = rgb_value(&c.primary);
+    p.primary_hover = rgb_value(&c.primary_hover);
+    p.on_primary = rgb_value(&c.on_primary);
+    p.focus_ring = rgb_value(&c.focus_ring);
+    p.link = rgb_value(&c.link);
+    p.accent = rgb_value(&c.accent);
+    p.success = rgb_value(&c.success);
+    p.warning = rgb_value(&c.warning);
+    p.danger = rgb_value(&c.danger);
+    p.terminal_bg = rgb_value(&t.background);
+    p.terminal_fg = rgb_value(&t.foreground);
+    p.terminal_cursor = rgb_value(&t.cursor);
+    p.terminal_selection = rgb_value(&t.selection_background);
+    p.terminal_ansi = [
+        &t.black,
+        &t.red,
+        &t.green,
+        &t.yellow,
+        &t.blue,
+        &t.magenta,
+        &t.cyan,
+        &t.white,
+        &t.bright_black,
+        &t.bright_red,
+        &t.bright_green,
+        &t.bright_yellow,
+        &t.bright_blue,
+        &t.bright_magenta,
+        &t.bright_cyan,
+        &t.bright_white,
+    ]
+    .map(|v| rgb_value(v));
+    fill_extended_tokens(&mut p, theme);
+    p
 }
 
 #[cfg(test)]
@@ -844,5 +1109,27 @@ mod tests {
             assert_eq!(palette.link, link, "{id} link");
             assert_eq!(palette.accent, accent, "{id} accent");
         }
+    }
+    #[test]
+    fn custom_colors_cover_extended_tokens_and_unknown_ids_fall_back() {
+        let mut theme = zzclawterm_core::themes::builtins()[0].copy_as_custom();
+        theme.colors.primary = "#123456".into();
+        theme.colors.scroll_thumb = "#abcdef".into();
+        theme.colors.shadow = "rgba(1,2,3,0.5)".into();
+        theme.colors.terminal.foreground_intense = Some("#112233".into());
+        theme.colors.terminal.find_match_background = "rgba(255,0,0,0.5)".into();
+        theme.colors.terminal.background = "#000000".into();
+        let mut catalog = zzclawterm_core::themes::ThemeCatalog::default();
+        catalog.upsert(theme.clone()).unwrap();
+        let p = super::resolve_theme_palette(&theme.id, &catalog);
+        assert_eq!(p.primary, 0x123456);
+        assert_eq!(p.scroll_thumb, 0xabcdef);
+        assert_eq!(p.shadow, 0x01020380);
+        assert_eq!(p.terminal_fg_intense, Some(0x112233));
+        assert_eq!(p.terminal_find_bg, 0x800000);
+        assert_eq!(
+            super::resolve_theme_palette("missing", &catalog),
+            theme_palette("github-dark")
+        );
     }
 }

@@ -6,7 +6,7 @@ use crate::features::formatting::short_id;
 use crate::features::{ZzClawTermApp, session::SavedConnectionStartOptions};
 use crate::models::{SessionLaunchConfig, StartupCommandRequest};
 
-use super::session_runtime::MultiplexSshStartRequest;
+use super::session_runtime::{MultiplexSshStartRequest, SessionStartFocusTarget};
 
 const RECONNECTING_BANNER: &str = "\r\n\x1b[36m[Reconnecting…]\x1b[0m\r\n";
 
@@ -41,7 +41,7 @@ impl ZzClawTermApp {
         &mut self,
         startup_command: Option<StartupCommandRequest>,
         working_dir: Option<PathBuf>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.session.start_has_active_pending() || self.session.start_has_active_failed() {
@@ -145,9 +145,15 @@ impl ZzClawTermApp {
             SessionLaunchConfig::Rdp(_) | SessionLaunchConfig::Vnc(_) => {
                 self.shell
                     .set_status("remote desktop duplication is not available".to_string());
+                self.shell.show_workspace();
+                cx.notify();
+                return;
             }
         }
         self.shell.show_workspace();
+        if self.session.start_has_active_pending() {
+            self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);
+        }
         cx.notify();
     }
 
@@ -287,6 +293,7 @@ impl ZzClawTermApp {
         if update.already_disconnected {
             return;
         }
+        self.close_terminal_executions_for_session(session_id, cx);
         let banner = "\r\n\x1b[31m[Session disconnected]\x1b[0m\r\n\x1b[33m[Press Enter to reconnect]\x1b[0m\r\n";
         let encoding = self
             .session
@@ -373,6 +380,7 @@ impl ZzClawTermApp {
             return;
         };
         self.session.mark_session_disconnected(&old_id);
+        self.close_terminal_executions_for_session(&old_id, cx);
         let launch_config = metadata.launch_config;
         let source_connection_id = metadata.source_connection_id;
         let ai_execution_profile = metadata.ai_execution_profile;
@@ -499,9 +507,89 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
     use zzclawterm_terminal::TerminalScreen;
 
     use super::RECONNECTING_BANNER;
+    use crate::features::test_support::{
+        app_with_visible_local_session, session_focus_test_window,
+    };
+    use crate::models::SessionLaunchConfig;
+    use crate::test_support::TestConfigDir;
+
+    #[test]
+    fn duplicate_session_focus_handoff_survives_menu_dismissal() {
+        let root = TestConfigDir::new("zzclawterm-duplicate-focus");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+        let cx = session_focus_test_window(&mut cx, &app);
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                // Exercise the real start path without launching an interactive shell.
+                let mut metadata = app.session.metadata("source").unwrap().clone();
+                let SessionLaunchConfig::Local(config) = &mut metadata.launch_config else {
+                    panic!("expected local fixture");
+                };
+                config.shell_path = Some(
+                    root.path()
+                        .join("missing-test-shell")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                app.session.register_session_metadata("source", metadata);
+                window.focus(app.session.dialog_tab_actions_focus(), cx);
+
+                app.duplicate_active_session(window, cx);
+                assert!(app.session.start_has_active_pending());
+                assert!(app.terminal.input_focus().is_focused(window));
+                // Menus restore their previous focus after the action returns.
+                window.focus(app.session.dialog_tab_actions_focus(), cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(app.read(cx).terminal.input_focus().is_focused(window));
+        });
+    }
+
+    #[test]
+    fn duplicate_without_a_valid_start_preserves_existing_input_focus() {
+        for missing_source in [true, false] {
+            let root = TestConfigDir::new("zzclawterm-duplicate-invalid-start-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    if missing_source {
+                        app.session.clear_active_session();
+                    } else {
+                        let mut metadata = app.session.metadata("source").unwrap().clone();
+                        let SessionLaunchConfig::Local(config) = &mut metadata.launch_config else {
+                            panic!("expected local fixture");
+                        };
+                        config.encoding = "invalid-test-encoding".into();
+                        app.session.register_session_metadata("source", metadata);
+                    }
+                    window.focus(app.session.prompt_credential_focus(), cx);
+                    app.duplicate_active_session(window, cx);
+                    assert!(!app.session.start_has_active_pending());
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(
+                    app.read(cx)
+                        .session
+                        .prompt_credential_focus()
+                        .is_focused(window)
+                );
+            });
+        }
+    }
 
     #[test]
     fn reconnect_banner_returns_cursor_to_first_column_before_server_output() {

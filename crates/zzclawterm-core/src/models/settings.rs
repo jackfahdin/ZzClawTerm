@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::default_true;
+use super::window_material::{WindowMaterial, default_window_background_opacity};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -179,13 +180,20 @@ pub enum RecordingRotationPolicy {
 pub struct AppSettingsSummary {
     pub theme: String,
     #[serde(default)]
+    pub custom_themes: crate::themes::ThemeCatalog,
+    #[serde(default)]
     pub background_image_path: Option<String>,
     #[serde(default = "default_background_image_fit")]
     pub background_image_fit: String,
     /// Wallpaper opacity percent (0..=100).
     #[serde(default = "default_background_image_opacity")]
     pub background_image_opacity: u8,
-    /// Shell chrome opacity percent when wallpaper is active (0..=100).
+    #[serde(default)]
+    pub window_material: WindowMaterial,
+    /// Theme tint below wallpaper and content surfaces, in percent (0..=100).
+    #[serde(default = "default_window_background_opacity")]
+    pub window_background_opacity: u8,
+    /// Shell chrome opacity percent when wallpaper or native transparency is active (0..=100).
     #[serde(default = "default_background_content_opacity")]
     pub background_content_opacity: u8,
     pub language: String,
@@ -372,6 +380,10 @@ pub struct AppSettingsSummary {
     #[serde(default = "default_true")]
     pub interaction_terminal_zoom_enabled: bool,
     pub interaction_command_suggestions_enabled: bool,
+    /// Gates terminal credential suggestions and pending password autofill.
+    /// Defaults on for existing data that predates the field.
+    #[serde(default = "default_true")]
+    pub interaction_credential_autofill_enabled: bool,
     pub interaction_command_suggestion_min_chars: u32,
     pub interaction_command_suggestion_max_chars: u32,
     pub interaction_word_separators: String,
@@ -497,11 +509,14 @@ impl Default for AppSettingsSummary {
             background_image_fit: default_background_image_fit(),
             background_image_opacity: default_background_image_opacity(),
             background_content_opacity: default_background_content_opacity(),
+            window_material: WindowMaterial::default(),
+            window_background_opacity: default_window_background_opacity(),
             language: "zh-CN".to_string(),
             terminal_font_family: "JetBrains Mono".to_string(),
             terminal_font_size: 16,
             cursor_style: default_cursor_style(),
             cursor_blink: default_cursor_blink(),
+            custom_themes: crate::themes::ThemeCatalog::default(),
             terminal_theme: None,
             minimum_contrast_ratio: default_minimum_contrast_ratio(),
             ui_font_family: default_ui_font_family(),
@@ -583,6 +598,7 @@ impl Default for AppSettingsSummary {
             interaction_mouse_events_require_alt: false,
             interaction_terminal_zoom_enabled: true,
             interaction_command_suggestions_enabled: true,
+            interaction_credential_autofill_enabled: true,
             interaction_command_suggestion_min_chars: 2,
             interaction_command_suggestion_max_chars: 64,
             interaction_word_separators: " \t\r\n()[]{}\"':=,;|&<>".to_string(),
@@ -959,6 +975,9 @@ mod tests {
         // back to autostart-on and empty (auto-discover) path.
         assert!(summary.x11_server_autostart);
         assert!(summary.x11_server_path.is_empty());
+        // The credential autofill switch joins the command-suggestion switch in
+        // defaulting on, so legacy documents keep the panel enabled.
+        assert!(summary.interaction_credential_autofill_enabled);
     }
 
     #[test]

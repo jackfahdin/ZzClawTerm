@@ -32,6 +32,7 @@ impl Render for CommandPanelFixture {
 fn command_panel_keeps_editor_and_action_inside_empty_workspace_at_all_sizes() {
     let root = TestTempDir::new("zzclawterm-command-panel-layout");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let runtime = AppRuntime::from_parts_for_test(
         RuntimeMode::Portable,
         root.path().to_path_buf(),

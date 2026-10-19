@@ -2,10 +2,11 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use uuid::Uuid;
 
+use crate::heartbeat::{Heartbeat, Supervisor};
 use crate::helper_process;
 use crate::{
     FRAME_PAYLOAD_LIMIT, MAX_VNC_CLIPBOARD_TEXT_BYTES, MAX_VNC_INPUT_BATCH, PROTOCOL_VERSION,
@@ -13,21 +14,19 @@ use crate::{
     VncControlMessage, VncError, VncErrorKind, VncInputEvent, VncRuntimeEvent, VncSecurityMode,
     VncServerCapabilities, VncSessionConfig, VncSessionDrain, VncSessionState,
     decode_cursor_packet_owned, decode_frame_packet_owned, decode_vnc_control, encode_vnc_control,
-    read_packet, validate_committed_text,
+    validate_committed_text,
 };
+use zzclawterm_core::runtime::reaper::Reaper;
 
 const FRAME_QUEUE_LIMIT: usize = 64;
 const FRAME_QUEUE_BYTE_LIMIT: usize = FRAME_PAYLOAD_LIMIT;
 const CONTROL_QUEUE_LIMIT: usize = 256;
 const CONTROL_QUEUE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const HELPER_PACKAGE: &str = "zzclawterm-vnc-helper";
-/// Cargo package that builds the helper; the executable name above is the
-/// `[[bin]]` name, which no longer matches the package name.
-const HELPER_CARGO_PACKAGE: &str = "zzclawterm-vnc-helper";
 const HELPER_ENV_VAR: &str = "ZZCLAWTERM_VNC_HELPER";
 
 fn resolve_helper_path() -> Result<PathBuf, VncError> {
-    helper_process::resolve_helper(HELPER_PACKAGE, HELPER_CARGO_PACKAGE, HELPER_ENV_VAR)
+    helper_process::resolve_helper(HELPER_PACKAGE, HELPER_ENV_VAR)
         .map_err(|message| VncError::new(VncErrorKind::HelperMissing, message))
 }
 
@@ -81,6 +80,7 @@ struct EventQueue {
     space_available: Condvar,
     frame_item_limit: usize,
     frame_byte_limit: usize,
+    heartbeat: Arc<Heartbeat>,
 }
 
 impl Default for EventQueue {
@@ -97,6 +97,7 @@ impl EventQueue {
             space_available: Condvar::new(),
             frame_item_limit,
             frame_byte_limit,
+            heartbeat: Arc::new(Heartbeat::default()),
         }
     }
 
@@ -126,10 +127,12 @@ impl EventQueue {
             && (state.control.len() >= CONTROL_QUEUE_LIMIT
                 || state.control_bytes.saturating_add(cost) > CONTROL_QUEUE_BYTE_LIMIT)
         {
+            self.heartbeat.blocked(true);
             state = self
                 .space_available
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.heartbeat.blocked(false);
         }
         if state.closed {
             return false;
@@ -199,10 +202,12 @@ impl EventQueue {
             && (state.frames.len() >= self.frame_item_limit
                 || state.frame_bytes.saturating_add(cost) > self.frame_byte_limit)
         {
+            self.heartbeat.blocked(true);
             state = self
                 .space_available
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.heartbeat.blocked(false);
             if epoch.is_some() && state.current_epoch != epoch {
                 return false;
             }
@@ -292,8 +297,9 @@ struct SessionRecord {
     state: Arc<Mutex<VncSessionState>>,
     capabilities: Arc<Mutex<Option<VncServerCapabilities>>>,
     queue: Arc<EventQueue>,
-    writer: helper_process::IpcWriter,
-    child: Option<Child>,
+    writer: Arc<helper_process::IpcWriter>,
+    child: Arc<Mutex<Option<Child>>>,
+    supervisor: Option<Supervisor>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -304,6 +310,7 @@ struct SessionRecord {
 #[derive(Default)]
 pub struct VncSessionManager {
     sessions: Mutex<HashMap<String, SessionRecord>>,
+    reaper: Mutex<Option<Reaper<SessionRecord>>>,
     /// Installed once by the application; copied into every session queue so
     /// the reader thread can wake the consumer instead of being polled.
     queue_waker: Mutex<Option<QueueWaker>>,
@@ -328,6 +335,22 @@ impl VncSessionManager {
         self.queue_waker.lock().ok()?.clone()
     }
 
+    fn ensure_reaper(&self) -> Result<(), VncError> {
+        let mut slot = self
+            .reaper
+            .lock()
+            .map_err(|_| VncError::new(VncErrorKind::Ipc, "reaper lock poisoned"))?;
+        if slot.is_none() {
+            *slot = Some(
+                Reaper::new("vnc-reaper", 64, |mut record: SessionRecord| {
+                    cleanup_child(&mut record)
+                })
+                .map_err(|error| VncError::new(VncErrorKind::Ipc, error.to_string()))?,
+            );
+        }
+        Ok(())
+    }
+
     pub fn create_session(&self, config: VncSessionConfig) -> Result<String, VncError> {
         self.create_session_with_id(Uuid::new_v4().to_string(), config)
     }
@@ -343,7 +366,7 @@ impl VncSessionManager {
             let mut sessions = self.sessions.lock().map_err(|_| registry_poisoned())?;
             if sessions
                 .get(&session_id)
-                .is_some_and(|record| record.child.is_some())
+                .is_some_and(|record| record.reader.is_some())
             {
                 return Err(VncError::new(
                     VncErrorKind::Protocol,
@@ -352,6 +375,7 @@ impl VncSessionManager {
             }
             sessions.remove(&session_id);
         }
+        self.ensure_reaper()?;
         let helper = resolve_helper_path()?;
         let helper_process::HelperProcess {
             mut child,
@@ -380,20 +404,59 @@ impl VncSessionManager {
         let queue = Arc::new(EventQueue::with_waker(self.queue_waker()));
         let state = Arc::new(Mutex::new(VncSessionState::Connecting));
         let capabilities = Arc::new(Mutex::new(None));
-        let reader = spawn_reader(
+        let mut record = SessionRecord {
+            state: state.clone(),
+            capabilities: capabilities.clone(),
+            queue: queue.clone(),
+            writer: Arc::new(writer),
+            child: Arc::new(Mutex::new(Some(child))),
+            reader: None,
+            supervisor: None,
+        };
+        record.reader = match spawn_reader(
             session_id.clone(),
             stdout,
             queue.clone(),
             state.clone(),
             capabilities.clone(),
-        );
-        let mut record = SessionRecord {
-            state,
-            capabilities,
-            queue,
-            writer,
-            child: Some(child),
-            reader: Some(reader),
+        ) {
+            Ok(reader) => Some(reader),
+            Err(error) => {
+                cleanup_child(&mut record);
+                return Err(VncError::new(
+                    VncErrorKind::Ipc,
+                    format!("failed to start helper reader: {error}"),
+                ));
+            }
+        };
+        let ping_writer = Arc::clone(&record.writer);
+        let timeout_queue = Arc::clone(&queue);
+        let timeout_state = Arc::clone(&state);
+        let timeout_id = session_id.clone();
+        record.supervisor = match Supervisor::spawn(
+            Arc::clone(&queue.heartbeat),
+            Arc::clone(&record.child),
+            move |sequence| {
+                let _ = send_control(&ping_writer, &VncControlMessage::Ping { sequence });
+            },
+            move || {
+                push_reader_error(
+                    &timeout_id,
+                    &timeout_queue,
+                    &timeout_state,
+                    VncErrorKind::Timeout,
+                    "helper control loop did not respond within 10 seconds".into(),
+                )
+            },
+        ) {
+            Ok(supervisor) => Some(supervisor),
+            Err(error) => {
+                cleanup_child(&mut record);
+                return Err(VncError::new(
+                    VncErrorKind::Ipc,
+                    format!("failed to start helper supervisor: {error}"),
+                ));
+            }
         };
         let start_result = send_control(
             &record.writer,
@@ -626,33 +689,30 @@ impl VncSessionManager {
     /// Remove UI ownership immediately; reap the helper off the UI thread.
     /// The detached record cannot replace a later session with the same id.
     pub fn close_detached(&self, session_id: &str) -> Result<(), VncError> {
-        let Some(mut record) = self
+        self.ensure_reaper()?;
+        let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| registry_poisoned())?
-            .remove(session_id)
-        else {
-            return Ok(());
-        };
-        record.queue.trust.cancel();
-        record.queue.close();
-        let session_id = session_id.to_owned();
-        std::thread::spawn(move || {
-            record.queue.trust.invalidate(true);
-            let _ = send_control(
-                &record.writer,
-                &VncControlMessage::Input {
-                    session_id: session_id.clone(),
-                    events: vec![VncInputEvent::ReleaseAllInputs],
-                },
-            );
-            let _ = send_control(
-                &record.writer,
-                &VncControlMessage::Disconnect { session_id },
-            );
-            cleanup_child(&mut record);
-        });
-        Ok(())
+            .map_err(|_| VncError::new(VncErrorKind::Ipc, "session registry lock poisoned"))?;
+        let slot = self
+            .reaper
+            .lock()
+            .map_err(|_| VncError::new(VncErrorKind::Ipc, "reaper lock poisoned"))?;
+        slot.as_ref()
+            .ok_or_else(|| VncError::new(VncErrorKind::Ipc, "reaper unavailable"))?
+            .try_submit_with(|| {
+                let record = sessions.remove(session_id)?;
+                set_state(&record.state, VncSessionState::Disconnecting);
+                record.queue.close();
+                let _ = send_control(
+                    &record.writer,
+                    &VncControlMessage::Disconnect {
+                        session_id: session_id.to_owned(),
+                    },
+                );
+                Some(record)
+            })
+            .map_err(|error| VncError::new(VncErrorKind::Ipc, error.to_string()))
     }
 
     pub fn state(&self, session_id: &str) -> Option<VncSessionState> {
@@ -672,7 +732,7 @@ impl VncSessionManager {
             .map(|sessions| {
                 sessions
                     .iter()
-                    .filter_map(|(id, record)| record.child.is_some().then_some(id.clone()))
+                    .filter_map(|(id, record)| record.reader.is_some().then_some(id.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -798,10 +858,10 @@ fn spawn_reader(
     queue: Arc<EventQueue>,
     state: Arc<Mutex<VncSessionState>>,
     capabilities: Arc<Mutex<Option<VncServerCapabilities>>>,
-) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name(format!("zzclawterm-vnc-reader-{session_id}"))
-        .spawn(move || {
+) -> std::io::Result<JoinHandle<()>> {
+    zzclawterm_core::runtime::worker::spawn(
+        format!("zzclawterm-vnc-reader-{session_id}"),
+        move || {
             struct InvalidateOnExit(Arc<crate::vnc_trust::VncTrustState>);
             impl Drop for InvalidateOnExit {
                 fn drop(&mut self) {
@@ -811,7 +871,7 @@ fn spawn_reader(
             let _trust_lifetime = InvalidateOnExit(queue.trust.clone());
             let mut hello_received = false;
             loop {
-                let packet = match read_packet(&mut stdout) {
+                let packet = match crate::ipc::read_packet_budgeted(&mut stdout) {
                     Ok(Some(packet)) => packet,
                     Ok(None) => break,
                     Err(error) => {
@@ -819,7 +879,11 @@ fn spawn_reader(
                             &session_id,
                             &queue,
                             &state,
-                            VncErrorKind::Ipc,
+                            if error.kind() == std::io::ErrorKind::OutOfMemory {
+                                VncErrorKind::ResourceExhausted
+                            } else {
+                                VncErrorKind::Ipc
+                            },
                             error.to_string(),
                         );
                         return;
@@ -829,6 +893,11 @@ fn spawn_reader(
                     PacketType::Control => decode_vnc_control(&packet)
                         .map_err(|error| VncError::new(VncErrorKind::Protocol, error.to_string()))
                         .and_then(|message| {
+                            if let VncControlMessage::Pong { sequence } = message {
+                                require_server_hello(hello_received, "Pong")?;
+                                queue.heartbeat.pong(sequence);
+                                return Ok(());
+                            }
                             handle_control(
                                 &session_id,
                                 message,
@@ -867,6 +936,9 @@ fn spawn_reader(
                             Ok(())
                         }),
                 };
+                if hello_received {
+                    queue.heartbeat.hello();
+                }
                 if let Err(error) = result {
                     push_reader_error(&session_id, &queue, &state, error.kind, error.message);
                     return;
@@ -890,9 +962,12 @@ fn spawn_reader(
                     VncErrorKind::HelperCrashed,
                     "the VNC helper exited unexpectedly".to_string(),
                 );
+            } else {
+                // Reap normal EOF without a later heartbeat timeout.
+                queue.heartbeat.fail_once();
             }
-        })
-        .expect("failed to spawn the VNC helper reader")
+        },
+    )
 }
 
 fn require_server_hello(received: bool, packet_kind: &str) -> Result<(), VncError> {
@@ -952,7 +1027,8 @@ fn handle_control(
                 "VNC helper sent duplicate ServerHello",
             ));
         }
-        VncControlMessage::ClientHello { .. }
+        VncControlMessage::Ping { .. }
+        | VncControlMessage::ClientHello { .. }
         | VncControlMessage::ServerKeyResponse { .. }
         | VncControlMessage::Connect { .. }
         | VncControlMessage::Input { .. }
@@ -1034,8 +1110,8 @@ fn handle_control(
             fatal,
         } if event_session == session_id => {
             if fatal {
-                queue.trust.invalidate(false);
-                set_state(state, VncSessionState::Failed);
+                push_reader_error(session_id, queue, state, error.kind, error.message);
+                return Ok(());
             }
             queue.push_control(VncRuntimeEvent::Error {
                 session_id: session_id.to_string(),
@@ -1055,17 +1131,16 @@ fn push_reader_error(
     kind: VncErrorKind,
     message: String,
 ) {
+    if !queue.heartbeat.fail_once() {
+        return;
+    }
+    queue.close();
     let error = VncError::new(kind, message);
     set_state(state, VncSessionState::Failed);
-    queue.push_control(VncRuntimeEvent::Error {
+    queue.push_control_force(VncRuntimeEvent::Error {
         session_id: session_id.to_string(),
         error,
         fatal: true,
-    });
-    queue.push_control(VncRuntimeEvent::State {
-        session_id: session_id.to_string(),
-        state: VncSessionState::Failed,
-        message: None,
     });
 }
 
@@ -1078,8 +1153,16 @@ fn set_state(state: &Arc<Mutex<VncSessionState>>, new_state: VncSessionState) {
 fn cleanup_child(record: &mut SessionRecord) {
     record.queue.trust.invalidate(true);
     record.queue.close();
-    helper_process::cleanup_child(&mut record.child, &mut record.reader);
-    record.writer.shutdown();
+    if let Some(mut supervisor) = record.supervisor.take() {
+        supervisor.stop();
+    }
+    helper_process::cleanup_child(
+        &mut record.child.lock().unwrap_or_else(|p| p.into_inner()),
+        &mut record.reader,
+    );
+    if let Some(writer) = Arc::get_mut(&mut record.writer) {
+        writer.shutdown();
+    }
 }
 
 fn is_latin1_within_limit(text: &str) -> bool {
@@ -1102,6 +1185,51 @@ mod tests {
         VncReconnectConfig, VncRuntimeEvent, VncSecurityConfig, VncSecurityMode,
         VncServerCapabilities, VncSessionConfig, VncSessionState,
     };
+
+    #[test]
+    fn pixel_budget_survives_drain_and_releases_on_reset_and_close() {
+        let budget = crate::pixel_memory::PixelBudget::test(1024);
+        let frame = crate::RemoteFrameEvent::Bitmap {
+            epoch: 1,
+            full: true,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: crate::PixelFormat::Bgra8,
+            pixels: vec![0; 4].into(),
+        };
+        let packet = crate::encode_frame_packet_owned("s", frame).unwrap();
+        let mut wire = Vec::new();
+        crate::write_packet(&mut wire, &packet).unwrap();
+        let received = crate::ipc::read_packet_inner(&mut wire.as_slice(), Some(&budget))
+            .unwrap()
+            .unwrap();
+        let (_, frame) = crate::decode_frame_packet_owned(received).unwrap();
+        let queue = EventQueue::default();
+        queue.push_reset("s", 1, 1, 1);
+        queue.push_frame(frame);
+        let allocated = budget.used();
+        assert!(allocated > 0);
+        let drain = queue.drain();
+        assert_eq!(budget.used(), allocated, "draining transfers the lease");
+        let retained = drain.frames.clone();
+        drop(drain);
+        queue.push_reset("s", 2, 1, 1);
+        queue.close();
+        assert_eq!(
+            budget.used(),
+            allocated,
+            "a consumer may still own drained pixels"
+        );
+        drop(retained);
+        assert_eq!(budget.used(), 0);
+        let tiny = crate::pixel_memory::PixelBudget::test(1);
+        let error = crate::ipc::read_packet_inner(&mut wire.as_slice(), Some(&tiny)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(tiny.used(), 0);
+    }
 
     #[test]
     fn server_hello_must_be_first_and_records_capabilities_only_once() {
@@ -1257,7 +1385,7 @@ mod tests {
             height: 1,
             stride: 4,
             format: PixelFormat::Rgba8,
-            pixels: vec![x as u8; 4],
+            pixels: vec![x as u8; 4].into(),
         }
     }
 
@@ -1292,7 +1420,7 @@ mod tests {
             height: 1,
             stride: 4,
             format: PixelFormat::Rgba8,
-            pixels: vec![10, 20, 30, 255],
+            pixels: vec![10, 20, 30, 255].into(),
         };
         framebuffer.apply(&frame).expect("apply");
         assert_eq!(framebuffer.pixels(), &[30, 20, 10, 255]);
@@ -1328,7 +1456,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 hotspot: RemotePoint { x: 0, y: 0 },
-                pixels: vec![shape_id as u8; 4],
+                pixels: vec![shape_id as u8; 4].into(),
             })
         };
         assert!(queue.push_cursor(shape(1)));

@@ -1,3 +1,6 @@
+pub mod reaper;
+pub mod worker;
+
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;

@@ -1,8 +1,7 @@
-use rust_i18n::t;
-
-use std::borrow::Cow;
-
 use gpui::{Context, IntoElement, KeyDownEvent, div, prelude::*, px, rgb};
+use rust_i18n::t;
+use zzclawterm_core::models::credentials::PasswordUpdate;
+use zzclawterm_ui::ZzClawButton;
 
 use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
 use crate::models::SecurityPasswordEditorState;
@@ -16,85 +15,186 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        // A stored secret is never shown, so the box says so in its
-        // placeholder rather than standing a row of bullets in for it. The
-        // reveal toggle now unmasks the box itself.
-        let password_placeholder = if editor.has_password {
-            t!("passwordManager.passwordUnchanged")
-        } else {
-            Cow::Borrowed("")
-        };
-        let password_masked = !editor.show_password;
-        div()
+        let busy = self.security.editor_busy();
+        let mut body = div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap_3()
             .track_focus(self.security.password_editor_focus())
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.handle_security_password_editor_key_down(event, window, cx);
-            }))
-            .child(security_editor_field(
-                self,
+                if this.handle_security_password_editor_key_down(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }));
+        for (id, label, value) in [
+            (
                 "pw-name",
-                t!("passwordManager.nameLabel"),
+                t!("authForm.accountName").to_string(),
                 editor.name.clone(),
-                TextInputSetup::default(),
-                cx,
-            ))
-            .child(security_editor_field(
-                self,
+            ),
+            (
                 "pw-username",
-                t!("passwordManager.usernameLabel"),
+                t!("credentialManager.usernameOptionalLabel").to_string(),
                 editor.username.clone(),
+            ),
+        ] {
+            body = body.child(security_editor_field(
+                self,
+                id,
+                label,
+                value,
                 TextInputSetup::default(),
                 cx,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .items_end()
-                    .gap_1()
-                    .child(div().min_w_0().flex_1().child(security_editor_field(
-                        self,
-                        "pw-value",
-                        t!("passwordManager.passwordLabel"),
-                        editor.password.expose_secret().to_owned(),
-                        TextInputSetup {
-                            placeholder: password_placeholder.into(),
-                            masked: password_masked,
-                            multi_line: false,
-                            submit_on_enter: false,
-                            code: false,
-                        },
-                        cx,
-                    )))
-                    .child(
-                        zzclawterm_ui::ZzClawIconButton::new(
-                            "security-pw-toggle-vis",
-                            if editor.show_password {
-                                "icons/eye-off.svg"
-                            } else {
-                                "icons/eye.svg"
-                            },
-                        )
-                        .tooltip(t!(if editor.show_password {
-                            "passwordManager.hidePassword"
-                        } else {
-                            "passwordManager.showPassword"
-                        }))
-                        .disabled(self.security.editor_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_security_password_editor_visibility(cx);
-                        })),
-                    ),
-            )
-            .when_some(editor.error.clone(), |this, error| {
-                this.child(
+            ));
+            if editor.error_field == Some(id) {
+                body = body.child(
                     div()
-                        .text_size(px(10.))
+                        .text_xs()
                         .text_color(rgb(palette.danger))
-                        .child(error),
+                        .child(editor.error.clone().unwrap_or_default()),
+                );
+            }
+        }
+        let status = match &editor.password_update {
+            PasswordUpdate::Remove => t!("authForm.passwordWillRemove"),
+            PasswordUpdate::Replace(_) => t!("authForm.newPassword"),
+            PasswordUpdate::Keep if editor.has_password => t!("authForm.passwordSaved"),
+            PasswordUpdate::Keep => t!("authForm.passwordNotSaved"),
+        };
+        body = body.child(div().text_xs().child(status));
+        if let PasswordUpdate::Replace(value) = &editor.password_update {
+            body = body.child(div().flex().items_end().gap_1().child(
+                div().min_w_0().flex_1().child(security_editor_field(
+                    self,
+                    "pw-value",
+                    if editor.id.is_some() {
+                        t!("authForm.newPasswordRequiredLabel")
+                    } else {
+                        t!("authForm.passwordOptional")
+                    },
+                    value.expose_secret().to_owned(),
+                    TextInputSetup::new_password(),
+                    cx,
+                )),
+            ));
+            if editor.error_field == Some("pw-value") {
+                body = body.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette.danger))
+                        .child(editor.error.clone().unwrap_or_default()),
+                );
+            }
+        }
+        let mut actions = div().flex().flex_wrap().gap_2();
+        if matches!(editor.password_update, PasswordUpdate::Keep) {
+            actions = actions.child(
+                ZzClawButton::new("account-change-password", t!("authForm.changePassword"))
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_account_password_update(
+                            PasswordUpdate::Replace(Default::default()),
+                            cx,
+                        )
+                    })),
+            );
+            if editor.has_password {
+                actions = actions.child(
+                    ZzClawButton::new("account-remove-password", t!("authForm.removePassword"))
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_account_password_update(PasswordUpdate::Remove, cx)
+                        })),
+                );
+            }
+        } else if editor.id.is_some() {
+            actions = actions.child(
+                ZzClawButton::new("account-cancel-password", t!("authForm.undoPasswordChange"))
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_account_password_update(PasswordUpdate::Keep, cx)
+                    })),
+            );
+        }
+        if let Some(id) = editor.id.clone() {
+            if editor.has_password {
+                let copy_id = id.clone();
+                let reveal_id = id.clone();
+                actions = actions
+                    .child(
+                        ZzClawButton::new(
+                            "account-show-original",
+                            t!("authForm.viewOriginalPassword"),
+                        )
+                        .disabled(busy)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.reveal_security_password(reveal_id.clone(), window, cx)
+                            },
+                        )),
+                    )
+                    .child(
+                        ZzClawButton::new(
+                            "account-copy-original",
+                            t!("authForm.copyOriginalPassword"),
+                        )
+                        .disabled(busy)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.copy_security_password(copy_id.clone(), window, cx)
+                            },
+                        )),
+                    );
+            }
+            body = body.child(actions);
+            if let Some(value) = self.security.revealed_password(&id) {
+                body = body.child(div().text_xs().whitespace_normal().child(value.to_owned()));
+            }
+            let mut seen = std::collections::HashSet::new();
+            let names = self
+                .connection_state
+                .connections()
+                .iter()
+                .filter(|connection| {
+                    connection.auth.as_ref().is_some_and(|auth| {
+                        auth.account_id.as_deref() == Some(id.as_str())
+                            || auth.password_id.as_deref() == Some(id.as_str())
+                    }) && seen.insert(connection.id.clone())
+                })
+                .map(|connection| connection.name.clone())
+                .collect::<Vec<_>>();
+            body = body.child(
+                ZzClawButton::new(
+                    "account-references",
+                    t!("authForm.references", count = names.len()),
                 )
-            })
+                .disabled(busy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(editor) = this.security.password_editor_mut() {
+                        editor.references_expanded = !editor.references_expanded;
+                    }
+                    cx.notify();
+                })),
+            );
+            if editor.references_expanded {
+                for name in names {
+                    body = body.child(div().text_xs().child(name));
+                }
+            }
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.text_muted))
+                    .child(t!("authForm.nextAuthentication")),
+            );
+        } else {
+            body = body.child(actions);
+        }
+        if editor.error_field.is_none()
+            && let Some(error) = editor.error
+        {
+            body = body.child(div().text_xs().text_color(rgb(palette.danger)).child(error));
+        }
+        body.text_size(px(12.))
     }
 }

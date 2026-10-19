@@ -331,27 +331,22 @@ pub(super) fn external_editor_watch_key(remote_path: &str, local_path: &Path) ->
 pub(super) fn upload_external_editor_file(
     service: RemoteFileService,
     job_id: &str,
-    remote_path: &str,
-    raw_path_token: Option<String>,
+    remote_file_path: RemoteFilePath,
     local_path: &Path,
+    control: SftpTransferControl,
     transfer_options: SftpTransferOptions,
     transfer_tx: &futures::channel::mpsc::UnboundedSender<TransferJobResult>,
 ) {
     let _ = transfer_tx.unbounded_send(TransferJobResult {
         id: job_id.to_string(),
         event: TransferJobEvent::Started {
-            detail: format!("Syncing external edit {remote_path}"),
+            detail: format!("Syncing external edit {}", remote_file_path.display_path),
         },
     });
-    let control = SftpTransferControl::new();
     let progress_id = job_id.to_string();
     let progress_tx = transfer_tx.clone();
-    let remote_file_path = RemoteFilePath {
-        display_path: remote_path.to_string(),
-        raw_path_token,
-    };
     let result = service
-        .upload_remote_file_with_progress_and_control_options(
+        .upload_remote_edit_with_progress_and_control_options(
             local_path.to_path_buf(),
             &remote_file_path,
             control,

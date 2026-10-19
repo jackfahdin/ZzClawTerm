@@ -103,8 +103,14 @@ impl AutoSyncCoordinator {
                     }
                 }
             }
-            Err(zzclawterm_core::CloudSyncError::Conflict(_)) => {
+            Err(zzclawterm_core::CloudSyncError::Conflict(preview)) => {
                 self.remote_available = false;
+                if preview.overwrite_blocked {
+                    // The configured master password does not match this device,
+                    // so neither side can be reconciled by retrying. Resume when
+                    // the settings change, which is how the password is fixed.
+                    self.paused = true;
+                }
             }
             Err(error) => {
                 self.paused = permanent_auto_sync_error(error);

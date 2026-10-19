@@ -1,3 +1,4 @@
+use rust_i18n::t;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -11,6 +12,7 @@ use zzclawterm_transport::{
 
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::TransferFileClipboard;
+use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
@@ -167,6 +169,13 @@ impl ZzClawTermApp {
         {
             self.shell
                 .set_status("cut is only available for remote files");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -195,6 +204,13 @@ impl ZzClawTermApp {
             .collect::<Vec<_>>();
         if entries.is_empty() {
             self.shell.set_status("select files to copy or cut");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -205,6 +221,13 @@ impl ZzClawTermApp {
             "{} {count} file item(s)",
             if cut { "cut" } else { "copied" }
         ));
+        self.notify_operation_at(
+            cx.active_window(),
+            "file-clipboard",
+            zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+            t!("common.operationSucceeded").to_string(),
+            cx,
+        );
         cx.notify();
     }
 
@@ -234,11 +257,25 @@ impl ZzClawTermApp {
             internal
         } else {
             self.shell.set_status("file clipboard is empty");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
         if clipboard.entries.is_empty() {
             self.shell.set_status("file clipboard has no usable paths");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -246,6 +283,13 @@ impl ZzClawTermApp {
             || (!prefer_local && self.session.is_disconnected(&clipboard.source_session_id))
         {
             self.shell.set_status("file clipboard session disconnected");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -261,11 +305,25 @@ impl ZzClawTermApp {
         let (Some(source_service), Some(target_service)) = (source_service, target_service) else {
             self.shell
                 .set_status("file clipboard session is unavailable");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         };
         if clipboard.cut && target_service.kind() != FileBrowserBackendKind::Remote {
             self.shell.set_status("cut requires a remote destination");
+            self.notify_operation_at(
+                cx.active_window(),
+                "file-clipboard",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                t!("common.operationFailed").to_string(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -352,18 +410,14 @@ impl ZzClawTermApp {
                 options: options.clone(),
             };
             let tx = self.transfer.transfer_event_sender();
-            self.submit_transfer_blocking_job(
-                "file-clipboard",
-                id.clone(),
-                tx.clone(),
-                move || {
-                    let result = run_clipboard_copy(request);
-                    let _ = tx.unbounded_send(TransferJobResult {
-                        id,
-                        event: TransferJobEvent::Finished(result),
-                    });
-                },
-            );
+            self.submit_bulk_transfer_job("file-clipboard", id.clone(), tx.clone(), move || {
+                let mut progress = TransferProgressEventSender::new(id.clone(), tx.clone());
+                let result = run_clipboard_copy(request, move |value| progress.send(value));
+                let _ = tx.unbounded_send(TransferJobResult {
+                    id,
+                    event: TransferJobEvent::Finished(result),
+                });
+            });
             started += 1;
         }
         self.shell
@@ -383,7 +437,10 @@ struct ClipboardCopyRequest {
     options: SftpPathTransferOptions,
 }
 
-fn run_clipboard_copy(request: ClipboardCopyRequest) -> Result<TransferJobOutput, String> {
+fn run_clipboard_copy(
+    request: ClipboardCopyRequest,
+    progress: impl FnMut(zzclawterm_transport::SftpTransferProgress) + Send + 'static,
+) -> Result<TransferJobOutput, String> {
     let ClipboardCopyRequest {
         source_service,
         target_service,
@@ -418,7 +475,7 @@ fn run_clipboard_copy(request: ClipboardCopyRequest) -> Result<TransferJobOutput
         control: control.clone(),
         options,
     }
-    .execute()
+    .execute_with_progress(progress)
     .map_err(|error| error.to_string())?;
     if !summary.copied {
         return Err("copy skipped; source was kept".into());
@@ -474,6 +531,53 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use zzclawterm_transport::SftpFileType;
+
+    #[test]
+    fn clipboard_copy_reports_partial_progress_before_the_finished_output() {
+        use super::{ClipboardCopyRequest, run_clipboard_copy};
+        use crate::models::TransferJobOutput;
+        use std::sync::{Arc, Mutex};
+        use zzclawterm_transport::{
+            FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
+        };
+
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-clipboard-progress");
+        std::fs::create_dir_all(root.path()).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        let payload = vec![7_u8; 512 * 1024];
+        std::fs::write(&source, &payload).unwrap();
+        let values = Arc::new(Mutex::new(Vec::new()));
+        let record = values.clone();
+        let output = run_clipboard_copy(
+            ClipboardCopyRequest {
+                source_service: FileBrowserService::local(),
+                target_service: FileBrowserService::local(),
+                source: RemoteFilePath::new(source.to_string_lossy()),
+                target_path: target.to_string_lossy().into_owned(),
+                target_session_id: "target".into(),
+                cut: false,
+                control: SftpTransferControl::new(),
+                options: SftpPathTransferOptions::default(),
+            },
+            move |p| record.lock().unwrap().push(p),
+        )
+        .unwrap();
+        assert!(
+            matches!(output, TransferJobOutput::Sent { bytes, .. } if bytes == payload.len() as u64)
+        );
+        let values = values.lock().unwrap();
+        assert!(
+            values
+                .iter()
+                .any(|p| p.bytes_transferred > 0 && p.bytes_transferred < payload.len() as u64)
+        );
+        assert_eq!(
+            values.last().unwrap().bytes_transferred,
+            payload.len() as u64
+        );
+        assert_eq!(std::fs::read(target).unwrap(), payload);
+    }
 
     #[test]
     fn remote_copy_rejects_self_descendant_and_root_after_normalization() {

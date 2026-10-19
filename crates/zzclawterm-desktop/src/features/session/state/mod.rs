@@ -159,6 +159,7 @@ pub(in crate::features) struct PromptInputTarget {
     pub id: String,
     pub seed: String,
     pub echo: bool,
+    pub kind: zzclawterm_ui::ZzClawInputKind,
 }
 
 /// Session-scoped overlays, confirmations and editing dialogs.
@@ -289,10 +290,12 @@ impl SessionFeatureState {
         while let Some(event) = self.events.pending.pop_front() {
             let session_id = match &event {
                 SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputBoundary { session_id, .. }
                 | SessionEvent::OutputDropped { session_id, .. }
                 | SessionEvent::CwdChanged { session_id, .. }
                 | SessionEvent::CommandAccepted { session_id, .. }
                 | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if selected.contains(session_id) {
@@ -365,6 +368,16 @@ impl SessionFeatureState {
                     .ssh_connections
                     .insert(session_id.clone(), connection);
             }
+            // Transferred UI events and detector-held bytes precede any output
+            // the destination bridge can receive after claiming this session.
+            if let Some(state) = self.protocols.zmodem.get(&session_id)
+                && let Some(consumer) = state.runtime_consumer()
+            {
+                self.event_bridge
+                    .bind_protocol_consumer(&session_id, consumer);
+                state.rebind_wake(self.event_bridge.protocol_wake());
+            }
+            self.event_bridge.hold_session_for_ui(&session_id);
             self.event_bridge.claim_session(&session_id);
         }
         ordered_ids.retain(|id| self.metadata.contains_key(id));
@@ -815,12 +828,88 @@ impl SessionFeatureState {
             .configure(encoding, scrollback_limit, session_encodings);
     }
 
+    pub(in crate::features) fn begin_terminal_execution_boundary(
+        &self,
+        session_id: &str,
+        token: &str,
+    ) {
+        self.event_bridge.begin_output_boundary(session_id, token);
+    }
+
     pub(in crate::features) fn route_session_events_to_ui(&self, session_id: &str) {
         self.event_bridge.route_session_to_ui(session_id);
     }
 
+    pub(super) fn start_zmodem_runtime(
+        &mut self,
+        session_id: &str,
+        transfer: zzclawterm_transport::ZmodemTransfer,
+    ) -> std::io::Result<zzclawterm_transport::zmodem::runtime::ZmodemRuntime> {
+        let worker = zzclawterm_transport::zmodem::runtime::ZmodemRuntime::spawn(
+            self.manager_handle(),
+            session_id.into(),
+            transfer,
+        )?;
+        worker.set_wake(self.event_bridge.protocol_wake());
+        let bridge_events = self
+            .event_bridge
+            .begin_protocol_handoff(session_id, worker.consumer_id());
+        let mut bootstrap = VecDeque::new();
+        let mut retained = VecDeque::new();
+        while let Some(event) = self.events.pending.pop_front() {
+            let id = match &event {
+                SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputBoundary { session_id, .. }
+                | SessionEvent::OutputDropped { session_id, .. }
+                | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandAccepted { session_id, .. }
+                | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::CleanupFailed { session_id, .. }
+                | SessionEvent::Error { session_id, .. } => session_id,
+            };
+            if id == session_id {
+                bootstrap.push_back(event);
+            } else {
+                retained.push_back(event);
+            }
+        }
+        self.events.pending = retained;
+        bootstrap.extend(bridge_events);
+        worker.activate(bootstrap);
+        Ok(worker)
+    }
+
+    pub(super) fn finish_zmodem_runtime(
+        &mut self,
+        session_id: &str,
+        pending: VecDeque<SessionEvent>,
+    ) {
+        self.events.pending.extend(pending);
+        self.event_bridge.finish_protocol_handoff(session_id);
+    }
+
     pub(in crate::features) fn resume_session_direct_output(&self, session_id: &str) {
         self.event_bridge.resume_session_direct_output(session_id);
+    }
+
+    /// Release UI handoffs only after the caller has submitted its output batch.
+    pub(in crate::features) fn complete_event_bridge_ui_drain(&self) {
+        let pending_sessions = self
+            .events
+            .pending
+            .iter()
+            .map(|event| match event {
+                SessionEvent::Output { session_id, .. }
+                | SessionEvent::OutputBoundary { session_id, .. }
+                | SessionEvent::OutputDropped { session_id, .. }
+                | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandAccepted { session_id, .. }
+                | SessionEvent::Exited { session_id, .. }
+                | SessionEvent::CleanupFailed { session_id, .. }
+                | SessionEvent::Error { session_id, .. } => session_id.clone(),
+            })
+            .collect();
+        self.event_bridge.complete_ui_drain(&pending_sessions);
     }
 
     pub(in crate::features) fn clear_event_bridge_session(&self, session_id: &str) {
@@ -1146,6 +1235,7 @@ impl SessionFeatureState {
             return false;
         };
         state.stop_worker();
+        self.event_bridge.finish_protocol_handoff(session_id);
         true
     }
 
@@ -2217,6 +2307,11 @@ impl SessionPromptState {
             id: format!("ssh.keyboard-interactive.{}.{index}", state.id),
             seed: state.responses[index].clone(),
             echo: state.request.prompts[index].echo,
+            kind: if index == 0 && state.request.otp_id.is_some() {
+                zzclawterm_ui::ZzClawInputKind::OneTimeCode
+            } else {
+                zzclawterm_ui::ZzClawInputKind::Secret
+            },
         })
     }
 
@@ -2276,6 +2371,12 @@ impl SessionPromptState {
                 id: format!("ssh.credential.{}", state.id),
                 seed: state.value.clone(),
                 echo: state.prompt.echo,
+                kind: match state.prompt.kind {
+                    zzclawterm_transport::SshCredentialPromptKind::Password => {
+                        zzclawterm_ui::ZzClawInputKind::Password
+                    }
+                    _ => zzclawterm_ui::ZzClawInputKind::Secret,
+                },
             });
         }
         let state = self.active_keyboard_interactive_prompt.as_ref()?;
@@ -2285,6 +2386,11 @@ impl SessionPromptState {
             id: format!("ssh.keyboard-interactive.{}.{index}", state.id),
             seed: state.responses[index].clone(),
             echo: state.request.prompts[index].echo,
+            kind: if index == 0 && state.request.otp_id.is_some() {
+                zzclawterm_ui::ZzClawInputKind::OneTimeCode
+            } else {
+                zzclawterm_ui::ZzClawInputKind::Secret
+            },
         })
     }
 

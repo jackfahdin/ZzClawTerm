@@ -73,18 +73,27 @@ fn terminal_view_has_cached_scrollback_snapshot_covering_offset(
     if offset == 0 {
         return view.frame_snapshot.is_some();
     }
-    if view.scrollback_snapshots.contains_key(&offset) {
+    if view
+        .scrollback_snapshots
+        .get(&offset)
+        .is_some_and(|snapshot| {
+            view.history_state()
+                .preserves_coordinates_from(snapshot.history)
+        })
+    {
         return true;
     }
     let viewport_rows = view.viewport_rows_for_ui();
     let scrollback_len = view.scrollback_len_for_ui();
     view.scrollback_snapshots.values().any(|snapshot| {
-        terminal_snapshot_covers_display_offset(
-            snapshot.as_ref(),
-            offset,
-            viewport_rows,
-            scrollback_len,
-        )
+        view.history_state()
+            .preserves_coordinates_from(snapshot.history)
+            && terminal_snapshot_covers_display_offset(
+                snapshot.as_ref(),
+                offset,
+                viewport_rows,
+                scrollback_len,
+            )
     })
 }
 
@@ -145,13 +154,15 @@ fn terminal_view_has_cached_scroll_snapshot_ready_for_user_scroll(
     let scrollback_len = view.scrollback_len_for_ui();
     let margin_rows = terminal_scroll_snapshot_ready_margin_rows(viewport_rows);
     view.scrollback_snapshots.values().any(|snapshot| {
-        terminal_snapshot_covers_display_offset_with_margin(
-            snapshot.as_ref(),
-            offset,
-            viewport_rows,
-            scrollback_len,
-            margin_rows,
-        )
+        view.history_state()
+            .preserves_coordinates_from(snapshot.history)
+            && terminal_snapshot_covers_display_offset_with_margin(
+                snapshot.as_ref(),
+                offset,
+                viewport_rows,
+                scrollback_len,
+                margin_rows,
+            )
     })
 }
 
@@ -901,24 +912,8 @@ impl ZzClawTermApp {
                 }
             }
             TerminalFrameEvent::ClearExceptInput(snapshot) => {
-                // Readline shells can repaint their input after the local clear.
-                // Windows local shells retain the ConPTY host's physical cursor.
-                let redraw = self
-                    .session
-                    .metadata(&snapshot.session_id)
-                    .is_some_and(|metadata| {
-                        !metadata.disconnected
-                            && match &metadata.launch_config {
-                                crate::models::SessionLaunchConfig::Ssh(config) => {
-                                    !config.is_network_device()
-                                }
-                                crate::models::SessionLaunchConfig::Local(_) => !cfg!(windows),
-                                _ => false,
-                            }
-                    });
-                if redraw {
-                    let _ = self.write_session_raw_input_recorded(&snapshot.session_id, &[0x0c]);
-                }
+                // This is a local presentation operation. A shell redraw (Ctrl+L)
+                // can archive the retained prompt again and recreate scrollback.
                 if let Some(view) = self.terminal.view.views.get_mut(&snapshot.session_id) {
                     view.clear_presentation_except_input(snapshot.revision, &snapshot.snapshot);
                 }
@@ -942,6 +937,7 @@ impl ZzClawTermApp {
             session_id,
             visible_text,
             recording_text_bytes,
+            input_highlights,
             snapshot,
             action_links,
             protocol_state,
@@ -973,6 +969,12 @@ impl ZzClawTermApp {
         }
         self.observe_recording_prompt_output(&session_id, &visible_text);
         let is_active = self.session.active_id() == Some(session_id.as_str());
+        if is_active
+            && accepted_bytes > 0
+            && self.terminal.assist.observe_credential_prompt_output()
+        {
+            cx.notify();
+        }
         let presentation = TerminalPresentation::resolve(
             is_active,
             self.terminal_session_has_visible_surface(&session_id),
@@ -1057,6 +1059,7 @@ impl ZzClawTermApp {
                     revision,
                 );
             }
+            view.frame_input_highlights = view.frame_snapshot.as_ref().and(input_highlights);
             (unread_changed, view.scroll_offset)
         };
         if shell_edit_snapshot_available {
@@ -1235,7 +1238,14 @@ impl ZzClawTermApp {
                 frame.action_links,
                 frame.revision,
             );
+            view.frame_input_highlights = frame.input_highlights;
         } else {
+            if !view
+                .history_state()
+                .preserves_coordinates_from(frame.snapshot.history)
+            {
+                return TerminalFrameApplyResult::default();
+            }
             view.remember_scrollback_snapshot(frame.offset, frame.snapshot.clone());
             if let Some(action_links) = frame.action_links {
                 view.scrollback_action_links
@@ -2139,6 +2149,7 @@ mod frame_event_queue_tests {
 
     fn output_frame(session_id: &str, revision: u64) -> TerminalFrameEvent {
         TerminalFrameEvent::Output(TerminalFrameOutputEvent {
+            input_highlights: None,
             session_id: session_id.to_string(),
             visible_text: format!("rev-{revision}"),
             recording_text_bytes: 0,
@@ -2184,6 +2195,7 @@ mod frame_event_queue_tests {
 
     fn snapshot_frame(session_id: &str, offset: usize) -> TerminalFrameEvent {
         TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
+            input_highlights: None,
             session_id: session_id.to_string(),
             offset,
             snapshot: std::sync::Arc::new(

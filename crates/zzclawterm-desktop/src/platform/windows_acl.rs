@@ -19,7 +19,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-pub(super) fn set_current_user_only(path: &Path, directory: bool) -> anyhow::Result<()> {
+pub(crate) fn set_current_user_only(path: &Path, directory: bool) -> anyhow::Result<()> {
     let user = current_user_sid(path)?;
     let acl = create_private_acl(path, user.sid(), directory)?;
     let path_wide = wide_path(path)?;
@@ -55,7 +55,7 @@ fn current_user_sid(path: &Path) -> anyhow::Result<CurrentUserSid> {
         unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut required_length) };
     if initial_result != 0 {
         return Err(anyhow::Error::msg(format!(
-            "Failed to query the current user SID for MCP discovery data during \
+            "Failed to query the current user SID for private application data during \
              GetTokenInformation(size) for '{}': unexpected result",
             path.display()
         )));
@@ -87,7 +87,7 @@ fn current_user_sid(path: &Path) -> anyhow::Result<CurrentUserSid> {
     let sid = token_user.User.Sid;
     if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
         return Err(anyhow::Error::msg(format!(
-            "Failed to query the current user SID for MCP discovery data during \
+            "Failed to query the current user SID for private application data during \
              GetTokenInformation(TokenUser) for '{}': Windows returned an invalid SID",
             path.display()
         )));
@@ -132,7 +132,7 @@ fn create_private_acl(
     }
     if raw_acl.is_null() {
         return Err(anyhow::Error::msg(format!(
-            "Failed to build a current-user-only ACL for MCP discovery data during \
+            "Failed to build a current-user-only ACL for private application data during \
              SetEntriesInAclW for '{}': Windows returned a null ACL",
             path.display()
         )));
@@ -144,7 +144,7 @@ fn wide_path(path: &Path) -> anyhow::Result<Vec<u16>> {
     let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
     if wide.contains(&0) {
         return Err(anyhow::Error::msg(format!(
-            "Failed to apply a current-user-only ACL to MCP discovery data: path contains an \
+            "Failed to apply a current-user-only ACL to private application data: path contains an \
              embedded NUL: '{}'",
             path.display()
         )));
@@ -160,7 +160,7 @@ fn last_error(operation: &str, path: &Path) -> anyhow::Error {
 fn status_error(operation: &str, path: &Path, status: u32) -> anyhow::Error {
     let source = std::io::Error::from_raw_os_error(status as i32);
     anyhow::Error::msg(format!(
-        "Failed to apply a current-user-only ACL to MCP discovery data during {operation} for \
+        "Failed to apply a current-user-only ACL to private application data during {operation} for \
          '{}': win32_error={status} ({source})",
         path.display()
     ))
@@ -204,7 +204,7 @@ impl<T> Drop for LocalAllocation<T> {
 }
 
 #[cfg(test)]
-pub(super) fn assert_current_user_only(path: &Path, directory: bool) {
+pub(crate) fn assert_current_user_only(path: &Path, directory: bool) {
     use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, AclSizeInformation, EqualSid, GetAce,

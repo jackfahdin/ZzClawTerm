@@ -11,6 +11,7 @@ use crate::models::{
 fn tab_transfer_preserves_split_tree_terminal_contents_and_active_session() {
     let root = TestTempDir::new("zzclawterm-tab-transfer");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let target_root = TestTempDir::new("zzclawterm-tab-transfer-target");
     let source = app_with_visible_local_session(&mut cx, root.path(), "tab");
     let target = app_with_visible_local_session(&mut cx, target_root.path(), "existing");
@@ -70,6 +71,7 @@ fn tab_transfer_preserves_split_tree_terminal_contents_and_active_session() {
 fn rejected_transfer_rolls_back_contents_order_and_active_tab() {
     let root = TestTempDir::new("zzclawterm-tab-transfer-rollback");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let target_root = TestTempDir::new("zzclawterm-tab-transfer-rollback-target");
     let source = app_with_visible_local_session(&mut cx, root.path(), "tab");
     let target = app_with_visible_local_session(&mut cx, target_root.path(), "tab");
@@ -103,6 +105,7 @@ fn rejected_transfer_rolls_back_contents_order_and_active_tab() {
 fn tab_transfer_rejects_stale_revision_and_missing_tab_without_mutating_source() {
     let root = TestTempDir::new("zzclawterm-tab-transfer-preflight");
     let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let source = app_with_visible_local_session(&mut cx, root.path(), "tab");
     source.update(&mut cx, |app, cx| {
         let revision = app.workspace_revision();

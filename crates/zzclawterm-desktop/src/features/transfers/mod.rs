@@ -6,7 +6,7 @@ mod drag_aggregate;
 mod drag_download;
 pub(in crate::features) mod drag_export;
 mod editor_window;
-mod external_sync_runtime;
+pub(in crate::features) mod external_sync_runtime;
 mod external_sync_window;
 pub(in crate::features) mod preview;
 mod remote_text_editor;
@@ -14,7 +14,7 @@ mod state;
 pub(in crate::features) use state::TransferSessionTransferBundle;
 pub(in crate::features) use state::TransferTreePresentation;
 mod transfer_events;
-mod transfer_jobs;
+pub(in crate::features) mod transfer_jobs;
 mod transfer_options;
 mod transfer_paths;
 mod transfer_widgets;
@@ -88,6 +88,26 @@ impl RemoteFileBackendPreferenceStore for ConnectionStoreBackendPreferences {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn submit_bulk_transfer_job(
+        &mut self,
+        name: &'static str,
+        job_id: String,
+        tx: futures::channel::mpsc::UnboundedSender<crate::models::TransferJobResult>,
+        run: impl FnOnce() + Send + 'static,
+    ) {
+        match self.transfer.bulk_executor() {
+            Ok(executor) => {
+                transfer_jobs::submit_transfer_blocking_job(executor, name, job_id, tx, run)
+            }
+            Err(error) => {
+                let _ = tx.unbounded_send(crate::models::TransferJobResult {
+                    id: job_id,
+                    event: crate::models::TransferJobEvent::Finished(Err(error.to_string())),
+                });
+            }
+        }
+    }
+
     pub(in crate::features) fn submit_transfer_blocking_job(
         &self,
         name: &'static str,

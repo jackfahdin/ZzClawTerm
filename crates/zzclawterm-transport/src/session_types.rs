@@ -28,12 +28,48 @@ pub enum SessionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
-    Output { session_id: String, data: Vec<u8> },
-    OutputDropped { session_id: String, bytes: usize },
-    CwdChanged { session_id: String, cwd: String },
-    CommandAccepted { session_id: String, command: String },
-    Exited { session_id: String, reason: String },
-    Error { session_id: String, message: String },
+    /// In-process ordering fence; never sent to the terminal or persisted.
+    OutputBoundary {
+        session_id: String,
+        token: String,
+    },
+    CleanupFailed {
+        session_id: String,
+        consumer_id: Option<SessionEventConsumerId>,
+        operation: CleanupOperation,
+    },
+    Output {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    OutputDropped {
+        session_id: String,
+        bytes: usize,
+    },
+    CwdChanged {
+        session_id: String,
+        cwd: String,
+    },
+    CommandAccepted {
+        session_id: String,
+        command: String,
+    },
+    Exited {
+        session_id: String,
+        reason: String,
+    },
+    Error {
+        session_id: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOperation {
+    Terminate,
+    Wait,
+    ReaderJoin,
+    WriterJoin,
 }
 
 pub trait TerminalTransport: Send {
@@ -72,6 +108,14 @@ pub struct SessionDrain {
 
 #[derive(Debug, Error)]
 pub enum SessionError {
+    #[error("session background worker unavailable: {0}")]
+    Worker(#[source] std::io::Error),
+    #[error(
+        "Local Terminal requires Windows 10 version 1809 (Build 17763) or later; current build: {build}"
+    )]
+    UnsupportedWindowsBuild { build: u32 },
+    #[error("Unable to determine Windows version before starting Local Terminal")]
+    WindowsVersionUnavailable,
     #[error("session not found: {0}")]
     NotFound(String),
     #[error("failed to open PTY: {0}")]
@@ -116,4 +160,10 @@ pub enum SessionError {
     },
     #[error("session registry lock is poisoned")]
     LockPoisoned,
+}
+
+impl SessionError {
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::Write { source, .. } if source.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock))
+    }
 }

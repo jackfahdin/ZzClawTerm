@@ -36,8 +36,8 @@ impl TryFrom<u8> for PacketType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
     pub packet_type: PacketType,
-    pub payload: Vec<u8>,
-    body: Vec<u8>,
+    pub payload: crate::pixel_memory::PixelBuffer,
+    body: crate::pixel_memory::PixelBuffer,
 }
 
 impl Packet {
@@ -58,6 +58,17 @@ fn payload_limit(packet_type: PacketType) -> usize {
 }
 
 pub fn read_packet(reader: &mut impl Read) -> io::Result<Option<Packet>> {
+    read_packet_inner(reader, None)
+}
+
+pub(crate) fn read_packet_budgeted(reader: &mut impl Read) -> io::Result<Option<Packet>> {
+    read_packet_inner(reader, Some(crate::pixel_memory::PixelBudget::shared()))
+}
+
+pub(crate) fn read_packet_inner(
+    reader: &mut impl Read,
+    budget: Option<&std::sync::Arc<crate::pixel_memory::PixelBudget>>,
+) -> io::Result<Option<Packet>> {
     let mut header = [0u8; HEADER_LEN];
     let mut read = 0;
     while read < header.len() {
@@ -80,6 +91,13 @@ pub fn read_packet(reader: &mut impl Read) -> io::Result<Option<Packet>> {
             "helper IPC payload exceeds limit",
         ));
     }
+    let lease = if packet_type != PacketType::Control {
+        budget
+            .map(|budget| budget.reserve(length).map(std::sync::Arc::new))
+            .transpose()?
+    } else {
+        None
+    };
     let mut payload = Vec::new();
     payload.try_reserve_exact(length).map_err(|_| {
         io::Error::new(
@@ -91,8 +109,8 @@ pub fn read_packet(reader: &mut impl Read) -> io::Result<Option<Packet>> {
     reader.read_exact(&mut payload)?;
     Ok(Some(Packet {
         packet_type,
-        payload,
-        body: Vec::new(),
+        payload: crate::pixel_memory::PixelBuffer::with_lease(payload, lease),
+        body: Default::default(),
     }))
 }
 
@@ -155,8 +173,10 @@ impl PacketReader {
             }
             packets.push(Packet {
                 packet_type,
-                payload: self.buffer[offset + HEADER_LEN..offset + packet_len].to_vec(),
-                body: Vec::new(),
+                payload: self.buffer[offset + HEADER_LEN..offset + packet_len]
+                    .to_vec()
+                    .into(),
+                body: Default::default(),
             });
             offset += packet_len;
         }
@@ -177,8 +197,8 @@ pub fn encode_control(message: &RdpControlMessage) -> io::Result<Packet> {
     }
     Ok(Packet {
         packet_type: PacketType::Control,
-        payload,
-        body: Vec::new(),
+        payload: payload.into(),
+        body: Default::default(),
     })
 }
 
@@ -209,8 +229,8 @@ pub fn encode_vnc_control(message: &VncControlMessage) -> io::Result<Packet> {
     }
     Ok(Packet {
         packet_type: PacketType::Control,
-        payload,
-        body: Vec::new(),
+        payload: payload.into(),
+        body: Default::default(),
     })
 }
 
@@ -324,8 +344,8 @@ pub fn encode_frame_packet(session_id: &str, event: &RdpFrameEvent) -> io::Resul
     }
     Ok(Packet {
         packet_type: PacketType::Frame,
-        payload,
-        body: Vec::new(),
+        payload: payload.into(),
+        body: Default::default(),
     })
 }
 
@@ -376,7 +396,7 @@ pub fn encode_frame_packet_owned(session_id: &str, event: RdpFrameEvent) -> io::
     }
     Ok(Packet {
         packet_type: PacketType::Frame,
-        payload,
+        payload: payload.into(),
         body: pixels,
     })
 }
@@ -464,33 +484,14 @@ fn decode_frame_header(packet: &Packet) -> io::Result<(String, FrameHeader, usiz
 }
 
 pub fn decode_frame_packet(packet: &Packet) -> io::Result<(String, RdpFrameEvent)> {
-    let (session_id, header, offset) = decode_frame_header(packet)?;
-    let pixels = if packet.body.is_empty() {
-        packet.payload[offset..].to_vec()
-    } else {
-        packet.body.clone()
-    };
-    Ok((
-        session_id,
-        RdpFrameEvent::Bitmap {
-            epoch: header.epoch,
-            full: header.full,
-            x: header.x,
-            y: header.y,
-            width: header.width,
-            height: header.height,
-            stride: header.stride,
-            format: header.format,
-            pixels,
-        },
-    ))
+    // Immutable pixel ownership is shared, including the original budget lease.
+    decode_frame_packet_owned(packet.clone())
 }
 
-pub fn decode_frame_packet_owned(mut packet: Packet) -> io::Result<(String, RdpFrameEvent)> {
+pub fn decode_frame_packet_owned(packet: Packet) -> io::Result<(String, RdpFrameEvent)> {
     let (session_id, header, offset) = decode_frame_header(&packet)?;
     let pixels = if packet.body.is_empty() {
-        packet.payload.drain(..offset);
-        packet.payload
+        packet.payload.skip(offset)
     } else {
         packet.body
     };
@@ -550,8 +551,8 @@ pub fn encode_cursor_packet(session_id: &str, event: &RemoteCursorEvent) -> io::
     }
     Ok(Packet {
         packet_type: PacketType::Cursor,
-        payload,
-        body: Vec::new(),
+        payload: payload.into(),
+        body: Default::default(),
     })
 }
 
@@ -597,7 +598,7 @@ fn decode_cursor_payload(packet: &Packet) -> io::Result<(String, RemoteCursorEve
                 width,
                 height,
                 hotspot,
-                pixels: Vec::new(),
+                pixels: Default::default(),
             })
         }
         2 => RemoteCursorEvent::Position(CursorPosition {
@@ -626,19 +627,18 @@ fn decode_cursor_payload(packet: &Packet) -> io::Result<(String, RemoteCursorEve
 pub fn decode_cursor_packet(packet: &Packet) -> io::Result<(String, RemoteCursorEvent)> {
     let (session_id, mut event, offset) = decode_cursor_payload(packet)?;
     if let RemoteCursorEvent::Shape(shape) = &mut event {
-        shape.pixels = packet.payload[offset..].to_vec();
+        shape.pixels = packet.payload.clone().skip(offset);
     }
     Ok((session_id, event))
 }
 
-pub fn decode_cursor_packet_owned(mut packet: Packet) -> io::Result<(String, RemoteCursorEvent)> {
+pub fn decode_cursor_packet_owned(packet: Packet) -> io::Result<(String, RemoteCursorEvent)> {
     if !packet.body.is_empty() {
         return decode_cursor_packet(&packet);
     }
     let (session_id, mut event, offset) = decode_cursor_payload(&packet)?;
     if let RemoteCursorEvent::Shape(shape) = &mut event {
-        packet.payload.drain(..offset);
-        shape.pixels = packet.payload;
+        shape.pixels = packet.payload.skip(offset);
     }
     Ok((session_id, event))
 }
@@ -702,7 +702,7 @@ mod tests {
             height: 2,
             stride: 8,
             format: PixelFormat::Bgra8,
-            pixels: vec![9; 16],
+            pixels: vec![9; 16].into(),
         };
         let packet = encode_frame_packet("session", &frame).unwrap();
         let mut encoded = Vec::new();
@@ -754,7 +754,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 hotspot: RemotePoint { x: 1, y: 0 },
-                pixels: vec![7; 16],
+                pixels: vec![7; 16].into(),
             }),
             RemoteCursorEvent::Position(CursorPosition { x: 640, y: 360 }),
             RemoteCursorEvent::Visibility(CursorVisibility { visible: false }),

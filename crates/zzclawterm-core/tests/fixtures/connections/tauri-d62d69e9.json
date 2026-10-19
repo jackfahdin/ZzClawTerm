@@ -12,6 +12,18 @@
       "sftp": { "enabled": true, "cwd_follow_mode": "rc_file", "pipeline_depth": 16, "future_policy": "preserved" },
       "asset": { "tags": ["production", "test-fixture"] },
       "future_connection": { "revision": 7 }
+    },
+    {
+      "id": "sessions-telnet",
+      "name": "Legacy Telnet",
+      "type": "telnet",
+      "host": "telnet.example.invalid",
+      "port": 23,
+      "username": "operator",
+      "enter_mode": "cr",
+      "send_naws": true,
+      "send_sga": true,
+      "future_telnet": { "revision": 7 }
     }
   ],
   "groups": []

@@ -313,6 +313,7 @@ impl ZzClawTermApp {
         }
         self.session
             .attach_sessions_from_transfer(catalog, insert_index);
+        self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(transfer);
         self.sync_input.attach_sessions_from_transfer(sync_input);
         if let Some(pane_root) = pane_root {
@@ -364,6 +365,7 @@ impl ZzClawTermApp {
             .map_err(|_| "the source terminal pipeline is unavailable".to_string())?;
         self.session
             .attach_sessions_from_transfer(bundle.catalog, Some(bundle.source_index));
+        self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(bundle.transfer);
         self.sync_input
             .restore_sessions_after_failed_transfer(bundle.sync_input);

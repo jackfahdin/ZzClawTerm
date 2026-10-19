@@ -266,7 +266,7 @@ impl BlockingJobScheduler {
         Self::with_limits(workers, DEFAULT_QUEUE_CAPACITY)
     }
 
-    fn with_limits(
+    pub(crate) fn with_limits(
         worker_count: usize,
         queue_capacity: usize,
     ) -> Result<Self, SchedulerStartError> {
@@ -385,6 +385,16 @@ impl BlockingJobScheduler {
         run: impl FnOnce(CancellationToken) + Send + 'static,
     ) -> Result<(), JobRejected> {
         self.submit(name, run).map(drop)
+    }
+
+    pub(crate) fn submit_with_outcome(
+        &self,
+        name: &'static str,
+        run: impl FnOnce(CancellationToken) + Send + 'static,
+        on_outcome: impl FnOnce(JobOutcome) + Send + 'static,
+    ) -> Result<(), JobRejected> {
+        self.submit_inner(name, Box::new(run), Some(Box::new(on_outcome)))
+            .map(drop)
     }
 
     pub fn submit_task<T: Send + 'static>(

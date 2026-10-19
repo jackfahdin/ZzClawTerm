@@ -22,6 +22,7 @@ pub(super) fn connection_editor_recording_section(
         editor,
         fields,
         baud_popover_open: _,
+        narrow: _,
     } = section;
     let use_global = editor.recording.is_none();
     let auto_start = editor

@@ -113,12 +113,23 @@ pub enum FramebufferError {
     AllocationFailed { bytes: usize },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Framebuffer {
     width: u32,
     height: u32,
     epoch: u64,
     bgra: Vec<u8>,
+    _lease: crate::pixel_memory::PixelLease,
+}
+
+impl std::fmt::Debug for Framebuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Framebuffer")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("epoch", &self.epoch)
+            .field("bytes", &self.bgra.len())
+            .finish()
+    }
 }
 
 impl Framebuffer {
@@ -131,6 +142,9 @@ impl Framebuffer {
         let len = validate_framebuffer_dimensions(width, height, limits)?;
         // Fallible allocation: a server-driven reset must degrade to a typed
         // error, never abort the process the way `vec![0; len]` would on OOM.
+        let lease = crate::pixel_memory::PixelBudget::shared()
+            .reserve(len)
+            .map_err(|_| FramebufferError::AllocationFailed { bytes: len })?;
         let mut bgra = Vec::new();
         bgra.try_reserve_exact(len)
             .map_err(|_| FramebufferError::AllocationFailed { bytes: len })?;
@@ -140,6 +154,7 @@ impl Framebuffer {
             height,
             epoch,
             bgra,
+            _lease: lease,
         })
     }
 
@@ -276,7 +291,7 @@ mod tests {
             height: 2,
             stride: 8,
             format: PixelFormat::Bgra8,
-            pixels,
+            pixels: pixels.into(),
         }
     }
 
@@ -318,7 +333,7 @@ mod tests {
             height: 2,
             stride: 8,
             format: PixelFormat::Rgba8,
-            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].into(),
         };
         framebuffer.apply(&frame).unwrap();
         assert_eq!(&framebuffer.pixels()[0..4], &[3, 2, 1, 4]);
@@ -327,30 +342,30 @@ mod tests {
     #[test]
     fn rejects_zero_and_oversized_dimensions() {
         assert_eq!(
-            Framebuffer::new(1, 0, 4, RDP_FRAMEBUFFER_LIMITS),
-            Err(FramebufferError::DimensionsTooLarge {
+            Framebuffer::new(1, 0, 4, RDP_FRAMEBUFFER_LIMITS).err(),
+            Some(FramebufferError::DimensionsTooLarge {
                 width: 0,
                 height: 4
             })
         );
         assert_eq!(
-            Framebuffer::new(1, 4, 0, RDP_FRAMEBUFFER_LIMITS),
-            Err(FramebufferError::DimensionsTooLarge {
+            Framebuffer::new(1, 4, 0, RDP_FRAMEBUFFER_LIMITS).err(),
+            Some(FramebufferError::DimensionsTooLarge {
                 width: 4,
                 height: 0
             })
         );
         let oversize = RDP_FRAMEBUFFER_LIMITS.max_width + 1;
         assert_eq!(
-            Framebuffer::new(1, oversize, 4, RDP_FRAMEBUFFER_LIMITS),
-            Err(FramebufferError::DimensionsTooLarge {
+            Framebuffer::new(1, oversize, 4, RDP_FRAMEBUFFER_LIMITS).err(),
+            Some(FramebufferError::DimensionsTooLarge {
                 width: oversize,
                 height: 4
             })
         );
         assert_eq!(
-            Framebuffer::new(1, 4, oversize, RDP_FRAMEBUFFER_LIMITS),
-            Err(FramebufferError::DimensionsTooLarge {
+            Framebuffer::new(1, 4, oversize, RDP_FRAMEBUFFER_LIMITS).err(),
+            Some(FramebufferError::DimensionsTooLarge {
                 width: 4,
                 height: oversize
             })

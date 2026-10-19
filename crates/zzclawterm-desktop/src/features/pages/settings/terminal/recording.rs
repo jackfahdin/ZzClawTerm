@@ -5,7 +5,6 @@ use zzclawterm_core::{ExistingFileBehavior, RecordingMode, RecordingRotationPoli
 use zzclawterm_ui::ZzClawSelectOption;
 
 use crate::features::pages::settings::panel::SettingsPanel;
-use crate::widgets::small_button;
 
 use super::super::{
     settings_form_row, settings_form_section, settings_input_action_control, settings_switch,
@@ -79,14 +78,14 @@ impl SettingsPanel {
                     settings_input_action_control(
                         260.,
                         recording_path_input,
-                        small_button(
-                            palette,
+                        zzclawterm_ui::ZzClawButton::new(
                             "settings-recording-path-browse",
                             t!("settings.browse"),
-                            cx.listener(|this, _, _, cx| {
-                                this.prompt_recording_path_setting(cx);
-                            }),
-                        ),
+                        )
+                        .form_control()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.prompt_recording_path_setting(cx);
+                        })),
                     ),
                 ))
                 .child(

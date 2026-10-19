@@ -31,7 +31,14 @@ use crate::models::{
 const TRANSFER_UI_COALESCE_WINDOW: Duration = Duration::from_millis(16);
 
 type ExternalEditorSyncStart = (Option<String>, String, String, Option<String>, PathBuf);
-type ExternalEditorWatchStart = (Option<String>, String, String, Option<String>, PathBuf);
+type ExternalEditorWatchStart = (
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    PathBuf,
+    crate::models::external_editor::ExternalEditorFileVersion,
+);
 
 use super::state::{TransferEditorSaveOutcome, TransferFeatureState};
 use super::transfer_widgets::{format_file_size, format_transfer_progress};
@@ -137,13 +144,21 @@ impl ZzClawTermApp {
     /// and `runtime_quiet_tick_allowed` had to carry a `transfer` term to keep
     /// that wait short.
     ///
-    /// `update_in` rather than `update`: the handler opens dialogs and external
-    /// editor windows, so it needs the `Window` the app entity is rendered in.
+    /// Pin the owning window: child windows also read the app entity, so GPUI's
+    /// current-window association changes as they render. Using that association
+    /// would terminate the transfer event loop after the upload prompt closes.
     pub(in crate::features) fn start_transfer_event_drain(&mut self, cx: &mut Context<Self>) {
         let Some(mut rx) = self.transfer.take_transfer_event_receiver() else {
             return;
         };
+        let owner_window = self.shell.main_window().map(Into::into);
         cx.spawn(async move |this, cx| {
+            let Some(owner_window) = owner_window.or_else(|| {
+                this.update_in(cx, |_, window, _| window.window_handle())
+                    .ok()
+            }) else {
+                return;
+            };
             while let Some(first) = rx.next().await {
                 // Progress is already throttled per job at the source, but each job
                 // gets its own 50ms phase and those phases stagger, so N concurrent
@@ -209,25 +224,28 @@ impl ZzClawTermApp {
                     }
                 }
                 let batch = coalesced;
-                if this
-                    .update_in(cx, |this, window, cx| {
-                        // One transaction, one notify, however many events it took.
-                        #[cfg(test)]
-                        this.transfer.note_ui_batch(batch.len());
-                        let mut dirty = false;
-                        for event in batch {
-                            dirty |= this.apply_transfer_event(event, window, cx);
-                        }
-                        if dirty {
-                            // Only the transfers panel. An app-wide notify here would
-                            // repaint the whole shell twenty times a second for a
-                            // progress bar, which is the pump this batching exists to
-                            // remove; `set_snapshot` notifies the panel and nothing
-                            // else. Events that change something outside the panel
-                            // still notify the app from their own handlers.
-                            this.flush_transfer_panel_snapshot(cx);
-                        }
+                if owner_window
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            // One transaction, one notify, however many events it took.
+                            #[cfg(test)]
+                            this.transfer.note_ui_batch(batch.len());
+                            let mut dirty = false;
+                            for event in batch {
+                                dirty |= this.apply_transfer_event(event, window, cx);
+                            }
+                            if dirty {
+                                // Only the transfers panel. An app-wide notify here would
+                                // repaint the whole shell twenty times a second for a
+                                // progress bar, which is the pump this batching exists to
+                                // remove; `set_snapshot` notifies the panel and nothing
+                                // else. Events that change something outside the panel
+                                // still notify the app from their own handlers.
+                                this.flush_transfer_panel_snapshot(cx);
+                            }
+                        })
                     })
+                    .and_then(|result| result)
                     .is_err()
                 {
                     break;
@@ -345,7 +363,12 @@ impl ZzClawTermApp {
             navigation_job_key.as_deref(),
             &event_id,
         ) {
-            self.transfer.browser.pending_navigations.remove(&event_id);
+            if matches!(event.event, TransferJobEvent::Finished(_)) {
+                self.transfer.browser.pending_navigations.remove(&event_id);
+            } else {
+                self.transfer
+                    .restore_transfer_job_after_event((job_index, job));
+            }
             return false;
         }
         dirty |= transfer_event_needs_ui_refresh(
@@ -380,6 +403,27 @@ impl ZzClawTermApp {
         let event_failed = matches!(&event.event, TransferJobEvent::Finished(Err(_)));
         let event_succeeded = matches!(&event.event, TransferJobEvent::Finished(Ok(_)));
         let event_finished = event_failed || event_succeeded;
+        if let (TransferJobKind::SendTo { .. }, TransferJobEvent::Finished(result)) =
+            (&job.kind, &event.event)
+        {
+            use zzclawterm_ui::notification::ZzClawNotificationKind;
+
+            match result {
+                Ok(TransferJobOutput::Sent { .. }) => self.notify_background_operation(
+                    "file-copy-result",
+                    ZzClawNotificationKind::Success,
+                    t!("common.operationSucceeded").to_string(),
+                    cx,
+                ),
+                Err(error) if error != SFTP_TRANSFER_CANCELLED => self.notify_background_operation(
+                    "file-copy-result",
+                    ZzClawNotificationKind::Error,
+                    t!("common.operationFailed").to_string(),
+                    cx,
+                ),
+                _ => {}
+            }
+        }
         if event_finished {
             self.transfer.settle_cut_job(
                 &event_id,
@@ -692,8 +736,16 @@ impl ZzClawTermApp {
                     target_parent_path: target_parent_path.clone(),
                 };
                 job.entries.clear();
-                job.summary = None;
-                job.progress = None;
+                job.summary = Some(zzclawterm_transport::SftpTransferSummary {
+                    remote_path: target_path.clone(),
+                    local_path: job
+                        .progress
+                        .as_ref()
+                        .map(|progress| progress.local_path.clone())
+                        .unwrap_or_default(),
+                    bytes,
+                    skipped: false,
+                });
                 job.control = None;
                 if let (Some(source_session_id), Some(parent)) =
                     (job_session_id.as_deref(), source_parent_path.as_deref())
@@ -1058,6 +1110,7 @@ impl ZzClawTermApp {
                 remote_path,
                 raw_path_token,
                 local_path,
+                baseline,
             })) => {
                 job.status = TransferJobStatus::Completed;
                 job.detail = format!("Opened {}", local_path.display());
@@ -1075,6 +1128,7 @@ impl ZzClawTermApp {
                     remote_path,
                     raw_path_token,
                     local_path,
+                    baseline,
                 ));
             }
             TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(summary))) => {
@@ -1317,7 +1371,7 @@ impl ZzClawTermApp {
                 local_path,
             );
         }
-        if let Some((session_id, job_id, remote_path, raw_path_token, local_path)) =
+        if let Some((session_id, job_id, remote_path, raw_path_token, local_path, baseline)) =
             external_watch_to_start
             && session_id
                 .as_deref()
@@ -1328,6 +1382,7 @@ impl ZzClawTermApp {
                 remote_path,
                 raw_path_token,
                 local_path,
+                baseline,
             )
         {
             self.shell.set_status(error);
@@ -1472,9 +1527,75 @@ mod tests {
     };
 
     #[test]
+    fn closing_shared_app_child_window_keeps_transfer_events_alive() {
+        let test_dir = TestConfigDir::new("zzclawterm-transfer-child-close");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, main) = hosted(&mut cx, test_dir.path());
+        let mut main = main.clone();
+        let sender = main.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.transfer.enqueue_transfer_job(running_job("upload"));
+                let mut listing = running_job("listing");
+                listing.kind = TransferJobKind::ListChildren {
+                    remote_path: "/remote".into(),
+                };
+                app.transfer.enqueue_transfer_job(listing);
+                app.start_transfer_event_drain(cx);
+                app.transfer.transfer_event_sender()
+            })
+        });
+        main.run_until_parked();
+
+        // Like the upload prompt, the child reads the shared app while rendering, then closes.
+        let child_app = app.clone();
+        let (_, child) = cx.add_window_view(move |_, _| AppHost { app: child_app });
+        child.run_until_parked();
+        child.update(|window, _| window.remove_window());
+        sender
+            .unbounded_send(TransferJobResult {
+                id: "upload".into(),
+                event: TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(
+                    SftpTransferSummary {
+                        remote_path: "/remote/upload".into(),
+                        local_path: PathBuf::from("/local/upload"),
+                        bytes: 3,
+                        skipped: false,
+                    },
+                ))),
+            })
+            .unwrap();
+        main.run_until_parked();
+        assert!(
+            !sender.is_closed(),
+            "closing a child window must not terminate the transfer event loop"
+        );
+        sender
+            .unbounded_send(TransferJobResult {
+                id: "listing".into(),
+                event: TransferJobEvent::Finished(Ok(TransferJobOutput::ChildEntries {
+                    remote_path: "/remote".into(),
+                    entries: Vec::new(),
+                })),
+            })
+            .unwrap();
+        main.run_until_parked();
+        main.update(|_, cx| {
+            let transfer = &app.read(cx).transfer;
+            assert_eq!(
+                transfer.transfer_job("upload").unwrap().status,
+                TransferJobStatus::Completed
+            );
+            // Directory listings are internal jobs removed by the event handler on completion.
+            assert!(transfer.transfer_job("listing").is_none());
+        });
+    }
+
+    #[test]
     fn skipped_job_does_not_cancel_other_batch_jobs() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-batch-skip");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -1640,6 +1761,7 @@ mod tests {
     fn unchanged_cwd_sync_keeps_browser_state_and_shell_status() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-sync-unchanged");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let entries = vec![browser_entry("alpha")];
         let result_entries = entries.clone();
@@ -1696,6 +1818,7 @@ mod tests {
     fn changed_cwd_listing_drops_only_selections_that_disappeared() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-sync-selection");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -1756,6 +1879,7 @@ mod tests {
     fn changed_cwd_path_clears_selection() {
         let test_dir = TestConfigDir::new("zzclawterm-cwd-sync-path-change");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -1860,6 +1984,7 @@ mod tests {
         let one_dir = TestConfigDir::new("zzclawterm-transfer-drain");
         let many_dir = TestConfigDir::new("zzclawterm-transfer-drain");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (one_batch, one_sent) = stress(&mut cx, one_dir.path(), 1);
         let (many_batch, many_sent) = stress(&mut cx, many_dir.path(), 8);
 
@@ -1907,6 +2032,7 @@ mod tests {
     fn the_batch_deadline_is_not_extended_by_later_events() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-drain");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -1955,6 +2081,7 @@ mod tests {
     fn a_progress_batch_does_not_recompute_the_browser_listing() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-drain");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -2013,6 +2140,7 @@ mod tests {
     fn a_terminal_event_ends_the_batch_without_waiting_for_the_window() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-drain");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -2058,6 +2186,7 @@ mod tests {
     fn wrapped_transfer_cancellation_marks_the_job_cancelled() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-cancelled");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -2095,6 +2224,7 @@ mod tests {
     fn successful_transfer_releases_retry_state_while_failure_keeps_it() {
         let test_dir = TestConfigDir::new("zzclawterm-transfer-retry-state");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let sender = vcx.update(|_, cx| {
             app.update(cx, |app, cx| {

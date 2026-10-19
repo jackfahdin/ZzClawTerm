@@ -68,6 +68,23 @@ impl SelectRegistry {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn dismiss_connection_editor_menus(&mut self, cx: &mut Context<Self>) {
+        let fields = self
+            .selects
+            .fields
+            .iter()
+            .filter(|(id, _)| {
+                id.starts_with("connection-editor-")
+                    && id.as_ref() != "connection-editor-section"
+                    && id.as_ref() != "connection-editor-kind"
+            })
+            .map(|(_, field)| field.clone())
+            .collect::<Vec<_>>();
+        for field in fields {
+            field.update(cx, |field, cx| field.dismiss_menu(cx));
+        }
+    }
+
     pub(in crate::features) fn select_entity<I>(
         &mut self,
         id: I,
@@ -201,6 +218,39 @@ impl ZzClawTermApp {
             return;
         };
 
+        if id == "connection-editor-kind" {
+            if let Some(kind) = [
+                crate::models::ConnectionKindTab::Ssh,
+                crate::models::ConnectionKindTab::Local,
+                crate::models::ConnectionKindTab::Telnet,
+                crate::models::ConnectionKindTab::Serial,
+                crate::models::ConnectionKindTab::Rdp,
+                crate::models::ConnectionKindTab::Vnc,
+            ]
+            .into_iter()
+            .find(|kind| kind.label() == value)
+            {
+                self.set_connection_editor_kind(kind, cx);
+            }
+            return;
+        }
+
+        if id == "connection-editor-section" {
+            if let Some(section) = self
+                .connection_state
+                .active_editor_draft()
+                .and_then(|editor| {
+                    crate::models::ConnectionEditorSection::for_kind(editor.kind)
+                        .iter()
+                        .copied()
+                        .find(|section| section.id() == value)
+                })
+            {
+                self.set_connection_editor_section(section, cx);
+            }
+            return;
+        }
+
         if let Some(index) = id
             .strip_prefix("connection-editor-ssh-agent-forwarding-endpoint-")
             .and_then(|index| index.parse::<usize>().ok())
@@ -221,6 +271,10 @@ impl ZzClawTermApp {
             }
             "appearance-minimum-contrast" => self.set_minimum_contrast_ratio(value, cx),
             "appearance-background-fit" => self.set_background_image_fit(value, cx),
+            "appearance-window-material" => self.set_window_material(
+                zzclawterm_core::models::window_material::WindowMaterial::from(value.to_owned()),
+                cx,
+            ),
             "appearance-terminal-font-weight" => {
                 if let Ok(weight) = value.parse() {
                     self.set_terminal_font_weight(weight, cx);

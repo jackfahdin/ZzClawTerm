@@ -124,7 +124,7 @@ fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// Scan plain text for action-link entities (priority: host:port > url > ipv4 > archive).
+/// Scan plain text for action-link entities (priority: url > host:port > ipv4 > archive).
 pub(crate) fn find_action_links(
     text: &str,
     matchers: &ActionLinksMatcherSettings,
@@ -221,11 +221,11 @@ pub(crate) fn find_action_links(
         }
     }
 
-    // Higher priority first when resolving overlaps.
+    // Keep complete URLs instead of the host:port or IPv4 embedded in them.
     matches.sort_by(|a, b| {
         let rank = |kind: ActionLinkKind| match kind {
-            ActionLinkKind::HostPort => 0,
-            ActionLinkKind::Url => 1,
+            ActionLinkKind::Url => 0,
+            ActionLinkKind::HostPort => 1,
             ActionLinkKind::Ip => 2,
             ActionLinkKind::Archive => 3,
         };
@@ -410,7 +410,89 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
 mod tests {
     use zzclawterm_core::ActionLinksMatcherSettings;
 
-    use super::{ActionLinkKind, actions_for_match, find_action_links};
+    use super::{ActionLinkKind, actions_for_match, find_action_links, match_at_offset};
+
+    #[test]
+    fn urls_take_priority_over_embedded_hosts_ips_and_archives() {
+        let matchers = ActionLinksMatcherSettings::default();
+        for url in [
+            "http://123.123.123.123:123/sdfsdf",
+            "https://123.123.123.123:8443/path",
+            "http://example.com:8080/path",
+            "https://localhost:8443/archive.tar.gz?download=1#contents",
+        ] {
+            let line = format!("curl {url}");
+            let found = find_action_links(&line, &matchers, true);
+            assert_eq!(found.len(), 1, "{line}");
+            let item = &found[0];
+            assert_eq!(item.kind, ActionLinkKind::Url, "{line}");
+            assert_eq!(item.text, url);
+            assert_eq!(item.value, url);
+            assert_eq!((item.start, item.end), (5, line.len()));
+            // Hovering the scheme, host, port, or path must select the same URL.
+            for offset in item.start..item.end {
+                assert_eq!(
+                    match_at_offset(&line, offset, &matchers).as_ref(),
+                    Some(item)
+                );
+            }
+            let actions = actions_for_match(item);
+            let default = actions.iter().find(|action| action.is_default).unwrap();
+            assert_eq!(default.open_url.as_deref(), Some(url));
+            assert!(default.command.is_none());
+            let curl = actions.iter().find(|action| action.id == "curl").unwrap();
+            let expected_command = if url.contains('?') {
+                format!("curl '{url}'")
+            } else {
+                format!("curl {url}")
+            };
+            assert_eq!(curl.command.as_deref(), Some(expected_command.as_str()));
+        }
+    }
+
+    #[test]
+    fn bare_host_ports_keep_their_port_actions() {
+        let matchers = ActionLinksMatcherSettings::default();
+        for host in ["123.123.123.123", "example.com", "localhost"] {
+            let value = format!("{host}:123");
+            let found = find_action_links(&value, &matchers, true);
+            assert_eq!(found.len(), 1);
+            let item = &found[0];
+            assert_eq!(item.kind, ActionLinkKind::HostPort);
+            assert_eq!(item.value, value);
+            assert_eq!(item.host.as_deref(), Some(host));
+            assert_eq!(item.port.as_deref(), Some("123"));
+            let actions = actions_for_match(item);
+            let default = actions.iter().find(|action| action.is_default).unwrap();
+            assert_eq!(default.id, "curl-http");
+            assert_eq!(default.command, Some(format!("curl http://{value}")));
+            assert!(actions.iter().any(|action| action.id == "nc"));
+            assert!(actions.iter().any(|action| action.id == "telnet"));
+        }
+    }
+
+    #[test]
+    fn url_priority_preserves_separate_action_links_in_text_order() {
+        let matchers = ActionLinksMatcherSettings::default();
+        let found = find_action_links(
+            "192.168.1.1:22 https://example.com:8443/app.zip 10.0.0.1 backup.tar.gz",
+            &matchers,
+            true,
+        );
+        let entities = found
+            .iter()
+            .map(|item| (item.kind, item.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entities,
+            vec![
+                (ActionLinkKind::HostPort, "192.168.1.1:22"),
+                (ActionLinkKind::Url, "https://example.com:8443/app.zip"),
+                (ActionLinkKind::Ip, "10.0.0.1"),
+                (ActionLinkKind::Archive, "backup.tar.gz"),
+            ]
+        );
+    }
 
     #[test]
     fn detects_ip_and_actions() {

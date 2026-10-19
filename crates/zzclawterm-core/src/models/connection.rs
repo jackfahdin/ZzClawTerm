@@ -12,6 +12,17 @@ use super::{
     is_default_telnet_auto_login_config,
 };
 
+/// Default outbound idle interval for Telnet NOP keepalive, in seconds.
+pub const DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS: u32 = 60;
+
+fn default_telnet_keep_alive_interval_secs() -> u32 {
+    DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
+}
+
+fn is_default_telnet_keep_alive_interval_secs(value: &u32) -> bool {
+    *value == DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SerialFlowControl {
@@ -552,6 +563,11 @@ pub enum ConnectionType {
         send_naws: bool,
         #[serde(default = "default_true")]
         send_sga: bool,
+        #[serde(
+            default = "default_telnet_keep_alive_interval_secs",
+            skip_serializing_if = "is_default_telnet_keep_alive_interval_secs"
+        )]
+        keep_alive_interval_secs: u32,
         #[serde(default, skip_serializing_if = "is_default_telnet_auto_login_config")]
         auto_login: TelnetAutoLoginConfig,
         #[serde(default)]

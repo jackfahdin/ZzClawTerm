@@ -829,6 +829,13 @@ fn current_selected_occurrence_matches(
     key: &TerminalFrameSearchKey,
     selection: Option<TerminalSelection>,
 ) -> Result<TerminalSelectedOccurrenceMatches, String> {
+    let selection = selection.map(|selection| {
+        view.frame_snapshot
+            .iter()
+            .chain(view.scrollback_snapshots.values())
+            .find_map(|snapshot| selection.expanded_for_snapshot(snapshot))
+            .unwrap_or(selection)
+    });
     // The visible result provides immediate feedback. Once the full-buffer
     // result arrives it is authoritative for both decorations and the ruler.
     let result = view

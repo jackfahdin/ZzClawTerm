@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
-use gpui::TestAppContext;
+use gpui::{AppContext as _, TestAppContext};
 use zzclawterm_core::AiExecutionProfile;
 use zzclawterm_transport::{
     LocalSessionConfig, RemoteFileBackendPreference, RemoteFileBackendPreferenceStore,
@@ -13,7 +13,8 @@ use zzclawterm_transport::{
 };
 
 use crate::features::runtime_jobs::SessionStartResult;
-use crate::features::session::HostKeyPromptIssue;
+use crate::features::session::{HostKeyPromptChoice, HostKeyPromptIssue};
+use crate::features::test_support::{app_with_visible_local_session, session_focus_test_window};
 use crate::models::{
     SessionEventBridge, SessionLaunchConfig, SessionRuntimeMetadata, StartupCommandAction,
     TabActionsSubmenu, TerminalFramePipeline, WorkspaceSplitDirection,
@@ -30,6 +31,78 @@ use super::{
     SessionFeatureFocus, SessionFeatureState, SessionPromptState, SessionStartEventRequest,
     SessionStartFeatureState,
 };
+
+#[test]
+fn host_key_prompt_accept_and_reject_restore_terminal_input_focus() {
+    let root = TestConfigDir::new("zzclawterm-host-key-focus");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "terminal");
+    let cx = session_focus_test_window(&mut cx, &app);
+
+    for choice in [HostKeyPromptChoice::Accept, HostKeyPromptChoice::Reject] {
+        let (response_tx, response_rx) = mpsc::channel();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.session.prompts.active_host_key_prompt = Some(HostKeyPromptRequest {
+                    id: "host-key".into(),
+                    host_key: SshHostKey {
+                        host: "example.test".into(),
+                        port: 22,
+                        host_identifier: "example.test".into(),
+                        key_type: "ssh-ed25519".into(),
+                        key_base64: "test-key".into(),
+                        fingerprint: "SHA256:test".into(),
+                    },
+                    issue: HostKeyPromptIssue::Unknown,
+                    response_tx,
+                });
+                window.focus(app.session.dialog_tab_actions_focus(), cx);
+
+                // A stale button must leave the prompt and its focus untouched.
+                app.resolve_host_key_prompt("stale".into(), choice, window, cx);
+                assert!(app.session.dialog_tab_actions_focus().is_focused(window));
+                assert!(response_rx.try_recv().is_err());
+
+                app.resolve_host_key_prompt("host-key".into(), choice, window, cx);
+                assert_eq!(response_rx.try_recv().unwrap(), choice);
+                assert!(app.session.prompt_active_host_key().is_none());
+                assert!(app.terminal.input_focus().is_focused(window));
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(app.read(cx).terminal.input_focus().is_focused(window));
+        });
+    }
+}
+
+#[test]
+fn consuming_an_entire_sideband_prefix_keeps_ui_routing_after_the_drain_completes() {
+    for prefix in [b":".as_slice(), b"*", b"::TRZ"] {
+        let root = TestConfigDir::new("zzclawterm-sideband-prefix-routing");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "prefix-session");
+        cx.update_entity(&app, |app, cx| {
+            app.session
+                .push_event_bridge_ui_event_for_test(SessionEvent::Output {
+                    session_id: "prefix-session".into(),
+                    data: prefix.to_vec(),
+                });
+            // This path consumes events without expiring detector prefixes.
+            app.drain_session_events_for_input_wake(cx);
+            assert!(app.session.pending_events_are_empty());
+            assert_eq!(app.session.event_bridge_queued_event_count(), 0);
+            assert!(app.session.has_protocol_runtime_sessions());
+            assert!(
+                app.session
+                    .event_bridge
+                    .session_requires_ui_for_test("prefix-session")
+            );
+        });
+    }
+}
 
 fn pending(name: &str) -> PendingSessionStart {
     PendingSessionStart {
@@ -161,6 +234,7 @@ fn credential_prompt_state(id: &str) -> CredentialPromptState {
 fn resolving_a_prompt_wakes_the_activation_pass() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     let mut wake_rx = prompts
         .take_wake_receiver()
@@ -196,6 +270,7 @@ fn resolving_a_prompt_wakes_the_activation_pass() {
 fn credential_prompt_owner_isolates_input_and_clears_focus_on_take() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
 
     prompts.activate_credential(credential_prompt_state("credential-1"));
@@ -223,6 +298,7 @@ fn credential_prompt_owner_isolates_input_and_clears_focus_on_take() {
 fn mismatched_host_key_resolution_preserves_active_prompt() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     let (response_tx, _response_rx) = mpsc::channel();
     prompts.active_host_key_prompt = Some(HostKeyPromptRequest {
@@ -256,6 +332,7 @@ fn mismatched_host_key_resolution_preserves_active_prompt() {
 fn mismatched_agent_resolution_preserves_active_prompt() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     let broker = prompts.agent_broker();
     let session = broker
@@ -309,6 +386,7 @@ fn mismatched_agent_resolution_preserves_active_prompt() {
 fn totp_clock_sleeps_to_the_next_step_boundary() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     prompts.activate_keyboard_interactive(totp_prompt_for_test(30));
 
@@ -328,6 +406,7 @@ fn totp_clock_sleeps_to_the_next_step_boundary() {
 fn no_totp_clock_without_a_code_on_screen() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     assert_eq!(prompts.keyboard_totp_seconds_to_next_step(31), None);
 
@@ -376,6 +455,7 @@ fn totp_prompt_for_test(period: u64) -> KeyboardInteractivePromptState {
 fn otp_missing_entry_preserves_manual_timing_but_clears_refresh_timing() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut prompts = prompt_state(&cx, test_dir.path());
     let (response_tx, _response_rx) = mpsc::channel();
     prompts.activate_keyboard_interactive(KeyboardInteractivePromptState {
@@ -440,6 +520,7 @@ fn otp_missing_entry_preserves_manual_timing_but_clears_refresh_timing() {
 fn session_state_owns_live_runtime_and_initializes_transient_state() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let focus = || cx.update(|cx| cx.focus_handle());
     let manager = Arc::new(SessionManager::new());
     let event_bridge = SessionEventBridge::spawn(
@@ -615,6 +696,7 @@ fn session_state_owns_live_runtime_and_initializes_transient_state() {
 fn session_catalog_registration_and_reordering_stay_synchronized() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     sessions.register_session_metadata("session-a", session_metadata("first", None));
@@ -647,6 +729,7 @@ fn transferring_split_session_catalog_preserves_order_metadata_and_pending_event
     let test_dir = TestConfigDir::new("zzclawterm-session-transfer-test");
     let target_dir = TestConfigDir::new("zzclawterm-session-transfer-target-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut source = session_state(&cx, test_dir.path());
     let mut target = session_state(&cx, target_dir.path());
     source.register_session_metadata("root", session_metadata("root session", None));
@@ -682,6 +765,7 @@ fn transferring_split_session_catalog_preserves_order_metadata_and_pending_event
 fn session_catalog_inserts_out_of_order_completions_at_reserved_positions() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     let mut starts = SessionStartFeatureState::new();
     let session_a = starts.allocate_tab_placement(0);
@@ -718,6 +802,7 @@ fn session_catalog_inserts_out_of_order_completions_at_reserved_positions() {
 fn session_catalog_keeps_existing_tabs_before_reserved_appends() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     let mut starts = SessionStartFeatureState::new();
     sessions.register_session_metadata("session-x", session_metadata("existing", None));
@@ -747,6 +832,7 @@ fn session_catalog_keeps_existing_tabs_before_reserved_appends() {
 fn session_catalog_owns_presentation_and_active_history_queries() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     let mut metadata = session_metadata("fallback", None);
     let ssh = SshSessionConfig {
@@ -816,6 +902,7 @@ fn session_catalog_owns_presentation_and_active_history_queries() {
 fn active_session_selection_derives_configuration_from_the_catalog() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     let mut metadata = session_metadata("first", None);
     metadata.ssh_config = Some(SshSessionConfig::default());
@@ -863,6 +950,7 @@ fn active_session_selection_derives_configuration_from_the_catalog() {
 fn session_disconnect_transition_is_idempotent() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     assert!(sessions.mark_session_disconnected("missing").is_none());
@@ -890,6 +978,7 @@ fn session_disconnect_transition_is_idempotent() {
 fn remote_file_service_requires_live_multiplex_for_session_scoped_ssh() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     let config = SshSessionConfig {
         name: "ssh".to_string(),
@@ -916,6 +1005,7 @@ fn remote_file_service_requires_live_multiplex_for_session_scoped_ssh() {
 fn reconnect_presentation_migration_preserves_destination_overrides() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     sessions.set_custom_name("old".to_string(), "old name".to_string());
@@ -951,6 +1041,7 @@ fn reconnect_presentation_migration_preserves_destination_overrides() {
 fn provisional_reconnect_keeps_one_visible_tab_until_replacement() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     sessions.register_session_metadata("old", session_metadata("ssh", None));
 
@@ -967,6 +1058,7 @@ fn provisional_reconnect_keeps_one_visible_tab_until_replacement() {
 fn removing_session_catalog_clears_all_session_scoped_entries() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     let mut metadata = session_metadata("first", Some("multiplex-a"));
@@ -1015,6 +1107,7 @@ fn removing_session_catalog_clears_all_session_scoped_entries() {
 fn closing_the_active_session_hands_over_to_the_most_recent_visit() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     sessions.register_session_metadata("session-a", session_metadata("first", None));
@@ -1058,6 +1151,7 @@ fn closing_the_active_session_hands_over_to_the_most_recent_visit() {
 fn session_handover_falls_back_to_tab_order_without_activation_history() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     sessions.register_session_metadata("session-a", session_metadata("first", None));
@@ -1079,6 +1173,7 @@ fn session_handover_falls_back_to_tab_order_without_activation_history() {
 fn tab_lock_and_drag_state_have_single_owner() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
 
     assert!(sessions.set_tab_locked("tab-a", true));
@@ -1103,6 +1198,7 @@ fn tab_lock_and_drag_state_have_single_owner() {
 fn closing_a_split_root_can_migrate_logical_tab_presentation() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     sessions.set_custom_name("root".to_string(), "logical tab".to_string());
     sessions.set_custom_name("survivor".to_string(), "pane".to_string());
@@ -1123,6 +1219,7 @@ fn closing_a_split_root_can_migrate_logical_tab_presentation() {
 fn tab_group_reorder_moves_split_sessions_as_one_block() {
     let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, test_dir.path());
     for id in ["a", "a-child", "b", "c", "c-child"] {
         sessions.register_session_metadata(id, session_metadata(id, None));
@@ -1491,6 +1588,7 @@ fn moved_ssh_connection_survives_source_shutdown_and_repeated_transfers() {
     let source_dir = TestConfigDir::new("zzclawterm-ssh-move-source");
     let target_dir = TestConfigDir::new("zzclawterm-ssh-move-target");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut source = session_state(&cx, source_dir.path());
     let pool = source.ssh_connection_pool();
     let mut target = session_state_with_runtime(
@@ -1543,6 +1641,7 @@ fn closing_and_disconnecting_sessions_in_other_windows_release_only_their_leases
     let source_dir = TestConfigDir::new("zzclawterm-ssh-shared-source");
     let target_dir = TestConfigDir::new("zzclawterm-ssh-shared-target");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut source = session_state(&cx, source_dir.path());
     let pool = source.ssh_connection_pool();
     let mut target = session_state_with_runtime(
@@ -1585,6 +1684,7 @@ fn closing_and_disconnecting_sessions_in_other_windows_release_only_their_leases
 fn window_shutdown_marks_pending_starts_cancelled_before_late_results_arrive() {
     let dir = TestConfigDir::new("zzclawterm-late-start-shutdown");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, dir.path());
     sessions
         .start
@@ -1602,6 +1702,7 @@ fn window_shutdown_marks_pending_starts_cancelled_before_late_results_arrive() {
 fn reconnect_releases_old_lease_without_disconnecting_shared_sibling_or_replacement() {
     let dir = TestConfigDir::new("zzclawterm-ssh-reconnect-leases");
     let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut sessions = session_state(&cx, dir.path());
     let pool = sessions.ssh_connection_pool();
     let old_disconnects = Arc::new(AtomicUsize::new(0));
@@ -1636,4 +1737,110 @@ fn reconnect_releases_old_lease_without_disconnecting_shared_sibling_or_replacem
     sessions.shutdown_workers();
     pool.finish_disconnects();
     assert_eq!(new_disconnects.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn telnet_reconnect_request_retains_custom_keepalive_through_event_routing() {
+    let mut starts = SessionStartFeatureState::new();
+    let mut request = pending("Telnet reconnect");
+    request.reconnect_session_id = Some("old-telnet".into());
+    request.launch_config = Some(SessionLaunchConfig::Telnet(
+        zzclawterm_transport::TelnetSessionConfig {
+            keep_alive_interval_secs: 45,
+            ..Default::default()
+        },
+    ));
+    starts.register_pending("telnet-request".into(), request);
+    assert!(starts.reconnect_is_pending("old-telnet"));
+    let SessionStartEventRequest::Pending { pending, .. } =
+        starts.take_event_request("telnet-request")
+    else {
+        panic!("Pending reconnect expected");
+    };
+    let pending = pending.expect("registered request");
+    assert_eq!(pending.reconnect_session_id.as_deref(), Some("old-telnet"));
+    let Some(SessionLaunchConfig::Telnet(config)) = pending.launch_config else {
+        panic!("Telnet launch config expected");
+    };
+    assert_eq!(config.keep_alive_interval_secs, 45);
+}
+
+#[test]
+fn zmodem_spawn_failure_preserves_ui_pending_and_bridge_consumer() {
+    let root = TestConfigDir::new("zzclawterm-zmodem-spawn-failure");
+    let cx = TestAppContext::single();
+    let mut state = session_state(&cx, root.path());
+    state.extend_pending_events([SessionEvent::Output {
+        session_id: "z".into(),
+        data: b"pending".to_vec(),
+    }]);
+    let _failure = zzclawterm_core::runtime::worker::fail_after(0);
+    assert!(
+        state
+            .start_zmodem_runtime(
+                "z",
+                zzclawterm_transport::ZmodemTransfer::new(
+                    zzclawterm_transport::ZmodemDirection::Download,
+                    &[]
+                )
+            )
+            .is_err()
+    );
+    assert_eq!(state.pending_event_count(), 1);
+    assert!(
+        matches!(state.pop_pending_event(), Some(SessionEvent::Output { data, .. }) if data == b"pending")
+    );
+}
+
+#[test]
+fn zmodem_handoff_preserves_ui_then_bridge_order_and_other_sessions() {
+    let root = TestConfigDir::new("zzclawterm-zmodem-handoff-order");
+    let cx = TestAppContext::single();
+    let mut state = session_state(&cx, root.path());
+    state.extend_pending_events([
+        SessionEvent::Output {
+            session_id: "z".into(),
+            data: b"ui".to_vec(),
+        },
+        SessionEvent::Output {
+            session_id: "other".into(),
+            data: b"other".to_vec(),
+        },
+    ]);
+    state.push_event_bridge_ui_event_for_test(SessionEvent::Output {
+        session_id: "z".into(),
+        data: b"bridge".to_vec(),
+    });
+    let worker = state
+        .start_zmodem_runtime(
+            "z",
+            zzclawterm_transport::ZmodemTransfer::new(
+                zzclawterm_transport::ZmodemDirection::Download,
+                &[],
+            ),
+        )
+        .unwrap();
+    assert_eq!(state.pending_event_count(), 1);
+    worker.cancel("test");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let result = loop {
+        if let Some(event) = worker.try_recv_event()
+            && event.done
+        {
+            break event;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    };
+    let bytes: Vec<u8> = result
+        .pending_events
+        .iter()
+        .flat_map(|event| match event {
+            SessionEvent::Output { data, .. } => data.clone(),
+            _ => panic!("output"),
+        })
+        .collect();
+    assert_eq!(bytes, b"uibridge");
+    state.finish_zmodem_runtime("z", result.pending_events);
+    assert_eq!(state.pending_event_count(), 3);
 }

@@ -8,6 +8,30 @@ use zzclawterm_store::{FlushBarrier, StoreBlockingClient, StoreConfig, StoreRunt
 
 pub(crate) use zzclawterm_core::test_support::TestTempDir as TestConfigDir;
 
+/// Runs GPUI's test cleanup when a plain Rust test leaves its context's scope.
+///
+/// `add_window_view` and `add_empty_window` retain visual contexts until `quit`.
+/// Dropping the original `TestAppContext` alone leaves those contexts, windows,
+/// entities and their workers alive. Unlike `#[gpui::test]`, `#[test]` does not
+/// call `quit` for us. Keep this guard in the owning scope, including when the
+/// context variable is shadowed by a borrowed visual context.
+#[must_use = "keep the cleanup guard alive until the test context is no longer used"]
+pub(crate) struct TestAppCleanup {
+    cx: gpui::TestAppContext,
+}
+
+impl TestAppCleanup {
+    pub(crate) fn new(cx: &gpui::TestAppContext) -> Self {
+        Self { cx: cx.clone() }
+    }
+}
+
+impl Drop for TestAppCleanup {
+    fn drop(&mut self) {
+        self.cx.quit();
+    }
+}
+
 /// Opens an isolated test store and waits until its redb worker is ready.
 ///
 /// Waiting on the barrier is part of the cleanup contract: without it, a very
@@ -157,4 +181,100 @@ fn synchronized_test_store_cannot_recreate_its_tree_after_cleanup() {
         !path.exists(),
         "the storage worker recreated its temporary tree after cleanup"
     );
+}
+
+#[cfg(test)]
+mod gpui_cleanup_tests {
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::rc::Rc;
+
+    use gpui::{Context, Entity, IntoElement, Render, TestAppContext, Window, div};
+
+    use crate::features::ZzClawTermApp;
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::test_support::{TestAppCleanup, TestConfigDir};
+
+    struct WindowProbe {
+        released: Rc<Cell<usize>>,
+    }
+
+    impl Render for WindowProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl Drop for WindowProbe {
+        fn drop(&mut self) {
+            self.released.set(self.released.get() + 1);
+        }
+    }
+
+    fn assert_visual_cleanup(panic_in_test: bool) {
+        let released = Rc::new(Cell::new(0));
+        let quit_called = Rc::new(Cell::new(false));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = TestAppCleanup::new(&cx);
+            let quit_called = Rc::clone(&quit_called);
+            cx.on_quit(move || quit_called.set(true));
+            cx.add_empty_window();
+            for _ in 0..2 {
+                let released = Rc::clone(&released);
+                let (_, cx) = cx.add_window_view(move |_, _| WindowProbe { released });
+                cx.run_until_parked();
+            }
+            assert_eq!(released.get(), 0);
+            if panic_in_test {
+                panic!("exercise GPUI cleanup on unwind");
+            }
+        }));
+        assert_eq!(result.is_err(), panic_in_test);
+        assert!(quit_called.get(), "GPUI quit callbacks were not run");
+        assert_eq!(released.get(), 2, "window entities survived test cleanup");
+    }
+
+    #[test]
+    fn visual_contexts_release_window_entities_at_scope_exit() {
+        assert_visual_cleanup(false);
+    }
+
+    #[test]
+    fn visual_contexts_release_window_entities_during_panic_unwind() {
+        assert_visual_cleanup(true);
+    }
+
+    struct AppWindow {
+        _app: Entity<ZzClawTermApp>,
+    }
+
+    impl Render for AppWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[test]
+    fn repeated_visual_tests_release_apps_and_their_worker_owned_resources() {
+        for _ in 0..16 {
+            let root = TestConfigDir::new("zzclawterm-visual-test-cleanup");
+            let weak = {
+                let mut cx = TestAppContext::single();
+                let _test_app_cleanup = TestAppCleanup::new(&cx);
+                let app = app_with_visible_local_session(&mut cx, root.path(), "session");
+                let weak = app.downgrade();
+                cx.add_window_view(move |_, _| AppWindow { _app: app });
+                weak
+            };
+            assert!(
+                weak.upgrade().is_none(),
+                "test window retained its ZzClawTermApp"
+            );
+            assert!(
+                !root.path().exists(),
+                "worker-owned app resources survived cleanup"
+            );
+        }
+    }
 }

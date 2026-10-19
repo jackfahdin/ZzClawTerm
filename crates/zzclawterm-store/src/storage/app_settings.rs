@@ -6,6 +6,7 @@
 //! unchanged.
 
 use std::collections::HashMap;
+use zzclawterm_core::models::window_material::{WindowMaterial, default_window_background_opacity};
 
 use super::{
     ConnectionStore, LEGACY_TEXT_MASTER_KEY, META_MASTER_KEY, META_TABLE, SETTINGS_DEFAULT,
@@ -20,11 +21,42 @@ use zzclawterm_core::{
     WorkspaceUiState, default_panel_open_mode, default_search_engines, normalize_panel_open_mode,
 };
 
+// Reject malformed known fields before an unrelated save can replace their data.
+fn read_window_appearance(value: &serde_json::Value) -> Result<(WindowMaterial, u8), StorageError> {
+    let material = match json_path(value, &["appearance", "window_material"]) {
+        None => WindowMaterial::Opaque,
+        Some(serde_json::Value::String(material)) => WindowMaterial::from(material.clone()),
+        Some(_) => {
+            return Err(StorageError::InvalidData(
+                "window material must be a string".into(),
+            ));
+        }
+    };
+    let opacity = match json_path(value, &["appearance", "window_background_opacity"]) {
+        None => default_window_background_opacity(),
+        Some(value) => value
+            .as_u64()
+            .map(|value| value.min(100) as u8)
+            .or_else(|| value.as_i64().map(|value| value.clamp(0, 100) as u8))
+            .ok_or_else(|| {
+                StorageError::InvalidData("window background opacity must be an integer".into())
+            })?,
+    };
+    Ok((material, opacity))
+}
+
 impl ConnectionStore {
     pub fn load_app_settings_summary(&self) -> Result<AppSettingsSummary, StorageError> {
         let value = self.load_settings_value()?;
+        let (window_material, window_background_opacity) = read_window_appearance(&value)?;
         Ok(AppSettingsSummary {
+            window_material,
+            window_background_opacity,
             theme: json_string(&value, &["appearance", "theme"], "github-dark"),
+            custom_themes: json_path(&value, &["appearance", "custom_themes"])
+                .cloned()
+                .map(zzclawterm_core::themes::ThemeCatalog)
+                .unwrap_or_default(),
             background_image_path: json_path(&value, &["appearance", "background_image_path"])
                 .and_then(|v| v.as_str())
                 .map(str::trim)
@@ -387,6 +419,11 @@ impl ConnectionStore {
                 &["interaction", "command_suggestions_enabled"],
                 true,
             ),
+            interaction_credential_autofill_enabled: json_bool(
+                &value,
+                &["interaction", "credential_autofill_enabled"],
+                true,
+            ),
             interaction_command_suggestion_min_chars: json_u32(
                 &value,
                 &["interaction", "command_suggestion_min_chars"],
@@ -578,12 +615,20 @@ impl ConnectionStore {
     }
 
     pub fn verify_master_password(&self, password: &str) -> Result<bool, StorageError> {
+        Ok(self.master_password_matches(password)?.unwrap_or(true))
+    }
+
+    /// Whether `password` is the stored master password.
+    ///
+    /// Returns `Ok(None)` when this store has no stored master password, so no
+    /// candidate can be checked; callers must not read that as a match.
+    pub fn master_password_matches(&self, password: &str) -> Result<Option<bool>, StorageError> {
         let Some(token) = self.load_encrypted_master_password()? else {
-            return Ok(true);
+            return Ok(None);
         };
         let bootstrap = CredentialCrypto::new(self.portable_key_path.clone(), None);
         let stored = bootstrap.decrypt_settings_secret(&token)?;
-        Ok(stored == password)
+        Ok(Some(stored == password))
     }
 
     pub fn save_master_password(
@@ -1040,7 +1085,45 @@ impl ConnectionStore {
         settings: &AppSettingsSummary,
     ) -> Result<AppSettingsSummary, StorageError> {
         let mut value = self.load_settings_value()?;
+        read_window_appearance(&value)?;
         set_nested_json_string(&mut value, &["appearance", "theme"], settings.theme.clone());
+        set_nested_json_string(
+            &mut value,
+            &["appearance", "window_material"],
+            settings.window_material.as_str().to_owned(),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["appearance", "window_background_opacity"],
+            serde_json::json!(settings.window_background_opacity.min(100)),
+        );
+        let previous = json_path(&value, &["appearance", "custom_themes"])
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        if settings.custom_themes.0 != previous {
+            let records = settings.custom_themes.0.as_array().ok_or_else(|| {
+                StorageError::InvalidData("unsupported custom theme catalog".into())
+            })?;
+            for record in records {
+                if previous.as_array().is_some_and(|old| old.contains(record)) {
+                    continue;
+                }
+                let theme: zzclawterm_core::themes::ThemeConfig =
+                    serde_json::from_value(record.clone())?;
+                let errors = theme.validate();
+                if !errors.is_empty() || zzclawterm_core::themes::is_builtin(&theme.id) {
+                    return Err(StorageError::InvalidData(format!(
+                        "invalid custom theme: {}",
+                        errors.join(", ")
+                    )));
+                }
+            }
+        }
+        set_nested_json_value(
+            &mut value,
+            &["appearance", "custom_themes"],
+            settings.custom_themes.0.clone(),
+        );
         match settings
             .background_image_path
             .as_deref()
@@ -1384,6 +1467,11 @@ impl ConnectionStore {
             &mut value,
             &["interaction", "command_suggestions_enabled"],
             serde_json::Value::Bool(settings.interaction_command_suggestions_enabled),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["interaction", "credential_autofill_enabled"],
+            serde_json::Value::Bool(settings.interaction_credential_autofill_enabled),
         );
         set_nested_json_value(
             &mut value,

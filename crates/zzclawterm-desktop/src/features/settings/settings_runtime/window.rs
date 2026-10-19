@@ -117,6 +117,16 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.settings.theme_designer().submitting {
+            return false;
+        }
+        if self.settings.theme_designer().dirty() {
+            self.theme_designer_action(
+                crate::features::settings::theme_designer::ThemeIntent::CloseSettings,
+                cx,
+            );
+            return false;
+        }
         if !self.settings_draft_dirty() {
             self.discard_settings_draft_and_window(panel, cx);
             return true;
@@ -248,4 +258,62 @@ fn open_settings_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &mut App) {
             cx.notify();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
+
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+    use crate::features::settings::theme_designer::ThemeIntent;
+    use crate::features::test_support::session_focus_test_window;
+    use crate::test_support::{TestAppCleanup, TestConfigDir};
+
+    #[test]
+    fn native_close_and_quit_protect_a_theme_draft_even_without_other_settings_edits() {
+        let dir = TestConfigDir::new("zzclawterm-theme-close-guard");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = dir.path().to_path_buf();
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.clone(),
+            root.join("config"),
+            root.join("logs"),
+            root.join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.theme_designer_action(ThemeIntent::Copy("github-dark".into()), cx);
+        });
+        let vcx = session_focus_test_window(&mut cx, &app);
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.settings_draft_dirty());
+                let panel = app.settings_panel.clone();
+                assert!(!app.request_settings_window_close(&panel, window, cx));
+                assert_eq!(
+                    app.settings.theme_designer().pending,
+                    Some(ThemeIntent::CloseSettings)
+                );
+                app.resolve_theme_designer_pending(None, cx);
+                assert!(app.shell.has_settings_draft());
+                app.handle_window_close_request_with_count(0, window, cx);
+                assert_eq!(
+                    app.settings.theme_designer().pending,
+                    Some(ThemeIntent::Quit(0))
+                );
+                app.resolve_theme_designer_pending(None, cx);
+                assert!(app.settings.theme_designer().dirty());
+            })
+        });
+    }
 }

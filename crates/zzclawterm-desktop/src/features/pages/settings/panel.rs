@@ -133,6 +133,10 @@ impl SettingsSnapshot {
 #[derive(Clone, PartialEq)]
 pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) summary: Arc<AppSettingsSummary>,
+    pub(in crate::features) theme_options: Arc<[(String, String)]>,
+    pub(in crate::features) theme_diagnostics: Arc<[String]>,
+    pub(in crate::features) theme_designer:
+        crate::features::settings::theme_designer::ThemeDesignerState,
     pub(in crate::features) keyword_config: Arc<KeywordHighlightConfig>,
     pub(in crate::features) search_engine_presentation: SearchEnginePresentationState,
     pub(in crate::features) keyword_highlight_presentation: KeywordHighlightPresentationState,
@@ -153,6 +157,9 @@ impl SettingsPresentation {
     fn empty(cx: &mut Context<SettingsPanel>) -> Self {
         Self {
             summary: Arc::new(AppSettingsSummary::default()),
+            theme_options: zzclawterm_ui::available_themes(&Default::default()).into(),
+            theme_diagnostics: Arc::from([]),
+            theme_designer: Default::default(),
             keyword_config: Arc::new(KeywordHighlightConfig::default()),
             search_engine_presentation: SearchEnginePresentationState {
                 expanded_index: None,
@@ -471,11 +478,16 @@ pub(in crate::features) struct SettingsPanel {
     number_inputs: HashMap<SharedString, Entity<ZzClawNumberInputState>>,
     pub(in crate::features::pages::settings) image_opacity_slider: Entity<ZzClawSliderState>,
     pub(in crate::features::pages::settings) content_opacity_slider: Entity<ZzClawSliderState>,
+    pub(in crate::features::pages::settings) window_opacity_slider: Entity<ZzClawSliderState>,
     pub(in crate::features::pages::settings) image_opacity_focus: gpui::FocusHandle,
     pub(in crate::features::pages::settings) content_opacity_focus: gpui::FocusHandle,
+    pub(in crate::features::pages::settings) window_opacity_focus: gpui::FocusHandle,
     last_image_opacity: u8,
     last_content_opacity: u8,
+    last_window_opacity: u8,
     slider_subscriptions: Vec<Subscription>,
+    pub(in crate::features::pages::settings) theme_picker_controls:
+        super::workspace::theme_designer::ThemePickerControls,
     selects: SelectRegistry,
     select_subscriptions: Vec<Subscription>,
     ui_font_select_options: FontSelectOptionCache,
@@ -498,6 +510,17 @@ impl SettingsPanel {
     ) -> Self {
         let image_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(100.));
         let content_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(82.));
+        let window_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(20.));
+        let window_subscription = cx.observe(&window_opacity_slider, |this, slider, cx| {
+            let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                return;
+            };
+            let value = value.round().clamp(0., 100.) as u8;
+            if value != this.last_window_opacity {
+                this.last_window_opacity = value;
+                this.set_window_background_opacity(value, cx);
+            }
+        });
         let image_subscription = cx.observe(&image_opacity_slider, |this, slider, cx| {
             let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
                 return;
@@ -533,11 +556,19 @@ impl SettingsPanel {
             number_inputs: HashMap::new(),
             image_opacity_slider,
             content_opacity_slider,
+            window_opacity_slider,
             image_opacity_focus: cx.focus_handle(),
             content_opacity_focus: cx.focus_handle(),
+            window_opacity_focus: cx.focus_handle(),
             last_image_opacity: 100,
             last_content_opacity: 82,
-            slider_subscriptions: vec![image_subscription, content_subscription],
+            last_window_opacity: 20,
+            slider_subscriptions: vec![
+                image_subscription,
+                content_subscription,
+                window_subscription,
+            ],
+            theme_picker_controls: Default::default(),
             selects: SelectRegistry::default(),
             select_subscriptions: Vec::new(),
             ui_font_select_options: FontSelectOptionCache::empty(),
@@ -611,6 +642,25 @@ impl SettingsPanel {
                 });
         }
         self.surface = snapshot.surface;
+        let window_opacity = snapshot.settings.summary.window_background_opacity;
+        self.last_window_opacity = window_opacity;
+        if self.window_opacity_slider.read(cx).value()
+            != ZzClawSliderValue::Single(f32::from(window_opacity))
+        {
+            self.window_opacity_slider =
+                cx.new(|_| ZzClawSliderState::new().default_value(f32::from(window_opacity)));
+            self.slider_subscriptions[2] =
+                cx.observe(&self.window_opacity_slider, |this, slider, cx| {
+                    let ZzClawSliderValue::Single(value) = slider.read(cx).value() else {
+                        return;
+                    };
+                    let value = value.round().clamp(0., 100.) as u8;
+                    if value != this.last_window_opacity {
+                        this.last_window_opacity = value;
+                        this.set_window_background_opacity(value, cx);
+                    }
+                });
+        }
         self.settings = snapshot.settings.clone();
         self.ai = snapshot.ai.clone();
         self.cloud_sync = snapshot.cloud_sync.clone();
@@ -619,6 +669,12 @@ impl SettingsPanel {
         self.text_inputs = snapshot.text_inputs.clone();
         self.number_inputs = snapshot.number_inputs.clone();
         self.snapshot = Some(snapshot);
+        cx.spawn(async move |this, cx| {
+            let _ = this.update_in(cx, |panel, window, cx| {
+                panel.sync_theme_picker_controls(window, cx)
+            });
+        })
+        .detach();
         #[cfg(test)]
         {
             self.rebuild_count += 1;
@@ -1024,6 +1080,10 @@ impl Render for SettingsPanel {
             return div().size_full().into_any_element();
         };
 
+        if snapshot.settings.theme_designer.open {
+            return self.theme_designer_section(cx);
+        }
+
         let palette = snapshot.chrome.palette;
         let settings_title = t!("settings.title");
         let active_group = t!(snapshot.active_tab.group_i18n_key());
@@ -1251,7 +1311,7 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = snapshot.chrome.palette;
-        let dirty = snapshot.draft_dirty;
+        let dirty = snapshot.draft_dirty || snapshot.settings.theme_designer.dirty();
         let validation_error = snapshot.validation_error.clone();
         let apply_disabled = !dirty || validation_error.is_some();
         let confirm_disabled = validation_error.is_some();
@@ -1809,6 +1869,14 @@ impl SettingsPanel {
         });
     }
 
+    pub(in crate::features) fn set_window_background_opacity(
+        &mut self,
+        percent: u8,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_app(cx, |app, cx| app.set_window_background_opacity(percent, cx));
+    }
+
     pub(in crate::features) fn set_background_image_opacity(
         &mut self,
         percent: u8,
@@ -1905,6 +1973,7 @@ forward_app_action!(
     toggle_cloud_sync_enabled,
     toggle_command_suggestions,
     toggle_confirm_on_close,
+    toggle_credential_autofill,
     toggle_cursor_blink,
     toggle_bold_default_foreground,
     toggle_docker_manager_panel,
@@ -1953,7 +2022,7 @@ mod tests {
 
     use gpui::{
         AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, div, px,
+        TestAppContext, VisualTestContext, div, prelude::FluentBuilder as _, px,
     };
     use zzclawterm_core::{AppRuntime, RuntimeMode};
 
@@ -1996,6 +2065,7 @@ mod tests {
 
     struct MainHost {
         app: Entity<ZzClawTermApp>,
+        fill: bool,
     }
 
     impl Render for MainHost {
@@ -2004,15 +2074,21 @@ mod tests {
             _window: &mut gpui::Window,
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            div().w(px(360.)).h(px(720.)).flex().flex_col().child(
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    self.app
-                        .read(cx)
-                        .settings_panel
-                        .clone()
-                        .cached(crate::features::layout::cached_panel_style()),
-                ),
-            )
+            div()
+                .w(px(360.))
+                .h(px(720.))
+                .when(self.fill, |host| host.size_full())
+                .flex()
+                .flex_col()
+                .child(
+                    div().flex_1().min_h_0().overflow_hidden().child(
+                        self.app
+                            .read(cx)
+                            .settings_panel
+                            .clone()
+                            .cached(crate::features::layout::cached_panel_style()),
+                    ),
+                )
         }
     }
 
@@ -2076,6 +2152,7 @@ mod tests {
         let host_app = app.clone();
         let (_, vcx) = cx.add_window_view(move |_, _| MainHost {
             app: host_app.clone(),
+            fill: false,
         });
         let vcx: &mut VisualTestContext = vcx;
         vcx.run_until_parked();
@@ -2106,9 +2183,70 @@ mod tests {
     }
 
     #[test]
+    fn theme_manager_can_render_browsing_editing_and_unsaved_navigation() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        let dir = TestConfigDir::new("zzclawterm-theme-manager-view");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, dir.path());
+        // Paint one surface: open_page also opens a native settings window.
+        // Painting the same input entities in both hosts makes their geometry
+        // notifications alternate forever between the two window sizes.
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.begin_settings_draft(cx);
+            app.flush_settings_panel_snapshots(cx);
+        });
+        let host_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| MainHost {
+            app: host_app,
+            fill: true,
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.focus_settings_tab(SettingsTab::Appearance, cx);
+                app.theme_designer_action(ThemeIntent::Toggle, cx);
+            })
+        });
+        draw(&app, vcx);
+        vcx.update(|window, _| window.resize(gpui::size(px(640.), px(480.))));
+        draw(&app, vcx);
+        vcx.update(|window, _| window.resize(gpui::size(px(1000.), px(720.))));
+        draw(&app, vcx);
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.settings.theme_designer().editable());
+                app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+            })
+        });
+        draw(&app, vcx);
+        vcx.update(|window, _| window.resize(gpui::size(px(640.), px(480.))));
+        draw(&app, vcx);
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.existing_text_input("theme.designer.name").is_some());
+                app.edit_theme_designer("primary", "invalid".into(), cx);
+                app.theme_designer_action(ThemeIntent::Toggle, cx);
+            })
+        });
+        draw(&app, vcx);
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.settings.theme_designer().open);
+                assert!(app.settings.theme_designer().pending.is_some());
+                app.resolve_theme_designer_pending(Some(false), cx);
+            })
+        });
+        draw(&app, vcx);
+        vcx.update(|_, cx| assert!(!app.read(cx).settings.theme_designer().open));
+    }
+
+    #[test]
     fn panel_lease_callback_does_not_double_lease() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
@@ -2168,6 +2306,7 @@ mod tests {
     fn repeated_refresh_requests_coalesce_and_clear_for_next_cycle() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let panel = vcx.update(|_, cx| main_panel(&app, cx));
         let initial = vcx.update(|_, cx| rebuilds(&panel, cx));
@@ -2204,6 +2343,7 @@ mod tests {
     fn unrelated_app_notify_does_not_repaint_cached_settings_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let before = vcx.update(|_, cx| paints(&app, cx));
         assert!(
@@ -2226,6 +2366,7 @@ mod tests {
     fn inactive_cloud_sync_state_does_not_rebuild_settings_snapshot() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
         let panel = vcx.update(|_, cx| main_panel(&app, cx));
         let (initial_rebuilds, initial_status) = vcx.update(|_, cx| {
@@ -2272,6 +2413,7 @@ mod tests {
     fn main_and_native_surfaces_receive_updates_independently() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         let native = cx.new(|cx| {
             SettingsPanel::new_for_surface(app.downgrade(), SettingsSurface::NativeWindow, cx)
@@ -2398,6 +2540,7 @@ mod tests {
     fn every_settings_surface_draws_only_inputs_it_built() {
         let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
         let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let (app, vcx) = hosted(&mut cx, test_dir.path());
 
         // First, before the loop below has visited Security: enabling cloud sync

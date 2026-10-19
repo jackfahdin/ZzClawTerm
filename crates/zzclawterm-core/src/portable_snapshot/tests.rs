@@ -39,6 +39,35 @@ fn sync_settings_exclude_local_configuration_and_preserve_it_on_apply() {
 }
 
 #[test]
+fn native_window_preferences_are_device_local_but_remain_in_backups() {
+    let current = serde_json::json!({"appearance": {
+        "window_material": "blurred", "window_background_opacity": 35,
+        "background_opacity": 0.82, "theme": "dark"
+    }});
+    let mut synced = current.clone();
+    project_sync_settings(&mut synced);
+    assert!(synced["appearance"].get("window_material").is_none());
+    assert!(
+        synced["appearance"]
+            .get("window_background_opacity")
+            .is_none()
+    );
+    assert_eq!(synced["appearance"]["background_opacity"], 0.82);
+    synced["appearance"]["window_material"] = serde_json::json!("transparent");
+    preserve_device_local_sync_settings(&mut synced, &current);
+    assert_eq!(synced, current);
+
+    let mut backup = RawPortableSnapshot::backup("device", "test");
+    backup
+        .entities
+        .insert("settings".into(), current.to_string());
+    backup.recalculate_hash().expect("backup hash");
+    validate_raw_snapshot(&backup).expect("backup validity");
+    let restored: serde_json::Value = serde_json::from_str(&backup.entities["settings"]).unwrap();
+    assert_eq!(restored, current);
+}
+
+#[test]
 fn v3_hash_protects_notes_when_the_entity_is_present() {
     let mut snapshot = RawPortableSnapshot::backup("device-1", "test");
     snapshot.entities.insert(
