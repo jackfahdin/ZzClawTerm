@@ -434,7 +434,7 @@ fn session_start_rolls_back_each_worker_creation_failure() {
     // The override only selects the same binary used by the other fixtures.
     unsafe {
         std::env::set_var(
-            "NYATERM_RDP_HELPER",
+            "ZZCLAWTERM_RDP_HELPER",
             env!("CARGO_BIN_EXE_zzclawterm-rdp-helper"),
         );
     }
