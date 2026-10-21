@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use zzclawterm_ui::{ZzClawScrollable, ZzClawTooltip};
 
 use gpui::{
-    Bounds, Context, FontWeight, IntoElement, KeyDownEvent, Pixels, SharedString, div, prelude::*,
-    px, rgb, rgba, svg,
+    Bounds, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
+    SharedString, div, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::{
     CommandHistoryEntry, QuickCommand, TerminalInputState, apply_terminal_input_data,
@@ -22,6 +22,9 @@ use crate::models::{CommandSuggestionItem, CommandSuggestionState};
 use crate::terminal::terminal_byte_index_for_cell_col;
 
 mod helpers;
+
+#[cfg(test)]
+mod dismissal_tests;
 
 use self::helpers::command_suggestion_highlight_parts;
 
@@ -1190,6 +1193,11 @@ impl ZzClawTermApp {
             .id(SharedString::from("command-suggestions-overlay"))
             .absolute()
             .occlude()
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button == MouseButton::Right {
+                    this.dismiss_command_suggestions(cx);
+                }
+            }))
             .left(px(placement.x))
             .top(px(placement.y))
             .w(px(menu_w))

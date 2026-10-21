@@ -1198,6 +1198,9 @@ impl ZzClawTermApp {
             return;
         }
         self.terminal.input.focus_active = focused;
+        if !focused {
+            self.dismiss_command_suggestions(cx);
+        }
         let Some(session_id) = self.session.active_id_owned() else {
             return;
         };
