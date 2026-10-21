@@ -724,6 +724,8 @@ mod tests {
     fn sync_sidebar_password_submission_runs_push_and_pull_and_records_history() {
         let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-roundtrip");
         let mut cx = TestAppContext::single();
+        // Keep button bounds stable between rendering and simulated pointer events.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         let host_app = app.clone();
@@ -756,7 +758,7 @@ mod tests {
             cx.update(|window, cx| {
                 assert!(
                     !window.has_active_nya_dialog(cx),
-                    "submission must close the password dialog"
+                    "submission must close the password dialog: {trigger}"
                 );
                 assert!(!app.read(cx).settings.snapshot_password_prompt_active());
             });
