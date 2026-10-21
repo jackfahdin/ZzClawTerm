@@ -486,14 +486,7 @@ impl ZzClawTermApp {
         // Tauri DropZone: gap-0.5 pt-1
         let mut top = div().flex().flex_col().items_center().gap(px(2.)).pt_1();
         for (index, entry) in top_entries.into_iter().enumerate() {
-            top = top.child(self.activity_entry_button(
-                entry,
-                side,
-                top_zone,
-                index,
-                show_labels,
-                cx,
-            ));
+            top = top.child(self.activity_entry_button(entry, top_zone, index, show_labels, cx));
         }
         // End-of-zone drop target (append).
         top = top.child(self.activity_zone_end_drop_target(top_zone, top_len, cx));
@@ -508,7 +501,6 @@ impl ZzClawTermApp {
         for (index, entry) in bottom_entries.into_iter().enumerate() {
             bottom = bottom.child(self.activity_entry_button(
                 entry,
-                side,
                 bottom_zone,
                 index,
                 show_labels,
@@ -583,7 +575,6 @@ impl ZzClawTermApp {
     pub(in crate::features) fn activity_entry_button(
         &self,
         entry: ActivityBarEntry,
-        side: ActivitySide,
         zone: ActivityBarZone,
         index: usize,
         show_labels: bool,
@@ -605,11 +596,6 @@ impl ZzClawTermApp {
         };
         let entry_id = entry.persistence_id().to_string();
         let context_entry_id = entry_id.clone();
-        let indicator = if selected {
-            active_color
-        } else {
-            rgba(0x00000000)
-        };
 
         div()
             .id(SharedString::from(format!("activity-{entry_id}")))
@@ -642,17 +628,6 @@ impl ZzClawTermApp {
                 rgb(palette.text_muted)
             })
             .bg(rgba(0x00000000))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(4.))
-                    .bottom(px(4.))
-                    .w(px(2.))
-                    .rounded_full()
-                    .bg(indicator)
-                    .when(side == ActivitySide::Left, |this| this.left_0())
-                    .when(side == ActivitySide::Right, |this| this.right_0()),
-            )
             .child(activity_icon(icon_path, icon_color.into(), 18.))
             .when(show_labels, |this| {
                 this.child(
