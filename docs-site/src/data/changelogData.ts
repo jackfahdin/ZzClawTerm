@@ -10,6 +10,36 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.1.5] - 2026-10-21',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (40 commits): dual-pane file manager, logical line numbers for terminal snapshots, WindTerm Dark/Light themes, settings panel visibility management with a remote monitoring tab, per-connection username source handling, session retry with tab placement, tab close buttons, built-in editor font size, document language recognition, and more.',
+          '**settings:** New Settings → Terminal → X11 tab: a centered X11 icon shows the server state (accent while running, gray otherwise; hover for status, display, and path details); local DISPLAY and X server path settings moved here.',
+          '**settings:** X server path becomes a dropdown ("ZzXsrv (default)" auto-discovery / "Custom" with a native browse button), validated to require an existing vcxsrv.exe before settings can be applied.',
+          '**settings:** New "Show X server tray icon" toggle (on by default; launches new instances with `-notrayicon` when off); a red "restart the X server to take effect" hint appears while a running managed instance disagrees with the toggle.',
+        ],
+      },
+      {
+        title: 'Changed',
+        items: [
+          '**terminal:** X server management collapses to a single master toggle "Enable X server" (MobaXterm semantics, on by default): started with the app, stopped on exit, and revived automatically by the next X11-forwarded connection if it dies; the separate "start on demand" toggle is removed and is now always-on internal behavior.',
+          '**terminal:** The "Enable X server" toggle takes effect immediately: enabling starts the server in the background, disabling stops instances started by the app (external servers are untouched).',
+          '**settings:** The "Local X11 DISPLAY" description now states its meaning plainly (the local display SSH X11 forwarding connects back to; port = 6000 + display number; the default localhost:0 fits the managed ZzXsrv).',
+          '**ui:** Remove the selection indicator bar from sidebar buttons.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**desktop:** Dismiss the command suggestion popup on right-click outside it or when the terminal loses focus.',
+          '**build:** Bundled ZzXsrv updated to 21.1.16.2, fixing the console window flash caused by xkbcomp running through cmd.exe at X server startup.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.1.4] - 2026-10-19',
     sections: [
       {
@@ -86,6 +116,36 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.1.5] - 2026-10-21',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 NyaTerm（40 个提交）：双栏文件管理器、终端快照逻辑行号管理、WindTerm Dark/Light 主题、设置面板可见性管理与远程监控子页、连接用户名来源处理、会话重试与标签页放置、标签页关闭按钮、内置编辑器字体大小配置、文档语言识别等。',
+          '**settings:** 新增「设置 → 终端 → X11」子页：状态区以居中 X11 大图标着色显示运行状态（运行中高亮、未运行灰色，悬浮图标查看运行状态、Display、程序路径等详情）；本地 DISPLAY 地址与 X Server 路径配置迁入该页。',
+          '**settings:** X Server 路径改为下拉选择（「ZzXsrv（默认）」自动探测 /「自定义」），自定义模式提供原生文件浏览按钮，并对路径做有效性校验（须为存在的 vcxsrv.exe，否则阻止应用设置）。',
+          '**settings:** 新增「显示 X Server 托盘图标」开关（默认开启，关闭时以 `-notrayicon` 启动新实例）；当运行中的托管实例与该开关不一致时，开关下方显示红色「重启 X Server 后生效」警示。',
+        ],
+      },
+      {
+        title: '变更',
+        items: [
+          '**terminal:** X Server 管理简化为单一总开关「启用 X Server」（MobaXterm 同款语义，默认开启）：随应用启动拉起、退出时联动关闭，运行中若服务器意外退出，下一个勾选 X11 转发的连接会自动兜底拉起；原「连接时按需启动」独立开关移除，降级为内部恒生效行为。',
+          '**terminal:** 「启用 X Server」总开关立即生效：开启即后台启动 X Server，关闭即停止由本应用拉起的实例（外部服务器不受影响），不再等下次启动。',
+          '**settings:** 「本地 X11 DISPLAY」说明文案改为明确其语义（SSH X11 转发回连的本地 display，端口 = 6000 + display 号，默认 localhost:0 适用于托管 ZzXsrv）。',
+          '**ui:** 移除侧边栏按钮的选中指示条。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**desktop:** 右键点击建议框外部或终端失焦时，正确关闭命令建议弹窗。',
+          '**build:** 随包分发的 ZzXsrv 升级至 21.1.16.2，修复启动 X Server 时 xkbcomp 经 cmd.exe 执行导致的控制台窗口闪烁。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.1.4] - 2026-10-19',
     sections: [
