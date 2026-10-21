@@ -168,7 +168,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn multiplex_active_ssh_session_with_startup(
         &mut self,
         startup_command: Option<StartupCommandRequest>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.session.start_has_active_pending() || self.session.start_has_active_failed() {
@@ -221,6 +221,9 @@ impl ZzClawTermApp {
             cx,
         );
         self.shell.show_workspace();
+        if self.session.start_has_active_pending() {
+            self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);
+        }
         cx.notify();
     }
 
@@ -286,6 +289,14 @@ impl ZzClawTermApp {
         self.terminal.invalidate_shell_editing_session(session_id);
         self.clear_terminal_mouse_report_for_session(session_id);
         self.transfer.clear_file_clipboard_for_session(session_id);
+        let rollback = self.transfer.invalidate_browser_navigation(session_id);
+        if self.session.active_id() == Some(session_id) {
+            if let Some(snapshot) = rollback {
+                self.restore_transfer_browser_navigation(snapshot);
+            }
+            self.transfer.clear_pending_cwd_sync();
+            self.defer_transfer_panel_snapshot_flush(cx);
+        }
         self.session.remove_remote_file_service(session_id);
         let Some(update) = self.session.mark_session_disconnected(session_id) else {
             return;
@@ -313,6 +324,7 @@ impl ZzClawTermApp {
             self.terminal.clear_active_session_assist();
         }
         self.prune_workspace_split();
+        self.mark_file_manager_session_disconnected(session_id, true, cx);
         cx.notify();
     }
 
@@ -320,7 +332,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn reconnect_session(
         &mut self,
         session_id: String,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.session.session_is_busy(&session_id) {
@@ -359,6 +371,16 @@ impl ZzClawTermApp {
             .then(|| self.session.cwd(&old_id))
             .flatten()
             .and_then(zzclawterm_transport::build_ssh_reconnect_cwd_command);
+        self.session.clear_cwd(&old_id);
+        if let Some(snapshot) = self.transfer.invalidate_browser_navigation(&old_id)
+            && self.session.active_id() == Some(old_id.as_str())
+        {
+            self.restore_transfer_browser_navigation(snapshot);
+        }
+        if self.session.active_id() == Some(old_id.as_str()) {
+            self.transfer.clear_pending_cwd_sync();
+            self.defer_transfer_panel_snapshot_flush(cx);
+        }
         // Tauri: write cyan reconnecting line into the buffer before recreating.
         self.terminal
             .append_existing_session_text(&old_id, RECONNECTING_BANNER);
@@ -466,6 +488,11 @@ impl ZzClawTermApp {
         self.session.finish_busy_action(&old_id);
         self.session.retain_busy_actions_for_live_sessions();
         self.shell.show_workspace();
+        if self.session.active_id() == Some(old_id.as_str())
+            && self.session.start_reconnect_is_pending(&old_id)
+        {
+            self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);
+        }
         cx.notify();
     }
 
@@ -487,19 +514,30 @@ impl ZzClawTermApp {
             .move_session_surface_bounds(old_id, new_id.to_string());
         self.terminal.move_search_session_state(old_id, new_id);
         self.session.replace_session_order_id(old_id, new_id);
+        self.session.clear_cwd(old_id);
+        if let Some(snapshot) = self.transfer.invalidate_browser_navigation(old_id)
+            && self.session.active_id() == Some(old_id)
+        {
+            self.restore_transfer_browser_navigation(snapshot);
+        }
+        self.transfer.replace_session_id(old_id, new_id);
+        self.file_manager.replace_session_id(old_id, new_id, cx);
+        self.mark_file_manager_session_disconnected(new_id, false, cx);
         self.session.migrate_session_presentation(old_id, new_id);
 
         self.shell.replace_workspace_session_id(old_id, new_id);
-        self.terminal.replace_terminal_window_tab_id(old_id, new_id);
+        self.shell.replace_terminal_window_tab_id(old_id, new_id);
         self.sync_input.replace_session_id(old_id, new_id);
         if self.session.active_id() == Some(old_id) {
             self.activate_session_id(new_id, cx);
-        }
-        self.transfer.replace_session_id(old_id, new_id);
-        if self.session.active_id() == Some(new_id)
-            && self.transfer.has_browser_session_cache(new_id)
-        {
+        } else if self.session.active_id() == Some(new_id) {
             self.restore_transfer_browser_session_cache(new_id, cx);
+            if self.transfer_browser_is_visible() {
+                self.sync_transfer_browser_to_cwd(
+                    crate::models::TransferCwdSyncReason::Automatic,
+                    cx,
+                );
+            }
         }
         self.sync_workspace_split_from_active_tab();
     }
@@ -509,12 +547,13 @@ impl ZzClawTermApp {
 mod tests {
     use gpui::TestAppContext;
     use zzclawterm_terminal::TerminalScreen;
+    use zzclawterm_transport::SshSessionConfig;
 
     use super::RECONNECTING_BANNER;
     use crate::features::test_support::{
         app_with_visible_local_session, session_focus_test_window,
     };
-    use crate::models::SessionLaunchConfig;
+    use crate::models::{SessionLaunchConfig, StartupCommandRequest};
     use crate::test_support::TestConfigDir;
 
     #[test]
@@ -586,6 +625,141 @@ mod tests {
                         .session
                         .prompt_credential_focus()
                         .is_focused(window)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn multiplex_session_focus_handoff_survives_menu_or_dialog_dismissal() {
+        for with_startup_command in [false, true] {
+            let root = TestConfigDir::new("zzclawterm-multiplex-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    let mut metadata = app.session.metadata("source").unwrap().clone();
+                    // Port zero fails locally; focus must not depend on SSH I/O.
+                    metadata.launch_config = SessionLaunchConfig::Ssh(Box::new(SshSessionConfig {
+                        host: "127.0.0.1".into(),
+                        port: 0,
+                        ..SshSessionConfig::default()
+                    }));
+                    app.session.register_session_metadata("source", metadata);
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+
+                    if with_startup_command {
+                        app.multiplex_active_ssh_session_with_startup(
+                            Some(StartupCommandRequest {
+                                command: "pwd".into(),
+                                delay_ms: 0,
+                            }),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        app.multiplex_active_ssh_session(window, cx);
+                    }
+                    assert!(app.session.start_has_active_pending());
+                    assert!(app.terminal.input_focus().is_focused(window));
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(app.read(cx).terminal.input_focus().is_focused(window));
+            });
+        }
+    }
+
+    #[test]
+    fn multiplex_without_an_ssh_source_preserves_existing_input_focus() {
+        for missing_source in [true, false] {
+            let root = TestConfigDir::new("zzclawterm-multiplex-invalid-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    if missing_source {
+                        app.session.clear_active_session();
+                    }
+                    window.focus(app.session.prompt_credential_focus(), cx);
+                    app.multiplex_active_ssh_session(window, cx);
+                    assert!(!app.session.start_has_active_pending());
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(
+                    app.read(cx)
+                        .session
+                        .prompt_credential_focus()
+                        .is_focused(window)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn reconnect_focus_handoff_requires_an_active_session_and_accepted_start() {
+        for (active, valid_encoding) in [(true, true), (false, true), (true, false)] {
+            let root = TestConfigDir::new("zzclawterm-reconnect-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    let mut metadata = app.session.metadata("source").unwrap().clone();
+                    let SessionLaunchConfig::Local(config) = &mut metadata.launch_config else {
+                        panic!("expected local fixture");
+                    };
+                    config.shell_path = Some(
+                        root.path()
+                            .join("missing-test-shell")
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    if !valid_encoding {
+                        config.encoding = "invalid-test-encoding".into();
+                    }
+                    app.session.register_session_metadata("source", metadata);
+                    if !active {
+                        let metadata = app.session.metadata("source").unwrap().clone();
+                        app.session.register_session_metadata("other", metadata);
+                        app.session.select_active_session("other");
+                    }
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                    app.reconnect_session("source".into(), window, cx);
+                    assert_eq!(
+                        app.session.active_id(),
+                        Some(if active { "source" } else { "other" })
+                    );
+                    assert_eq!(
+                        app.session.start_reconnect_is_pending("source"),
+                        valid_encoding
+                    );
+                    assert_eq!(
+                        app.terminal.input_focus().is_focused(window),
+                        active && valid_encoding
+                    );
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let app = app.read(cx);
+                assert_eq!(
+                    app.terminal.input_focus().is_focused(window),
+                    active && valid_encoding
+                );
+                assert_eq!(
+                    app.session.dialog_tab_actions_focus().is_focused(window),
+                    !(active && valid_encoding)
                 );
             });
         }

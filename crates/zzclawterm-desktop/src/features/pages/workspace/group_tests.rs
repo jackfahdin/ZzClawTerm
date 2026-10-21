@@ -70,7 +70,7 @@ fn render_groups_and_invoke_menu() {
         app.sync_component_theme(cx);
         app.session.mark_restore_complete();
         app.shell.set_workspace_pane_layout_restored(true);
-        app.terminal.complete_terminal_windows_restore();
+        app.shell.complete_terminal_windows_restore();
         app.reconcile_terminal_windows();
     });
     let fixture_app = app.clone();
@@ -115,9 +115,9 @@ fn render_groups_and_invoke_menu() {
                 cx.simulate_keystrokes(&format!("{}enter", "down ".repeat(index + 1)));
                 draw(&app, cx);
                 app.read_with(cx, |app, _| {
-                    let tree = app.terminal.terminal_window_tree().unwrap();
+                    let tree = app.shell.terminal_window_tree().unwrap();
                     assert_eq!(tree.collect_tab_ids().len(), count);
-                    let size = app.terminal.terminal_workspace_size().unwrap();
+                    let size = app.shell.terminal_workspace_size().unwrap();
                     let expected = crate::models::TerminalWindowNode::tile_in_bounds(
                         &tree.collect_tab_ids(),
                         mode,
@@ -132,7 +132,7 @@ fn render_groups_and_invoke_menu() {
                     );
                     for group in tree.leaf_ids() {
                         let bounds = app
-                            .terminal
+                            .shell
                             .terminal_split_bounds(&group)
                             .expect("rendered group");
                         assert!(

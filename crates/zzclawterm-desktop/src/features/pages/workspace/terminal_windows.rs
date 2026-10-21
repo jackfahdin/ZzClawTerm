@@ -1,5 +1,5 @@
 use crate::features::ZzClawTermApp;
-use crate::features::shell::SessionTabDragPayload;
+use crate::features::shell::WorkspaceTabDragPayload;
 use crate::models::{TabDockEdge, TabDockZone, TerminalWindowNode, WorkspaceSplitDirection};
 use crate::theme::ThemePalette;
 use gpui::{
@@ -58,7 +58,7 @@ impl ZzClawTermApp {
                 let id = measure_id.clone();
                 cx.defer(move |cx| {
                     let _ = app.update(cx, |this, _| {
-                        this.terminal.record_terminal_split_bounds(id, bounds)
+                        this.shell.record_terminal_split_bounds(id, bounds)
                     });
                 });
             },
@@ -119,7 +119,7 @@ impl ZzClawTermApp {
                 let id = measure_id.clone();
                 cx.defer(move |cx| {
                     let _ = app.update(cx, |this, _| {
-                        this.terminal.record_terminal_split_bounds(id, bounds)
+                        this.shell.record_terminal_split_bounds(id, bounds)
                     });
                 });
             },
@@ -155,34 +155,58 @@ impl ZzClawTermApp {
         let content = if pending_here && self.session.start_has_active_pending() {
             self.pending_workspace_state().into_any_element()
         } else if pending_here && self.session.start_has_active_failed() {
-            self.failed_workspace_state().into_any_element()
+            self.failed_workspace_state(cx).into_any_element()
         } else if let Some(active) = &active {
-            self.workspace_session_content(active.clone(), cx)
+            match crate::models::WorkspaceTabId::from_layout_key(active) {
+                crate::models::WorkspaceTabId::Session(id) => {
+                    self.workspace_session_content(id, cx)
+                }
+                crate::models::WorkspaceTabId::Editor(id) => self.workspace_editor_content(&id, cx),
+                crate::models::WorkspaceTabId::FileManager(id) => {
+                    self.workspace_file_manager_content(&id, cx)
+                }
+            }
         } else {
             self.empty_workspace_state(cx).into_any_element()
         };
         let group_id = group.to_string();
         let move_id = group_id.clone();
         let drop_id = group_id.clone();
-        let zone = self.terminal.terminal_window_drop_for_leaf(group);
+        let zone = self.shell.terminal_window_drop_for_leaf(group);
         let palette = self.theme_palette();
+        let clicked_editor = active.clone().filter(|key| {
+            !crate::models::WorkspaceTabId::from_layout_key(key).is_terminal_session()
+        });
         div()
             .id(SharedString::from(format!("tw-content-{group}")))
+            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                if !showing_request
+                    && let Some(key) = &clicked_editor
+                    && this.active_workspace_tab().as_ref() != Some(key)
+                {
+                    this.activate_workspace_tab(key, cx);
+                }
+            }))
             .flex_1()
             .min_h_0()
             .min_w_0()
+            .flex()
+            .flex_col()
             .relative()
             .overflow_hidden()
-            .can_drop(|drag, _, _| drag.is::<SessionTabDragPayload>())
+            .can_drop(|drag, _, _| drag.is::<WorkspaceTabDragPayload>())
             .on_drag_move(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<SessionTabDragPayload>, _, cx| {
+                move |this, event: &gpui::DragMoveEvent<WorkspaceTabDragPayload>, _, cx| {
+                    if event.drag(cx).tab_id.is_start() {
+                        return;
+                    }
                     let b = event.bounds;
                     let p = event.event.position;
                     // GPUI dispatches drag moves to every group, including those
                     // outside the pointer. Only clear this group's old target so
                     // a later sibling cannot erase the hovered group's preview.
                     if !b.contains(&p) {
-                        if this.terminal.clear_terminal_window_drop_for_leaf(&move_id) {
+                        if this.shell.clear_terminal_window_drop_for_leaf(&move_id) {
                             cx.notify();
                         }
                         return;
@@ -202,15 +226,19 @@ impl ZzClawTermApp {
                 },
             ))
             .on_drop(
-                cx.listener(move |this, payload: &SessionTabDragPayload, _, cx| {
+                cx.listener(move |this, payload: &WorkspaceTabDragPayload, _, cx| {
+                    if payload.tab_id.is_start() {
+                        this.clear_session_tab_drag(cx);
+                        return;
+                    }
                     this.accept_session_tab_drop(payload, cx);
                     let zone = this
-                        .terminal
+                        .shell
                         .terminal_window_drop_for_leaf(&drop_id)
                         .unwrap_or(TabDockZone::Center);
                     if payload.source_workspace_id == this.workspace_id {
                         this.dock_tab_on_terminal_window_leaf(
-                            payload.session_id.clone(),
+                            payload.tab_id.layout_key(),
                             drop_id.clone(),
                             zone,
                             cx,
@@ -245,7 +273,13 @@ impl ZzClawTermApp {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
-                if !showing_request && let Some(active) = &active {
+                if !showing_request
+                    && let Some(active) = &active
+                    && matches!(
+                        crate::models::WorkspaceTabId::from_layout_key(active),
+                        crate::models::WorkspaceTabId::Session(_)
+                    )
+                {
                     this.activate_workspace_pane(active.clone(), cx);
                     this.focus_terminal_session(active, window, cx);
                 }

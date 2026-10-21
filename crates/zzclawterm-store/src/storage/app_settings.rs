@@ -15,10 +15,11 @@ use super::{
 };
 use zzclawterm_core::{
     AppSettingsSummary, CredentialCrypto, DEFAULT_RECORDING_PATH_TEMPLATE,
-    DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, InternalEditorDisplay, RecordingMode,
-    RecordingRotationPolicy, SearchEngineConfig, TerminalRightClickAction, TransferBrowserViewMode,
-    WorkspaceId, WorkspaceRestoreManifest, WorkspaceRestoreState, WorkspaceSessionState,
-    WorkspaceUiState, default_panel_open_mode, default_search_engines, normalize_panel_open_mode,
+    DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, FileManagerUiSettings,
+    InternalEditorDisplay, RecordingMode, RecordingRotationPolicy, SearchEngineConfig,
+    TerminalRightClickAction, TransferBrowserViewMode, WorkspaceId, WorkspaceRestoreManifest,
+    WorkspaceRestoreState, WorkspaceSessionState, WorkspaceUiState, default_panel_open_mode,
+    default_search_engines, normalize_panel_open_mode,
 };
 
 // Reject malformed known fields before an unrelated save can replace their data.
@@ -46,8 +47,24 @@ fn read_window_appearance(value: &serde_json::Value) -> Result<(WindowMaterial, 
 }
 
 impl ConnectionStore {
+    pub(super) fn migrate_legacy_panel_visibility(&self) -> Result<(), StorageError> {
+        let mut value = self.load_settings_value()?;
+        if zzclawterm_core::models::settings::panel_visibility::migrate_legacy_panel_visibility(
+            &mut value,
+        )
+        .map_err(StorageError::InvalidData)?
+        {
+            self.save_settings_value(&value)?;
+        }
+        Ok(())
+    }
+
     pub fn load_app_settings_summary(&self) -> Result<AppSettingsSummary, StorageError> {
-        let value = self.load_settings_value()?;
+        let mut value = self.load_settings_value()?;
+        zzclawterm_core::models::settings::panel_visibility::migrate_legacy_panel_visibility(
+            &mut value,
+        )
+        .map_err(StorageError::InvalidData)?;
         let (window_material, window_background_opacity) = read_window_appearance(&value)?;
         Ok(AppSettingsSummary {
             window_material,
@@ -218,28 +235,18 @@ impl ConnectionStore {
             ),
             terminal_action_links_matchers: load_action_links_matchers(&value),
             search_custom_engines: load_search_engines(&value),
-            ui_show_notes_panel: json_bool(&value, &["ui", "show_notes_panel"], true),
-            ui_show_remote_stats: json_bool(&value, &["ui", "show_remote_stats"], true),
             ui_remote_stats_interval: json_u32(&value, &["ui", "remote_stats_interval"], 3)
                 .clamp(1, 60),
-            ui_show_gpu_monitor: json_bool(&value, &["ui", "show_gpu_monitor"], false),
             ui_gpu_monitor_interval: json_u32(&value, &["ui", "gpu_monitor_interval"], 3)
                 .clamp(3, 120),
-            ui_show_ascend_npu_monitor: json_bool(
-                &value,
-                &["ui", "show_ascend_npu_monitor"],
-                false,
-            ),
             ui_ascend_npu_monitor_interval: json_u32(
                 &value,
                 &["ui", "ascend_npu_monitor_interval"],
                 3,
             )
             .clamp(3, 120),
-            ui_show_process_manager: json_bool(&value, &["ui", "show_process_manager"], true),
             ui_process_manager_interval: json_u32(&value, &["ui", "process_manager_interval"], 5)
                 .clamp(3, 120),
-            ui_show_docker_manager: json_bool(&value, &["ui", "show_docker_manager"], true),
             ui_docker_manager_interval: json_u32(&value, &["ui", "docker_manager_interval"], 10)
                 .clamp(3, 120),
             ui_quick_cmd_view_mode: normalize_quick_cmd_view_mode(&json_string(
@@ -303,6 +310,10 @@ impl ConnectionStore {
                 &["ui", "file_explorer_favorite_dirs_by_connection_id"],
                 12,
             ),
+            ui_file_manager: json_path(&value, &["ui", "file_manager"])
+                .cloned()
+                .and_then(|value| serde_json::from_value::<FileManagerUiSettings>(value).ok())
+                .unwrap_or_default(),
             ui_left_panel_width: json_u32(&value, &["ui", "left_width"], 256).clamp(160, 720),
             ui_right_panel_width: json_u32(&value, &["ui", "right_width"], 288).clamp(200, 720),
             ui_transfer_height: json_u32(&value, &["ui", "transfer_height"], 180).clamp(60, 600),
@@ -868,6 +879,11 @@ impl ConnectionStore {
                 12,
             ),
         );
+        set_nested_json_value(
+            &mut value,
+            &["ui", "file_manager"],
+            serde_json::to_value(&settings.ui_file_manager).unwrap_or(serde_json::Value::Null),
+        );
         self.save_settings_value(&value)?;
         self.load_app_settings_summary()
     }
@@ -1360,23 +1376,8 @@ impl ConnectionStore {
         );
         set_nested_json_value(
             &mut value,
-            &["ui", "show_notes_panel"],
-            serde_json::Value::Bool(settings.ui_show_notes_panel),
-        );
-        set_nested_json_value(
-            &mut value,
-            &["ui", "show_remote_stats"],
-            serde_json::Value::Bool(settings.ui_show_remote_stats),
-        );
-        set_nested_json_value(
-            &mut value,
             &["ui", "remote_stats_interval"],
             serde_json::Value::from(settings.ui_remote_stats_interval.clamp(1, 60)),
-        );
-        set_nested_json_value(
-            &mut value,
-            &["ui", "show_gpu_monitor"],
-            serde_json::Value::Bool(settings.ui_show_gpu_monitor),
         );
         set_nested_json_value(
             &mut value,
@@ -1385,28 +1386,13 @@ impl ConnectionStore {
         );
         set_nested_json_value(
             &mut value,
-            &["ui", "show_ascend_npu_monitor"],
-            serde_json::Value::Bool(settings.ui_show_ascend_npu_monitor),
-        );
-        set_nested_json_value(
-            &mut value,
             &["ui", "ascend_npu_monitor_interval"],
             serde_json::Value::from(settings.ui_ascend_npu_monitor_interval.clamp(3, 120)),
         );
         set_nested_json_value(
             &mut value,
-            &["ui", "show_process_manager"],
-            serde_json::Value::Bool(settings.ui_show_process_manager),
-        );
-        set_nested_json_value(
-            &mut value,
             &["ui", "process_manager_interval"],
             serde_json::Value::from(settings.ui_process_manager_interval.clamp(3, 120)),
-        );
-        set_nested_json_value(
-            &mut value,
-            &["ui", "show_docker_manager"],
-            serde_json::Value::Bool(settings.ui_show_docker_manager),
         );
         set_nested_json_value(
             &mut value,
@@ -1932,6 +1918,8 @@ fn default_activity_right_top() -> Vec<String> {
         "activeSessions".to_string(),
         "commandHistory".to_string(),
         "resourceMonitor".to_string(),
+        "gpuMonitor".to_string(),
+        "ascendNpuMonitor".to_string(),
         "processManager".to_string(),
         "dockerManager".to_string(),
     ]

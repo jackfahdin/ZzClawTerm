@@ -98,9 +98,10 @@ pub use environment::{
     normalize_environment_variable_name,
 };
 pub use file_browser::{
-    FileBrowserBackendKind, FileBrowserCapabilities, FileBrowserService, file_browser_identity,
-    file_browser_join, file_browser_name, file_browser_parent, file_browser_path_eq,
-    file_browser_path_is_root, file_browser_root, valid_file_browser_child_name,
+    FileBrowserBackendKind, FileBrowserCapabilities, FileBrowserService,
+    file_browser_copy_destination_invalid, file_browser_identity, file_browser_join,
+    file_browser_name, file_browser_parent, file_browser_path_eq, file_browser_path_is_root,
+    file_browser_root, valid_file_browser_child_name,
 };
 pub use session_config::{
     LocalSessionConfig, SerialSessionConfig, SftpCwdFollowMode, SftpSettings, SshAgentEndpoint,

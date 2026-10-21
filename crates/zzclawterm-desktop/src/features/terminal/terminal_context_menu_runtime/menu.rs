@@ -415,7 +415,7 @@ impl ZzClawTermApp {
                         format!("AI action started: {status_name}"),
                         false,
                     );
-                    this.ensure_panel_open(NavItem::AiAssistant);
+                    this.ensure_panel_open(NavItem::AiAssistant, cx);
                     window.focus(this.ai.chat_focus(), cx);
                     this.start_ai_ask(cx);
                 }))

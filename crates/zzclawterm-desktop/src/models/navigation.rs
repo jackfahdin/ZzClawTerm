@@ -399,13 +399,39 @@ impl Default for ActivityBarLayoutState {
                 "recording".to_string(),
                 "lock".to_string(),
             ],
-            hidden_items: Vec::new(),
+            hidden_items: zzclawterm_core::models::settings::panel_visibility::default_hidden_items(
+            ),
             show_labels: false,
         }
     }
 }
 
 impl ActivityBarLayoutState {
+    /// Older store defaults omitted accelerator slots entirely. Restore only
+    /// those missing slots, retaining unknown ids and all saved visibility.
+    pub(crate) fn ensure_remote_monitor_entries(&mut self) {
+        for (id, anchor) in [
+            ("gpuMonitor", "resourceMonitor"),
+            ("ascendNpuMonitor", "gpuMonitor"),
+        ] {
+            if self.find_entry(id).is_some() {
+                continue;
+            }
+            let insert_at = self
+                .right_top
+                .iter()
+                .position(|entry| entry == anchor)
+                .map(|index| index + 1)
+                .or_else(|| {
+                    self.right_top
+                        .iter()
+                        .position(|entry| entry == "processManager")
+                })
+                .unwrap_or(self.right_top.len());
+            self.right_top.insert(insert_at, id.into());
+        }
+    }
+
     /// Add the new entry before restoring panels, without changing saved placement.
     pub(crate) fn ensure_plugin_entry(&mut self) {
         if self.find_entry("plugins").is_some() {
@@ -830,7 +856,11 @@ mod tests {
         );
         assert_eq!(
             layout.hidden_entries_ordered(),
-            vec!["fileExplorer".to_string()]
+            vec![
+                "fileExplorer".to_string(),
+                "gpuMonitor".to_string(),
+                "ascendNpuMonitor".to_string()
+            ]
         );
 
         // Unknown ids cannot be hidden.
@@ -843,6 +873,26 @@ mod tests {
             layout.first_panel_on_side(PanelSide::Left),
             Some(NavItem::Transfers)
         );
+    }
+
+    #[test]
+    fn missing_monitor_slots_are_restored_without_moving_existing_or_unknown_entries() {
+        let mut layout = ActivityBarLayoutState {
+            left_top: vec!["gpuMonitor".into(), "future".into()],
+            right_top: vec!["resourceMonitor".into(), "processManager".into()],
+            hidden_items: vec!["futureHidden".into(), "gpuMonitor".into()],
+            ..ActivityBarLayoutState::default()
+        };
+        layout.ensure_remote_monitor_entries();
+        assert_eq!(layout.left_top, ["gpuMonitor", "future"]);
+        assert_eq!(
+            layout.right_top,
+            ["resourceMonitor", "ascendNpuMonitor", "processManager"]
+        );
+        assert_eq!(layout.hidden_items, ["futureHidden", "gpuMonitor"]);
+        let before = layout.clone();
+        layout.ensure_remote_monitor_entries();
+        assert_eq!(layout, before);
     }
 
     #[test]
@@ -879,6 +929,10 @@ mod tests {
 
         layout.reset_to_default();
         assert_eq!(layout, ActivityBarLayoutState::default());
-        assert!(!layout.has_hidden_entries());
+        assert!(layout.has_hidden_entries());
+        assert_eq!(
+            layout.hidden_items,
+            zzclawterm_core::models::settings::panel_visibility::default_hidden_items()
+        );
     }
 }

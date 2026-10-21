@@ -92,7 +92,12 @@ impl TransferTreeState {
     }
 
     pub(super) fn replace_session(&mut self, old: &str, new: &str) {
-        if let Some(state) = self.sessions.remove(old) {
+        if let Some(mut state) = self.sessions.remove(old) {
+            // Cached listings survive reconnect; requests belong to the old connection.
+            for node in state.nodes.values_mut() {
+                node.pending = None;
+            }
+            state.dirty = true;
             self.sessions.insert(new.to_string(), state);
         }
     }
@@ -763,6 +768,31 @@ mod tests {
             raw_path_token: None,
             symlink_target_is_directory: false,
         }
+    }
+
+    #[test]
+    fn reconnect_keeps_cached_tree_listings_but_retires_old_connection_requests() {
+        let mut tree = TransferTreeState::default();
+        let backend = FileBrowserBackendKind::Remote;
+        tree.seed(
+            "old",
+            backend,
+            RemoteFilePath::new("/"),
+            Arc::new(vec![directory("pending", "/pending")]),
+        );
+        let path = RemoteFilePath::new("/pending");
+        let generation = tree.begin_request("old", backend, path.clone()).unwrap();
+        tree.reveal("old", backend, path.clone());
+        tree.replace_session("old", "new");
+        assert!(!tree.complete("old", &path, generation, Ok(vec![])));
+        assert!(!tree.complete("new", &path, generation, Ok(vec![])));
+        assert!(
+            tree.presentation(Some("new"), true)
+                .rows
+                .iter()
+                .any(|row| row.label == "pending")
+        );
+        assert!(tree.begin_request("new", backend, path).is_some());
     }
 
     #[test]

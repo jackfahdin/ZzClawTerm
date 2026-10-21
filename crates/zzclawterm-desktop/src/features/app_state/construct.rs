@@ -27,6 +27,7 @@ use crate::features::commands::{
     quick_command_sort_mode_from_setting, quick_command_view_mode_from_setting,
 };
 use crate::features::connections::{ConnectionFeatureFocus, ConnectionFeatureState};
+use crate::features::file_manager::FileManagerFeatureState;
 use crate::features::mcp::McpHostFeatureState;
 use crate::features::notes::{NotesFeatureState, NotesPanel};
 use crate::features::pages::connections::panel::ConnectionPanel;
@@ -164,6 +165,8 @@ impl ZzClawTermApp {
             show_labels: settings.ui_activity_bar_show_labels,
         };
         activity_bar_layout.ensure_plugin_entry();
+        activity_bar_layout.ensure_remote_monitor_entries();
+        settings.ui_activity_bar_right_top = activity_bar_layout.right_top.clone();
         settings.ui_activity_bar_left_bottom = activity_bar_layout.left_bottom.clone();
         let mut active_left_panel = settings
             .ui_active_left_panel
@@ -349,6 +352,7 @@ impl ZzClawTermApp {
                 },
                 cx.background_executor().clone(),
             ),
+            file_manager: FileManagerFeatureState::default(),
             security: SecurityFeatureState::new(
                 SecurityCatalogState::new(
                     connection_ssh_keys,

@@ -40,7 +40,7 @@ pub(in crate::features) fn remote_refresh_due(
 
 impl ZzClawTermApp {
     pub(in crate::features) fn refresh_stats_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.settings.summary().ui_show_remote_stats || self.remote_ops.stats_is_pending() {
+        if self.remote_ops.stats_is_pending() {
             return false;
         }
         if self.remote_ops.take_stats_warmup_retry_due()
@@ -56,8 +56,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn refresh_gpu_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings.summary().ui_show_gpu_monitor
-            && !self.remote_ops.gpu_is_pending()
+        if !self.remote_ops.gpu_is_pending()
             && remote_refresh_due(
                 self.remote_ops.gpu_last_refresh_at(),
                 self.settings.summary().ui_gpu_monitor_interval.max(1),
@@ -70,8 +69,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn refresh_npu_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings.summary().ui_show_ascend_npu_monitor
-            && !self.remote_ops.npu_is_pending()
+        if !self.remote_ops.npu_is_pending()
             && remote_refresh_due(
                 self.remote_ops.npu_last_refresh_at(),
                 self.settings
@@ -87,8 +85,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn refresh_processes_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.settings.summary().ui_show_process_manager
-            && !self.remote_ops.process_is_pending()
+        if !self.remote_ops.process_is_pending()
             && remote_refresh_due(
                 self.remote_ops.process_last_refresh_at(),
                 self.settings.summary().ui_process_manager_interval.max(3),
@@ -102,7 +99,7 @@ impl ZzClawTermApp {
 
     /// The overview and visible resource, or an open container's details on the off beats.
     pub(in crate::features) fn refresh_docker_if_due(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.settings.summary().ui_show_docker_manager || self.remote_ops.docker_is_pending() {
+        if self.remote_ops.docker_is_pending() {
             return false;
         }
         let interval = self.settings.summary().ui_docker_manager_interval.max(3);

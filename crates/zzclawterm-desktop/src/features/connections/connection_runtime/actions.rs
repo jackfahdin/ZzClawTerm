@@ -445,23 +445,23 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    pub(in crate::features) fn delete_selected_connections(
+    pub(in crate::features) fn delete_connections_by_ids(
         &mut self,
+        connection_ids: &[String],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match selected_connections_delete_target(self.connection_state.selected_connections()) {
-            SelectedConnectionsDeleteTarget::None => {
-                self.shell
-                    .set_status("select saved connections before deleting".to_string());
-                cx.notify();
+        let Some(connections) = self.resolve_saved_connection_targets(connection_ids, cx) else {
+            return;
+        };
+        match selected_connections_delete_target(connections) {
+            SelectedConnectionsDeleteTarget::Single(id) => {
+                self.open_connection_delete_confirm(id, window, cx);
             }
-            SelectedConnectionsDeleteTarget::Single(connection_id) => {
-                self.open_connection_delete_confirm(connection_id, window, cx);
+            SelectedConnectionsDeleteTarget::Multiple(connections) => {
+                self.open_selected_connections_delete_confirm(connections, window, cx);
             }
-            SelectedConnectionsDeleteTarget::Multiple(selected) => {
-                self.open_selected_connections_delete_confirm(selected, window, cx);
-            }
+            SelectedConnectionsDeleteTarget::None => {}
         }
     }
 

@@ -11,6 +11,8 @@ ZzClawTerm 支持对工作区外观做细粒度调整，包括 UI 主题、终�
 
 顶部菜单 **View → Theme** 也可以快速切换主题。
 
+内置的 **WindTerm Dark**（`windterm-dark`）和 **WindTerm Light**（`windterm-light`）分别基于 [WindTerm](https://github.com/kingToolbox/WindTerm) 的 `dige-black` 与 `dige-white` 配色，保留其 ANSI 16 色，并适配 NyaTerm 的界面状态色。两者都可独立用于界面或终端，也支持终端跟随界面。若要查看原始终端配色，请关闭下方的最小对比度增强；浅色主题的部分 ANSI 颜色在白底上对比度较低。
+
 主题列表里有两个高对比度主题，用于无障碍辅助、明亮环境或投屏场景：
 
 - **Nya HC** — 深色底的高对比度

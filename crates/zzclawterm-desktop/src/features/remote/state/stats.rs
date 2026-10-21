@@ -9,6 +9,10 @@ use zzclawterm_transport::{CpuUsageSource, NetworkSummaryInfo, RemoteStats, Remo
 pub(in crate::features) enum StatsApplyOutcome {
     Ignored,
     CompletedInactive,
+    IconProbeCompleted {
+        session_id: String,
+        stats: Box<RemoteStats>,
+    },
     Applied {
         session_id: String,
         stats: Box<RemoteStats>,
@@ -33,6 +37,15 @@ pub(super) struct StatsPaneState {
     network_history: HashMap<String, VecDeque<NetworkHistorySample>>,
     selected_network_interfaces: HashMap<String, String>,
     snapshots: HashMap<String, RemoteStats>,
+    icon_probes: HashMap<String, IconProbe>,
+}
+
+#[derive(Default)]
+struct IconProbe {
+    attempts: u8,
+    pending_job: Option<u64>,
+    retry_after: Option<Instant>,
+    finished: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -220,6 +233,10 @@ impl StatsPaneState {
 
     pub(super) fn is_pending_for(&self, session_id: &str) -> bool {
         self.job.is_pending_for(session_id)
+            || self
+                .icon_probes
+                .get(session_id)
+                .is_some_and(|probe| probe.pending_job.is_some())
     }
 
     pub(super) fn begin_job(
@@ -315,6 +332,7 @@ impl StatsPaneState {
             network_history: HashMap::new(),
             selected_network_interfaces: HashMap::new(),
             snapshots: HashMap::new(),
+            icon_probes: HashMap::new(),
             sampler: Arc::new(RemoteStatsSampler::default()),
         }
     }
@@ -326,6 +344,7 @@ impl StatsPaneState {
     }
 
     pub(super) fn clear_stats_sample(&mut self, session_id: &str) {
+        self.icon_probes.remove(session_id);
         self.sampler.clear_session(session_id);
         self.network_history.remove(session_id);
         self.selected_network_interfaces.remove(session_id);
@@ -380,7 +399,26 @@ impl StatsPaneState {
         event: StatsJobResult,
         active_session_id: Option<&str>,
     ) -> StatsApplyOutcome {
-        if !self.complete_event(event.job_id, &event.session_id) {
+        // A tab switch invalidates the presentation job, but a bounded icon
+        // probe still belongs to its original connection. Reconnect/close removes
+        // its token, so a reply from an older connection cannot satisfy a new one.
+        let probe_matches = self
+            .icon_probes
+            .get(&event.session_id)
+            .is_some_and(|probe| probe.pending_job == Some(event.job_id));
+        if probe_matches {
+            let probe = self
+                .icon_probes
+                .get_mut(&event.session_id)
+                .expect("matching probe");
+            probe.pending_job = None;
+            if event.result.is_ok() || probe.attempts >= 2 {
+                probe.finished = true;
+            } else {
+                probe.retry_after = Some(Instant::now() + std::time::Duration::from_secs(1));
+            }
+        }
+        if !self.complete_event(event.job_id, &event.session_id) && !probe_matches {
             return StatsApplyOutcome::Ignored;
         }
         if active_session_id != Some(event.session_id.as_str()) {
@@ -388,6 +426,12 @@ impl StatsPaneState {
                 self.record_network_sample(&event.session_id, stats);
                 self.snapshots
                     .insert(event.session_id.clone(), stats.clone());
+            }
+            if probe_matches && let Ok(stats) = event.result {
+                return StatsApplyOutcome::IconProbeCompleted {
+                    session_id: event.session_id,
+                    stats: Box::new(stats),
+                };
             }
             return StatsApplyOutcome::CompletedInactive;
         }
@@ -426,12 +470,148 @@ impl StatsPaneState {
     }
 }
 
+impl StatsPaneState {
+    pub(super) fn icon_probe_needed(&self, session_id: &str) -> bool {
+        self.icon_probes
+            .get(session_id)
+            .is_none_or(|probe| !probe.finished)
+    }
+
+    pub(super) fn icon_probe_due(&self, session_id: &str) -> bool {
+        self.icon_probes.get(session_id).is_none_or(|probe| {
+            !probe.finished
+                && probe.pending_job.is_none()
+                && probe
+                    .retry_after
+                    .is_none_or(|deadline| Instant::now() >= deadline)
+        })
+    }
+
+    pub(super) fn begin_icon_probe(&mut self, session_id: &str, job_id: u64) {
+        let probe = self.icon_probes.entry(session_id.into()).or_default();
+        if !probe.finished && probe.pending_job.is_none() {
+            probe.attempts += 1;
+            probe.pending_job = Some(job_id);
+            probe.retry_after = None;
+        }
+    }
+
+    pub(super) fn take_icon_probe_snapshot(&mut self, session_id: &str) -> Option<RemoteStats> {
+        if !self.icon_probe_needed(session_id) {
+            return None;
+        }
+        let snapshot = self.snapshots.get(session_id)?.clone();
+        self.icon_probes
+            .entry(session_id.into())
+            .or_default()
+            .finished = true;
+        Some(snapshot)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{StatsApplyOutcome, StatsPaneState};
     use crate::features::runtime_jobs::StatsJobResult;
     use std::time::Instant;
     use zzclawterm_transport::{NetworkInfo, NetworkSummaryInfo, RemoteStats};
+
+    #[test]
+    fn icon_probe_retries_once_after_delay_and_stays_finished_across_tab_switches() {
+        let mut state = StatsPaneState::new();
+        assert!(state.icon_probe_due("a"));
+        for attempt in 0..2 {
+            let ticket = state.begin_job("a".into(), false);
+            state.begin_icon_probe("a", ticket.job_id);
+            assert!(!state.icon_probe_due("a"));
+            state.apply_stats_event(
+                StatsJobResult {
+                    job_id: ticket.job_id,
+                    session_id: "a".into(),
+                    result: Err("probe failed".into()),
+                },
+                Some("a"),
+            );
+            if attempt == 0 {
+                assert!(state.icon_probe_needed("a"));
+                assert!(!state.icon_probe_due("a"));
+                state.icon_probes.get_mut("a").unwrap().retry_after = Some(Instant::now());
+                assert!(state.icon_probe_due("a"));
+            }
+        }
+        assert!(!state.icon_probe_needed("a"));
+        state.reset_for_session_switch();
+        state.activate_session("a");
+        assert!(!state.icon_probe_needed("a"));
+        state.clear_stats_sample("a");
+        assert!(state.icon_probe_needed("a"));
+    }
+
+    #[test]
+    fn icon_probe_reuses_cached_system_snapshot_without_a_job() {
+        let mut state = StatsPaneState::new();
+        state.apply_data("a", stats(&[]));
+        assert!(state.take_icon_probe_snapshot("a").is_some());
+        assert!(!state.is_pending());
+        assert!(!state.icon_probe_needed("a"));
+        assert!(state.take_icon_probe_snapshot("a").is_none());
+    }
+
+    #[test]
+    fn icon_probe_reply_after_tab_switch_does_not_complete_another_sessions_job() {
+        let mut state = StatsPaneState::new();
+        let old = state.begin_job("a".into(), false);
+        state.begin_icon_probe("a", old.job_id);
+        state.reset_for_session_switch();
+        let current = state.begin_job("b".into(), false);
+        let outcome = state.apply_stats_event(
+            StatsJobResult {
+                job_id: old.job_id,
+                session_id: "a".into(),
+                result: Ok(stats(&[])),
+            },
+            Some("b"),
+        );
+        assert!(
+            matches!(outcome, StatsApplyOutcome::IconProbeCompleted { session_id, .. } if session_id == "a")
+        );
+        assert!(state.is_pending_for("b"));
+        assert!(!state.icon_probe_needed("a"));
+        assert!(state.complete_event(current.job_id, "b"));
+    }
+
+    #[test]
+    fn a_closed_or_reconnected_session_rejects_old_icon_probe_results() {
+        let mut state = StatsPaneState::new();
+        let old = state.begin_job("a".into(), false);
+        state.begin_icon_probe("a", old.job_id);
+        state.clear_stats_sample("a");
+        let current = state.begin_job("a".into(), false);
+        state.begin_icon_probe("a", current.job_id);
+        assert!(matches!(
+            state.apply_stats_event(
+                StatsJobResult {
+                    job_id: old.job_id,
+                    session_id: "a".into(),
+                    result: Ok(stats(&[]))
+                },
+                Some("a")
+            ),
+            StatsApplyOutcome::Ignored
+        ));
+        assert!(state.icon_probe_needed("a"));
+        assert!(!state.icon_probe_due("a"));
+        assert!(state.is_pending_for("a"));
+        state.apply_stats_event(
+            StatsJobResult {
+                job_id: current.job_id,
+                session_id: "a".into(),
+                result: Ok(stats(&[])),
+            },
+            Some("a"),
+        );
+        assert!(!state.icon_probe_needed("a"));
+    }
 
     fn stats(interfaces: &[(&str, f64, f64)]) -> RemoteStats {
         RemoteStats {

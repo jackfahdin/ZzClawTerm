@@ -166,8 +166,49 @@ impl ZzClawTermApp {
             .settings
             .adjust_transfer_internal_editor_font_size(delta)
         {
+            self.sync_transfer_internal_editor_font_input(cx);
             self.save_transfer_settings("internal editor font size saved", cx);
             cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_transfer_internal_editor_font_size(
+        &mut self,
+        size: u16,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.settings.set_transfer_internal_editor_font_size(size);
+        self.sync_transfer_internal_editor_font_input(cx);
+        if changed {
+            self.save_transfer_settings("internal editor font size saved", cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn reset_transfer_internal_editor_font_size(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_transfer_internal_editor_font_size(
+            zzclawterm_core::models::settings::default_internal_editor_font_size(),
+            cx,
+        );
+    }
+
+    pub(in crate::features) fn sync_transfer_internal_editor_font_input(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = self
+            .number_input_fields_snapshot()
+            .get("settings.number.transfer-internal-editor-font-size")
+        {
+            let value = self
+                .settings
+                .summary()
+                .transfer_internal_editor_font_size
+                .to_string();
+            input.update(cx, |input, cx| input.set_content_silent(&value, cx));
         }
     }
 
@@ -177,6 +218,14 @@ impl ZzClawTermApp {
     ) {
         self.settings.toggle_transfer_ask_save_location();
         self.save_transfer_settings("transfer save-location preference saved", cx);
+    }
+
+    pub(in crate::features) fn toggle_file_manager_auto_collapse(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.toggle_file_manager_auto_collapse();
+        self.queue_settings_save(SettingsSaveKind::FileExplorer, cx);
     }
 
     pub(in crate::features) fn toggle_transfer_preserve_timestamps(

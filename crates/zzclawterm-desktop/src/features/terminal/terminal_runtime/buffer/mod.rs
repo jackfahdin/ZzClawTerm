@@ -207,9 +207,8 @@ fn terminal_scroll_snapshot_request_should_enqueue(
 fn terminal_scroll_snapshot_request_action_links_enabled(
     priority: bool,
     action_links_enabled: bool,
-    low_latency_mode: bool,
 ) -> bool {
-    priority && action_links_enabled && !low_latency_mode
+    priority && action_links_enabled
 }
 
 fn terminal_live_action_link_enrichment_should_enqueue(
@@ -329,8 +328,7 @@ impl ZzClawTermApp {
         self.terminal.view.frame_pipeline.request_snapshot(
             session_id.to_string(),
             offset,
-            self.settings.summary().terminal_action_links_enabled
-                && !self.settings.summary().terminal_low_latency_mode,
+            self.settings.summary().terminal_action_links_enabled,
             self.settings
                 .summary()
                 .terminal_action_links_matchers
@@ -348,10 +346,7 @@ impl ZzClawTermApp {
         session_id: &str,
         snapshot: &TerminalSnapshot,
     ) -> bool {
-        if session_id.is_empty()
-            || !self.settings.summary().terminal_action_links_enabled
-            || self.settings.summary().terminal_low_latency_mode
-        {
+        if session_id.is_empty() || !self.settings.summary().terminal_action_links_enabled {
             return false;
         }
         let matcher_key = terminal_action_link_matcher_key(
@@ -489,7 +484,6 @@ impl ZzClawTermApp {
             let action_links_enabled = terminal_scroll_snapshot_request_action_links_enabled(
                 priority,
                 self.settings.summary().terminal_action_links_enabled,
-                self.settings.summary().terminal_low_latency_mode,
             );
             self.terminal.view.frame_pipeline.request_priority_snapshot(
                 session_id.to_string(),
@@ -523,7 +517,6 @@ impl ZzClawTermApp {
         if session_id.is_empty()
             || offset == 0
             || !self.settings.summary().terminal_action_links_enabled
-            || self.settings.summary().terminal_low_latency_mode
         {
             return false;
         }
@@ -1160,9 +1153,14 @@ impl ZzClawTermApp {
             if self.session.start_has_active_pending() || self.session.start_has_active_failed() {
                 return Vec::new();
             }
-            return self.session.active_id().into_iter().collect();
+            return self
+                .session
+                .active_id()
+                .filter(|id| !self.shell.session_tab_is_hidden(id))
+                .into_iter()
+                .collect();
         }
-        if let Some(root) = self.terminal.windows.tree.as_ref() {
+        if let Some(root) = self.shell.terminal_window_tree_ref() {
             let mut visible = terminal_window_node_visible_tab_ids(root);
             if (self.session.start_has_active_pending() || self.session.start_has_active_failed())
                 && let Some(group) = self.current_terminal_group()
@@ -1172,9 +1170,16 @@ impl ZzClawTermApp {
             return visible;
         }
         if let Some(root) = self.shell.workspace_split() {
-            return workspace_pane_node_visible_session_ids(root);
+            return workspace_pane_node_visible_session_ids(root)
+                .into_iter()
+                .filter(|id| !self.shell.session_tab_is_hidden(id))
+                .collect();
         }
-        self.session.active_id().into_iter().collect()
+        self.session
+            .active_id()
+            .filter(|id| !self.shell.session_tab_is_hidden(id))
+            .into_iter()
+            .collect()
     }
 
     fn apply_terminal_snapshot_frame(
@@ -1292,15 +1297,16 @@ impl ZzClawTermApp {
             "terminal frame snapshot row reuse"
         );
         // Snapshot applies only dirties the surface, not chrome.
-        let current_action_link_matcher_key =
-            (self.settings.summary().terminal_action_links_enabled
-                && !self.settings.summary().terminal_low_latency_mode)
-                .then(|| {
-                    terminal_action_link_matcher_key(
-                        true,
-                        &self.settings.summary().terminal_action_links_matchers,
-                    )
-                });
+        let current_action_link_matcher_key = self
+            .settings
+            .summary()
+            .terminal_action_links_enabled
+            .then(|| {
+                terminal_action_link_matcher_key(
+                    true,
+                    &self.settings.summary().terminal_action_links_matchers,
+                )
+            });
         let should_paint = self.terminal_session_has_visible_surface(&frame.session_id)
             && self
                 .terminal
@@ -1571,7 +1577,7 @@ impl ZzClawTermApp {
         }
     }
 
-    fn apply_terminal_effects(
+    pub(in crate::features) fn apply_terminal_effects(
         &mut self,
         session_id: &str,
         effects: TerminalEffects,
@@ -1598,7 +1604,7 @@ impl ZzClawTermApp {
             );
         }
         if let Some(cwd) = effects.cwd {
-            self.apply_session_cwd(session_id, cwd);
+            self.apply_session_cwd(session_id, cwd, cx);
         }
     }
 
@@ -2502,16 +2508,13 @@ mod frame_event_queue_tests {
     #[test]
     fn terminal_scroll_snapshot_action_links_only_for_priority_user_requests() {
         assert!(terminal_scroll_snapshot_request_action_links_enabled(
-            true, true, false
+            true, true
         ));
         assert!(!terminal_scroll_snapshot_request_action_links_enabled(
-            false, true, false
+            false, true
         ));
         assert!(!terminal_scroll_snapshot_request_action_links_enabled(
-            true, false, false
-        ));
-        assert!(!terminal_scroll_snapshot_request_action_links_enabled(
-            true, true, true
+            true, false
         ));
     }
 
@@ -3077,7 +3080,12 @@ fn collect_terminal_window_node_visible_tab_ids<'a>(
 ) {
     match node {
         TerminalWindowNode::Leaf { active_tab_id, .. } => {
-            if let Some(id) = active_tab_id.as_deref() {
+            if let Some(id) = active_tab_id.as_deref()
+                && matches!(
+                    crate::models::WorkspaceTabId::from_layout_key(id),
+                    crate::models::WorkspaceTabId::Session(_)
+                )
+            {
                 ids.push(id);
             }
         }

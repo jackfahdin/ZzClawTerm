@@ -185,21 +185,19 @@ impl ZzClawTermApp {
         let hover_bg = self.shell_surface_color(palette.hover);
         // Tauri openTabsMenuItems is reversed (rightmost first) but keeps global ordinals.
         let ordered = group
-            .and_then(|id| self.terminal.terminal_group_tabs(id))
-            .map(|(tabs, _)| {
-                tabs.iter()
-                    .filter_map(|id| self.session.session_info(id))
-                    .collect()
-            })
-            .unwrap_or_else(|| self.ordered_tab_sessions());
+            .and_then(|id| self.shell.terminal_group_tabs(id))
+            .map(|(tabs, _)| tabs)
+            .unwrap_or_else(|| self.workspace_tab_ids());
         let ordinals: std::collections::HashMap<String, usize> = ordered
             .iter()
             .enumerate()
-            .map(|(index, session)| (session.id.clone(), index + 1))
+            .map(|(index, key)| (key.clone(), index + 1))
             .collect();
         let mut sessions = ordered;
         sessions.reverse();
-        let active_id = self.session.active_id_owned();
+        let active_id = self
+            .selected_session_strip_tab(&group.map(str::to_string))
+            .map(|id| id.layout_key());
         // The list scrolls inside a `ZzClawScrollArea`, whose `max_h` sits on the
         // scroll container itself. The previous `overflow_y_scrollbar()` wrapper
         // moves the cap onto an outer root and makes the inner scroll area
@@ -218,7 +216,78 @@ impl ZzClawTermApp {
                     .child(t!("sessionQuickSwitcher.noSessions")),
             );
         } else {
-            for (index, session) in sessions.into_iter().enumerate() {
+            for (index, key) in sessions.into_iter().enumerate() {
+                match crate::models::WorkspaceTabId::from_layout_key(&key) {
+                    crate::models::WorkspaceTabId::Editor(id) => {
+                        if let Some(document) = self.transfer.editor_tab_snapshot(&id) {
+                            let selected = active_id.as_deref() == Some(&key);
+                            list = list.child(
+                                div()
+                                    .id(gpui::SharedString::from(format!("open-editor-{id}")))
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .gap_2()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .bg(rgb(if selected {
+                                        palette.hover
+                                    } else {
+                                        palette.surface
+                                    }))
+                                    .child(
+                                        ordinals
+                                            .get(&key)
+                                            .copied()
+                                            .unwrap_or(index + 1)
+                                            .to_string(),
+                                    )
+                                    .child(if document.dirty {
+                                        format!("● {}", document.name)
+                                    } else {
+                                        document.name
+                                    })
+                                    .on_click(cx.listener(move |app, _, window, cx| {
+                                        app.activate_workspace_tab(&key, cx);
+                                        app.shell.close_root_menus();
+                                        app.focus_active_workspace_surface(window, cx);
+                                    })),
+                            );
+                        }
+                        continue;
+                    }
+                    crate::models::WorkspaceTabId::FileManager(id) => {
+                        let selected = active_id.as_deref() == Some(&key);
+                        let title = self.file_manager_tab_title(&id, cx);
+                        list = list.child(
+                            div()
+                                .id(gpui::SharedString::from(format!("open-file-manager-{id}")))
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .gap_2()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(rgb(if selected {
+                                    palette.hover
+                                } else {
+                                    palette.surface
+                                }))
+                                .child(ordinals.get(&key).copied().unwrap_or(index + 1).to_string())
+                                .child(title)
+                                .on_click(cx.listener(move |app, _, window, cx| {
+                                    app.activate_workspace_tab(&key, cx);
+                                    app.shell.close_root_menus();
+                                    app.focus_active_workspace_surface(window, cx);
+                                })),
+                        );
+                        continue;
+                    }
+                    crate::models::WorkspaceTabId::Session(_) => {}
+                }
+                let Some(session) = self.session.session_info(&key) else {
+                    continue;
+                };
                 let session_id = session.id.clone();
                 let is_active = active_id
                     .as_deref()

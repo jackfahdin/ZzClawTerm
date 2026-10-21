@@ -109,9 +109,16 @@ impl ZzClawTermApp {
                 }
                 match result {
                     Ok(catalog) => {
+                        let released_username = (kind == SecurityAuthTab::Passwords)
+                            .then(|| this.editor_account_username_if_following(&request_item_id))
+                            .flatten();
                         this.security
                             .clear_revealed_for_deleted(kind, &request_item_id);
                         this.security.replace_catalog_state(catalog);
+                        if let Some(username) = released_username {
+                            this.adopt_released_account_username(&username, cx);
+                        }
+                        this.reconcile_open_editor_password_source();
                         this.request_shared_state_refresh(
                             crate::app_shell::SharedStateDomain::Security,
                             cx,

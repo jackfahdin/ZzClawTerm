@@ -2,7 +2,6 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
 
 use gpui::{Pixels, ScrollHandle, ScrollStrategy};
 use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
@@ -130,28 +129,59 @@ impl TransferFeatureState {
         self.browser.entries.is_empty()
     }
 
-    pub(in crate::features) fn apply_terminal_cwd_to_browser(&mut self, cwd: String) -> bool {
-        if self.browser.path_editing || self.browser.path == cwd {
+    pub(in crate::features) fn clear_pending_cwd_sync(&mut self) {
+        self.browser.pending_cwd_sync = false;
+    }
+
+    pub(in crate::features) fn defer_browser_cwd_sync(&mut self) {
+        self.browser.pending_cwd_sync = true;
+    }
+
+    pub(in crate::features) fn take_pending_cwd_sync(&mut self) -> bool {
+        std::mem::take(&mut self.browser.pending_cwd_sync)
+    }
+
+    /// Retire only automatic navigation; explicit Sync and user navigation keep ownership.
+    pub(in crate::features) fn cancel_browser_auto_cwd_sync(&mut self, session_id: &str) -> bool {
+        let Some(id) = self.browser.navigation_jobs.get(session_id) else {
+            return false;
+        };
+        if !self.queue.jobs.iter().any(|job| {
+            &job.id == id
+                && matches!(
+                    job.kind,
+                    crate::models::TransferJobKind::SyncCwd {
+                        reason: crate::models::TransferCwdSyncReason::Automatic,
+                    }
+                )
+        }) {
             return false;
         }
-        self.browser.path = cwd.clone();
-        self.browser.path_draft = cwd.clone();
-        self.browser.list_scroll = gpui::UniformListScrollHandle::new();
-        self.browser.horizontal_scroll = ScrollHandle::new();
-        self.browser.status = format!("cwd synced: {cwd}");
+        if let Some(snapshot) = self.invalidate_browser_navigation(session_id) {
+            let remote_path = snapshot.remote_path.clone();
+            self.browser.restore_navigation(snapshot);
+            self.set_remote_path(remote_path);
+        }
         true
     }
 
-    pub(in crate::features) fn browser_auto_sync_cwd_last_at(&self) -> Option<Instant> {
-        self.browser.auto_sync_cwd_last_at
+    pub(in crate::features) fn invalidate_browser_navigation(
+        &mut self,
+        session_id: &str,
+    ) -> Option<TransferBrowserNavigationSnapshot> {
+        let id = self.browser.navigation_jobs.remove(session_id)?;
+        self.browser.pending_navigations.remove(&id)
     }
 
-    pub(in crate::features) fn mark_browser_auto_sync_cwd(&mut self, now: Instant) {
-        self.browser.auto_sync_cwd_last_at = Some(now);
-    }
-
-    pub(in crate::features) fn reset_browser_auto_sync_cwd(&mut self) {
-        self.browser.auto_sync_cwd_last_at = None;
+    pub(in crate::features) fn make_browser_cwd_sync_explicit(&mut self, session_id: &str) {
+        let Some(id) = self.browser.navigation_jobs.get(session_id) else {
+            return;
+        };
+        if let Some(job) = self.queue.jobs.iter_mut().find(|job| &job.id == id)
+            && let crate::models::TransferJobKind::SyncCwd { reason } = &mut job.kind
+        {
+            *reason = crate::models::TransferCwdSyncReason::Explicit;
+        }
     }
 
     pub(in crate::features) fn remove_browser_session_cache(&mut self, session_id: &str) {
@@ -205,6 +235,14 @@ impl TransferFeatureState {
         session_id: &str,
     ) -> bool {
         self.browser.navigation_jobs.contains_key(session_id)
+    }
+
+    pub(in crate::features) fn browser_navigation_rollback(
+        &self,
+        session_id: &str,
+    ) -> Option<&TransferBrowserNavigationSnapshot> {
+        let id = self.browser.navigation_jobs.get(session_id)?;
+        self.browser.pending_navigations.get(id)
     }
 
     pub(in crate::features) fn scroll_browser_to_item(&mut self, offset: usize) {
@@ -303,6 +341,7 @@ impl TransferFeatureState {
     pub(in crate::features) fn finish_browser_path_edit(&mut self) {
         self.browser.path_draft.clear();
         self.browser.path_editing = false;
+        self.browser.pending_cwd_sync = false;
     }
 
     pub(in crate::features) fn dismiss_browser_path_edit(&mut self) {
@@ -424,6 +463,7 @@ impl TransferFeatureState {
         self.browser.raw_path_token = path.raw_path_token;
         self.browser.path_draft.clear();
         self.browser.path_editing = false;
+        self.browser.pending_cwd_sync = false;
         self.browser.path_menu = None;
         self.browser.selected_remote_path = None;
         self.browser.selected_remote_paths.clear();
@@ -668,6 +708,7 @@ impl TransferFeatureState {
         session_key: &str,
         remote_path: String,
     ) -> TransferBrowserNavigationSnapshot {
+        self.clear_pending_cwd_sync();
         let pending_job_id = self.browser.navigation_jobs.remove(session_key);
         if let Some(snapshot) =
             pending_job_id.and_then(|job_id| self.browser.pending_navigations.remove(&job_id))
@@ -706,16 +747,13 @@ impl TransferBrowserState {
     }
 
     fn record_history(&mut self, path: String) {
-        if self.history.get(self.history_index) == Some(&path) {
-            return;
+        if super::browser_logic::record_browser_history(
+            &mut self.history,
+            &mut self.history_index,
+            &path,
+        ) {
+            self.record_visited_history(path);
         }
-        if !self.history.is_empty() {
-            let current_index = self.history_index.min(self.history.len() - 1);
-            self.history.drain(..current_index);
-        }
-        self.history.push_front(path.clone());
-        self.history_index = 0;
-        self.record_visited_history(path);
     }
 
     fn record_visited_history(&mut self, path: String) {

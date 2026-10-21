@@ -38,6 +38,8 @@ impl ZzClawTermApp {
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
         self.settings.replace_summary(settings);
+        self.sync_remote_monitoring_inputs(cx);
+        self.sync_transfer_internal_editor_font_input(cx);
         self.sync_native_window_material(cx);
         if !self
             .settings
@@ -362,9 +364,6 @@ impl ZzClawTermApp {
     pub(in crate::features) fn resolved_keyword_highlight_rules(
         &self,
     ) -> Arc<Vec<ResolvedKeywordHighlightRule>> {
-        if self.settings.summary().terminal_low_latency_mode {
-            return Arc::new(Vec::new());
-        }
         if let Some(cached) = self.terminal.cached_keyword_highlight_rules() {
             return cached.clone();
         }
@@ -385,17 +384,6 @@ impl ZzClawTermApp {
     }
 
     fn ensure_keyword_highlight_rules_cache(&mut self) {
-        if self.settings.summary().terminal_low_latency_mode {
-            if !self
-                .terminal
-                .cached_keyword_highlight_rules()
-                .is_some_and(|rules| rules.is_empty())
-            {
-                self.terminal
-                    .cache_keyword_highlight_rules(Arc::new(Vec::new()));
-            }
-            return;
-        }
         if self.terminal.cached_keyword_highlight_rules().is_some() {
             return;
         }

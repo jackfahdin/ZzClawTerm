@@ -1,7 +1,5 @@
 use rust_i18n::t;
 
-use std::collections::{HashMap, HashSet};
-
 use std::rc::Rc;
 
 use gpui::{
@@ -10,7 +8,6 @@ use gpui::{
 };
 use zzclawterm_ui::{ZzClawRoot, ZzClawWindowHandle, zzclaw_root};
 
-use super::remote_text_editor::RemoteTextEditor;
 use crate::features::{
     ZzClawTermApp,
     view_widgets::{
@@ -21,9 +18,6 @@ use crate::features::{
 
 pub(super) struct RemoteFileEditorWindow {
     app: Entity<ZzClawTermApp>,
-    editors: HashMap<String, Entity<RemoteTextEditor>>,
-    editor_observations: HashMap<String, Subscription>,
-    active_editor_id: Option<String>,
     shell_focus: FocusHandle,
     chrome: ChildWindowChrome,
     _app_subscription: Subscription,
@@ -34,9 +28,6 @@ impl RemoteFileEditorWindow {
         let app_subscription = cx.observe(&app, |_, _, cx| cx.notify());
         Self {
             app,
-            editors: HashMap::new(),
-            editor_observations: HashMap::new(),
-            active_editor_id: None,
             shell_focus: cx.focus_handle(),
             chrome,
             _app_subscription: app_subscription,
@@ -46,7 +37,7 @@ impl RemoteFileEditorWindow {
 
 impl Render for RemoteFileEditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.app.read(cx).transfer.editor_has_workspace() {
+        if !self.app.read(cx).transfer.has_window_editor_documents() {
             let handle = window.window_handle().downcast::<ZzClawRoot>();
             self.app.update(cx, |app, cx| {
                 if handle.is_some_and(|handle| app.transfer.clear_editor_window_if(handle)) {
@@ -57,77 +48,45 @@ impl Render for RemoteFileEditorWindow {
             return div().size_full().into_any_element();
         }
 
-        let (palette, font, font_size, window_title, active_tab, tab_ids) =
-            self.app.read_with(cx, |app, _| {
-                let workspace = app
-                    .transfer
-                    .editor_workspace()
-                    .expect("editor checked above");
-                let editor = workspace
-                    .active_tab()
-                    .expect("open editor workspace has an active tab");
-                let name = if editor.name.trim().is_empty() {
-                    &editor.remote_path
-                } else {
-                    &editor.name
-                };
-                (
-                    app.theme_palette(),
-                    app.gpui_ui_font().font(),
-                    app.settings.summary().ui_font_size.clamp(12, 24) as f32,
-                    format!(
-                        "{}{}",
-                        if workspace.tabs.iter().any(|tab| tab.dirty) {
-                            "* "
-                        } else {
-                            ""
-                        },
-                        name
-                    ),
-                    editor.clone(),
-                    workspace
-                        .tabs
-                        .iter()
-                        .map(|tab| tab.id.clone())
-                        .collect::<HashSet<_>>(),
-                )
-            });
-        self.editors.retain(|tab_id, _| tab_ids.contains(tab_id));
-        self.editor_observations
-            .retain(|tab_id, _| tab_ids.contains(tab_id));
-        if !self.editors.contains_key(&active_tab.id) {
-            let editor =
-                cx.new(|cx| RemoteTextEditor::new(self.app.clone(), &active_tab, window, cx));
-            self.editor_observations.insert(
-                active_tab.id.clone(),
-                cx.observe(&editor, |_, _, cx| cx.notify()),
-            );
-            self.editors.insert(active_tab.id.clone(), editor);
-        }
-        let editor = self
-            .editors
-            .get(&active_tab.id)
-            .expect("active editor created above")
-            .clone();
-        editor.update(cx, |editor, cx| editor.sync_from_tab(&active_tab, cx));
-        if self.active_editor_id.as_deref() != Some(active_tab.id.as_str()) {
-            self.active_editor_id = Some(active_tab.id.clone());
-            if active_tab.focused_field == crate::models::TransferEditorField::Content {
-                window.focus(&editor.read(cx).focus_handle(cx), cx);
-            }
-        }
-        window.set_window_title(&window_title);
-        let cursor_position = editor.read(cx).cursor_position(cx);
-        let content = self.app.update(cx, |app, cx| {
-            app.transfer_editor_window_view(editor, cursor_position, cx)
+        let (palette, font, font_size, window_title) = self.app.read_with(cx, |app, _| {
+            let workspace = app
+                .transfer
+                .window_editor_workspace()
+                .expect("editor checked above");
+            let editor = workspace
+                .active_tab()
+                .expect("open editor workspace has an active tab");
+            let name = if editor.name.trim().is_empty() {
+                &editor.remote_path
+            } else {
+                &editor.name
+            };
+            (
+                app.theme_palette(),
+                app.gpui_ui_font().font(),
+                app.settings.summary().ui_font_size.clamp(12, 24) as f32,
+                format!(
+                    "{}{}",
+                    if workspace.tabs.iter().any(|tab| tab.dirty) {
+                        "* "
+                    } else {
+                        ""
+                    },
+                    name
+                ),
+            )
         });
+        window.set_window_title(&window_title);
+        let content = self
+            .app
+            .update(cx, |app, cx| app.transfer_editor_window_view(cx));
         let close_app = self.app.clone();
         let on_close: ChildWindowCloseHandler =
             Rc::new(move |window: &mut Window, cx: &mut App| {
                 let handle = window.window_handle().downcast::<ZzClawRoot>();
                 let should_close = close_app.update(cx, |app, cx| {
                     app.close_transfer_editor(cx);
-                    let should_close = !app.transfer.editor_has_workspace();
+                    let should_close = !app.transfer.has_window_editor_documents();
                     if should_close && let Some(handle) = handle {
                         app.transfer.clear_editor_window_if(handle);
                     }
@@ -196,7 +155,7 @@ fn open_remote_file_editor_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &
             return;
         }
     }
-    if !app.read(cx).transfer.editor_has_workspace() {
+    if !app.read(cx).transfer.has_window_editor_documents() {
         app.update(cx, |app, cx| {
             app.transfer.clear_editor_window_tracking();
             cx.notify();
@@ -216,7 +175,7 @@ fn open_remote_file_editor_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &
             let handle = window.window_handle().downcast::<ZzClawRoot>();
             close_app.update(cx, |app, cx| {
                 app.close_transfer_editor(cx);
-                let should_close = !app.transfer.editor_has_workspace();
+                let should_close = !app.transfer.has_window_editor_documents();
                 if should_close && let Some(handle) = handle {
                     app.transfer.clear_editor_window_if(handle);
                 }

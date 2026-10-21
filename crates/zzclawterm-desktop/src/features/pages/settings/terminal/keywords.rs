@@ -39,10 +39,8 @@ impl SettingsPanel {
                 .gap_4()
                 .child(settings_form_row(
                     palette,
-                    t!("settings.keywordHighlightingExperimental"),
-                    Some(SharedString::from(
-                        t!("settings.keywordHighlightingExperimentalDesc"),
-                    )),
+                    t!("settings.keywordHighlighting"),
+                    None,
                     settings_switch(
                         palette,
                         "settings-keyword-highlights-enabled",
@@ -57,8 +55,6 @@ impl SettingsPanel {
                             .flex()
                             .flex_col()
                             .gap_4()
-                            .child(div().text_xs().text_color(rgb(palette.text_muted))
-                                .child(t!("settings.keywordHighlightLogicalLinesDesc")))
                             .child(
                                 div()
                                     .flex()

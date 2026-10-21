@@ -62,20 +62,23 @@ pub(super) fn validate_editor_account(
         None
     };
     let account = id.and_then(|id| accounts.iter().find(|entry| entry.id == id));
-    if (identity && editor.account_source_saved
-        || id.is_some()
+    if (id.is_some()
         || password_active && editor.password_source == ConnectionEditorPasswordSource::Saved)
         && account.is_none()
     {
         return Err(ConnectionEditorValidationError::MissingAccount);
     }
-    if editor.kind == ConnectionKindTab::Ssh
-        && account
-            .map(|entry| entry.username.trim())
-            .filter(|username| !username.is_empty())
-            .unwrap_or(editor.username.trim())
-            .is_empty()
+    let account_username = account
+        .map(|entry| entry.username.trim())
+        .filter(|username| !username.is_empty());
+    let effective_username = if identity
+        && editor.username_source == zzclawterm_core::ConnectionUsernameSource::Account
     {
+        account_username.unwrap_or(editor.username.trim())
+    } else {
+        editor.username.trim()
+    };
+    if editor.kind == ConnectionKindTab::Ssh && effective_username.is_empty() {
         return Err(ConnectionEditorValidationError::UsernameRequired);
     }
     if password_active
@@ -178,8 +181,24 @@ pub(super) fn connection_editor_from_saved(
         vnc_shared: true,
         vnc_view_only: false,
         password_source,
-        account_source_saved: uses_accounts
-            && (auth.account_id.is_some() || auth.password_id.is_some()),
+        username_source: if uses_accounts {
+            match auth.username_source {
+                Some(zzclawterm_core::ConnectionUsernameSource::Connection) => {
+                    zzclawterm_core::ConnectionUsernameSource::Connection
+                }
+                Some(zzclawterm_core::ConnectionUsernameSource::Account) | None => {
+                    if auth.account_id.is_some() || auth.password_id.is_some() {
+                        zzclawterm_core::ConnectionUsernameSource::Account
+                    } else {
+                        zzclawterm_core::ConnectionUsernameSource::Connection
+                    }
+                }
+            }
+        } else {
+            zzclawterm_core::ConnectionUsernameSource::Connection
+        },
+        password_source_touched: true,
+        password_source_demoted: false,
         field_errors: Default::default(),
         password_edit: crate::models::ConnectionPasswordEdit::Keep,
         account_id: if uses_accounts {
@@ -460,7 +479,10 @@ pub(super) fn build_saved_connection_from_editor(
             }
             let port = parse_port(&editor.port)?;
             let username = editor.username.trim().to_string();
-            if username.is_empty() && editor.account_id.is_none() {
+            if username.is_empty()
+                && !(editor.account_id.is_some()
+                    && editor.username_source == zzclawterm_core::ConnectionUsernameSource::Account)
+            {
                 return Err(ConnectionEditorValidationError::UsernameRequired);
             }
             ConnectionType::Ssh {
@@ -789,6 +811,16 @@ pub(super) fn build_saved_connection_from_editor(
                     && editor.password_source == ConnectionEditorPasswordSource::Saved)
                     .then(|| editor.password_id.clone())
                     .flatten(),
+                username_source: (matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                ) && editor
+                    .account_id
+                    .as_ref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    && editor.username_source
+                        == zzclawterm_core::ConnectionUsernameSource::Connection)
+                    .then_some(zzclawterm_core::ConnectionUsernameSource::Connection),
                 password,
                 key_id: (mode == "key")
                     .then(|| {
@@ -1935,7 +1967,27 @@ mod account_edit_tests {
             Err(ConnectionEditorValidationError::AccountPasswordMissing)
         );
         editor.password_source = ConnectionEditorPasswordSource::Ask;
-        assert!(super::validate_editor_account(&editor, &[account]).is_ok());
+        assert!(super::validate_editor_account(&editor, &[account.clone()]).is_ok());
+        account.username = "deploy".into();
+        editor.username_source = zzclawterm_core::ConnectionUsernameSource::Connection;
+        editor.username.clear();
+        assert_eq!(
+            super::validate_editor_account(&editor, &[account.clone()]),
+            Err(ConnectionEditorValidationError::UsernameRequired)
+        );
+        editor.username = "manual".into();
+        let saved = build_saved_connection_from_editor(&editor).unwrap();
+        assert_eq!(
+            saved.auth.unwrap().username_source,
+            Some(zzclawterm_core::ConnectionUsernameSource::Connection)
+        );
+        editor.username_source = zzclawterm_core::ConnectionUsernameSource::Account;
+        let saved = build_saved_connection_from_editor(&editor).unwrap();
+        assert!(saved.auth.unwrap().username_source.is_none());
+        let mut unlinked = editor.clone();
+        unlinked.account_id = None;
+        unlinked.username_source = zzclawterm_core::ConnectionUsernameSource::Connection;
+        assert!(super::validate_editor_account(&unlinked, &[]).is_ok());
     }
 
     #[test]

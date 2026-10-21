@@ -205,9 +205,7 @@ impl ZzClawTermApp {
             && self
                 .terminal_protocol_state_for_session(&session_id)
                 .mouse_reporting;
-        let low_latency_mode = self.settings.summary().terminal_low_latency_mode;
-        let action_links_enabled =
-            self.settings.summary().terminal_action_links_enabled && !low_latency_mode;
+        let action_links_enabled = self.settings.summary().terminal_action_links_enabled;
         let render_output_pressure = self.runtime_output_pressure_active();
         let render_pressure = self
             .terminal
@@ -221,12 +219,8 @@ impl ZzClawTermApp {
                     view.performance_mode,
                 )
             })
-            .unwrap_or(render_output_pressure)
-            || low_latency_mode;
-        if render_pressure
-            && !low_latency_mode
-            && let Some(view) = self.terminal.view.views.get_mut(&session_id)
-        {
+            .unwrap_or(render_output_pressure);
+        if render_pressure && let Some(view) = self.terminal.view.views.get_mut(&session_id) {
             view.enter_render_degraded_mode();
         }
         let render_degraded = self
@@ -285,10 +279,8 @@ impl ZzClawTermApp {
         // Live sessions already paint the grid on TerminalSurface. Skip cloning /
         // building a shell-side viewport snapshot except when IME preedit needs
         // cursor placement, or when there is no session (empty bootstrap canvas).
-        let needs_shell_viewport_snapshot = session_id.is_empty()
-            || (is_active
-                && self.settings.summary().interaction_mac_ime_compatibility
-                && !self.terminal.input.ime_marked_text.is_empty());
+        let needs_shell_viewport_snapshot =
+            session_id.is_empty() || (is_active && !self.terminal.input.ime_marked_text.is_empty());
         let snapshot = if needs_shell_viewport_snapshot {
             self.terminal_snapshot_for_session(
                 (!session_id.is_empty()).then_some(session_id.as_str()),
@@ -485,7 +477,6 @@ impl ZzClawTermApp {
         let terminal_gpui_font = terminal_font.font();
         let ime_preedit_text = (is_active
             && !session_id.is_empty()
-            && self.settings.summary().interaction_mac_ime_compatibility
             && !self.terminal.input.ime_marked_text.is_empty())
         .then(|| self.terminal.input.ime_marked_text.clone());
         let ime_preedit_position = ime_preedit_text.as_ref().map(|_| {
@@ -697,7 +688,7 @@ impl ZzClawTermApp {
                 })
                 .unwrap_or((0, 0, 0, 0));
         let file_drop_hover = self
-            .terminal
+            .shell
             .terminal_file_drop_hover_matches(session_id.as_str());
         let drop_session_kind = self
             .session

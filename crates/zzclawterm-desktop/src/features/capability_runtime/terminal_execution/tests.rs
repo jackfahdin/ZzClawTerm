@@ -764,7 +764,7 @@ fn raw_session_events_survive_full_degraded_ui_tail(cx: &mut gpui::TestAppContex
             "UTF-8",
         );
         app.terminal.enter_session_render_degraded("raw");
-        app.terminal.complete_terminal_windows_restore();
+        app.shell.complete_terminal_windows_restore();
         let (request, _receiver) = execution_request("raw-task", "native", "raw", false);
         let state = &mut app.mcp.capabilities.terminal_executions;
         assert!(state.insert(request, None).is_ok());

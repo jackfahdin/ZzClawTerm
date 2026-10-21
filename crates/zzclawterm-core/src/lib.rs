@@ -14,6 +14,7 @@ pub mod credential_autofill;
 pub mod credentials_crypto;
 pub mod diagnostics;
 pub mod document_edit;
+pub mod document_language;
 pub mod hex_document;
 pub mod keyword_highlight_presets;
 pub mod models;

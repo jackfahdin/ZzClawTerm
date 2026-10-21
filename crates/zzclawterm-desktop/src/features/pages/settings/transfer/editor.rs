@@ -69,6 +69,16 @@ impl SettingsPanel {
                         cx,
                     ),
                 ))
+                .child(settings_form_row(
+                    palette,
+                    t!("settings.internalEditorFontSize"),
+                    Some(SharedString::from(t!(
+                        "settings.internalEditorFontSizeDesc"
+                    ))),
+                    self.existing_number_input_box(
+                        "settings.number.transfer-internal-editor-font-size",
+                    ),
+                ))
             })
             .when(editor_type == "external", |this| {
                 this.child(settings_form_row(

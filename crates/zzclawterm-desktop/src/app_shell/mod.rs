@@ -342,6 +342,11 @@ impl AppShell {
                 let _ = shell.update(cx, |this, cx| match event {
                     AppLifecycleEvent::ShutdownRequested => {
                         if this.quit_requested || this.controller.read(cx).workspace_count() == 1 {
+                            if this.controller.update(cx, |controller, cx| {
+                                controller.defer_quit_for_dirty_editors(this.workspace_id, cx)
+                            }) {
+                                return;
+                            }
                             if !this
                                 .controller
                                 .update(cx, |controller, _| controller.begin_process_quit())
@@ -395,7 +400,11 @@ impl AppShell {
                         }
                     }
                     AppLifecycleEvent::NewWindowRequested => this.request_new_window(cx),
-                    AppLifecycleEvent::ShutdownCancelled => this.quit_requested = false,
+                    AppLifecycleEvent::ShutdownCancelled => {
+                        this.quit_requested = false;
+                        this.controller
+                            .update(cx, |controller, cx| controller.cancel_editor_quit_gates(cx));
+                    }
                 });
             });
         });

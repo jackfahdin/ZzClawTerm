@@ -245,6 +245,38 @@ struct ZzClawSelectItem {
     font_family: Option<SharedString>,
 }
 
+impl ZzClawSelectItem {
+    fn subtitle_title(&self) -> Option<AnyElement> {
+        let subtitle = self.subtitle.clone()?;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(self.label.clone()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .opacity(0.65)
+                        .child(subtitle),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl gpui_kit::component::select::SelectItem for ZzClawSelectItem {
     type Value = String;
 
@@ -253,23 +285,38 @@ impl gpui_kit::component::select::SelectItem for ZzClawSelectItem {
     }
 
     fn display_title(&self) -> Option<AnyElement> {
-        // The closed selector uses the ordinary UI font even for font options.
-        None
+        // Font options keep the closed selector on the ordinary UI font.
+        self.subtitle_title()
     }
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div().flex().items_center().gap_3().child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .when_some(self.font_family.clone(), |this, font_family| {
-                    this.font_family(font_family)
-                })
-                .child(self.label.clone()),
-        )
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .when_some(self.font_family.clone(), |this, font_family| {
+                        this.font_family(font_family)
+                    })
+                    .child(self.label.clone()),
+            )
+            .when_some(self.subtitle.clone(), |this, subtitle| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .opacity(0.65)
+                        .child(subtitle),
+                )
+            })
     }
 
     fn value(&self) -> &Self::Value {

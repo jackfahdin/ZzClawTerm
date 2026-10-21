@@ -46,9 +46,11 @@ impl DesktopController {
             .update(cx, |shell, _| shell.app.clone())
             .map_err(|_| "the target window closed during the drag")?
             .ok_or("the target window is still loading")?;
-        let session_ids = source_app
-            .read(cx)
-            .can_transfer_tab_tree(&request.root_tab_id, request.source_revision)?;
+        let session_ids = source_app.read(cx).can_transfer_tab_tree(
+            &request.root_tab_id,
+            request.source_revision,
+            cx,
+        )?;
         target_app
             .read(cx)
             .can_accept_tab_tree(&session_ids, &request.placement)?;
@@ -112,7 +114,7 @@ impl DesktopController {
             .update(cx, |shell, _| shell.app.clone())?
             .ok_or_else(|| anyhow::anyhow!("the source window is still loading"))?;
         app.read(cx)
-            .can_transfer_tab_tree(&root_tab_id, source_revision)
+            .can_transfer_tab_tree(&root_tab_id, source_revision, cx)
             .map_err(anyhow::Error::msg)?;
         let target_workspace_id = self.open_workspace_at(
             OpenWorkspaceRequest {

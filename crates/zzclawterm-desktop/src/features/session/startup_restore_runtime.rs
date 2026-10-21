@@ -57,12 +57,12 @@ impl ZzClawTermApp {
             return;
         }
         if !self.session.restore_is_complete()
-            || !self.terminal.terminal_windows_restore_is_complete()
+            || !self.shell.terminal_windows_restore_is_complete()
             || !self.shell.workspace_layout_restore_is_settled()
         {
             return;
         }
-        if !self.terminal.terminal_layout_persistence_is_supported()
+        if !self.shell.terminal_layout_persistence_is_supported()
             || !self.normalize_legacy_terminal_groups()
         {
             return;
@@ -81,7 +81,7 @@ impl ZzClawTermApp {
                 .into_iter()
                 .map(|session| session.id)
                 .collect::<Vec<_>>();
-            Some(self.terminal.serialize_terminal_window_layout(&ordered))
+            Some(self.shell.serialize_terminal_window_layout(&ordered))
         } else {
             None
         };
@@ -483,7 +483,7 @@ impl ZzClawTermApp {
         }
         self.mark_startup_restore_complete();
         // After all tabs reconnect, attempt multi-leaf then global pane layout restore.
-        self.terminal.mark_terminal_windows_restore_pending();
+        self.shell.mark_terminal_windows_restore_pending();
         self.shell.set_workspace_pane_layout_restored(false);
         // Prefer stored ui.workspace_pane_layout only when no open_tabs per-tab roots exist.
         // open_tabs[].root maps to per-tab session_pane_roots (Tauri Tab.root).
@@ -535,6 +535,7 @@ impl ZzClawTermApp {
         if !self.session.ordered_sessions().is_empty() {
             self.persist_open_tabs();
         }
+        self.restore_file_manager_after_sessions(cx);
         cx.notify();
     }
 
@@ -730,7 +731,7 @@ impl ZzClawTermApp {
             "restore skipped unsupported tab {} ({})",
             tab.title, tab.session_type
         ));
-        self.terminal.preserve_unread_terminal_layout();
+        self.shell.preserve_unread_terminal_layout();
         false
     }
 
@@ -745,7 +746,7 @@ impl ZzClawTermApp {
             return;
         }
         let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
-            self.terminal.preserve_unread_terminal_layout();
+            self.shell.preserve_unread_terminal_layout();
             return;
         };
         if !restored.is_split() {

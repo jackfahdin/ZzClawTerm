@@ -27,7 +27,7 @@ use zzclawterm_ui::{
 use super::ZzClawTermApp;
 
 pub(in crate::features) const ORDINARY_INPUT_SHELL_PADDING_X_PX: f32 = 4.;
-pub(in crate::features) const ORDINARY_NUMBER_INPUT_WIDTH_PX: f32 = 128.;
+pub(in crate::features) const ORDINARY_NUMBER_INPUT_MAX_WIDTH_PX: f32 = 220.;
 
 pub(in crate::features) fn ordinary_input_shell_border_color(
     palette: crate::theme::ThemePalette,
@@ -668,6 +668,9 @@ impl ZzClawTermApp {
             "transfer-upload-threads" => self.set_transfer_upload_threads(value, cx),
             "transfer-max-retries" => self.set_transfer_max_retries(value, cx),
             "transfer-buffer-size" => self.set_transfer_buffer_size(value, cx),
+            "transfer-internal-editor-font-size" => {
+                self.set_transfer_internal_editor_font_size(value.clamp(8, 72) as u16, cx)
+            }
             _ => {}
         }
     }
@@ -760,8 +763,10 @@ pub(in crate::features) fn number_input_box_from_state(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .w(px(ORDINARY_NUMBER_INPUT_WIDTH_PX))
-        .max_w_full()
+        // Share the available control slot, leaving room for six-digit values
+        // and both 32px step buttons.
+        .w_full()
+        .max_w(px(ORDINARY_NUMBER_INPUT_MAX_WIDTH_PX))
         .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
         .min_w_0()
         .flex()
@@ -778,12 +783,89 @@ pub(in crate::features) fn number_input_box_from_state(
 
 #[cfg(test)]
 mod tests {
-    use super::ORDINARY_NUMBER_INPUT_WIDTH_PX;
+    use gpui::{
+        AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, div, px,
+    };
+    use zzclawterm_ui::{ZzClawNumberInputOptions, ZzClawNumberInputState};
 
-    #[test]
-    fn number_input_box_uses_stable_nonzero_width() {
-        const { assert!(ORDINARY_NUMBER_INPUT_WIDTH_PX >= 120.) };
+    use super::number_input_box_from_state;
+
+    struct NumberBoxFixture {
+        field: Entity<ZzClawNumberInputState>,
+        slot_width: f32,
     }
+
+    impl Render for NumberBoxFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+                .w(px(self.slot_width))
+                .flex()
+                .child(number_input_box_from_state(
+                    "number-layout".into(),
+                    crate::theme::theme_palette("dark"),
+                    self.field.clone(),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn number_input_box_adapts_to_its_slot_and_displays_six_digit_drafts(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            zzclawterm_ui::apply_component_theme(
+                crate::theme::theme_palette("dark"),
+                gpui::font("Segoe UI"),
+                px(14.),
+                cx,
+            );
+        });
+        let (fixture, cx) = cx.add_window_view(|_, cx| NumberBoxFixture {
+            field: cx.new(|cx| {
+                ZzClawNumberInputState::new(
+                    cx,
+                    "100000",
+                    ZzClawNumberInputOptions::default()
+                        .range(100., 999_999.)
+                        .step(100.),
+                )
+            }),
+            slot_width: 220.,
+        });
+        let field = fixture.read_with(cx, |fixture, _| fixture.field.clone());
+        for slot_width in [180., 220., 320.] {
+            fixture.update(cx, |fixture, cx| {
+                fixture.slot_width = slot_width;
+                cx.notify();
+            });
+            for value in ["100000", "999999"] {
+                field.update(cx, |field, cx| field.set_content(value, cx));
+                cx.update(|window, cx| {
+                    _ = window.draw(cx);
+                    let input = field.read(cx).component_state().unwrap();
+                    let bounds = input.read(cx).input_bounds();
+                    let text = window.text_system().shape_line(
+                        value.into(),
+                        px(14.),
+                        &[window.text_style().to_run(value.len())],
+                        None,
+                    );
+                    assert!(
+                        bounds.size.width >= text.width,
+                        "{value} at slot width {slot_width}"
+                    );
+                    assert!(bounds.origin.x >= px(32.));
+                    assert!(bounds.right() <= px(slot_width.min(220.) - 32.));
+                    assert!(bounds.right() > px(slot_width.min(220.) - 64.));
+                    assert_eq!(field.read(cx).value(cx), value);
+                });
+            }
+        }
+    }
+
     #[test]
     fn secret_inputs_hide_on_navigation_without_losing_drafts() {
         use super::TextInputSetup;

@@ -321,10 +321,14 @@ pub fn file_browser_root(kind: FileBrowserBackendKind, path: &str) -> String {
 }
 
 pub fn file_browser_identity(kind: FileBrowserBackendKind, path: &str) -> String {
-    if kind == FileBrowserBackendKind::Local && cfg!(windows) {
-        path.replace('/', "\\").to_lowercase()
-    } else {
-        path.to_string()
+    match kind {
+        FileBrowserBackendKind::Remote => match posix_path_parts(path) {
+            Some(parts) if parts.is_empty() => "/".to_string(),
+            Some(parts) => format!("/{}", parts.join("/")),
+            None => path.to_string(),
+        },
+        FileBrowserBackendKind::Local if cfg!(windows) => path.replace('/', "\\").to_lowercase(),
+        FileBrowserBackendKind::Local => path.to_string(),
     }
 }
 
@@ -344,13 +348,76 @@ pub fn valid_file_browser_child_name(kind: FileBrowserBackendKind, name: &str) -
         && (kind == FileBrowserBackendKind::Remote || !cfg!(windows) || !name.contains('\\'))
 }
 
+/// True when copying `source` onto `destination` would overwrite the source, nest a
+/// directory inside itself, or operate on a filesystem root.
+///
+/// Identity is backend-aware: remote paths stay POSIX, local Windows paths are
+/// case-insensitive and accept both separators. Callers still have to compare
+/// endpoints separately — equal strings on different sessions are not the same file.
+pub fn file_browser_copy_destination_invalid(
+    kind: FileBrowserBackendKind,
+    source: &str,
+    destination: &str,
+    source_is_directory: bool,
+) -> bool {
+    if file_browser_path_is_root(kind, source) {
+        return true;
+    }
+    if file_browser_path_eq(kind, source, destination) {
+        return true;
+    }
+    if !source_is_directory {
+        return false;
+    }
+    match kind {
+        FileBrowserBackendKind::Remote => {
+            let Some(source_parts) = posix_path_parts(source) else {
+                return true;
+            };
+            let Some(destination_parts) = posix_path_parts(destination) else {
+                return true;
+            };
+            destination_parts.starts_with(&source_parts)
+        }
+        FileBrowserBackendKind::Local => {
+            let source_id = file_browser_identity(kind, source);
+            let destination_id = file_browser_identity(kind, destination);
+            let separator = if cfg!(windows) { '\\' } else { '/' };
+            let prefix = if source_id.ends_with(separator) {
+                source_id
+            } else {
+                format!("{source_id}{separator}")
+            };
+            destination_id.starts_with(&prefix)
+        }
+    }
+}
+
+fn posix_path_parts(path: &str) -> Option<Vec<&str>> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
     use super::file_browser_identity;
     use super::{
-        FileBrowserBackendKind, file_browser_join, file_browser_name, file_browser_parent,
-        file_browser_path_is_root, file_browser_root, valid_file_browser_child_name,
+        FileBrowserBackendKind, file_browser_copy_destination_invalid, file_browser_join,
+        file_browser_name, file_browser_parent, file_browser_path_is_root, file_browser_root,
+        valid_file_browser_child_name,
     };
 
     #[test]
@@ -378,6 +445,36 @@ mod tests {
         assert!(file_browser_path_is_root(
             FileBrowserBackendKind::Remote,
             "/"
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Remote,
+            "/src",
+            "/src/./",
+            false
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Remote,
+            "/src",
+            "/src/child/file",
+            true
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Remote,
+            "/",
+            "/other",
+            true
+        ));
+        assert!(!file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Remote,
+            "/src",
+            "/other/file",
+            true
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Remote,
+            "/src\0hidden",
+            "/other",
+            true
         ));
     }
 
@@ -419,5 +516,29 @@ mod tests {
             ),
             r"\\server\share\"
         );
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Local,
+            r"C:\src",
+            r"C:\src\child",
+            true
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Local,
+            r"C:\src",
+            r"c:/src/child",
+            true
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Local,
+            r"C:\",
+            r"D:\other",
+            true
+        ));
+        assert!(!file_browser_copy_destination_invalid(
+            FileBrowserBackendKind::Local,
+            r"C:\src",
+            r"C:\other\file",
+            true
+        ));
     }
 }

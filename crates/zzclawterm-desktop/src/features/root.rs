@@ -194,6 +194,12 @@ impl ZzClawTermApp {
         self.flush_ai_panel_snapshot(cx);
         self.ensure_visible_notes_loaded(cx);
         self.refresh_window_render_inputs(window, cx);
+        cx.observe_window_bounds(window, |this, window, cx| {
+            let browser_was_visible = this.transfer_browser_is_visible();
+            this.refresh_window_render_inputs(window, cx);
+            this.transfer_browser_visibility_changed(browser_was_visible, cx);
+        })
+        .detach();
         self.ensure_shortcut_interceptor(cx);
         self.queue_cloud_sync_history_refresh(None, cx);
         self.queue_wallpaper_refresh(cx);
@@ -544,26 +550,7 @@ impl ZzClawTermApp {
                             window,
                             cx,
                         )))
-                        .child(self.panel_resize_handle(PanelResizeSide::Left, cx))
-                        .when(panel != NavItem::Plugins, |this| {
-                            this.child(
-                                div()
-                                    .id("floating-left-panel-close")
-                                    .absolute()
-                                    .top(px(6.))
-                                    .right(px(8.))
-                                    .w(px(20.))
-                                    .h(px(20.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .child("×")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_floating_panel(PanelSide::Left, cx);
-                                    })),
-                            )
-                        }),
+                        .child(self.panel_resize_handle(PanelResizeSide::Left, cx)),
                 );
             }
 
@@ -589,26 +576,7 @@ impl ZzClawTermApp {
                             panel,
                             window,
                             cx,
-                        )))
-                        .when(panel != NavItem::Plugins, |this| {
-                            this.child(
-                                div()
-                                    .id("floating-right-panel-close")
-                                    .absolute()
-                                    .top(px(6.))
-                                    .right(px(8.))
-                                    .w(px(20.))
-                                    .h(px(20.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .child("×")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_floating_panel(PanelSide::Right, cx);
-                                    })),
-                            )
-                        }),
+                        ))),
                 );
             }
 
@@ -617,7 +585,9 @@ impl ZzClawTermApp {
                     full_window_input_layer("mobile-panel-backdrop")
                         .bg(rgba(0x00000080))
                         .on_click(cx.listener(|this, _, _, cx| {
+                            let browser_was_visible = this.transfer_browser_is_visible();
                             this.shell.close_mobile_panels();
+                            this.transfer_browser_visibility_changed(browser_was_visible, cx);
                             cx.notify();
                         })),
                 );
@@ -724,11 +694,13 @@ impl ZzClawTermApp {
                             .text_color(rgb(palette.text_muted)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        let browser_was_visible = this.transfer_browser_is_visible();
                         if left {
                             this.shell.close_mobile_panel(PanelSide::Left);
                         } else {
                             this.shell.close_mobile_panel(PanelSide::Right);
                         }
+                        this.transfer_browser_visibility_changed(browser_was_visible, cx);
                         cx.notify();
                     })),
             )
@@ -754,7 +726,6 @@ impl ZzClawTermApp {
             locked: self.security.screen_locked(),
         };
         let quick_switch_open = self.quick_switch_open(cx);
-        let transfer_editor_open = self.transfer.editor_inline_overlay_is_open();
         let transfer_external_sync_open = self.active_external_editor_sync_prompt().is_some();
         let ssh_auth_prompt_open = self.session.prompt_has_active_ssh_auth();
         let full_access_confirmation = self.pending_ai_full_access();
@@ -788,12 +759,6 @@ impl ZzClawTermApp {
                 this.child(full_window_overlay_layer(
                     "transfer-job-menu-input-layer",
                     self.transfer_job_menu_overlay(cx),
-                ))
-            })
-            .when(transfer_editor_open, |this| {
-                this.child(full_window_overlay_layer(
-                    "transfer-editor-input-layer",
-                    self.transfer_editor_overlay(cx),
                 ))
             })
             .when(transfer_external_sync_open, |this| {
@@ -1583,17 +1548,17 @@ mod tests {
             app.session.select_active_session(active_session_id.clone());
             app.shell.show_workspace();
             let target_leaf_id = app
-                .terminal
+                .shell
                 .ensure_terminal_windows_root(session_ids.clone(), Some(active_session_id))
                 .expect("benchmark terminal window root");
             let mut leaf_ids = vec![target_leaf_id.clone()];
             for session_id in session_ids.iter().skip(1).take(7) {
-                let result = app.terminal.dock_tab_on_terminal_window_leaf(
+                let result = app.shell.dock_tab_on_terminal_window_leaf(
                     session_id,
                     &target_leaf_id,
                     TabDockZone::Edge(TabDockEdge::Right),
                 );
-                let crate::features::terminal::TerminalWindowDockResult::Docked {
+                let crate::features::shell::TerminalWindowDockResult::Docked {
                     focused_leaf_id: Some(leaf_id),
                 } = result
                 else {
@@ -1606,14 +1571,14 @@ mod tests {
                 if leaf_id == &target_leaf_id {
                     continue;
                 }
-                let result = app.terminal.dock_tab_on_terminal_window_leaf(
+                let result = app.shell.dock_tab_on_terminal_window_leaf(
                     session_id,
                     leaf_id,
                     TabDockZone::Center,
                 );
                 assert!(matches!(
                     result,
-                    crate::features::terminal::TerminalWindowDockResult::Docked { .. }
+                    crate::features::shell::TerminalWindowDockResult::Docked { .. }
                 ));
             }
         });

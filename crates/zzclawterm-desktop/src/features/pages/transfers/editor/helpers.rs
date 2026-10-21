@@ -228,6 +228,9 @@ pub(super) fn is_known_binary_file(name: &str) -> bool {
 }
 
 pub(super) fn is_known_text_file(name: &str) -> bool {
+    if zzclawterm_core::document_language::document_language_for_path(name).is_some() {
+        return true;
+    }
     let base_name = remote_file_basename(name);
     let normalized = base_name.trim_start_matches('.');
     let extension = remote_file_extension(name);
@@ -286,6 +289,7 @@ pub(super) fn is_known_text_file(name: &str) -> bool {
             | "socket"
             | "sql"
             | "swift"
+            | "svg"
             | "timer"
             | "toml"
             | "ts"
@@ -371,7 +375,37 @@ mod editor_process_tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use super::editor_process;
+    use super::{RemoteFileTextKind, editor_process, remote_file_text_kind};
+
+    #[test]
+    fn highlighted_files_open_as_text_while_binary_files_keep_the_external_route() {
+        for name in [
+            "page.astro",
+            "view.svelte",
+            "main.kt",
+            "main.exs",
+            "view.ejs",
+            "view.erb",
+            "main.zig",
+            "module.mts",
+            "types.pyi",
+            "BUILD.MK",
+            "Gemfile",
+            "Makefile",
+            "image.svg",
+        ] {
+            assert_eq!(
+                remote_file_text_kind(name),
+                RemoteFileTextKind::Text,
+                "{name}"
+            );
+        }
+        assert_eq!(remote_file_text_kind("app.exe"), RemoteFileTextKind::Binary);
+        assert_eq!(
+            remote_file_text_kind("unknown.custom"),
+            RemoteFileTextKind::Unknown
+        );
+    }
 
     #[test]
     fn literal_editor_path_with_spaces_is_one_executable() {

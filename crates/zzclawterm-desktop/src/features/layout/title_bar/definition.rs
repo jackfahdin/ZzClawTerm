@@ -11,6 +11,7 @@ use crate::shortcuts;
 pub(crate) enum TitleMenuCommand {
     NewWindow,
     NewSession,
+    OpenFileManager,
     ImportConfig,
     ExportConfig,
     ZoomIn,
@@ -88,6 +89,7 @@ impl TitleMenuCommand {
                 | Self::ViewLogs
                 | Self::NewWindow
                 | Self::NewSession
+                | Self::OpenFileManager
                 | Self::ImportConfig
                 | Self::ExportConfig
                 | Self::OpenSettings

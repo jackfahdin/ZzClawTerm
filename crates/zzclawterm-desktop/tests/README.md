@@ -17,7 +17,7 @@ cargo test -p zzclawterm-desktop --lib replacement_paste_frames_only_inserted_en
 cargo check -p zzclawterm-app
 ```
 
-desktop 状态测试覆盖建议关闭、低延迟和外层命令抑制下的无 OSC 回退、MouseUp
+desktop 状态测试覆盖建议关闭和外层命令抑制下的无 OSC 回退、MouseUp
 保留选区、失败写入、部分回显、旧快照禁用、超时、最新点击、OSC 边界和密码/鼠标报告/广播
 门禁。IME 测试使用 GPUI 输入处理器及真实本地 TCP 连接，检查预编辑不修改输入、
 物理文字键交由提交入口、覆盖只发送一次。粘贴载荷测试检查编码后的正文被包装，
@@ -53,6 +53,6 @@ SSH bash/zsh/fish 及 Docker shell 尚未实测；GPUI/TCP 测试不能替代这
 
 人工验证时，分别在有/无 OSC 的 shell 输入尾空格、中文宽字符和软换行命令，
 依次检查点击定位、拖选及双/三击后的删除、左右键折叠、文字/IME/粘贴覆盖。
-关闭命令建议并启用低延迟后重复；在 Docker/SSH 嵌套 shell 确认外层 command-running
+关闭命令建议后重复；在 Docker/SSH 嵌套 shell 确认外层 command-running
 不阻止唯一回显匹配。在重复文本、历史滚动、密码、alternate screen、鼠标报告和
 广播模式检查操作回退为普通终端行为。

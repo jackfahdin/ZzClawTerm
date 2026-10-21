@@ -20,7 +20,12 @@ impl ZzClawTermApp {
             ZzClawMenuItem::action(t!("savedConnections.ungroupedConnections"))
                 .icon("icons/conn/connect.svg")
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.move_connections_into_group(ungrouped_ids.clone(), None, cx);
+                    if this
+                        .resolve_saved_connection_targets(&ungrouped_ids, cx)
+                        .is_some()
+                    {
+                        this.move_connections_into_group(ungrouped_ids.clone(), None, cx);
+                    }
                 })),
         ];
 
@@ -36,7 +41,13 @@ impl ZzClawTermApp {
                 ZzClawMenuItem::action(label)
                     .icon("icons/conn/folder.svg")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.move_connections_into_group(ids.clone(), Some(group_id.clone()), cx);
+                        if this.resolve_saved_connection_targets(&ids, cx).is_some() {
+                            this.move_connections_into_group(
+                                ids.clone(),
+                                Some(group_id.clone()),
+                                cx,
+                            );
+                        }
                     })),
             );
         }
@@ -49,12 +60,46 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> Vec<ZzClawMenuItem> {
         let selected = self.connection_state.selected_connections();
-        let selected_count = selected.len();
-        let targets_selection = selected_count > 1
+        let target_ids = if selected.len() > 1
             && self
                 .connection_state
-                .list_contains_selected_id(&connection.id);
-        let connect_label = if targets_selection {
+                .list_contains_selected_id(&connection.id)
+        {
+            selected.into_iter().map(|item| item.id).collect()
+        } else {
+            vec![connection.id.clone()]
+        };
+        self.build_connection_target_menu_items(connection.id, target_ids, true, cx)
+    }
+
+    /// Targets are captured when the menu opens, independently of list selection.
+    pub(in crate::features) fn connection_target_menu_items(
+        &mut self,
+        connection_id: String,
+        target_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Vec<ZzClawMenuItem> {
+        self.build_connection_target_menu_items(connection_id, target_ids, false, cx)
+    }
+
+    fn build_connection_target_menu_items(
+        &mut self,
+        connection_id: String,
+        target_ids: Vec<String>,
+        clear_selection_after_copy: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<ZzClawMenuItem> {
+        if self
+            .connection_state
+            .connection_by_id(&connection_id)
+            .is_none()
+        {
+            self.shell.set_status("connection is no longer available");
+            cx.notify();
+            return Vec::new();
+        }
+        let selected_count = target_ids.len();
+        let connect_label = if selected_count > 1 {
             format!(
                 "{} ({selected_count})",
                 t!("savedConnections.connectSelected")
@@ -62,64 +107,78 @@ impl ZzClawTermApp {
         } else {
             t!("savedConnections.connect").to_string()
         };
-        let copy_label = if targets_selection {
+        let copy_label = if selected_count > 1 {
             t!("savedConnections.copySelected")
         } else {
             t!("savedConnections.copy")
         };
-        let move_ids = if targets_selection {
-            selected
-                .into_iter()
-                .map(|connection| connection.id)
-                .collect()
-        } else {
-            vec![connection.id.clone()]
-        };
-
-        let connection_id = connection.id.clone();
-        let connection_for_connect = connection.clone();
-        let connection_for_edit = connection.id.clone();
-        let connection_for_rename = connection.id.clone();
-        let connection_for_copy = connection.id.clone();
-        let connection_for_delete = connection.id;
-        let move_items = self.connection_move_to_group_menu_items(move_ids, cx);
+        let connect_ids = target_ids.clone();
+        let copy_ids = target_ids.clone();
+        let edit_id = connection_id.clone();
+        let rename_id = connection_id.clone();
+        let session_id = self.session_id_for_connection(&connection_id);
+        let manager_available = session_id.is_some();
+        let open_session = session_id.clone();
+        let left_session = session_id.clone();
+        let right_session = session_id.clone();
+        let move_items = self.connection_move_to_group_menu_items(target_ids.clone(), cx);
 
         vec![
             ZzClawMenuItem::action(connect_label)
                 .icon("icons/conn/connect.svg")
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    let selected = this.connection_state.selected_connections();
-                    if selected.len() > 1 && selected.iter().any(|item| item.id == connection_id) {
-                        this.start_selected_saved_connections(window, cx);
-                    } else {
-                        this.start_saved_connection(connection_for_connect.clone(), window, cx);
-                    }
+                    this.start_saved_connections_by_ids(&connect_ids, window, cx);
                 })),
             ZzClawMenuItem::action(t!("savedConnections.edit"))
                 .icon("icons/net/edit.svg")
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_connection_editor(
-                        Some(connection_for_edit.clone()),
-                        None,
-                        false,
-                        window,
-                        cx,
-                    );
+                    this.edit_saved_connection_by_id(&edit_id, window, cx);
+                })),
+            ZzClawMenuItem::separator(),
+            ZzClawMenuItem::action(t!("fileManager.openInManager"))
+                .icon("icons/file-manager.svg")
+                .disabled(!manager_available)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(session_id) = &open_session {
+                        this.open_file_manager_for_session(session_id, None, cx);
+                    } else {
+                        this.shell
+                            .set_status(t!("fileManager.sessionUnavailable").to_string());
+                        cx.notify();
+                    }
+                })),
+            ZzClawMenuItem::action(t!("fileManager.openLeft"))
+                .disabled(!manager_available)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(session_id) = &left_session {
+                        this.open_file_manager_for_session(
+                            session_id,
+                            Some(crate::features::file_manager::PaneId::Left),
+                            cx,
+                        );
+                    }
+                })),
+            ZzClawMenuItem::action(t!("fileManager.openRight"))
+                .disabled(!manager_available)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(session_id) = &right_session {
+                        this.open_file_manager_for_session(
+                            session_id,
+                            Some(crate::features::file_manager::PaneId::Right),
+                            cx,
+                        );
+                    }
                 })),
             ZzClawMenuItem::separator(),
             ZzClawMenuItem::action(t!("savedConnections.rename"))
                 .icon("icons/session/rename.svg")
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.rename_connection(connection_for_rename.clone(), window, cx);
+                    this.edit_saved_connection_by_id(&rename_id, window, cx);
                 })),
             ZzClawMenuItem::action(copy_label)
                 .icon("icons/copy.svg")
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.connection_state.selected_connections().len() > 1 {
-                        this.copy_selected_connections(cx);
-                    } else {
-                        this.copy_connection_by_id(connection_for_copy.clone(), cx);
-                    }
+                    this.copy_connections_by_ids(&copy_ids, clear_selection_after_copy, cx);
                 })),
             ZzClawMenuItem::submenu(t!("savedConnections.moveToGroup"), move_items)
                 .icon("icons/net/move.svg"),
@@ -128,15 +187,7 @@ impl ZzClawTermApp {
                 .icon("icons/net/delete.svg")
                 .danger()
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.connection_state.selected_connections().len() > 1 {
-                        this.delete_selected_connections(window, cx);
-                    } else {
-                        this.open_connection_delete_confirm(
-                            connection_for_delete.clone(),
-                            window,
-                            cx,
-                        );
-                    }
+                    this.delete_connections_by_ids(&target_ids, window, cx);
                 })),
         ]
     }
@@ -231,26 +282,29 @@ impl ZzClawTermApp {
         } else {
             t!("savedConnections.connect").to_string()
         };
+        let connect_ids = move_ids.clone();
+        let copy_ids = move_ids.clone();
+        let delete_ids = move_ids.clone();
         let move_items = self.connection_move_to_group_menu_items(move_ids, cx);
 
         vec![
             ZzClawMenuItem::action(connect_label)
                 .icon("icons/conn/connect.svg")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.start_selected_saved_connections(window, cx);
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_saved_connections_by_ids(&connect_ids, window, cx);
                 })),
             ZzClawMenuItem::action(t!("savedConnections.copySelected"))
                 .icon("icons/copy.svg")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.copy_selected_connections(cx);
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.copy_connections_by_ids(&copy_ids, true, cx);
                 })),
             ZzClawMenuItem::submenu(t!("savedConnections.moveToGroup"), move_items)
                 .icon("icons/net/move.svg"),
             ZzClawMenuItem::action(t!("savedConnections.delete"))
                 .icon("icons/net/delete.svg")
                 .danger()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.delete_selected_connections(window, cx);
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.delete_connections_by_ids(&delete_ids, window, cx);
                 })),
         ]
     }
@@ -370,5 +424,95 @@ impl ZzClawTermApp {
             ]);
         }
         items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{AppRuntime, RuntimeMode, SavedConnection, test_support::TestTempDir};
+
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+
+    #[test]
+    fn connection_menus_preserve_selection_scope_and_assets_use_explicit_single_targets() {
+        let root = TestTempDir::new("zzclawterm-connection-menu-targets");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.path().to_path_buf(),
+            root.path().join("config"),
+            root.path().join("logs"),
+            root.path().join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+        app.update(&mut cx, |app, cx| {
+            let connections = ["first", "second", "third"].map(|id| {
+                serde_json::from_value::<SavedConnection>(serde_json::json!({
+                    "id": id, "name": id, "type": "local_terminal",
+                }))
+                .unwrap()
+            });
+            app.connection_state
+                .replace_loaded(connections.to_vec(), Vec::new());
+            let ids = connections
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>();
+            app.connection_state
+                .select_list_connection("first".into(), &ids, false, false);
+            app.connection_state
+                .select_list_connection("second".into(), &ids, true, false);
+            let selected = app.connection_context_menu_items(connections[0].clone(), cx);
+            assert!(selected[0].test_label().ends_with("(2)"));
+            assert_eq!(
+                selected[3].test_label(),
+                rust_i18n::t!("fileManager.openInManager")
+            );
+            assert_eq!(
+                selected[8].test_label(),
+                rust_i18n::t!("savedConnections.copySelected")
+            );
+            let unselected = app.connection_context_menu_items(connections[2].clone(), cx);
+            assert_eq!(
+                unselected[0].test_label(),
+                rust_i18n::t!("savedConnections.connect")
+            );
+            let asset = app.connection_target_menu_items("first".into(), vec!["first".into()], cx);
+            assert_eq!(
+                asset[0].test_label(),
+                rust_i18n::t!("savedConnections.connect")
+            );
+            assert_eq!(
+                asset[8].test_label(),
+                rust_i18n::t!("savedConnections.copy")
+            );
+            assert_eq!(app.connection_state.selected_connections().len(), 2);
+
+            let mut changed = connections[0].clone();
+            changed.name = "Latest connection".into();
+            app.connection_state
+                .replace_loaded(vec![changed], Vec::new());
+            let latest = app
+                .resolve_saved_connection_targets(&["first".into()], cx)
+                .unwrap();
+            assert_eq!(latest[0].name, "Latest connection");
+            assert!(
+                app.resolve_saved_connection_targets(&["first".into(), "second".into()], cx)
+                    .is_none()
+            );
+            assert_eq!(app.shell.status(), "connection is no longer available");
+            assert!(
+                app.connection_target_menu_items("second".into(), vec!["second".into()], cx)
+                    .is_empty()
+            );
+        });
     }
 }

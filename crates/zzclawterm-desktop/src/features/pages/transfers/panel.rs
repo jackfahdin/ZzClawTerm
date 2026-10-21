@@ -10,7 +10,6 @@ use zzclawterm_transport::SftpFileEntry;
 use zzclawterm_ui::ZzClawInputState;
 
 use crate::features::ZzClawTermApp;
-use crate::features::transfers::TRANSFER_CWD_SYNC_POLL_INTERVAL;
 use crate::models::{
     TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserSortColumn,
     TransferBrowserSortDirection, TransferJobRowSnapshot, TransferRenameState,
@@ -106,23 +105,12 @@ pub(in crate::features) struct TransferSnapshot {
     pub has_session: bool,
     pub browser: TransferBrowserPresentation,
     pub queue: TransferQueuePresentation,
-    /// Whether the browser wants its remote cwd polled.
-    ///
-    /// The app decides this -- it depends on which panel is open, which the panel
-    /// cannot see -- and the panel acts on it by owning or dropping the task.
-    pub cwd_sync_demand: bool,
 }
 
 pub(in crate::features) struct TransferPanel {
     /// Weak, so the panel does not keep the app alive.
     app: WeakEntity<ZzClawTermApp>,
     snapshot: Option<TransferSnapshot>,
-    /// The cwd-sync poll, owned here rather than by the app.
-    ///
-    /// A `Task` dropped with its owner, so the poll cannot outlive the panel that
-    /// wants it. The panel decides *when to ask*; the app still owns the cwd itself
-    /// and every mutation of it, reached through an event-time hop.
-    cwd_clock: Option<gpui::Task<()>>,
     #[cfg(test)]
     paint_count: usize,
     #[cfg(test)]
@@ -134,7 +122,6 @@ impl TransferPanel {
         Self {
             app,
             snapshot: None,
-            cwd_clock: None,
             #[cfg(test)]
             paint_count: 0,
             #[cfg(test)]
@@ -151,49 +138,8 @@ impl TransferPanel {
         snapshot: TransferSnapshot,
         cx: &mut Context<Self>,
     ) {
-        let demand = snapshot.cwd_sync_demand;
         self.snapshot = Some(snapshot);
-        self.reconcile_cwd_clock(demand, cx);
         cx.notify();
-    }
-
-    /// Own or drop the cwd-sync poll to match demand.
-    ///
-    /// The task lives here so it is dropped with the panel: a poll cannot outlive the
-    /// view that wanted it, which is what "lifecycle-scoped" has to mean. The panel
-    /// only decides *when to ask*; every beat hops back to the app, which owns the
-    /// cwd and every mutation of it.
-    fn reconcile_cwd_clock(&mut self, demand: bool, cx: &mut Context<Self>) {
-        if !demand {
-            // Dropping the `Task` cancels it.
-            self.cwd_clock = None;
-            return;
-        }
-        if self.cwd_clock.is_some() {
-            return;
-        }
-        let app = self.app.clone();
-        self.cwd_clock = Some(cx.spawn(async move |_panel, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(TRANSFER_CWD_SYNC_POLL_INTERVAL)
-                    .await;
-                let Some(app) = app.upgrade() else {
-                    break;
-                };
-                // The app owns the decision -- whether the interval is due, whether a
-                // job is in flight, whether the shell is calm enough -- and the cwd.
-                // No error to handle: the strong handle from `upgrade` keeps the app
-                // alive for the call, and a released app ends the loop above.
-                let kept = app.update(cx, |app, cx| {
-                    app.sync_transfer_cwd_if_due(cx);
-                    app.transfer_cwd_sync_needs_polling()
-                });
-                if !kept {
-                    break;
-                }
-            }
-        }));
     }
 
     /// The one hop from a panel interaction back to the owner.
@@ -246,11 +192,6 @@ impl TransferPanel {
     #[cfg(test)]
     pub(in crate::features) fn rows_built(&self) -> usize {
         self.rows_built.get()
-    }
-
-    #[cfg(test)]
-    pub(in crate::features) fn cwd_clock_is_armed(&self) -> bool {
-        self.cwd_clock.is_some()
     }
 }
 
@@ -1453,22 +1394,6 @@ mod tests {
             built < 500,
             "a 500-entry listing must not materialise every row; built {built}"
         );
-    }
-
-    /// The cwd poll belongs to the panel, and dropping the panel cancels it.
-    #[test]
-    fn the_panel_owns_the_cwd_clock() {
-        let test_dir = TestConfigDir::new("zzclawterm-transfer-panel");
-        let mut cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let (app, vcx) = hosted(&mut cx, test_dir.path());
-        vcx.update(|_, cx| {
-            assert!(
-                app.read(cx).transfer_panel.read(cx).cwd_clock_is_armed(),
-                "an open browser must leave the poll with the panel"
-            );
-        });
-        let _ = Duration::from_secs(1);
     }
 
     #[test]

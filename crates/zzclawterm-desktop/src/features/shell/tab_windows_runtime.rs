@@ -1,46 +1,75 @@
 use gpui::Context;
 use zzclawterm_store::{StoreDomain, store_request};
 
-use crate::features::terminal::TerminalWindowDockResult;
+use crate::features::shell::TerminalWindowDockResult;
 use crate::features::{ZzClawTermApp, formatting::short_id};
 use crate::models::{MainMode, NavItem, SmartSplitMode, TabDockZone};
 
 impl ZzClawTermApp {
     /// Ensure every live session appears in the multi-leaf layout once it is enabled.
     pub(in crate::features) fn reconcile_terminal_windows(&mut self) {
-        let live_ids = self
+        let mut live_ids = self
             .ordered_tab_sessions()
             .into_iter()
             .map(|session| session.id)
             .collect::<Vec<_>>();
-        let preferred = self.current_terminal_group();
-        let active = self.session.active_id_owned();
-        self.terminal.reconcile_terminal_windows(
-            &live_ids,
-            preferred.as_deref(),
-            active.as_deref(),
+        live_ids.extend(
+            self.transfer
+                .editor_documents()
+                .iter()
+                .filter(|document| {
+                    document.display == zzclawterm_core::InternalEditorDisplay::Workspace
+                })
+                .map(|document| {
+                    crate::models::WorkspaceTabId::Editor(document.id.clone()).layout_key()
+                }),
         );
+        live_ids.extend(
+            self.file_manager
+                .workspaces()
+                .map(|(id, _)| crate::models::WorkspaceTabId::FileManager(id.clone()).layout_key()),
+        );
+        let preferred = self.current_terminal_group();
+        let active = self.active_workspace_tab();
+        self.shell
+            .reconcile_terminal_windows(&live_ids, preferred.as_deref(), active.as_deref());
         self.normalize_legacy_terminal_groups();
     }
 
     pub(in crate::features) fn ensure_terminal_windows_root(&mut self) {
-        let tab_ids = self
+        let mut tab_ids = self
             .ordered_tab_sessions()
             .into_iter()
             .map(|session| session.id)
             .collect::<Vec<_>>();
-        let active = self.session.active_id_owned();
-        self.terminal.ensure_terminal_windows_root(tab_ids, active);
+        tab_ids.extend(
+            self.transfer
+                .editor_documents()
+                .iter()
+                .filter(|document| {
+                    document.display == zzclawterm_core::InternalEditorDisplay::Workspace
+                })
+                .map(|document| {
+                    crate::models::WorkspaceTabId::Editor(document.id.clone()).layout_key()
+                }),
+        );
+        tab_ids.extend(
+            self.file_manager
+                .workspaces()
+                .map(|(id, _)| crate::models::WorkspaceTabId::FileManager(id.clone()).layout_key()),
+        );
+        let active = self.active_workspace_tab();
+        self.shell.ensure_terminal_windows_root(tab_ids, active);
     }
 
     pub(in crate::features) fn terminal_windows_is_multi_leaf(&self) -> bool {
-        self.terminal.terminal_windows_is_multi_leaf()
+        self.shell.terminal_windows_is_multi_leaf()
     }
 
     pub(in crate::features) fn sync_terminal_windows_active_tab(&mut self, session_id: &str) {
         // Multi-leaf tab ids are tab roots; map secondary pane focus to its strip tab.
         let tab_id = self.tab_root_for_session(session_id);
-        self.terminal.sync_terminal_windows_active_tab(&tab_id);
+        self.shell.workspace.focused_group = self.shell.sync_terminal_windows_active_tab(&tab_id);
     }
 
     pub(in crate::features) fn set_terminal_window_drop(
@@ -49,13 +78,13 @@ impl ZzClawTermApp {
         zone: TabDockZone,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.set_terminal_window_drop(leaf_id, zone) {
+        if self.shell.set_terminal_window_drop(leaf_id, zone) {
             cx.notify();
         }
     }
 
     pub(in crate::features) fn clear_terminal_window_drop(&mut self, cx: &mut Context<Self>) {
-        if self.terminal.clear_terminal_window_drop() {
+        if self.shell.clear_terminal_window_drop() {
             cx.notify();
         }
     }
@@ -78,7 +107,7 @@ impl ZzClawTermApp {
         }
         let focused_leaf_id =
             match self
-                .terminal
+                .shell
                 .dock_tab_on_terminal_window_leaf(&tab_id, &target_leaf_id, zone)
             {
                 TerminalWindowDockResult::MissingTree => {
@@ -99,7 +128,7 @@ impl ZzClawTermApp {
                 TerminalWindowDockResult::Docked { focused_leaf_id } => focused_leaf_id,
             };
         let _ = focused_leaf_id;
-        self.activate_session_id_with_surface_sync(&tab_id, cx);
+        self.activate_workspace_tab(&tab_id, cx);
         self.shell.navigation.selected_nav = NavItem::Workspace;
         self.shell.navigation.main_mode = MainMode::Workspace;
         let zone_label = match zone {
@@ -121,23 +150,19 @@ impl ZzClawTermApp {
         if !self.normalize_legacy_terminal_groups() && !self.shell.workspace.pane_roots.is_empty() {
             return;
         }
-        let tab_ids = self
-            .ordered_tab_sessions()
-            .into_iter()
-            .map(|session| session.id)
-            .collect::<Vec<_>>();
+        let tab_ids = self.workspace_tab_ids();
         if tab_ids.len() < 2 {
             self.shell.set_status("no tabs to tile".to_string());
             cx.notify();
             return;
         }
-        let active = self.session.active_id_owned();
+        let active = self.active_workspace_tab();
         let size = self
-            .terminal
+            .shell
             .terminal_workspace_size()
             .unwrap_or(self.shell.viewport_size());
         let Some(focused_leaf_id) =
-            self.terminal
+            self.shell
                 .tile_terminal_groups(&tab_ids, mode, size, active.as_deref())
         else {
             self.shell
@@ -149,7 +174,7 @@ impl ZzClawTermApp {
         self.shell.workspace.split = None;
         self.shell.workspace.split_resize = None;
         self.sync_terminal_frame_snapshot_priority();
-        let _ = focused_leaf_id;
+        self.shell.workspace.focused_group = focused_leaf_id;
         self.shell.navigation.selected_nav = NavItem::Workspace;
         self.shell.navigation.main_mode = MainMode::Workspace;
         self.shell
@@ -171,19 +196,41 @@ impl ZzClawTermApp {
         self.shell.mark_window_layout_persist_dirty();
     }
 
+    fn restore_session_window_layout(
+        &mut self,
+        layout: &zzclawterm_core::RestorableTerminalWindowNode,
+        ordered: &[String],
+        active: Option<&str>,
+    ) -> Option<Option<String>> {
+        let tree = self.shell.terminal_window_tree();
+        let result = self
+            .shell
+            .restore_terminal_window_layout(layout, ordered, active);
+        if self
+            .transfer
+            .editor_documents()
+            .iter()
+            .any(|doc| doc.display == zzclawterm_core::InternalEditorDisplay::Workspace)
+        {
+            self.shell.restore_terminal_window_tree(tree);
+            return None;
+        }
+        result
+    }
+
     pub(in crate::features) fn try_restore_terminal_window_layout(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.terminal_windows_restore_is_complete()
-            || self.terminal.terminal_windows_restore_is_in_flight()
+        if self.shell.terminal_windows_restore_is_complete()
+            || self.shell.terminal_windows_restore_is_in_flight()
         {
             return;
         }
         if !self.settings.summary().startup_restore
             || !self.settings.summary().startup_restore_window_layout
         {
-            self.terminal.complete_terminal_windows_restore();
+            self.shell.complete_terminal_windows_restore();
             return;
         }
         // Do not open the config DB during connect/register; wait for idle.
@@ -203,29 +250,26 @@ impl ZzClawTermApp {
         // correctly. Once startup restore is complete, an empty session list
         // means there is nothing to restore; mark this done so the runtime can
         // enter the quiet cadence.
-        if ordered.is_empty() {
+        if ordered.is_empty() && self.transfer.editor_documents().is_empty() {
             if self.session.restore_is_complete() {
-                self.terminal.complete_terminal_windows_restore();
+                self.shell.complete_terminal_windows_restore();
             }
             return;
         }
-        let active = self.session.active_id_owned();
+        let active = self.active_workspace_tab();
         let loaded = self
             .stores
             .startup_restore
             .update(cx, |store, _| store.take_loaded_terminal_window_layout());
         if let Some(layout) = loaded {
-            self.terminal.complete_terminal_windows_restore();
+            self.shell.complete_terminal_windows_restore();
             if let Some(layout) = layout
-                && let Some(focused_leaf_id) = self.terminal.restore_terminal_window_layout(
-                    &layout,
-                    &ordered,
-                    active.as_deref(),
-                )
+                && let Some(focused_leaf_id) =
+                    self.restore_session_window_layout(&layout, &ordered, active.as_deref())
             {
                 if self.shell.workspace.pane_roots.is_empty()
                     && let Some(group) = focused_leaf_id
-                    && let Some((_, Some(tab))) = self.terminal.terminal_group_tabs(&group)
+                    && let Some((_, Some(tab))) = self.shell.terminal_group_tabs(&group)
                 {
                     self.select_session(tab, cx);
                 }
@@ -236,7 +280,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        self.terminal.begin_terminal_windows_restore();
+        self.shell.begin_terminal_windows_restore();
         let restore_revision = self.workspace_revision;
         self.submit_store_request(
             0,
@@ -244,22 +288,31 @@ impl ZzClawTermApp {
                 store.load_terminal_window_layout()
             }),
             move |this, event, cx| {
-                this.terminal.complete_terminal_windows_restore();
+                this.shell.complete_terminal_windows_restore();
                 if this.workspace_revision != restore_revision {
+                    match &event.outcome {
+                        Ok(Some(layout))
+                            if crate::models::TerminalWindowNode::restore_layout(
+                                layout, &ordered,
+                            )
+                            .is_none() =>
+                        {
+                            this.shell.preserve_unread_terminal_layout()
+                        }
+                        Err(_) => this.shell.preserve_unread_terminal_layout(),
+                        _ => {}
+                    }
                     this.normalize_legacy_terminal_groups();
                     return;
                 }
                 match event.outcome {
                     Ok(Some(layout)) => {
-                        if let Some(focused_leaf_id) = this.terminal.restore_terminal_window_layout(
-                            &layout,
-                            &ordered,
-                            active.as_deref(),
-                        ) {
+                        if let Some(focused_leaf_id) =
+                            this.restore_session_window_layout(&layout, &ordered, active.as_deref())
+                        {
                             if this.shell.workspace.pane_roots.is_empty()
                                 && let Some(group) = focused_leaf_id
-                                && let Some((_, Some(tab))) =
-                                    this.terminal.terminal_group_tabs(&group)
+                                && let Some((_, Some(tab))) = this.shell.terminal_group_tabs(&group)
                             {
                                 this.select_session(tab, cx);
                             }
@@ -269,7 +322,7 @@ impl ZzClawTermApp {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        this.terminal.preserve_unread_terminal_layout();
+                        this.shell.preserve_unread_terminal_layout();
                         this.shell
                             .set_status(format!("failed to restore terminal layout: {error}"));
                     }

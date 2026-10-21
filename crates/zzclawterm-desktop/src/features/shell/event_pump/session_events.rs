@@ -261,9 +261,7 @@ impl ZzClawTermApp {
                             &mut pending_frame_outputs,
                             &mut drain_timings,
                         );
-                        if self.apply_session_cwd(&session_id, cwd) {
-                            self.defer_transfer_panel_snapshot_flush(cx);
-                        }
+                        self.apply_session_cwd(&session_id, cwd, cx);
                     }
                     SessionEvent::CommandAccepted {
                         session_id,

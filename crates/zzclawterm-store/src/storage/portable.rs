@@ -653,6 +653,10 @@ impl ConnectionStore {
         {
             set_nested_json_value(&mut current_settings, &["cloud_sync"], value.clone());
         }
+        zzclawterm_core::models::settings::panel_visibility::migrate_legacy_panel_visibility(
+            &mut settings,
+        )
+        .map_err(StorageError::InvalidData)?;
         let merged_settings = merge_imported_settings(
             settings,
             current_settings,

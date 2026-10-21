@@ -554,9 +554,6 @@ impl ZzClawTermApp {
         if self.session.active_ssh_config().is_none() {
             return fallback(t!("gpuMonitor.noSession").to_string());
         }
-        if !self.settings.summary().ui_show_gpu_monitor {
-            return fallback(t!("panel.gpuMonitorDisabled").to_string());
-        }
         let gpu = self.remote_ops.gpu_presentation();
         let Some(overview) = gpu.data else {
             return fallback(if gpu.pending || gpu.consecutive_refresh_failures == 0 {
@@ -591,9 +588,6 @@ impl ZzClawTermApp {
         let fallback = |label| HeaderStatusContent::simple(icon, label);
         if self.session.active_ssh_config().is_none() {
             return fallback(t!("ascendNpuMonitor.noSession").to_string());
-        }
-        if !self.settings.summary().ui_show_ascend_npu_monitor {
-            return fallback(t!("panel.npuMonitorDisabled").to_string());
         }
         let npu = self.remote_ops.npu_presentation();
         let Some(overview) = npu.data else {
@@ -635,9 +629,7 @@ impl ZzClawTermApp {
                 self.remote_stats_header_fallback(),
             )
         };
-        if self.session.active_ssh_config().is_none()
-            || !self.settings.summary().ui_show_remote_stats
-        {
+        if self.session.active_ssh_config().is_none() {
             return fallback();
         }
         let stats_state = self.remote_ops.stats_presentation();
@@ -803,8 +795,6 @@ impl ZzClawTermApp {
     fn remote_stats_header_fallback(&self) -> String {
         if self.session.active_ssh_config().is_none() {
             t!("panel.resourceMonitorNoSession").to_string()
-        } else if !self.settings.summary().ui_show_remote_stats {
-            t!("panel.resourceMonitorDisabled").to_string()
         } else {
             let stats = self.remote_ops.stats_presentation();
             if stats.consecutive_refresh_failures > 0 && stats.data.is_none() {

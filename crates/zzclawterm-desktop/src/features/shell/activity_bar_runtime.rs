@@ -86,42 +86,7 @@ impl ZzClawTermApp {
             .iter()
             .filter(|id| !self.shell.chrome.activity_bar_layout.is_hidden(id))
             .filter_map(|id| ActivityBarEntry::from_persistence_id(id))
-            .filter(|entry| self.activity_entry_visible(*entry))
             .collect()
-    }
-
-    pub(in crate::features) fn activity_entry_visible(&self, entry: ActivityBarEntry) -> bool {
-        let summary = self.settings.summary();
-        match entry {
-            ActivityBarEntry::Panel(NavItem::Notes) => summary.ui_show_notes_panel,
-            ActivityBarEntry::Panel(NavItem::Stats) => summary.ui_show_remote_stats,
-            ActivityBarEntry::Panel(NavItem::GpuMonitor) => summary.ui_show_gpu_monitor,
-            ActivityBarEntry::Panel(NavItem::AscendNpuMonitor) => {
-                summary.ui_show_ascend_npu_monitor
-            }
-            ActivityBarEntry::Panel(NavItem::Processes) => summary.ui_show_process_manager,
-            ActivityBarEntry::Panel(NavItem::Docker) => summary.ui_show_docker_manager,
-            _ => true,
-        }
-    }
-
-    pub(in crate::features) fn reconcile_activity_panel_availability(&mut self) {
-        for item in [
-            NavItem::Notes,
-            NavItem::Stats,
-            NavItem::GpuMonitor,
-            NavItem::AscendNpuMonitor,
-            NavItem::Processes,
-            NavItem::Docker,
-        ] {
-            let entry = ActivityBarEntry::Panel(item);
-            if self.activity_entry_visible(entry) {
-                continue;
-            }
-            if let Some(side) = self.panel_side_for_item(item) {
-                self.clear_activity_entry_from_side(item.persistence_id(), side);
-            }
-        }
     }
 
     pub(in crate::features) fn normalize_activity_bar_layout(&mut self) {
@@ -863,15 +828,13 @@ mod tests {
     }
 
     #[test]
-    fn disabling_an_available_panel_closes_floating_state_without_hiding_its_slot() {
+    fn hiding_an_entry_closes_its_floating_panel_and_can_be_reversed() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
-            if !app.settings.summary().ui_show_gpu_monitor {
-                app.toggle_gpu_monitor_panel(cx);
-            }
+            app.show_activity_entry("gpuMonitor".into(), cx);
             app.set_panel_open_mode(PanelOpenMode::Floating, cx);
             app.open_panel(NavItem::GpuMonitor, cx);
             assert_eq!(
@@ -879,9 +842,12 @@ mod tests {
                 Some(NavItem::GpuMonitor)
             );
 
-            app.toggle_gpu_monitor_panel(cx);
+            app.hide_activity_entry("gpuMonitor".into(), cx);
             assert_eq!(app.shell.floating_panel(PanelSide::Right), None);
+            assert!(app.shell.activity_bar_layout().is_hidden("gpuMonitor"));
+            app.show_activity_entry("gpuMonitor".into(), cx);
             assert!(!app.shell.activity_bar_layout().is_hidden("gpuMonitor"));
+            assert_eq!(app.shell.floating_panel(PanelSide::Right), None);
         });
     }
 
@@ -943,7 +909,10 @@ mod tests {
 
             app.reset_activity_bar_layout(cx);
 
-            assert!(!app.shell.activity_bar_layout().has_hidden_entries());
+            assert_eq!(
+                app.shell.activity_bar_layout().hidden_items,
+                zzclawterm_core::models::settings::panel_visibility::default_hidden_items()
+            );
             assert_eq!(app.shell.active_left_panel(), None);
             assert_eq!(app.shell.active_right_panel(), None);
         });

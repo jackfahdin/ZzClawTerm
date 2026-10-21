@@ -1,7 +1,7 @@
 //! Fill in a saved connection's icon from what the remote host reports.
 //!
-//! Runs off the remote-stats snapshot the resource panel already collects, so no
-//! extra round trip is made. Only ever fills in a blank or refreshes a previous
+//! Reuses remote-stats snapshots, requesting a bounded probe when no monitor
+//! consumes them. Only ever fills in a blank or refreshes a previous
 //! auto-detection — a hand-picked icon clears the flag and is never touched.
 
 use gpui::Context;
@@ -12,6 +12,54 @@ use zzclawterm_transport::SystemInfo;
 use crate::features::{ZzClawTermApp, icons::infer_connection_icon_key_from_remote_system};
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn connection_icon_probe_needed(&self) -> bool {
+        let Some(session_id) = self.session.active_id() else {
+            return false;
+        };
+        let Some(metadata) = self.session.metadata(session_id) else {
+            return false;
+        };
+        if metadata.disconnected || !self.remote_ops.icon_probe_needed(session_id) {
+            return false;
+        }
+        let Some(connection_id) = metadata.source_connection_id.as_deref() else {
+            return false;
+        };
+        self.connection_state
+            .connections()
+            .iter()
+            .any(|connection| {
+                connection.id == connection_id
+                    && matches!(connection.config, ConnectionType::Ssh { .. })
+                    && connection.ssh_profile != zzclawterm_core::SshProfile::NetworkDevice
+                    && connection.icon_auto_detect_enabled()
+            })
+    }
+
+    /// A bounded consumer of the existing stats service, sharing its in-flight
+    /// request with visible monitoring without keeping periodic collection alive.
+    pub(in crate::features) fn refresh_connection_icon_if_due(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.connection_icon_probe_needed() {
+            return false;
+        }
+        let Some(session_id) = self.session.active_id().map(str::to_owned) else {
+            return false;
+        };
+        if let Some(stats) = self.remote_ops.take_icon_probe_snapshot(&session_id) {
+            self.apply_auto_detected_connection_icon(&session_id, &stats.system, cx);
+            self.sync_remote_panel_demand(cx);
+            return true;
+        }
+        if self.remote_ops.stats_is_pending() || !self.remote_ops.icon_probe_due(&session_id) {
+            return false;
+        }
+        self.refresh_stats_auto(cx);
+        true
+    }
+
     pub(in crate::features) fn apply_auto_detected_connection_icon(
         &mut self,
         session_id: &str,

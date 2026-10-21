@@ -183,7 +183,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.forget_text_inputs("transfer.rename.");
-        self.ensure_panel_open(crate::models::NavItem::Transfers);
+        self.ensure_panel_open(crate::models::NavItem::Transfers, cx);
         let entries = self.selected_transfer_entries();
         let [entry] = entries.as_slice() else {
             self.shell

@@ -146,6 +146,7 @@ impl ZzClawTermApp {
                 SettingsTab::Interaction => SettingsSectionPresentation::Interaction,
                 SettingsTab::Keybindings => SettingsSectionPresentation::Keybindings,
                 SettingsTab::TerminalGeneral => SettingsSectionPresentation::TerminalGeneral,
+                SettingsTab::RemoteMonitoring => SettingsSectionPresentation::RemoteMonitoring,
                 SettingsTab::Search => SettingsSectionPresentation::Search,
                 SettingsTab::Translation => SettingsSectionPresentation::Translation,
                 SettingsTab::AiGeneral => SettingsSectionPresentation::AiGeneral,

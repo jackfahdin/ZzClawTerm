@@ -44,7 +44,7 @@ impl ZzClawTermApp {
         if self.session.active_ssh_config_owned().is_none() {
             self.shell
                 .set_status("start an SSH session first".to_string());
-            self.ensure_panel_open(NavItem::Transfers);
+            self.ensure_panel_open(NavItem::Transfers, cx);
             cx.notify();
             return false;
         }

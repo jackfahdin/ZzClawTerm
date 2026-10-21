@@ -78,10 +78,7 @@ impl ZzClawTermApp {
                 .activity_bar_layout()
                 .hidden_entries_on_side(*side)
                 .into_iter()
-                .filter(|id| {
-                    ActivityBarEntry::from_persistence_id(id)
-                        .is_some_and(|entry| self.activity_entry_visible(entry))
-                })
+                .filter(|id| ActivityBarEntry::from_persistence_id(id).is_some())
                 .collect(),
             ActivityBarContextTarget::Entry { .. } => Vec::new(),
         }
@@ -942,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_recovery_is_side_scoped_and_availability_filtered() {
+    fn hidden_recovery_is_side_scoped_and_includes_monitor_entries() {
         let test_dir = TestConfigDir::new("zzclawterm-activity-bar-view");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -951,9 +948,6 @@ mod tests {
             app.hide_activity_entry("fileExplorer".to_string(), cx);
             app.hide_activity_entry("aiAssistant".to_string(), cx);
             app.hide_activity_entry("gpuMonitor".to_string(), cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = false;
-            app.settings.replace_summary(summary);
 
             let left = app.hidden_activity_entry_ids_for_target(&ActivityBarContextTarget::Bar {
                 side: PanelSide::Left,
@@ -965,7 +959,7 @@ mod tests {
             assert_eq!(left, vec!["fileExplorer"]);
             assert!(right.iter().any(|id| id == "aiAssistant"));
             assert!(!right.iter().any(|id| id == "fileExplorer"));
-            assert!(!right.iter().any(|id| id == "gpuMonitor"));
+            assert!(right.iter().any(|id| id == "gpuMonitor"));
         });
     }
 

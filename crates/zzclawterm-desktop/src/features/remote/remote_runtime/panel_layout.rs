@@ -26,8 +26,7 @@ impl ZzClawTermApp {
     ///
     /// **Deliberately narrow.** This is for Remote-panel state that must follow the
     /// active session, not a general activation side-effect bucket. Today that is refresh
-    /// demand: a panel's clock is armed on `(visible || the header wants it) && enabled in
-    /// settings && a session with an SSH config`, and the last term just changed --
+    /// demand: a panel's clock is armed on `(visible || the header wants it || icon detection is pending) && a supported SSH session`, and the last term just changed --
     /// switching to a non-SSH session has to drop the clocks. The snapshot flush joins
     /// this helper, which keeps every activation caller from switching sessions while
     /// omitting either.
@@ -189,9 +188,6 @@ mod tests {
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
         cx.update_entity(&app, |app, cx| {
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = true;
-            app.settings.replace_summary(summary);
             app.open_or_toggle_panel(NavItem::GpuMonitor, cx);
 
             register_session(app, "ssh-a", true);

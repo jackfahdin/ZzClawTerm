@@ -1127,7 +1127,9 @@ fn switching_password_sources_preserves_the_direct_password_and_saved_reference(
         ConnectionEditorPasswordSource::Ask,
         ConnectionEditorPasswordSource::Direct,
     ] {
-        assert!(set_connection_editor_password_source(&mut draft, source));
+        assert!(set_connection_editor_password_source(
+            &mut draft, source, true
+        ));
         let editor = draft.as_ref().unwrap();
         assert_eq!(editor.password_source, source);
         assert_eq!(editor.password.expose_secret(), "draft-secret");
@@ -1933,7 +1935,9 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         password_source: ConnectionEditorPasswordSource::Direct,
         password_id: None,
         account_id: None,
-        account_source_saved: false,
+        username_source: zzclawterm_core::ConnectionUsernameSource::Connection,
+        password_source_touched: false,
+        password_source_demoted: false,
         password_edit: crate::models::ConnectionPasswordEdit::Replace,
         field_errors: Default::default(),
         password: "draft-secret".to_string().into(),
@@ -2065,7 +2069,7 @@ fn raw_tcp_toggle_retains_telnet_keepalive_configuration() {
 }
 
 #[test]
-fn selecting_an_account_updates_password_source_without_replacing_the_manual_username() {
+fn selecting_an_account_follows_its_username_without_replacing_an_explicit_password() {
     let mut cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let app = cache_test_app(&mut cx);
@@ -2090,8 +2094,10 @@ fn selecting_an_account_updates_password_source_without_replacing_the_manual_use
         ];
         app.security
             .replace_catalog(Vec::new(), Vec::new(), accounts, Vec::new());
-        app.connection_state
-            .begin_editor(connection_editor_state_with_secret_draft());
+        let mut draft = connection_editor_state_with_secret_draft();
+        draft.password_source = ConnectionEditorPasswordSource::Ask;
+        draft.password_source_touched = false;
+        app.connection_state.begin_editor(draft);
         app.set_connection_editor_select_value(
             ConnectionEditorSelect::Account,
             Some("with-password"),
@@ -2099,39 +2105,123 @@ fn selecting_an_account_updates_password_source_without_replacing_the_manual_use
         );
         let draft = app.connection_state.active_editor_draft().unwrap();
         assert_eq!(draft.username, "root");
+        assert_eq!(
+            draft.username_source,
+            zzclawterm_core::ConnectionUsernameSource::Account
+        );
         assert_eq!(draft.password_source, ConnectionEditorPasswordSource::Saved);
+        assert!(!draft.password_source_touched);
         assert_eq!(draft.password.expose_secret(), "draft-secret");
+        app.set_connection_editor_select_value(ConnectionEditorSelect::Account, None, cx);
+        let draft = app.connection_state.active_editor_draft().unwrap();
+        assert!(draft.account_id.is_none());
+        assert_eq!(draft.username, "deploy");
+        assert_eq!(
+            draft.username_source,
+            zzclawterm_core::ConnectionUsernameSource::Connection
+        );
+        app.set_connection_editor_select_value(
+            ConnectionEditorSelect::Account,
+            Some("with-password"),
+            cx,
+        );
         app.set_connection_editor_select_value(
             ConnectionEditorSelect::Account,
             Some("username-only"),
             cx,
         );
+        let draft = app.connection_state.active_editor_draft().unwrap();
+        assert_eq!(draft.password_source, ConnectionEditorPasswordSource::Ask);
+        assert!(draft.password_source_demoted);
         assert_eq!(
-            app.connection_state
-                .active_editor_draft()
-                .unwrap()
-                .password_source,
-            ConnectionEditorPasswordSource::Ask
+            draft.username_source,
+            zzclawterm_core::ConnectionUsernameSource::Account
         );
-        app.set_connection_editor_select_value(
-            ConnectionEditorSelect::Authentication,
-            Some("key"),
-            cx,
-        );
+        app.set_connection_editor_password_source(ConnectionEditorPasswordSource::Direct, cx);
         app.set_connection_editor_select_value(
             ConnectionEditorSelect::Account,
             Some("with-password"),
             cx,
         );
         let draft = app.connection_state.active_editor_draft().unwrap();
-        assert_eq!(draft.auth_mode, "key");
-        assert_eq!(draft.password_source, ConnectionEditorPasswordSource::Ask);
-        app.set_connection_account_source(false, cx);
+        assert_eq!(
+            draft.password_source,
+            ConnectionEditorPasswordSource::Direct
+        );
+        assert!(draft.password_source_touched);
+        app.use_connection_editor_username(cx);
         let draft = app.connection_state.active_editor_draft().unwrap();
-        assert_eq!(draft.username, "root");
+        assert_eq!(draft.username, "deploy");
+        assert_eq!(
+            draft.username_source,
+            zzclawterm_core::ConnectionUsernameSource::Connection
+        );
+        app.set_connection_editor_select_value(ConnectionEditorSelect::Account, None, cx);
+        let draft = app.connection_state.active_editor_draft().unwrap();
         assert!(draft.account_id.is_none());
+        assert_eq!(draft.username, "deploy");
+        assert_eq!(
+            draft.username_source,
+            zzclawterm_core::ConnectionUsernameSource::Connection
+        );
         assert_eq!(draft.password.expose_secret(), "draft-secret");
     });
+}
+
+#[test]
+fn account_dropdown_selection_reaches_the_connection_editor() {
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = cache_test_app(&mut cx);
+    cx.update_entity(&app, |app, cx| {
+        app.security.replace_catalog(
+            Vec::new(),
+            Vec::new(),
+            vec![zzclawterm_core::SavedPassword {
+                id: "with-password".into(),
+                name: "Ops".into(),
+                username: "deploy".into(),
+                password: None,
+                has_password: true,
+                sort_order: 0,
+            }],
+            Vec::new(),
+        );
+        app.connection_state
+            .begin_editor(connection_editor_state_with_secret_draft());
+        app.on_select_changed("connection-editor-account", Some("with-password"), cx);
+        let draft = app.connection_state.active_editor_draft().unwrap();
+        assert_eq!(draft.account_id.as_deref(), Some("with-password"));
+        app.on_select_changed(
+            "connection-editor-account",
+            Some(crate::features::selects::NO_SELECTION_VALUE),
+            cx,
+        );
+        let draft = app.connection_state.active_editor_draft().unwrap();
+        assert!(draft.account_id.is_none());
+    });
+}
+
+#[test]
+fn editing_the_username_while_an_account_is_selected_keeps_it_on_the_connection() {
+    let mut draft = connection_editor_state_with_secret_draft();
+    draft.account_id = Some("ops".into());
+    draft.username_source = zzclawterm_core::ConnectionUsernameSource::Account;
+    set_connection_editor_field_text(&mut draft, ConnectionEditorField::Username, "root".into());
+    assert_eq!(
+        draft.username_source,
+        zzclawterm_core::ConnectionUsernameSource::Account
+    );
+    set_connection_editor_field_text(
+        &mut draft,
+        ConnectionEditorField::Username,
+        "service".into(),
+    );
+    assert_eq!(draft.username, "service");
+    assert_eq!(
+        draft.username_source,
+        zzclawterm_core::ConnectionUsernameSource::Connection
+    );
 }
 
 #[test]

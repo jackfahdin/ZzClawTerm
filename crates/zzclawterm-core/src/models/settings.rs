@@ -1,3 +1,5 @@
+pub mod panel_visibility;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,79 @@ impl TransferBrowserViewMode {
             Self::Tree => "tree",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileManagerUiSettings {
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default)]
+    pub left: FileManagerPaneRestore,
+    #[serde(default)]
+    pub right: FileManagerPaneRestore,
+    #[serde(default = "default_file_manager_split_percent")]
+    pub split_percent: u8,
+    #[serde(default)]
+    pub active_pane: FileManagerPaneSide,
+    #[serde(default)]
+    pub queue_expanded: bool,
+    #[serde(default = "default_file_manager_queue_height")]
+    pub queue_height: u32,
+    #[serde(default = "default_true")]
+    pub auto_collapse_sidebar: bool,
+    #[serde(default = "default_true")]
+    pub remember_layout: bool,
+}
+
+impl Default for FileManagerUiSettings {
+    fn default() -> Self {
+        Self {
+            open: false,
+            left: FileManagerPaneRestore::default(),
+            right: FileManagerPaneRestore::default(),
+            split_percent: default_file_manager_split_percent(),
+            active_pane: FileManagerPaneSide::Left,
+            queue_expanded: false,
+            queue_height: default_file_manager_queue_height(),
+            auto_collapse_sidebar: true,
+            remember_layout: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FileManagerPaneRestore {
+    #[serde(default)]
+    pub source: FileManagerSourceRestore,
+    #[serde(default)]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileManagerSourceRestore {
+    #[default]
+    Local,
+    Connection {
+        #[serde(default)]
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileManagerPaneSide {
+    #[default]
+    Left,
+    Right,
+}
+
+fn default_file_manager_split_percent() -> u8 {
+    50
+}
+
+fn default_file_manager_queue_height() -> u32 {
+    160
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -241,6 +316,7 @@ pub struct AppSettingsSummary {
     pub terminal_keep_alive_interval: u32,
     #[serde(default = "default_terminal_timestamp_format")]
     pub terminal_timestamp_format: String,
+    /// Retained only to round-trip legacy settings; GPUI owns renderer selection.
     pub terminal_hardware_acceleration: bool,
     pub terminal_show_workspace_padding: bool,
     pub terminal_show_line_numbers: bool,
@@ -249,6 +325,7 @@ pub struct AppSettingsSummary {
     pub terminal_paste_image_as_path: bool,
     #[serde(default)]
     pub terminal_reconnect_restore_cwd: bool,
+    /// Retained only to round-trip legacy settings; no longer affects terminal behavior.
     #[serde(default)]
     pub terminal_low_latency_mode: bool,
     #[serde(default = "default_terminal_zebra_stripes_enabled")]
@@ -261,22 +338,12 @@ pub struct AppSettingsSummary {
     /// Online search engines for terminal selection context menu (Tauri search.custom_engines).
     #[serde(default = "default_search_engines")]
     pub search_custom_engines: Vec<SearchEngineConfig>,
-    /// Whether the Tauri-compatible Notes panel is available in the activity bar.
-    #[serde(default = "default_true")]
-    pub ui_show_notes_panel: bool,
-    pub ui_show_remote_stats: bool,
     pub ui_remote_stats_interval: u32,
-    #[serde(default)]
-    pub ui_show_gpu_monitor: bool,
     #[serde(default = "default_hardware_monitor_interval")]
     pub ui_gpu_monitor_interval: u32,
-    #[serde(default)]
-    pub ui_show_ascend_npu_monitor: bool,
     #[serde(default = "default_hardware_monitor_interval")]
     pub ui_ascend_npu_monitor_interval: u32,
-    pub ui_show_process_manager: bool,
     pub ui_process_manager_interval: u32,
-    pub ui_show_docker_manager: bool,
     pub ui_docker_manager_interval: u32,
     #[serde(default = "default_quick_cmd_view_mode")]
     pub ui_quick_cmd_view_mode: String,
@@ -314,6 +381,9 @@ pub struct AppSettingsSummary {
     pub ui_file_explorer_auto_sync_cwd_connection_ids: Vec<String>,
     #[serde(default)]
     pub ui_file_explorer_favorite_dirs_by_connection_id: HashMap<String, Vec<String>>,
+    /// Dual-pane file manager layout. Independent of the sidebar explorer.
+    #[serde(default)]
+    pub ui_file_manager: FileManagerUiSettings,
     #[serde(default = "default_left_panel_width")]
     pub ui_left_panel_width: u32,
     #[serde(default = "default_right_panel_width")]
@@ -350,10 +420,8 @@ pub struct AppSettingsSummary {
     pub ui_activity_bar_right_bottom: Vec<String>,
     #[serde(default)]
     pub ui_activity_bar_show_labels: bool,
-    /// Activity-bar item ids the user has hidden from the rail (Tauri
-    /// `ui.activity_bar_layout.hidden_items`). Empty by default so legacy
-    /// data with no hidden entries keeps every item visible.
-    #[serde(default)]
+    /// Hidden activity-bar entries. Legacy switches are migrated by the store.
+    #[serde(default = "panel_visibility::default_hidden_items")]
     pub ui_activity_bar_hidden_items: Vec<String>,
     /// Docked multi-open preference. This is independent from
     /// `ui_panel_open_mode`: main keeps multi-open configured while floating
@@ -389,6 +457,7 @@ pub struct AppSettingsSummary {
     pub interaction_word_separators: String,
     pub interaction_duplicate_session_command_delay_ms: u32,
     pub interaction_alt_as_meta: bool,
+    /// Retained only to round-trip legacy settings. Native terminal IME is always enabled.
     pub interaction_mac_ime_compatibility: bool,
     pub interaction_tab_double_click_action: String,
     pub interaction_tab_middle_click_action: String,
@@ -543,16 +612,10 @@ impl Default for AppSettingsSummary {
             terminal_action_links_enabled: false,
             terminal_action_links_matchers: ActionLinksMatcherSettings::default(),
             search_custom_engines: default_search_engines(),
-            ui_show_notes_panel: true,
-            ui_show_remote_stats: true,
             ui_remote_stats_interval: 3,
-            ui_show_gpu_monitor: false,
             ui_gpu_monitor_interval: 3,
-            ui_show_ascend_npu_monitor: false,
             ui_ascend_npu_monitor_interval: 3,
-            ui_show_process_manager: true,
             ui_process_manager_interval: 5,
-            ui_show_docker_manager: true,
             ui_docker_manager_interval: 10,
             ui_quick_cmd_view_mode: default_quick_cmd_view_mode(),
             ui_quick_cmd_sort_mode: default_quick_cmd_sort_mode(),
@@ -568,6 +631,7 @@ impl Default for AppSettingsSummary {
             ui_file_explorer_view_mode: TransferBrowserViewMode::List,
             ui_file_explorer_auto_sync_cwd_connection_ids: Vec::new(),
             ui_file_explorer_favorite_dirs_by_connection_id: HashMap::new(),
+            ui_file_manager: FileManagerUiSettings::default(),
             ui_left_panel_width: 256,
             ui_right_panel_width: 288,
             ui_transfer_height: 180,
@@ -585,7 +649,7 @@ impl Default for AppSettingsSummary {
             ui_activity_bar_right_top: default_activity_right_top(),
             ui_activity_bar_right_bottom: default_activity_right_bottom(),
             ui_activity_bar_show_labels: false,
-            ui_activity_bar_hidden_items: Vec::new(),
+            ui_activity_bar_hidden_items: panel_visibility::default_hidden_items(),
             ui_panel_multi_open: false,
             ui_panel_open_mode: default_panel_open_mode(),
             ui_left_open_panels: Vec::new(),
@@ -748,7 +812,7 @@ fn default_terminal_keep_alive_mode() -> String {
     "compatible".to_string()
 }
 
-fn default_internal_editor_font_size() -> u16 {
+pub fn default_internal_editor_font_size() -> u16 {
     13
 }
 
@@ -884,7 +948,10 @@ mod tests {
     #[test]
     fn summary_default_has_empty_hidden_items_and_docked_mode() {
         let summary = AppSettingsSummary::default();
-        assert!(summary.ui_activity_bar_hidden_items.is_empty());
+        assert_eq!(
+            summary.ui_activity_bar_hidden_items,
+            crate::models::settings::panel_visibility::default_hidden_items()
+        );
         assert_eq!(summary.ui_panel_open_mode, "docked");
         assert!(!summary.ui_panel_multi_open);
         assert_eq!(
@@ -961,7 +1028,10 @@ mod tests {
 
         let summary: AppSettingsSummary =
             serde_json::from_str(json).expect("legacy summary deserializes");
-        assert!(summary.ui_activity_bar_hidden_items.is_empty());
+        assert_eq!(
+            summary.ui_activity_bar_hidden_items,
+            crate::models::settings::panel_visibility::default_hidden_items()
+        );
         assert_eq!(summary.ui_panel_open_mode, "docked");
         assert!(!summary.ui_panel_multi_open);
         // Legacy documents lack the asset/start-workspace UI settings; they must

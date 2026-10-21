@@ -65,6 +65,24 @@ impl SettingsPanel {
                     ))
                     .child(settings_form_row(
                         palette,
+                        t!("settings.fileManagerAutoCollapse"),
+                        Some(SharedString::from(t!(
+                            "settings.fileManagerAutoCollapseDesc"
+                        ))),
+                        settings_switch(
+                            palette,
+                            "file-manager-auto-collapse",
+                            self.settings
+                                .summary()
+                                .ui_file_manager
+                                .auto_collapse_sidebar,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_file_manager_auto_collapse(cx);
+                            }),
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
                         t!("settings.duplicateStrategy"),
                         Some(SharedString::from(t!("settings.duplicateStrategyDesc"))),
                         self.settings_select_control(

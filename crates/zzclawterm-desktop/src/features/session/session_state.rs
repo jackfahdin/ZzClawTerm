@@ -150,6 +150,12 @@ impl ZzClawTermApp {
         self.terminal.reset_assist_for_session_switch();
         let previous_session_id = self.session.active_id_owned();
         let switching_sessions = previous_session_id.as_deref() != Some(session_id);
+        if switching_sessions {
+            if let Some(previous_id) = previous_session_id.as_deref() {
+                self.transfer.cancel_browser_auto_cwd_sync(previous_id);
+            }
+            self.transfer.clear_pending_cwd_sync();
+        }
         let target_is_rdp = self.remote_desktop.is_session(session_id);
         if switching_sessions && let Some(previous_session_id) = previous_session_id.as_deref() {
             self.release_remote_keys(previous_session_id);
@@ -181,7 +187,6 @@ impl ZzClawTermApp {
         }
         // Keep workspace_split mirrored to the active tab's per-tab pane root.
         self.sync_workspace_split_from_active_tab();
-        self.transfer.reset_browser_auto_sync_cwd();
         // Transfer browser state is only needed when the transfers panel is open
         // or we already have cached browser state for this session. Skipping the
         // full reset on every activate keeps connect/switch chrome responsive.
@@ -216,6 +221,13 @@ impl ZzClawTermApp {
         // Recover paint immediately if this tab was backgrounded without grids.
         if !target_is_rdp && live_snapshot_missing {
             self.request_terminal_live_snapshot(session_id);
+        }
+        if switching_sessions
+            && self.transfer_browser_is_visible()
+            && !self
+                .sync_transfer_browser_to_cwd(crate::models::TransferCwdSyncReason::Automatic, cx)
+        {
+            self.load_transfer_browser_for_active_session_if_needed(cx);
         }
         // Transfer browser state is rendered by a separate entity, so an App notify
         // alone cannot publish session-switch changes to its snapshot.
@@ -272,6 +284,10 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) {
+        if !crate::models::WorkspaceTabId::from_layout_key(&session_id).is_session() {
+            self.activate_workspace_tab(&session_id, cx);
+            return;
+        }
         // Local metadata is authoritative for tab existence; transport lock not needed.
         let known = self.session.has_session(&session_id);
         let disconnected = self.session.is_disconnected(&session_id);
@@ -281,6 +297,9 @@ impl ZzClawTermApp {
             self.remove_session_state(&session_id, cx);
             cx.notify();
             return;
+        }
+        if self.shell.reveal_workspace_session(&session_id) {
+            self.reconcile_terminal_windows();
         }
         // Strip selection targets tab roots; focus the preferred leaf under that tab.
         let focus_id = if !self.is_secondary_pane_session(&session_id) {
@@ -332,7 +351,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if let crate::features::shell::NewSessionMenuAnchor::TerminalLeaf(group) = &anchor
-            && let Some((_, Some(tab))) = self.terminal.terminal_group_tabs(group)
+            && let Some((_, Some(tab))) = self.shell.terminal_group_tabs(group)
         {
             self.select_session(tab, cx);
         }

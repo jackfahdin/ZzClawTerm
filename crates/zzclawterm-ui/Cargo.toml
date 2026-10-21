@@ -11,7 +11,38 @@ zzclawterm-core.workspace = true
 gpui.workspace = true
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf"] }
 gpui-base.workspace = true
-gpui-kit = { workspace = true, features = ["tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-css", "tree-sitter-go", "tree-sitter-html", "tree-sitter-javascript", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-rust", "tree-sitter-toml", "tree-sitter-typescript", "tree-sitter-yaml"] }
+gpui-kit = { workspace = true, features = [
+    "tree-sitter-astro",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-diff",
+    "tree-sitter-ejs",
+    "tree-sitter-elixir",
+    "tree-sitter-erb",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-jsdoc",
+    "tree-sitter-kotlin",
+    "tree-sitter-lua",
+    "tree-sitter-make",
+    "tree-sitter-markdown",
+    "tree-sitter-php",
+    "tree-sitter-python",
+    "tree-sitter-ruby",
+    "tree-sitter-rust",
+    "tree-sitter-scala",
+    "tree-sitter-sql",
+    "tree-sitter-svelte",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+    "tree-sitter-zig",
+] }
 url.workspace = true
 
 [dev-dependencies]

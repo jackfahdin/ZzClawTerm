@@ -272,7 +272,7 @@ mod tests {
             let content = self.app.update(cx, |app, cx| match stage {
                 Stage::Empty => app.empty_workspace_state(cx),
                 Stage::Pending => app.pending_workspace_state().into_any_element(),
-                Stage::Failed => app.failed_workspace_state().into_any_element(),
+                Stage::Failed => app.failed_workspace_state(cx).into_any_element(),
                 Stage::Terminal => app
                     .terminal_canvas_for("s0".to_string(), cx)
                     .into_any_element(),

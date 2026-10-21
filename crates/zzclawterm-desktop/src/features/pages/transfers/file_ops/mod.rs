@@ -1,4 +1,4 @@
-mod clipboard;
+pub(in crate::features) mod clipboard;
 mod mkdir_file;
 mod move_delete;
 mod send_to;

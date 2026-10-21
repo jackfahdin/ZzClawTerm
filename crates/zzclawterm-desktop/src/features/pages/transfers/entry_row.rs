@@ -15,7 +15,7 @@ use crate::theme::ThemePalette;
 use super::{format_permissions_octal, format_sftp_modified};
 use crate::features::pages::transfers::panel::TransferPanel;
 
-pub(super) fn format_browser_file_size(size: Option<u64>) -> String {
+pub(in crate::features) fn format_browser_file_size(size: Option<u64>) -> String {
     match size {
         None | Some(0) => "-".to_string(),
         Some(size) if size < 1024 => format!("{size} B"),

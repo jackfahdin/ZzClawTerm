@@ -2,6 +2,67 @@ use super::{ThemeCatalog, ThemeConfig, builtins, parse_color, resolve_theme};
 use serde_json::json;
 
 #[test]
+fn windterm_themes_are_read_only_builtins_with_editable_copies() {
+    for id in ["windterm-dark", "windterm-light"] {
+        assert!(crate::themes::is_builtin(id));
+        let mut catalog = ThemeCatalog::default();
+        let theme = resolve_theme(id, &catalog);
+        assert_eq!(theme.id, id);
+        assert!(theme.validate().is_empty());
+        assert!(catalog.upsert(theme.clone()).is_err());
+        let copy = theme.copy_as_custom();
+        catalog.upsert(copy.clone()).unwrap();
+        assert_eq!(resolve_theme(&copy.id, &catalog).colors, theme.colors);
+    }
+}
+
+#[test]
+fn windterm_application_preserves_other_scopes_and_existing_custom_themes() {
+    use crate::models::settings::AppSettingsSummary;
+    use crate::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
+
+    let mut original = AppSettingsSummary::default();
+    let mut legacy = builtins()[0].copy_as_custom();
+    legacy.id = "windterm-dige-black".into();
+    original.custom_themes.upsert(legacy.clone()).unwrap();
+    original.terminal_theme = Some(legacy.id.clone());
+    let base = ThemeSettings::from(&original);
+    for id in ["windterm-dark", "windterm-light"] {
+        for target in [
+            ThemeApplyTarget::Ui,
+            ThemeApplyTarget::Terminal,
+            ThemeApplyTarget::BothFollowUi,
+        ] {
+            let commit = ThemeMutation::Apply {
+                id: id.into(),
+                target,
+            }
+            .prepare(&base)
+            .unwrap();
+            let mut settings = original.clone();
+            commit.merge_into(&mut settings);
+            assert_eq!(
+                settings.theme,
+                if target == ThemeApplyTarget::Terminal {
+                    original.theme.as_str()
+                } else {
+                    id
+                }
+            );
+            assert_eq!(
+                settings.terminal_theme.as_deref(),
+                match target {
+                    ThemeApplyTarget::Ui => Some(legacy.id.as_str()),
+                    ThemeApplyTarget::Terminal => Some(id),
+                    ThemeApplyTarget::BothFollowUi => None,
+                }
+            );
+            assert_eq!(settings.custom_themes, original.custom_themes);
+        }
+    }
+}
+
+#[test]
 fn theme_application_changes_only_the_requested_scope() {
     use crate::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
     let original = crate::models::settings::AppSettingsSummary::default();

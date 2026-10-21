@@ -92,3 +92,33 @@ pub(crate) fn app_with_visible_local_session(
     });
     app
 }
+
+/// A loaded editor document without starting file I/O.
+pub(crate) fn editor_document(
+    session: &str,
+    path: &str,
+    display: zzclawterm_core::InternalEditorDisplay,
+) -> crate::models::TransferEditorState {
+    crate::models::TransferEditorState {
+        display,
+        id: crate::models::TransferEditorState::tab_id(Some(session), path),
+        session_id: Some(session.to_string()),
+        remote_path: path.to_string(),
+        raw_path_token: None,
+        name: path.rsplit(['/', '\\']).next().unwrap_or(path).to_string(),
+        content: "original".into(),
+        search_query: String::new(),
+        active_match: 0,
+        revision: None,
+        generation: zzclawterm_transport::RemoteTextGeneration::next(),
+        loading: false,
+        saving: false,
+        dirty: false,
+        conflict: false,
+        close_after_save: false,
+        reload_confirm: false,
+        error: None,
+        backup_warning_path: None,
+        focused_field: crate::models::TransferEditorField::Content,
+    }
+}

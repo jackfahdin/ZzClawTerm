@@ -1,5 +1,3 @@
-use rust_i18n::t;
-
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 
 use crate::features::ZzClawTermApp;
@@ -54,7 +52,6 @@ impl ZzClawTermApp {
         _window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let palette = self.theme_palette();
         match panel {
             NavItem::Plugins => self.plugins.panel.clone().into_any_element(),
             NavItem::Transfers => self
@@ -62,15 +59,11 @@ impl ZzClawTermApp {
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::Notes if self.settings.summary().ui_show_notes_panel => self
+            NavItem::Notes => self
                 .notes_panel
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::Notes => {
-                crate::features::inspector::disabled_inspector_panel(palette, t!("notes.disabled"))
-                    .into_any_element()
-            }
             NavItem::Tunnels => self.tunnels_view(cx).into_any_element(),
             NavItem::SecurityAuth => self.security_auth_panel(cx).into_any_element(),
             NavItem::SyncBackupHistory => self.sync_backup_history_panel(cx).into_any_element(),
@@ -89,61 +82,36 @@ impl ZzClawTermApp {
                 self.active_sessions_panel(model, cx).into_any_element()
             }
             NavItem::CommandHistory => self.command_history_panel(cx).into_any_element(),
-            NavItem::Stats if self.settings.summary().ui_show_remote_stats => self
+            NavItem::Stats => self
                 .remote_panels
                 .entity(RemoteMonitorKind::Stats)
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::Stats => crate::features::inspector::disabled_inspector_panel(
-                palette,
-                t!("panel.resourceMonitorDisabled"),
-            )
-            .into_any_element(),
-            NavItem::GpuMonitor if self.settings.summary().ui_show_gpu_monitor => self
+            NavItem::GpuMonitor => self
                 .remote_panels
                 .entity(RemoteMonitorKind::Gpu)
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::GpuMonitor => crate::features::inspector::disabled_inspector_panel(
-                palette,
-                t!("panel.gpuMonitorDisabled"),
-            )
-            .into_any_element(),
-            NavItem::AscendNpuMonitor if self.settings.summary().ui_show_ascend_npu_monitor => self
+            NavItem::AscendNpuMonitor => self
                 .remote_panels
                 .entity(RemoteMonitorKind::Npu)
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::AscendNpuMonitor => crate::features::inspector::disabled_inspector_panel(
-                palette,
-                t!("panel.npuMonitorDisabled"),
-            )
-            .into_any_element(),
-            NavItem::Processes if self.settings.summary().ui_show_process_manager => self
+            NavItem::Processes => self
                 .remote_panels
                 .entity(RemoteMonitorKind::Processes)
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::Processes => crate::features::inspector::disabled_inspector_panel(
-                palette,
-                t!("processManager.disabled"),
-            )
-            .into_any_element(),
-            NavItem::Docker if self.settings.summary().ui_show_docker_manager => self
+            NavItem::Docker => self
                 .remote_panels
                 .entity(RemoteMonitorKind::Docker)
                 .clone()
                 .cached(cached_panel_style())
                 .into_any_element(),
-            NavItem::Docker => crate::features::inspector::disabled_inspector_panel(
-                palette,
-                t!("dockerManager.disabled"),
-            )
-            .into_any_element(),
             NavItem::Recording => {
                 let model = self.recording_sessions_panel_model();
                 self.recording_panel(model, cx).into_any_element()

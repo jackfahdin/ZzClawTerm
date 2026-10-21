@@ -196,6 +196,9 @@ impl ZzClawTermApp {
         options: SavedConnectionStartOptions,
         cx: &mut Context<Self>,
     ) {
+        if !self.session.start.retry_is_pending(&options) {
+            return;
+        }
         let options = self.prepare_session_start_options(options);
         let Some(placement) = options.tab_placement else {
             self.complete_mcp_session_open_failure(
@@ -210,9 +213,10 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        if !self
-            .session
-            .start_reserve_saved_connection(&connection.id, placement)
+        if options.retry_request_id.is_none()
+            && !self
+                .session
+                .start_reserve_saved_connection(&connection.id, placement)
         {
             self.complete_mcp_session_open_failure(
                 &connection.id,
@@ -240,6 +244,7 @@ impl ZzClawTermApp {
             );
             self.complete_mcp_session_open_failure(&connection.id, &message);
             self.session.start_release_saved_connection(&connection.id);
+            self.fail_retry_preparation(&options, message.clone(), cx);
             self.shell.set_status(message);
             cx.notify();
             return;
@@ -261,6 +266,7 @@ impl ZzClawTermApp {
                     }
                 }),
                 move |this, event, cx| {
+                    if !this.session.start.retry_is_pending(&options) { return; }
                     let mut connection = connection;
                     let password = match event.outcome {
                         Ok(Some(entry)) => {
@@ -277,6 +283,7 @@ impl ZzClawTermApp {
                                     }
                                     Err(error) => {
                                         let error = account_auth_error_message(error);
+                                        this.fail_retry_preparation(&options, error.clone(), cx);
                                         this.complete_mcp_session_open_failure(&connection_id, &error);
                                         this.session.start_release_saved_connection(&connection_id);
                                         this.shell.set_status(
@@ -295,6 +302,7 @@ impl ZzClawTermApp {
                             entry.password.filter(|password| !password.trim().is_empty())
                         },
                         Ok(None) => {
+                            this.fail_retry_preparation(&options, "saved password was not found".to_string(), cx);
                             this.complete_mcp_session_open_failure(
                                 &connection_id,
                                 "saved password was not found",
@@ -308,6 +316,7 @@ impl ZzClawTermApp {
                             return;
                         }
                         Err(error) => {
+                            this.fail_retry_preparation(&options, format!("could not load saved password: {error}"), cx);
                             this.complete_mcp_session_open_failure(
                                 &connection_id,
                                 &format!("could not load saved password: {error}"),
@@ -322,6 +331,7 @@ impl ZzClawTermApp {
                         }
                     };
                     let Some(password) = password else {
+                        this.fail_retry_preparation(&options, "saved password is empty or locked".to_string(), cx);
                         this.complete_mcp_session_open_failure(
                             &connection_id,
                             "saved password is empty or locked",
@@ -355,6 +365,10 @@ impl ZzClawTermApp {
         options: SavedConnectionStartOptions,
         cx: &mut Context<Self>,
     ) {
+        if !self.session.start.retry_is_pending(&options) {
+            return;
+        }
+        let options = self.prepare_session_start_options(options);
         if matches!(
             connection.config,
             ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. }
@@ -372,6 +386,9 @@ impl ZzClawTermApp {
                 connection.clone(),
                 move |app, result, cx| match result {
                     Ok(route) => {
+                        if !app.session.start.retry_is_pending(&options) {
+                            return;
+                        }
                         app.remote_desktop
                             .prepared_routes
                             .insert(pending_connection.id.clone(), route);
@@ -382,6 +399,10 @@ impl ZzClawTermApp {
                         );
                     }
                     Err(error) => {
+                        if !app.session.start.retry_is_pending(&options) {
+                            return;
+                        }
+                        app.fail_retry_preparation(&options, error.clone(), cx);
                         app.session
                             .start_release_saved_connection(&pending_connection.id);
                         app.shell.set_status(error.clone());
@@ -396,6 +417,13 @@ impl ZzClawTermApp {
                 cx,
             );
             return;
+        }
+        if matches!(
+            connection.config,
+            ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. }
+        ) && let Some(request_id) = &options.retry_request_id
+        {
+            let _ = self.session.start.take_event_request(request_id);
         }
         let connection_id = connection.id.clone();
         let workspace_split = options.workspace_split.clone();
@@ -416,6 +444,7 @@ impl ZzClawTermApp {
                     Ok(args) => args,
                     Err(_) => {
                         let message = rust_i18n::t!("dialog.shellArgsUnclosedQuote").to_string();
+                        self.fail_retry_preparation(&options, message.clone(), cx);
                         self.shell.set_status(message.clone());
                         self.notify_operation(
                             "shell-arguments",
@@ -849,6 +878,7 @@ impl ZzClawTermApp {
             reconnect_session_id,
             workspace_split,
             tab_placement,
+            retry_request_id: _,
         } = options;
         let connection_name = connection.name.clone();
         let source_connection_id = Some(connection.id.clone());

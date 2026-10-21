@@ -68,6 +68,7 @@ impl ZzClawTermApp {
             cx,
         );
         window.focus(&field.read(cx).focus_handle(), cx);
+        field.update(cx, |field, cx| field.focus_with_cursor_at_end(window, cx));
         let visible = self.visible_transfer_browser_entries().len();
         let status = transfer_browser_search_status(
             self.transfer.browser_view().search.as_str(),

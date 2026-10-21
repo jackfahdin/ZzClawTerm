@@ -41,7 +41,7 @@ impl ZzClawTermApp {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .when(!self.shell_background().transparent_surfaces(), |this| {
+                    .when(!self.wallpaper_enabled(), |this| {
                         this.child(div().mb_9().child(zzclawterm_logo_mark(
                             terminal_palette,
                             256.,
@@ -61,7 +61,7 @@ impl ZzClawTermApp {
                                 temporary_ssh_label,
                                 temporary_ssh,
                                 cx.listener(|this, _, window, cx| {
-                                    this.ensure_panel_open(NavItem::Connections);
+                                    this.ensure_panel_open(NavItem::Connections, cx);
                                     this.open_temporary_ssh_link_dialog(window, cx);
                                 }),
                             ))
@@ -70,7 +70,7 @@ impl ZzClawTermApp {
                                 open_chat_label,
                                 open_chat,
                                 cx.listener(|this, _, window, cx| {
-                                    this.ensure_panel_open(NavItem::AiAssistant);
+                                    this.ensure_panel_open(NavItem::AiAssistant, cx);
                                     window.focus(this.ai.chat_focus(), cx);
                                     this.ai.set_panel_status("AI assistant focused");
                                     cx.notify();
@@ -114,6 +114,7 @@ impl ZzClawTermApp {
             .unwrap_or_else(|| t!("terminal.connecting").to_string());
 
         div()
+            .debug_selector(|| "pending-workspace-state".into())
             .flex_1()
             .min_h_0()
             .flex()
@@ -129,6 +130,7 @@ impl ZzClawTermApp {
             ))
             .child(
                 div()
+                    .debug_selector(|| "pending-workspace-name".into())
                     .max_w(px(320.))
                     .px_4()
                     .text_center()
@@ -138,8 +140,12 @@ impl ZzClawTermApp {
             )
     }
 
-    pub(in crate::features) fn failed_workspace_state(&self) -> impl IntoElement {
+    pub(in crate::features) fn failed_workspace_state(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let palette = self.theme_palette();
+        let request_id = self.session.active_failed_request_id().map(str::to_string);
         let error = self
             .session
             .start_active_failed()
@@ -148,6 +154,7 @@ impl ZzClawTermApp {
             .unwrap_or_default();
 
         div()
+            .debug_selector(|| "failed-workspace-state".into())
             .flex_1()
             .min_h_0()
             .flex()
@@ -164,6 +171,7 @@ impl ZzClawTermApp {
             )
             .child(
                 div()
+                    .debug_selector(|| "failed-workspace-message".into())
                     .flex()
                     .flex_col()
                     .items_center()
@@ -185,5 +193,20 @@ impl ZzClawTermApp {
                             .child(truncate_preview(&error, 160)),
                     ),
             )
+            .when_some(request_id, |this, request_id| {
+                this.child(
+                    div()
+                        .debug_selector(|| "failed-session-reconnect-target".into())
+                        .child(zzclawterm_ui::small_button(
+                            palette,
+                            "failed-session-reconnect",
+                            t!("tabCtx.reconnect"),
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.retry_failed_session_start(request_id.clone(), window, cx);
+                            }),
+                        )),
+                )
+            })
     }
 }

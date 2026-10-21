@@ -12,7 +12,11 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.security.screen_locked() {
+        if self.security.screen_locked()
+            || self.active_workspace_tab().is_some_and(|key| {
+                !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
+            })
+        {
             return;
         }
         let clipboard = cx.read_from_clipboard();
@@ -61,7 +65,11 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.security.screen_locked() {
+        if self.security.screen_locked()
+            || self.active_workspace_tab().is_some_and(|key| {
+                !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
+            })
+        {
             return;
         }
         if text.is_empty() {
@@ -153,7 +161,11 @@ impl ZzClawTermApp {
         text: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.security.screen_locked() {
+        if self.security.screen_locked()
+            || self.active_workspace_tab().is_some_and(|key| {
+                !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
+            })
+        {
             return;
         }
         if text.is_empty() {

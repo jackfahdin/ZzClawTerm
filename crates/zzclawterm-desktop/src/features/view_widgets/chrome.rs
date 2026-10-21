@@ -296,18 +296,20 @@ pub(in crate::features) fn panel_header_with_actions(
     background: gpui::Rgba,
     actions: Option<AnyElement>,
 ) -> impl IntoElement {
-    // Tauri PanelHeader: min-h-9, uppercase tracked title + dimmed meta/actions.
+    // Keep controls in flow; narrow panels may need another row for actions.
     let title = title.into();
     let meta = meta.into();
     let show_meta = !meta.is_empty();
     div()
-        .h(px(36.))
+        .min_h(px(36.))
         .flex_none()
         .flex()
+        .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_3()
+        .gap_x_3()
         .px_3()
+        .py(px(3.))
         .border_b_1()
         .border_color(rgb(palette.border))
         .bg(background)
@@ -315,11 +317,14 @@ pub(in crate::features) fn panel_header_with_actions(
             div()
                 .min_w_0()
                 .flex_1()
+                .overflow_hidden()
                 .flex()
                 .items_baseline()
                 .gap_2()
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(px(11.))
                         .font_weight(FontWeight(700.))
                         .text_color(rgb(palette.text_muted))
@@ -329,10 +334,10 @@ pub(in crate::features) fn panel_header_with_actions(
                     this.child(
                         div()
                             .min_w_0()
+                            .truncate()
                             .text_size(px(11.))
                             .text_color(rgb(palette.text_muted))
                             .opacity(0.85)
-                            .overflow_hidden()
                             .child(meta),
                     )
                 }),
@@ -341,7 +346,9 @@ pub(in crate::features) fn panel_header_with_actions(
             this.child(
                 div()
                     .flex_none()
+                    .max_w_full()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_1()
                     .child(actions),

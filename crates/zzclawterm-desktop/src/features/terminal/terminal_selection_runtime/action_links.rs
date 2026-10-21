@@ -86,7 +86,6 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if !self.settings.summary().terminal_action_links_enabled
-            || self.settings.summary().terminal_low_latency_mode
             || self.runtime_output_pressure_active()
         {
             self.clear_action_link_tooltip(cx);
@@ -295,10 +294,14 @@ impl ZzClawTermApp {
     }
 
     fn visible_terminal_surface_session_ids(&self) -> Vec<String> {
-        if let Some(window_root) = self.terminal.windows.tree.as_ref()
+        if let Some(window_root) = self.shell.terminal_window_tree().as_ref()
             && matches!(window_root, TerminalWindowNode::Split { .. })
         {
-            return window_root.active_tabs();
+            return window_root
+                .active_tabs()
+                .into_iter()
+                .filter(|id| self.session.has_session(id))
+                .collect();
         }
         self.shell
             .workspace_split()
@@ -466,8 +469,7 @@ impl ZzClawTermApp {
             || view.output_burst_bytes > 0
             || view.performance_mode == TerminalPerformanceMode::Overloaded;
         terminal_expensive_interactions_enabled(
-            self.settings.summary().terminal_action_links_enabled
-                && !self.settings.summary().terminal_low_latency_mode,
+            self.settings.summary().terminal_action_links_enabled,
             is_active,
             render_degraded,
             runtime_output_pressure,

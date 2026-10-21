@@ -494,6 +494,7 @@ impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn send_selected_transfer_path_to_terminal(
         &mut self,
         part: TransferPathPart,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(value) = self.selected_transfer_path_part(part) else {
@@ -513,7 +514,7 @@ impl ZzClawTermApp {
                 .set_status(format!("sent remote {} to terminal", part.label()));
             self.transfer
                 .set_browser_status(truncate_preview(&value, 92));
-            cx.notify();
+            self.focus_terminal_input(window, cx);
         }
     }
 

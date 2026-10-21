@@ -128,6 +128,7 @@ impl ZzClawTermApp {
             SettingsTab::Interaction => self.ensure_interaction_inputs(cx),
             SettingsTab::Keybindings => self.ensure_keybinding_inputs(cx),
             SettingsTab::TerminalGeneral => self.ensure_terminal_inputs(cx),
+            SettingsTab::RemoteMonitoring => self.ensure_remote_monitoring_inputs(cx),
             SettingsTab::Search => self.ensure_expanded_search_engine_inputs(cx),
             SettingsTab::Translation => self.ensure_translation_inputs(cx),
             SettingsTab::AiGeneral => self.ensure_ai_general_inputs(cx),
@@ -425,6 +426,22 @@ impl ZzClawTermApp {
                 600.0,
                 5.0,
             ),
+        ] {
+            self.ensure_number_input(
+                id,
+                &format!("{}", value as i64),
+                ZzClawNumberInputOptions::default()
+                    .range(min, max)
+                    .step(step)
+                    .decimal_places(0),
+                cx,
+            );
+        }
+    }
+
+    fn ensure_remote_monitoring_inputs(&mut self, cx: &mut Context<Self>) {
+        let summary = self.settings.summary().clone();
+        for (id, value, min, max, step) in [
             (
                 "settings.number.remote-stats-interval",
                 summary.ui_remote_stats_interval as f64,
@@ -466,7 +483,9 @@ impl ZzClawTermApp {
                 &format!("{}", value as i64),
                 ZzClawNumberInputOptions::default()
                     .range(min, max)
-                    .step(step),
+                    .step(step)
+                    .decimal_places(0)
+                    .suffix(t!("common.seconds")),
                 cx,
             );
         }
@@ -475,6 +494,13 @@ impl ZzClawTermApp {
     fn ensure_transfer_inputs(&mut self, cx: &mut Context<Self>) {
         let summary = self.settings.summary().clone();
         for (id, value, min, max, step) in [
+            (
+                "settings.number.transfer-internal-editor-font-size",
+                summary.transfer_internal_editor_font_size as f64,
+                8.0,
+                72.0,
+                1.0,
+            ),
             (
                 "settings.number.transfer-download-threads",
                 summary.transfer_download_threads as f64,
@@ -769,12 +795,13 @@ impl ZzClawTermApp {
 
 /// Every tab, so the tests below cannot silently miss one that gets added.
 #[cfg(test)]
-pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 14] = [
+pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 15] = [
     SettingsTab::General,
     SettingsTab::Appearance,
     SettingsTab::Interaction,
     SettingsTab::Keybindings,
     SettingsTab::TerminalGeneral,
+    SettingsTab::RemoteMonitoring,
     SettingsTab::Search,
     SettingsTab::Translation,
     SettingsTab::AiGeneral,
@@ -879,6 +906,80 @@ mod tests {
                 "flushing the {tab:?} tab again changed its input handle set"
             );
         }
+    }
+
+    #[test]
+    fn remote_monitoring_inputs_reset_only_the_five_intervals_and_cancel_restores_them() {
+        let test_dir = TestConfigDir::new("zzclawterm-monitor-settings");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, cx| {
+            app.settings.set_remote_stats_interval(17);
+            app.settings.set_gpu_monitor_interval(18);
+            app.settings.set_ascend_npu_monitor_interval(19);
+            app.settings.set_process_manager_interval(20);
+            app.settings.set_docker_manager_interval(21);
+            let original = app.settings.summary().clone();
+            app.begin_settings_draft(cx);
+            app.ensure_settings_tab_inputs(SettingsTab::TerminalGeneral, cx);
+            assert!(
+                !app.number_input_fields_snapshot()
+                    .contains_key("settings.number.gpu-monitor-interval")
+            );
+            app.focus_settings_tab(SettingsTab::RemoteMonitoring, cx);
+            app.flush_settings_panel_snapshots(cx);
+            let inputs = app.number_input_fields_snapshot();
+            for (id, original_value, default_value) in [
+                ("settings.number.remote-stats-interval", "17", "3"),
+                ("settings.number.gpu-monitor-interval", "18", "3"),
+                ("settings.number.ascend-npu-monitor-interval", "19", "3"),
+                ("settings.number.process-manager-interval", "20", "5"),
+                ("settings.number.docker-manager-interval", "21", "10"),
+            ] {
+                assert_eq!(inputs[id].read(cx).value(cx), original_value);
+                assert_ne!(original_value, default_value);
+            }
+            app.reset_remote_monitoring_intervals(cx);
+            assert!(app.settings_draft_dirty());
+            let mut expected = original.clone();
+            expected.ui_remote_stats_interval = 3;
+            expected.ui_gpu_monitor_interval = 3;
+            expected.ui_ascend_npu_monitor_interval = 3;
+            expected.ui_process_manager_interval = 5;
+            expected.ui_docker_manager_interval = 10;
+            assert_eq!(*app.settings.summary(), expected);
+            for (id, value) in [
+                ("remote-stats", "3"),
+                ("gpu-monitor", "3"),
+                ("ascend-npu-monitor", "3"),
+                ("process-manager", "5"),
+                ("docker-manager", "10"),
+            ] {
+                assert_eq!(
+                    inputs[format!("settings.number.{id}-interval").as_str()]
+                        .read(cx)
+                        .value(cx),
+                    value
+                );
+            }
+            app.cancel_settings(cx);
+            assert_eq!(*app.settings.summary(), original);
+            for (id, value) in [
+                ("remote-stats", "17"),
+                ("gpu-monitor", "18"),
+                ("ascend-npu-monitor", "19"),
+                ("process-manager", "20"),
+                ("docker-manager", "21"),
+            ] {
+                assert_eq!(
+                    inputs[format!("settings.number.{id}-interval").as_str()]
+                        .read(cx)
+                        .value(cx),
+                    value
+                );
+            }
+        });
     }
 
     /// Static tab inputs outlive the page; only the row-scoped ones are released.

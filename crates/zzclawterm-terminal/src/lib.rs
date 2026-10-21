@@ -20,6 +20,7 @@ pub mod editing;
 mod encoding;
 mod graphics;
 mod kitty_payload;
+mod line_numbers;
 pub mod navigation;
 pub mod recording_sanitizer;
 mod reflow_timestamps;
@@ -212,7 +213,8 @@ pub struct SelectionSnapshot {
 pub struct TerminalSnapshotRow {
     /// Empty row discarded by a local clear, retaining its host coordinates.
     pub cleared: bool,
-    /// Line number relative to the last local clear, independent of host rows.
+    /// Logical line number in retained history, rebased by a local clear.
+    /// Soft-wrapped continuations share their first row's number.
     pub display_line_number: Option<usize>,
     pub line_id: Option<TerminalLineId>,
     pub revision: u64,
@@ -576,6 +578,7 @@ struct LineMetadata {
 struct ScreenLineState {
     /// Logical first retained input row after a local clear.
     clear_line_origin: Option<i64>,
+    line_numbers: line_numbers::LineNumbers,
     last_cursor_line: Option<i64>,
     command_navigation: command_navigation::CommandNavigationState,
     pending_command_prompt: Option<i64>,
@@ -599,6 +602,7 @@ impl ScreenLineState {
     fn retain_physical_range(&mut self, topmost: Line, bottommost: Line) -> usize {
         let first = self.logical_line(topmost);
         let last = self.logical_line(bottommost);
+        self.line_numbers.retain_from(first);
         let before = self.metadata.len();
         let mut retained = self.metadata.split_off(&first);
         if let Some(after_last) = last.checked_add(1) {
@@ -905,6 +909,8 @@ impl TerminalCore {
         if self.cols != old_cols {
             self.primary_lines.metadata.clear();
             self.alternate_lines.metadata.clear();
+            self.primary_lines.line_numbers = Default::default();
+            self.alternate_lines.line_numbers = Default::default();
             self.primary_lines.clear_line_origin = None;
             self.alternate_lines.clear_line_origin = None;
             self.primary_lines.last_cursor_line = None;
@@ -926,6 +932,8 @@ impl TerminalCore {
             self.clear_snapshot_row_cache();
         }
         if let Some(timestamps) = timestamps {
+            // Width reflow changes wrap positions throughout retained history.
+            self.initialize_line_numbers();
             for (line, metadata) in reflow_timestamps::restore(&self.term, timestamps) {
                 let signature = line_signature(&self.term, line, self.cols);
                 let revision = self.allocate_line_revision();
@@ -948,6 +956,11 @@ impl TerminalCore {
                             .clear_line_origin
                             .map_or(origin, |old| old.min(origin)),
                     );
+                }
+                if let Some(number) = metadata.logical_line_number {
+                    self.active_line_state_mut()
+                        .line_numbers
+                        .restore_number(logical_line, number);
                 }
             }
         }
@@ -1239,6 +1252,9 @@ impl TerminalCore {
             }
         }
         self.active_line_state_mut().clear_line_origin = Some(origin.saturating_add(start as i64));
+        self.active_line_state_mut()
+            .line_numbers
+            .start_at(origin.saturating_add(start as i64));
         self.retain_active_presentation_range();
     }
 
@@ -1783,6 +1799,7 @@ impl TerminalCore {
 
     fn stamp_changed_lines(&mut self) {
         self.sync_presentation_state();
+        self.initialize_line_numbers();
         let cursor = self.term.grid().cursor.point.line;
         let state = self.active_line_state_mut();
         let cursor = state.logical_line(cursor);
@@ -1897,8 +1914,24 @@ impl TerminalCore {
         if line < topmost || line > bottommost {
             return;
         }
+        self.index_line_wrap(line);
         let signature = line_signature(&self.term, line, cols);
         let logical_line = self.active_line_state().logical_line(line);
+        let state = self.active_line_state();
+        let erased_input = state.metadata.get(&logical_line).is_some_and(|metadata| {
+            if !metadata.shell_input
+                || metadata.signature == Some(signature)
+                || state.shell_input_kind(Some(logical_line)) == Some(ShellInputLineKind::Active)
+            {
+                return false;
+            }
+            // Damage can erase input without replacing the logical row.
+            // A surviving prompt or same-row output is not surviving input;
+            // conversely, a partial erase must keep any remaining input.
+            let start = metadata.input_start_col.unwrap_or(0).min(cols);
+            let end = metadata.input_end_col.unwrap_or(cols).min(cols);
+            (start..end).all(|col| cell_text_is_blank(&self.term.grid()[line][Column(col)]))
+        });
         let should_revise = self
             .active_line_state()
             .metadata
@@ -1919,13 +1952,41 @@ impl TerminalCore {
             metadata.revision = Some(revision);
         }
         metadata.signature = Some(signature);
+        if erased_input {
+            metadata.shell_input = false;
+            metadata.input_start_col = None;
+            metadata.input_end_col = None;
+        }
         if should_revise {
             let state = self.active_line_state_mut();
             if let Some(origin) = state.clear_line_origin.as_mut() {
                 // Absolute host rewrites above the retained input are real output.
+                if logical_line < *origin {
+                    state.line_numbers.start_at(logical_line);
+                }
                 *origin = (*origin).min(logical_line);
             }
         }
+    }
+
+    fn index_line_wrap(&mut self, line: Line) {
+        let wraps = self.term.grid()[line][Column(self.term.columns() - 1)]
+            .flags
+            .contains(Flags::WRAPLINE);
+        let state = self.active_line_state_mut();
+        state.line_numbers.update(state.logical_line(line), wraps);
+    }
+
+    fn initialize_line_numbers(&mut self) {
+        if self.active_line_state().line_numbers.initialized {
+            return;
+        }
+        // An inactive primary grid can reflow while the alternate screen is
+        // visible. Rebuild its index once when it becomes active again.
+        for index in self.term.topmost_line().0..=self.term.bottommost_line().0 {
+            self.index_line_wrap(Line(index));
+        }
+        self.active_line_state_mut().line_numbers.initialized = true;
     }
 
     fn allocate_line_revision(&mut self) -> u64 {
@@ -1969,6 +2030,8 @@ impl TerminalCore {
         if reset_generation != self.consumed_reset_generation {
             self.primary_lines.metadata.clear();
             self.alternate_lines.metadata.clear();
+            self.primary_lines.line_numbers = Default::default();
+            self.alternate_lines.line_numbers = Default::default();
             self.primary_lines.clear_line_origin = None;
             self.alternate_lines.clear_line_origin = None;
             self.primary_lines.last_cursor_line = None;
@@ -2030,6 +2093,7 @@ impl TerminalCore {
             state.clear_line_origin = None;
             state.last_cursor_line = None;
             state.metadata.clear();
+            state.line_numbers = Default::default();
             state.command_navigation = Default::default();
             state.pending_command_prompt = None;
             state.logical_origin = 0;
@@ -2280,11 +2344,11 @@ fn snapshot_window_from_term(
             epoch: line_state.epoch,
             logical_line: line_state.logical_line(line),
         });
-        let display_line_number = line_state
-            .clear_line_origin
-            .zip(line_id)
-            .and_then(|(origin, id)| usize::try_from(id.logical_line - origin).ok())
-            .map(|line| line.saturating_add(1));
+        let display_line_number = line_id.and_then(|id| {
+            line_state
+                .line_numbers
+                .number(id.logical_line, line_state.logical_line(topmost))
+        });
         let shell_input = line_state.shell_input_kind(line_id.map(|id| id.logical_line));
         let shell_input_columns = shell_input.and_then(|kind| {
             if kind == ShellInputLineKind::Active

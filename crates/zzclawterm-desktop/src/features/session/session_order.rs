@@ -23,6 +23,8 @@ impl ZzClawTermApp {
         tab_placement: Option<SessionStartTabPlacement>,
         insert_index: Option<usize>,
     ) {
+        let tab_placement = tab_placement.map(|p| self.session.resolve_start_tab_placement(p));
+        let active_tab = self.active_workspace_tab();
         let encoding = metadata.launch_config.encoding().map(ToOwned::to_owned);
         let is_terminal = encoding.is_some();
         self.session.prepare_session_metadata_for_start(
@@ -35,13 +37,13 @@ impl ZzClawTermApp {
         self.session.claim_session_events(session_id);
         self.finish_session_registration(session_id, encoding, is_terminal);
         if let Some(placement) = tab_placement {
-            self.terminal
+            self.shell
                 .place_started_terminal_tab(session_id, placement.request_sequence);
             // Worker completion order must not reorder requests issued in the same group.
             let before = self
-                .terminal
+                .shell
                 .terminal_group_for_tab(session_id)
-                .and_then(|group| self.terminal.terminal_group_tabs(&group))
+                .and_then(|group| self.shell.terminal_group_tabs(&group))
                 .and_then(|(tabs, _)| {
                     tabs.into_iter().find(|id| {
                         self.session
@@ -53,12 +55,12 @@ impl ZzClawTermApp {
                     })
                 });
             if let Some(before) = before {
-                self.terminal
+                self.shell
                     .place_tab_before_in_terminal_windows(session_id, &before);
             }
             // A completed background request can select its destination group,
             // but must never hide the session that still owns keyboard input.
-            if let Some(active) = self.session.active_id_owned() {
+            if let Some(active) = active_tab {
                 self.sync_terminal_windows_active_tab(&active);
             }
             self.sync_terminal_frame_snapshot_priority();
@@ -111,7 +113,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn settle_session_start_tab_placements_if_idle(&mut self) {
         if self.session.start_visible_tab_reservation_count() == 0 {
             self.session.clear_start_tab_placements();
-            self.terminal.clear_terminal_start_groups();
+            self.shell.clear_terminal_start_groups();
         }
     }
 
@@ -120,7 +122,10 @@ impl ZzClawTermApp {
         self.session
             .session_order()
             .iter()
-            .filter(|session_id| !self.is_secondary_pane_session(session_id))
+            .filter(|session_id| {
+                !self.is_secondary_pane_session(session_id)
+                    && !self.shell.session_tab_is_hidden(session_id)
+            })
             .count()
     }
 
@@ -171,7 +176,9 @@ impl ZzClawTermApp {
             if !seen.insert(session_id.as_str()) {
                 continue;
             }
-            if self.is_secondary_pane_session(session_id) {
+            if self.is_secondary_pane_session(session_id)
+                || self.shell.session_tab_is_hidden(session_id)
+            {
                 continue;
             }
             if let Some(session) = self.session.session_info(session_id) {
@@ -180,16 +187,17 @@ impl ZzClawTermApp {
         }
         for (session_id, _) in self.session.metadata_entries() {
             if seen.insert(session_id)
+                && !self.shell.session_tab_is_hidden(session_id)
                 && !self.is_secondary_pane_session(session_id)
                 && let Some(session) = self.session.session_info(session_id)
             {
                 ordered.push(session);
             }
         }
-        if self.terminal.terminal_windows_restore_is_complete()
+        if self.shell.terminal_windows_restore_is_complete()
             && self.shell.workspace_pane_roots().is_empty()
         {
-            let ids = self.terminal.terminal_window_tab_ids();
+            let ids = self.shell.terminal_window_tab_ids();
             let positions = ids
                 .iter()
                 .enumerate()

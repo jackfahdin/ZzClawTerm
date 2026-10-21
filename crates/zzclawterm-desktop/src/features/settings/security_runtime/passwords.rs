@@ -280,6 +280,7 @@ impl ZzClawTermApp {
                             this.set_connection_editor_select_value(select, Some(&id), cx);
                             this.connection_state.set_editor_credential_overlay(None);
                         }
+                        this.reconcile_open_editor_password_source();
                         this.shell.set_status("password saved".to_string());
                         close = true;
                     }

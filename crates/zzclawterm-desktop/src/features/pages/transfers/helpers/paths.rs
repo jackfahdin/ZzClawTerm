@@ -119,7 +119,7 @@ pub(in crate::features::pages::transfers) fn transfer_path_part_value(
     }
 }
 
-pub(in crate::features::pages::transfers) fn format_sftp_modified(value: Option<u32>) -> String {
+pub(in crate::features) fn format_sftp_modified(value: Option<u32>) -> String {
     let Some(seconds) = value.filter(|seconds| *seconds > 0) else {
         return "-".to_string();
     };

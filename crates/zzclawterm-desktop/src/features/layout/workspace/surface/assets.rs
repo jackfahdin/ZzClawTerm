@@ -12,8 +12,8 @@ use zzclawterm_core::{
     format_asset_address, format_bytes, format_cpu_summary, format_disk_summary,
 };
 use zzclawterm_ui::{
-    ZzClawHorizontalScrollbar, ZzClawIconButton, ZzClawScrollable, ZzClawSearchInput, ZzClawSelect,
-    ZzClawUniformListScrollbar,
+    ZzClawContextMenu, ZzClawHorizontalScrollbar, ZzClawIconButton, ZzClawScrollable,
+    ZzClawSearchInput, ZzClawSelect, ZzClawUniformListScrollbar,
 };
 
 use crate::features::ZzClawTermApp;
@@ -22,7 +22,7 @@ use crate::features::assets::{
 };
 use crate::features::formatting::format_last_used_ms;
 use crate::features::icons::resolve_connection_icon;
-use crate::features::shell::SessionTabDragPayload;
+use crate::features::shell::WorkspaceTabDragPayload;
 use crate::features::view_widgets::connection_type_icon;
 
 const ASSET_CARD_MIN_WIDTH: f32 = 300.;
@@ -80,9 +80,24 @@ impl UniformListDecoration for AssetRowActionsDecoration {
             let edit = connection.clone();
             let connect_app = self.app.clone();
             let edit_app = self.app.clone();
+            let menu_app = self.app.clone();
+            let menu_id = connection.id.clone();
+            let selector = format!("asset-actions-{}", connection.id);
 
             layer = layer.child(
                 div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .capture_any_mouse_down(move |event: &MouseDownEvent, _, cx| {
+                        if event.button == MouseButton::Right
+                            && let Some(app) = menu_app.upgrade()
+                        {
+                            app.update(cx, |this, _| {
+                                this.start_workspace
+                                    .set_context_connection_id(Some(menu_id.clone()));
+                            });
+                        }
+                    })
                     .absolute()
                     .left(action_left)
                     .top(item_height * index)
@@ -109,7 +124,11 @@ impl UniformListDecoration for AssetRowActionsDecoration {
                                 return;
                             };
                             app.update(cx, |this, cx| {
-                                this.start_saved_connection(connection.clone(), window, cx);
+                                this.start_saved_connections_by_ids(
+                                    std::slice::from_ref(&connection.id),
+                                    window,
+                                    cx,
+                                );
                             });
                         },
                     ))
@@ -124,13 +143,7 @@ impl UniformListDecoration for AssetRowActionsDecoration {
                                 return;
                             };
                             app.update(cx, |this, cx| {
-                                this.open_connection_editor(
-                                    Some(edit.id.clone()),
-                                    None,
-                                    false,
-                                    window,
-                                    cx,
-                                );
+                                this.edit_saved_connection_by_id(&edit.id, window, cx);
                             });
                         },
                     )),
@@ -152,7 +165,11 @@ fn asset_action_button(
     border: u32,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let id = id.into();
+    let selector = id.to_string();
     div()
+        .id(SharedString::from(format!("{id}-shell")))
+        .debug_selector(move || selector.clone())
         .size(px(28.))
         .flex_none()
         .flex()
@@ -165,7 +182,10 @@ fn asset_action_button(
             ZzClawIconButton::new(id, icon_path)
                 .icon_size(px(15.))
                 .tooltip(tooltip)
-                .on_click(on_click),
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    on_click(event, window, cx);
+                }),
         )
         .into_any_element()
 }
@@ -180,6 +200,64 @@ fn responsive_asset_card_columns(viewport_width: f32) -> usize {
 }
 
 impl ZzClawTermApp {
+    fn asset_item(
+        &self,
+        connection_id: &str,
+        view: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let menu_id = connection_id.to_string();
+        let connect_id = connection_id.to_string();
+        let selector = format!("asset-{view}-{connection_id}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .capture_any_mouse_down(cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Right {
+                    this.start_workspace.set_context_connection_id(Some(menu_id.clone()));
+                }
+            }))
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if matches!(event, gpui::ClickEvent::Mouse(event) if event.up.button == MouseButton::Left)
+                    && event.click_count() == 2
+                {
+                    cx.stop_propagation();
+                    this.start_saved_connections_by_ids(std::slice::from_ref(&connect_id), window, cx);
+                }
+            }))
+    }
+
+    fn asset_context_menu(
+        &self,
+        container: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let app = cx.weak_entity();
+        ZzClawContextMenu::new_dynamic(
+            container.capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, _| {
+                if event.button == MouseButton::Right {
+                    this.start_workspace.set_context_connection_id(None);
+                }
+            })),
+            move |_, cx| {
+                let Some(app) = app.upgrade() else {
+                    return Vec::new();
+                };
+                app.update(cx, |this, cx| {
+                    let Some(id) = this
+                        .start_workspace
+                        .context_connection_id()
+                        .map(str::to_string)
+                    else {
+                        return Vec::new();
+                    };
+                    this.connection_target_menu_items(id.clone(), vec![id], cx)
+                })
+            },
+        )
+        .into_any_element()
+    }
+
     pub(in crate::features) fn empty_workspace_state(
         &mut self,
         cx: &mut Context<Self>,
@@ -210,19 +288,21 @@ impl ZzClawTermApp {
             })
             // Empty workspaces hide the tab strip, so the surface must receive
             // tab drops before the outside-release fallback creates a window.
-            .drag_over::<SessionTabDragPayload>(move |this, _, _, _| {
+            .drag_over::<WorkspaceTabDragPayload>(move |this, _, _, _| {
                 this.border_2().border_color(rgb(palette.focus_ring))
             })
-            .on_drop(cx.listener(|this, payload: &SessionTabDragPayload, _, cx| {
-                this.accept_session_tab_drop(payload, cx);
-                if payload.source_workspace_id != this.workspace_id {
-                    this.request_tab_tree_move(
-                        payload,
-                        zzclawterm_core::MoveTabPlacement::Append,
-                        cx,
-                    );
-                }
-            }))
+            .on_drop(
+                cx.listener(|this, payload: &WorkspaceTabDragPayload, _, cx| {
+                    this.accept_session_tab_drop(payload, cx);
+                    if payload.source_workspace_id != this.workspace_id {
+                        this.request_tab_tree_move(
+                            payload,
+                            zzclawterm_core::MoveTabPlacement::Append,
+                            cx,
+                        );
+                    }
+                }),
+            )
             .child(content)
             .child(
                 div()
@@ -604,10 +684,12 @@ impl ZzClawTermApp {
         let list = uniform_list(
             "asset-table-rows",
             row_records.len(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, _cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .filter_map(|index| row_records.get(index).cloned())
-                    .map(|record| this.asset_table_row(record, &labels, &widths, min_table_width))
+                    .map(|record| {
+                        this.asset_table_row(record, &labels, &widths, min_table_width, cx)
+                    })
                     .collect::<Vec<_>>()
             }),
         )
@@ -634,67 +716,71 @@ impl ZzClawTermApp {
                     .child(list),
             );
 
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id("asset-table-horizontal-viewport")
-                    .size_full()
-                    .min_h_0()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&horizontal_scroll)
-                    .child(scrolling_table),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h(px(34.))
-                    .w(px(ASSET_TABLE_ACTIONS_WIDTH))
-                    .pl_2()
-                    .pr_4()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgb(palette.section_header))
-                    .text_size(px(11.))
-                    .text_color(rgb(palette.text_muted))
-                    .child(t!("assets.actions")),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right(px(ASSET_SCROLLBAR_TRACK_WIDTH))
-                    .bottom_0()
-                    .child(ZzClawHorizontalScrollbar::new(
-                        "asset-table-horizontal-scrollbar",
-                        &horizontal_scroll,
-                    )),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(34.))
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .child(ZzClawUniformListScrollbar::new(
-                        "asset-table-vertical-scrollbar",
-                        &scroll,
-                    )),
-            )
-            .into_any_element()
+        self.asset_context_menu(
+            div()
+                .id("asset-table")
+                .debug_selector(|| "asset-table".to_string())
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("asset-table-horizontal-viewport")
+                        .size_full()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
+                        .track_scroll(&horizontal_scroll)
+                        .child(scrolling_table),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .h(px(34.))
+                        .w(px(ASSET_TABLE_ACTIONS_WIDTH))
+                        .pl_2()
+                        .pr_4()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .border_b_1()
+                        .border_color(rgb(palette.border))
+                        .bg(rgb(palette.section_header))
+                        .text_size(px(11.))
+                        .text_color(rgb(palette.text_muted))
+                        .child(t!("assets.actions")),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right(px(ASSET_SCROLLBAR_TRACK_WIDTH))
+                        .bottom_0()
+                        .child(ZzClawHorizontalScrollbar::new(
+                            "asset-table-horizontal-scrollbar",
+                            &horizontal_scroll,
+                        )),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(34.))
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(ZzClawUniformListScrollbar::new(
+                            "asset-table-vertical-scrollbar",
+                            &scroll,
+                        )),
+                ),
+            cx,
+        )
     }
 
     fn asset_header_cell(
@@ -773,6 +859,7 @@ impl ZzClawTermApp {
         labels: &AssetDisplayLabels,
         widths: &[f32; 7],
         min_table_width: f32,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = self.theme_palette();
         let connection = record.connection.clone();
@@ -795,7 +882,8 @@ impl ZzClawTermApp {
                 Some(2),
             ),
         ];
-        let mut row = div()
+        let mut row = self
+            .asset_item(&connection.id, "row", cx)
             .h(px(ASSET_TABLE_ROW_HEIGHT))
             .w_full()
             .min_w(px(min_table_width))
@@ -869,8 +957,11 @@ impl ZzClawTermApp {
     fn asset_row_actions(&self, connection: SavedConnection, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.theme_palette();
         let edit = connection.clone();
+        let selector = format!("asset-card-actions-{}", connection.id);
         div()
-            .ml_auto()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .w(px(ASSET_TABLE_ACTIONS_WIDTH))
             .flex_none()
             .pl_1()
@@ -885,7 +976,11 @@ impl ZzClawTermApp {
                 t!("savedConnections.connect"),
                 palette.border,
                 cx.listener(move |this, _, window, cx| {
-                    this.start_saved_connection(connection.clone(), window, cx);
+                    this.start_saved_connections_by_ids(
+                        std::slice::from_ref(&connection.id),
+                        window,
+                        cx,
+                    );
                 }),
             ))
             .child(asset_action_button(
@@ -894,7 +989,7 @@ impl ZzClawTermApp {
                 t!("savedConnections.edit"),
                 palette.border,
                 cx.listener(move |this, _, window, cx| {
-                    this.open_connection_editor(Some(edit.id.clone()), None, false, window, cx);
+                    this.edit_saved_connection_by_id(&edit.id, window, cx);
                 }),
             ))
             .into_any_element()
@@ -950,17 +1045,21 @@ impl ZzClawTermApp {
         .flex_1()
         .min_h_0()
         .track_scroll(&scroll);
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .p_3()
-            .child(width_tracker)
-            .child(list)
-            .vertical_scrollbar(&scroll)
-            .into_any_element()
+        self.asset_context_menu(
+            div()
+                .id("asset-cards")
+                .debug_selector(|| "asset-cards".to_string())
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .p_3()
+                .child(width_tracker)
+                .child(list)
+                .vertical_scrollbar(&scroll),
+            cx,
+        )
     }
 
     fn asset_card_row(
@@ -995,6 +1094,7 @@ impl ZzClawTermApp {
     ) -> AnyElement {
         let palette = self.theme_palette();
         let connection = record.connection.clone();
+        let footer_selector = format!("asset-card-footer-{}", connection.id);
         let asset = connection.asset.as_ref();
         let icon_def = resolve_connection_icon(connection.icon.as_deref(), connection.kind_label());
         let custom_icon = connection
@@ -1002,7 +1102,7 @@ impl ZzClawTermApp {
             .as_ref()
             .and_then(|id| self.connection_state.custom_icons.images.get(id))
             .cloned();
-        div()
+        self.asset_item(&connection.id, "card", cx)
             .w_full()
             .min_w_0()
             .h(px(190.))
@@ -1105,7 +1205,11 @@ impl ZzClawTermApp {
             )
             .child(
                 div()
+                    .id(SharedString::from(footer_selector.clone()))
+                    .debug_selector(move || footer_selector.clone())
                     .h(px(38.))
+                    .w_full()
+                    .min_w_0()
                     .flex_none()
                     .border_t_1()
                     .border_color(rgb(palette.border))
@@ -1135,33 +1239,4 @@ impl ZzClawTermApp {
 }
 
 #[cfg(test)]
-mod tests {
-    use gpui::px;
-
-    use super::{asset_action_left_in_decoration, responsive_asset_card_columns};
-
-    #[test]
-    fn asset_card_columns_follow_available_viewport_width() {
-        assert_eq!(responsive_asset_card_columns(f32::NAN), 1);
-        assert_eq!(responsive_asset_card_columns(631.), 1);
-        assert_eq!(responsive_asset_card_columns(632.), 2);
-        assert_eq!(responsive_asset_card_columns(939.), 2);
-        assert_eq!(responsive_asset_card_columns(940.), 3);
-        assert_eq!(responsive_asset_card_columns(1920.), 3);
-    }
-
-    #[test]
-    fn asset_actions_stay_fixed_at_the_viewport_right_edge() {
-        let viewport_width = px(960.);
-
-        for horizontal_scroll in [px(0.), px(-120.), px(-480.)] {
-            let decoration_left =
-                asset_action_left_in_decoration(viewport_width, horizontal_scroll);
-            assert_eq!(
-                horizontal_scroll + decoration_left,
-                px(856.),
-                "the 104px action column must stay pinned to the 960px viewport"
-            );
-        }
-    }
-}
+mod tests;

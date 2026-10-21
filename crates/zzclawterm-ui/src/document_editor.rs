@@ -309,6 +309,74 @@ mod tests {
     use gpui::{AppContext as _, Focusable as _, Modifiers, MouseButton, TestAppContext};
 
     #[gpui::test]
+    fn document_wheel_scrolls_with_or_without_modifiers_and_clamps_at_both_edges(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+
+        cx.update(gpui_kit::init);
+        let mut document = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                ZzClawDocumentEditorState::new_source(window, cx, "line\n".repeat(500), "plain")
+            });
+            document = Some(editor.clone());
+            zzclaw_root(editor, window, cx)
+        });
+        let document = document.unwrap();
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let position = cx.update(|_, cx| {
+            document
+                .read(cx)
+                .editor
+                .read(cx)
+                .range_to_bounds(&(0..0))
+                .unwrap()
+                .center()
+        });
+        for modifiers in [
+            Modifiers::default(),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                platform: true,
+                ..Modifiers::default()
+            },
+        ] {
+            let mut last_y = px(0.);
+            for (delta_y, movement) in [
+                (100_000., 0),
+                (-100., -1),
+                (-100., -1),
+                (-100_000., -1),
+                (-100., 0),
+                (100., 1),
+                (100_000., 1),
+                (100., 0),
+            ] {
+                cx.simulate_event(ScrollWheelEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(0.), px(delta_y))),
+                    modifiers,
+                    touch_phase: TouchPhase::Moved,
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+                let y = cx.update(|_, cx| document.read(cx).editor.read(cx).scroll_offset().y);
+                match movement {
+                    -1 => assert!(y < last_y),
+                    1 => assert!(y > last_y),
+                    _ => assert_eq!(y, last_y),
+                }
+                last_y = y;
+            }
+        }
+    }
+
+    #[gpui::test]
     fn clicking_another_line_moves_the_document_cursor(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let mut document = None;

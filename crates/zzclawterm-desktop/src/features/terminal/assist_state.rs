@@ -162,10 +162,6 @@ impl TerminalFeatureState {
         self.assist.pending_command_history_entry.take()
     }
 
-    pub(in crate::features) fn invalidate_command_suggestion_search(&mut self) {
-        self.assist.invalidate_command_suggestion_search();
-    }
-
     pub(in crate::features) fn clear_command_tracking(&mut self) {
         self.assist.clear_command_tracking();
     }

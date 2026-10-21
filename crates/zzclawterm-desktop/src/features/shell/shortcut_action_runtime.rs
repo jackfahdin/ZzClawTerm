@@ -37,10 +37,20 @@ impl ZzClawTermApp {
             let handled = app
                 .update(cx, |this, cx| {
                     if this.settings.keybinding_recording_id().is_some()
-                        || this.shell.main_window().is_none_or(|main| {
-                            main.window_id() != window.window_handle().window_id()
-                        })
+                        || this.security.screen_locked()
                     {
+                        return false;
+                    }
+                    let window_id = window.window_handle().window_id();
+                    let editor_window = this
+                        .transfer
+                        .editor_window()
+                        .is_some_and(|editor| editor.window_id() == window_id);
+                    let main_window = this
+                        .shell
+                        .main_window()
+                        .is_some_and(|main| main.window_id() == window_id);
+                    if !main_window && !editor_window {
                         return false;
                     }
                     let Some(invocation) = crate::shortcuts::resolve_shortcut_invocation(
@@ -50,6 +60,11 @@ impl ZzClawTermApp {
                     ) else {
                         return false;
                     };
+                    // The child editor has no workspace keymap. Resolve only its
+                    // font commands here, without consulting the main window tab.
+                    if editor_window {
+                        return this.execute_editor_font_shortcut(invocation.id, cx);
+                    }
                     if !shortcut_interceptor_dispatches(invocation.id) {
                         return false;
                     }
@@ -61,6 +76,19 @@ impl ZzClawTermApp {
             }
         });
         self.shell.runtime.shortcut_interceptor = Some(subscription);
+    }
+
+    fn execute_editor_font_shortcut(&mut self, id: ShortcutId, cx: &mut Context<Self>) -> bool {
+        if self.security.screen_locked() {
+            return false;
+        }
+        match id {
+            ShortcutId::ZoomIn => self.adjust_transfer_internal_editor_font_size(1, cx),
+            ShortcutId::ZoomOut => self.adjust_transfer_internal_editor_font_size(-1, cx),
+            ShortcutId::ResetZoom => self.reset_transfer_internal_editor_font_size(cx),
+            _ => return false,
+        }
+        true
     }
 
     pub(in crate::features) fn execute_shortcut_invocation(
@@ -156,9 +184,7 @@ impl ZzClawTermApp {
                     },
                     cx,
                 );
-                if let Some(active) = self.session.active_id_owned() {
-                    self.focus_terminal_session(&active, window, cx);
-                }
+                self.focus_active_workspace_surface(window, cx);
             }
             ShortcutId::NextTerminalGroup => self.select_relative_terminal_group(1, window, cx),
             ShortcutId::PreviousTerminalGroup => {
@@ -172,9 +198,7 @@ impl ZzClawTermApp {
                     index.saturating_sub(1)
                 };
                 self.select_session_index(index, cx);
-                if let Some(active) = self.session.active_id_owned() {
-                    self.focus_terminal_session(&active, window, cx);
-                }
+                self.focus_active_workspace_surface(window, cx);
             }
             ShortcutId::DuplicateSession => self.duplicate_active_session(window, cx),
             ShortcutId::MultiplexSsh => self.multiplex_active_ssh_session(window, cx),
@@ -189,7 +213,11 @@ impl ZzClawTermApp {
                 self.execute_title_menu_command(&TitleMenuCommand::ToggleRightSidebar, window, cx)
             }
             ShortcutId::TogglePaneFocus => {
-                if self.session.active_id().is_some() {
+                if self.session.active_id().is_some()
+                    && !self.active_workspace_tab().is_some_and(|key| {
+                        !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
+                    })
+                {
                     self.shell
                         .set_pane_focus_mode(!self.shell.pane_focus_mode());
                     self.sync_terminal_frame_snapshot_priority();
@@ -213,7 +241,7 @@ impl ZzClawTermApp {
                 self.execute_title_menu_command(&TitleMenuCommand::OpenSettings, window, cx)
             }
             ShortcutId::OpenChat => {
-                self.ensure_panel_open(NavItem::AiAssistant);
+                self.ensure_panel_open(NavItem::AiAssistant, cx);
                 window.focus(self.ai.chat_focus(), cx);
                 self.shell.set_status("AI panel focused".to_string());
                 cx.notify();

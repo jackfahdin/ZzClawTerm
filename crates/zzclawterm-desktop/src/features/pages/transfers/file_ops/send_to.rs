@@ -24,8 +24,6 @@ pub(in crate::features::pages::transfers) struct TransferSendToTarget {
     pub(in crate::features::pages::transfers) session_id: String,
     /// Display name shown as the submenu entry label.
     pub(in crate::features::pages::transfers) label: String,
-    /// SSH address shown as the entry meta (e.g. `ssh -p 22 user@host`).
-    pub(in crate::features::pages::transfers) meta: Option<String>,
 }
 
 impl ZzClawTermApp {
@@ -56,7 +54,6 @@ impl ZzClawTermApp {
                 send_to_candidate_is_eligible(source_session_id, &candidate).then(|| {
                     TransferSendToTarget {
                         label: self.session.display_name_by_info(&session),
-                        meta: self.session.ssh_address(&session.id),
                         session_id: session.id,
                     }
                 })

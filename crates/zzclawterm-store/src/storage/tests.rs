@@ -975,7 +975,7 @@ fn exports_and_imports_portable_snapshot() {
     );
     assert_eq!(
         settings["ui"]["activity_bar_layout"]["hidden_items"],
-        serde_json::json!(["network"])
+        serde_json::json!(["network", "gpuMonitor", "ascendNpuMonitor"])
     );
     assert_eq!(settings["ui"]["show_notes_panel"], true);
     assert_eq!(
@@ -3155,7 +3155,10 @@ fn legacy_settings_default_hidden_items_and_docked_panel_mode() {
     let store = ConnectionStore::open(&dir).expect("store");
 
     let summary = store.load_app_settings_summary().expect("load");
-    assert!(summary.ui_activity_bar_hidden_items.is_empty());
+    assert_eq!(
+        summary.ui_activity_bar_hidden_items,
+        ["gpuMonitor", "ascendNpuMonitor"]
+    );
     assert_eq!(summary.ui_panel_open_mode, "docked");
     assert!(!summary.ui_panel_multi_open);
     assert_eq!(
@@ -3210,7 +3213,7 @@ fn plugin_layout_roundtrips_without_losing_legacy_or_unknown_settings() {
     );
     assert_eq!(
         saved.ui_activity_bar_hidden_items,
-        ["futureEntry", "plugins"]
+        ["futureEntry", "gpuMonitor", "ascendNpuMonitor", "plugins"]
     );
     let raw = store.load_settings_value().expect("raw");
     assert_eq!(
@@ -3319,6 +3322,38 @@ fn header_status_settings_roundtrip_and_preserve_unknown_ui_fields() {
     assert_eq!(normalized.ui_header_status_mode, "session");
 
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn retired_ime_setting_survives_loading_and_saving_interaction_settings() {
+    for legacy_enabled in [false, true] {
+        let dir = unique_temp_dir("retired-ime-setting");
+        let store = ConnectionStore::open(&dir).unwrap();
+        store
+            .save_settings_value(&serde_json::json!({
+                "interaction": {
+                    "mac_ime_compatibility": legacy_enabled,
+                    "future_setting": {"keep": true}
+                }
+            }))
+            .unwrap();
+
+        let mut settings = store.load_app_settings_summary().unwrap();
+        assert_eq!(settings.interaction_mac_ime_compatibility, legacy_enabled);
+        settings.interaction_alt_as_meta = true;
+        let saved = store.save_interaction_settings(&settings).unwrap();
+        assert_eq!(saved.interaction_mac_ime_compatibility, legacy_enabled);
+        assert!(saved.interaction_alt_as_meta);
+        let stored = store.load_settings_value().unwrap();
+        assert_eq!(
+            stored["interaction"]["mac_ime_compatibility"],
+            legacy_enabled
+        );
+        assert_eq!(
+            stored["interaction"]["future_setting"],
+            serde_json::json!({"keep": true})
+        );
+    }
 }
 
 #[test]
@@ -3467,15 +3502,14 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(summary.terminal_low_latency_mode);
     // Legacy settings omit the new field and must keep zebra stripes enabled.
     assert!(summary.terminal_zebra_stripes_enabled);
-    assert!(!summary.ui_show_remote_stats);
+    assert_eq!(
+        summary.ui_file_manager,
+        zzclawterm_core::FileManagerUiSettings::default()
+    );
     assert_eq!(summary.ui_remote_stats_interval, 9);
-    assert!(summary.ui_show_gpu_monitor);
     assert_eq!(summary.ui_gpu_monitor_interval, 7);
-    assert!(summary.ui_show_ascend_npu_monitor);
     assert_eq!(summary.ui_ascend_npu_monitor_interval, 8);
-    assert!(!summary.ui_show_process_manager);
     assert_eq!(summary.ui_process_manager_interval, 11);
-    assert!(!summary.ui_show_docker_manager);
     assert_eq!(summary.ui_docker_manager_interval, 13);
     assert_eq!(summary.ui_quick_cmd_view_mode, "compact");
     assert_eq!(summary.ui_quick_cmd_sort_mode, "useCount");
@@ -3791,6 +3825,37 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
         Some(vec!["/data", "/logs"])
     );
 
+    let mut file_manager_update = summary.clone();
+    file_manager_update.ui_file_manager.open = true;
+    file_manager_update.ui_file_manager.split_percent = 40;
+    file_manager_update.ui_file_manager.left.path = "/tmp/left".to_string();
+    file_manager_update.ui_file_manager.right = zzclawterm_core::FileManagerPaneRestore {
+        source: zzclawterm_core::FileManagerSourceRestore::Connection {
+            id: "conn-1".to_string(),
+        },
+        path: "/var".to_string(),
+    };
+    let updated = store
+        .save_file_explorer_favorite_dirs(&file_manager_update)
+        .expect("save file manager");
+    assert!(updated.ui_file_manager.open);
+    assert_eq!(updated.ui_file_manager.split_percent, 40);
+    assert_eq!(updated.ui_file_manager.left.path, "/tmp/left");
+    assert_eq!(
+        updated.ui_file_manager.right,
+        zzclawterm_core::FileManagerPaneRestore {
+            source: zzclawterm_core::FileManagerSourceRestore::Connection {
+                id: "conn-1".to_string(),
+            },
+            path: "/var".to_string(),
+        }
+    );
+    let stored = store.load_settings_value().expect("stored file manager");
+    assert_eq!(
+        json_path(&stored, &["ui", "file_manager", "open"]).and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
     let mut next_keybindings = summary.keybindings.clone();
     next_keybindings.insert("view.openSettings".to_string(), "ctrl+.".to_string());
     next_keybindings.insert(
@@ -3833,11 +3898,8 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     terminal_update.terminal_show_multi_line_paste_dialog = true;
     terminal_update.terminal_low_latency_mode = true;
     terminal_update.terminal_zebra_stripes_enabled = false;
-    terminal_update.ui_show_remote_stats = true;
     terminal_update.ui_remote_stats_interval = 4;
-    terminal_update.ui_show_gpu_monitor = true;
     terminal_update.ui_gpu_monitor_interval = 10;
-    terminal_update.ui_show_ascend_npu_monitor = true;
     terminal_update.ui_ascend_npu_monitor_interval = 12;
     let saved_terminal = store
         .save_terminal_settings(&terminal_update)
@@ -3849,11 +3911,8 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(saved_terminal.terminal_show_multi_line_paste_dialog);
     assert!(saved_terminal.terminal_low_latency_mode);
     assert!(!saved_terminal.terminal_zebra_stripes_enabled);
-    assert!(saved_terminal.ui_show_remote_stats);
     assert_eq!(saved_terminal.ui_remote_stats_interval, 4);
-    assert!(saved_terminal.ui_show_gpu_monitor);
     assert_eq!(saved_terminal.ui_gpu_monitor_interval, 10);
-    assert!(saved_terminal.ui_show_ascend_npu_monitor);
     assert_eq!(saved_terminal.ui_ascend_npu_monitor_interval, 12);
     let stored = store
         .load_settings_value()
@@ -5941,6 +6000,146 @@ fn command_history_merges_legacy_suggestion_rewrites_without_rewriting_raw_data(
     assert_eq!(imported[0].command, "ps -ef");
     assert_eq!(imported[0].use_count, 6);
     assert_eq!(imported[0].last_used_at_ms, 40);
+}
+
+#[test]
+fn legacy_panel_visibility_migrates_once_and_terminal_saves_preserve_legacy_keys() {
+    let dir = unique_temp_dir("panel-visibility-migration");
+    let legacy = serde_json::json!({"ui": {
+        "show_notes_panel": false, "show_remote_stats": false,
+        "show_gpu_monitor": true, "show_ascend_npu_monitor": false,
+        "show_process_manager": false, "show_docker_manager": true,
+        "activity_bar_layout": {"right_top": ["gpuMonitor", "notes"], "hidden_items": ["dockerManager"], "future": 17}
+    }, "future": {"keep": true}});
+    {
+        let store = ConnectionStore::open(&dir).unwrap();
+        store.save_settings_value(&legacy).unwrap();
+    }
+    {
+        let store = ConnectionStore::open(&dir).unwrap();
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(
+            raw["ui"]["activity_bar_layout"]["legacy_visibility_migrated"],
+            true
+        );
+        assert_eq!(
+            raw["ui"]["activity_bar_layout"]["hidden_items"],
+            serde_json::json!([
+                "dockerManager",
+                "notes",
+                "resourceMonitor",
+                "ascendNpuMonitor",
+                "processManager"
+            ])
+        );
+        assert_eq!(
+            raw["ui"]["activity_bar_layout"]["right_top"],
+            legacy["ui"]["activity_bar_layout"]["right_top"]
+        );
+        let mut summary = store.load_app_settings_summary().unwrap();
+        summary.ui_activity_bar_hidden_items.clear();
+        store.save_ui_layout_settings(&summary).unwrap();
+        summary.ui_gpu_monitor_interval = 19;
+        store.save_terminal_settings(&summary).unwrap();
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["ui"]["show_notes_panel"], false);
+        assert_eq!(raw["ui"]["show_gpu_monitor"], true);
+        assert_eq!(raw["ui"]["activity_bar_layout"]["future"], 17);
+        assert_eq!(raw["future"], legacy["future"]);
+    }
+    let store = ConnectionStore::open(&dir).unwrap();
+    assert!(
+        store
+            .load_app_settings_summary()
+            .unwrap()
+            .ui_activity_bar_hidden_items
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .load_app_settings_summary()
+            .unwrap()
+            .ui_gpu_monitor_interval,
+        19
+    );
+}
+
+#[test]
+fn old_backup_and_sync_visibility_are_migrated_before_merging_destination_marker() {
+    for kind in [PortableSnapshotKind::Backup, PortableSnapshotKind::Sync] {
+        let source_dir = unique_temp_dir("panel-visibility-source");
+        let target_dir = unique_temp_dir("panel-visibility-target");
+        let source = ConnectionStore::open(&source_dir).unwrap();
+        source.save_settings_value(&serde_json::json!({"ui": {
+            "show_remote_stats": false, "show_gpu_monitor": true,
+            "activity_bar_layout": {"hidden_items": ["notes"], "right_top": ["gpuMonitor", "resourceMonitor"], "future": 23}
+        }})).unwrap();
+        let mut snapshot = source
+            .build_raw_portable_snapshot(kind.clone(), "source", "legacy")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        let target = ConnectionStore::open(&target_dir).unwrap();
+        let mut current = target.load_app_settings_summary().unwrap();
+        current.ui_left_panel_width = 313;
+        target.save_ui_layout_settings(&current).unwrap();
+        target.apply_raw_portable_snapshot(&snapshot).unwrap();
+        let raw = target.load_settings_value().unwrap();
+        assert_eq!(
+            raw["ui"]["activity_bar_layout"]["hidden_items"],
+            serde_json::json!(["notes", "resourceMonitor", "ascendNpuMonitor"])
+        );
+        assert_eq!(raw["ui"]["activity_bar_layout"]["future"], 23);
+        assert_eq!(
+            raw["ui"]["activity_bar_layout"]["legacy_visibility_migrated"],
+            true
+        );
+        if kind == PortableSnapshotKind::Sync {
+            assert_eq!(
+                target
+                    .load_app_settings_summary()
+                    .unwrap()
+                    .ui_left_panel_width,
+                313
+            );
+        }
+        let mut summary = target.load_app_settings_summary().unwrap();
+        summary.ui_activity_bar_hidden_items.clear();
+        target.save_ui_layout_settings(&summary).unwrap();
+        let mut round_trip = target
+            .build_raw_portable_snapshot(kind, "target", "new")
+            .unwrap();
+        round_trip.recalculate_hash().unwrap();
+        source.apply_raw_portable_snapshot(&round_trip).unwrap();
+        assert!(
+            source
+                .load_app_settings_summary()
+                .unwrap()
+                .ui_activity_bar_hidden_items
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn invalid_visibility_import_and_open_leave_original_documents_intact() {
+    let source_dir = unique_temp_dir("invalid-visibility-source");
+    let target_dir = unique_temp_dir("invalid-visibility-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    let invalid =
+        serde_json::json!({"ui": {"activity_bar_layout": {"hidden_items": [42]}}, "future": 9});
+    source.save_settings_value(&invalid).unwrap();
+    let mut snapshot = source
+        .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "source", "legacy")
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    let before = target.load_settings_value().unwrap();
+    assert!(target.apply_raw_portable_snapshot(&snapshot).is_err());
+    assert_eq!(target.load_settings_value().unwrap(), before);
+    assert!(source.migrate_legacy_panel_visibility().is_err());
+    assert_eq!(source.load_settings_value().unwrap(), invalid);
+    drop(source);
+    assert!(ConnectionStore::open(&source_dir).is_err());
 }
 
 pub(super) fn unique_temp_dir(name: &str) -> TestTempDir {

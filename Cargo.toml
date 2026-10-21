@@ -56,10 +56,10 @@ futures = "0.3"
 same-file = "1"
 tempfile = "3"
 glob = "0.3.4"
-gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "77a6246ddff9cafa6a72380fee60feedaa89b7d2" }
-gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "b66e09eb9f7a68799fa1972cf0bb7629e8c53a55" }
-gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "b66e09eb9f7a68799fa1972cf0bb7629e8c53a55" }
-gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "77a6246ddff9cafa6a72380fee60feedaa89b7d2" }
+gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "c054331114f9abdc44e5d587cd23314db6ac5aff" }
+gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "66bf2501a53e223f9b6c0a220686586b9c04eb43" }
+gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "66bf2501a53e223f9b6c0a220686586b9c04eb43" }
+gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "c054331114f9abdc44e5d587cd23314db6ac5aff" }
 # Pure-Rust, `#![forbid(unsafe)]` PDF rasterizer (MIT OR Apache-2.0). Pinned
 # exactly: the crate is pre-1.0 and explicitly experimental, so a caret range
 # could pull in a breaking 0.8 without review. `embed-fonts` bundles the 14
@@ -130,7 +130,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 vnc = { package = "vnc-rs", git = "https://gitcode.com/JackfahdinImport/vnc-rs", rev = "ff1f60518247362dd763bfc84e60f8478d9cc18e" }
 vte = "0.14"
 zeroize = "1"
-zmodem2 = { git = "https://gitcode.com/JackfahdinImport/zmodem2", rev = "372662d9fef892ba36d628107bf8152ab46ba4ca" }
+zmodem2 = { git = "https://gitcode.com/JackfahdinImport/zmodem2", rev = "87a80216179f29d90e0b8c06ee5b4a6a0132c763" }
 zed_reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = [
     "blocking",
     "json",
@@ -168,9 +168,9 @@ inherits = "dev"
 debug = "full"
 
 [patch.crates-io]
-alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "4155cc1d57788444594d9d31cf233568ef113ee8" }
-ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
+alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "3b60b2ed9544cad2cbba9e92fa0785e885cb4af1" }
+ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
 sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca9a72f2a70b456186e2472b27f0d45d" }
 # The published ironrdp-client and ironrdp-connector packages declare their
 # sibling crates as registry dependencies, but in the IronRDP repository those
@@ -180,13 +180,13 @@ sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca
 # are identical on both sides. `ironrdp-tls` is here for the same reason:
 # `zzclawterm-rdp-helper` names its certificate-validation types directly, because
 # ironrdp-client does not re-export them.
-ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
-ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "56dd8686723423f2a570598ed66d2df6fd90f547" }
+ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
 
 # gpui-kit takes zed-reqwest from git while this workspace uses the
 # published crate; without this both end up in the graph.

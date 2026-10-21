@@ -47,6 +47,10 @@ impl ZzClawTermApp {
         let ticket = self
             .remote_ops
             .begin_stats_job(job_session_id.clone(), manual);
+        if self.connection_icon_probe_needed() {
+            self.remote_ops
+                .begin_icon_probe(&job_session_id, ticket.job_id);
+        }
         self.remote_ops.mark_stats_refresh_started();
         self.remote_ops
             .set_stats_status("loading remote system stats");
@@ -127,6 +131,7 @@ impl ZzClawTermApp {
                         if this.apply_stats_event(event, cx) {
                             cx.notify();
                         }
+                        this.sync_remote_panel_demand(cx);
                         // Flush boundary: a reply changed the pane, so its panel
                         // gets the snapshot now rather than at the next paint.
                         this.flush_remote_panel_snapshots(cx);
@@ -148,6 +153,10 @@ impl ZzClawTermApp {
         {
             StatsApplyOutcome::Ignored => false,
             StatsApplyOutcome::CompletedInactive => true,
+            StatsApplyOutcome::IconProbeCompleted { session_id, stats } => {
+                self.apply_auto_detected_connection_icon(&session_id, &stats.system, cx);
+                true
+            }
             StatsApplyOutcome::Applied {
                 session_id,
                 stats,

@@ -330,7 +330,12 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) password_source: ConnectionEditorPasswordSource,
     pub(crate) password_id: Option<String>,
     pub(crate) account_id: Option<String>,
-    pub(crate) account_source_saved: bool,
+    /// SSH and Telnet only. `Account` displays the linked account username.
+    pub(crate) username_source: zzclawterm_core::ConnectionUsernameSource,
+    /// Set once the user picks a password source, so later account changes do not replace it.
+    pub(crate) password_source_touched: bool,
+    /// The saved-account password stopped being available and the source fell back to asking.
+    pub(crate) password_source_demoted: bool,
     pub(crate) field_errors: std::collections::HashMap<ConnectionEditorField, String>,
     pub(crate) password_edit: ConnectionPasswordEdit,
     pub(crate) password: zzclawterm_core::SecretString,

@@ -735,8 +735,7 @@ impl ZzClawTermApp {
         ) else {
             return false;
         };
-        let action_links_enabled = self.settings.summary().terminal_action_links_enabled
-            && !self.settings.summary().terminal_low_latency_mode;
+        let action_links_enabled = self.settings.summary().terminal_action_links_enabled;
         let Some(view) = self.terminal.view.views.get(session_id) else {
             return false;
         };
@@ -766,15 +765,13 @@ impl ZzClawTermApp {
             session_id,
         );
         let layout_cache = view.render_cache.layout_cache.clone();
-        let render_degraded =
-            view.render_degraded || self.settings.summary().terminal_low_latency_mode;
+        let render_degraded = view.render_degraded;
         let has_new = view.has_new_while_scrolled;
         let performance_overlay = view.performance_overlay;
         let skipped = view.skipped_output_chars;
         let protocol_state = view.protocol_state;
         let search_matches = if is_active
             && !input_latency_active
-            && !self.settings.summary().terminal_low_latency_mode
             && self.terminal.search.open
             && self.terminal.search.mode == TerminalSearchMode::Buffer
         {
@@ -996,8 +993,7 @@ impl ZzClawTermApp {
             || burst > 0
             || mode == TerminalPerformanceMode::Overloaded
             || user_scroll_active
-            || input_latency_active
-            || self.settings.summary().terminal_low_latency_mode;
+            || input_latency_active;
         let render_degraded = render_degraded_view || render_pressure;
         let configured_keyword_rules = self.resolved_keyword_highlight_rules();
         let input_rules_key = self
@@ -1049,8 +1045,7 @@ impl ZzClawTermApp {
             retained_surface_snapshot,
         );
         let snapshot_duration = snapshot_started_at.elapsed();
-        let action_links_enabled = self.settings.summary().terminal_action_links_enabled
-            && !self.settings.summary().terminal_low_latency_mode;
+        let action_links_enabled = self.settings.summary().terminal_action_links_enabled;
         if let Some(snapshot) = snapshot.as_ref()
             && terminal_live_action_link_enrichment_allowed(
                 display_offset,

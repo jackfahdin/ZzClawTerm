@@ -1213,18 +1213,97 @@ impl ConnectionFeatureState {
         self.reset_editor_field(ConnectionEditorField::Password, "", cx);
     }
 
-    pub fn set_editor_account_source(&mut self, saved: bool) {
+    pub fn set_editor_username_silent(&mut self, username: &str, cx: &mut App) {
         if let Some(editor) = self.editor.draft.as_mut() {
-            editor.account_source_saved = saved;
-            if !saved {
-                editor.account_id = None;
-                editor.password_id = None;
-                if editor.password_source == ConnectionEditorPasswordSource::Saved {
+            editor.username = username.to_string();
+        }
+        if let Some(input) = self.editor.fields.get(&ConnectionEditorField::Username) {
+            input.update(cx, |state, cx| state.set_content_silent(username, cx));
+        }
+    }
+
+    /// Apply username and password consequences after the account id is already updated.
+    pub fn apply_editor_account_selection(
+        &mut self,
+        previous_id: Option<&str>,
+        previous_username: Option<&str>,
+        selected: Option<&zzclawterm_core::SavedPassword>,
+        cx: &mut App,
+    ) {
+        let username_sync = {
+            let Some(editor) = self.editor.draft.as_mut() else {
+                return;
+            };
+            if !matches!(
+                editor.kind,
+                ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+            ) {
+                return;
+            }
+            let cleared = editor.account_id.is_none();
+            let gaining = previous_id.is_none() && !cleared;
+            let selected_username = selected
+                .map(|account| account.username.trim())
+                .filter(|username| !username.is_empty());
+            let mut username_sync = None;
+            if cleared {
+                if editor.username_source == zzclawterm_core::ConnectionUsernameSource::Account
+                    && let Some(username) = previous_username
+                        .map(str::trim)
+                        .filter(|username| !username.is_empty())
+                {
+                    editor.username = username.to_string();
+                    username_sync = Some(username.to_string());
+                }
+                editor.username_source = zzclawterm_core::ConnectionUsernameSource::Connection;
+            } else if gaining && selected_username.is_some() {
+                editor.username_source = zzclawterm_core::ConnectionUsernameSource::Account;
+            }
+            let has_password = selected.is_some_and(|account| account.has_password);
+            if editor.auth_mode == "password" {
+                if editor.password_source == ConnectionEditorPasswordSource::Saved && !has_password
+                {
                     editor.password_source = ConnectionEditorPasswordSource::Ask;
+                    editor.password_source_demoted = true;
+                } else if editor.password_source == ConnectionEditorPasswordSource::Ask
+                    && has_password
+                {
+                    editor.password_source = ConnectionEditorPasswordSource::Saved;
+                    editor.password_source_demoted = false;
                 }
             }
-            editor.error = None;
-            editor.field_errors.clear();
+            username_sync
+        };
+        if let Some(username) = username_sync {
+            self.set_editor_username_silent(&username, cx);
+        }
+    }
+
+    pub fn use_connection_username(&mut self, account_username: Option<&str>, cx: &mut App) {
+        if let Some(username) = account_username
+            .map(str::trim)
+            .filter(|username| !username.is_empty())
+        {
+            self.set_editor_username_silent(username, cx);
+        }
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.username_source = zzclawterm_core::ConnectionUsernameSource::Connection;
+        }
+    }
+
+    pub fn follow_account_username(&mut self) {
+        if let Some(editor) = self.editor.draft.as_mut() {
+            editor.username_source = zzclawterm_core::ConnectionUsernameSource::Account;
+        }
+    }
+
+    pub fn demote_saved_password_if_unavailable(&mut self, has_password: bool) {
+        let Some(editor) = self.editor.draft.as_mut() else {
+            return;
+        };
+        if editor.password_source == ConnectionEditorPasswordSource::Saved && !has_password {
+            editor.password_source = ConnectionEditorPasswordSource::Ask;
+            editor.password_source_demoted = true;
         }
     }
 
@@ -2141,7 +2220,7 @@ impl ConnectionEditorFeatureState {
     }
 
     pub fn set_password_source(&mut self, source: ConnectionEditorPasswordSource) -> bool {
-        let changed = set_connection_editor_password_source(&mut self.draft, source);
+        let changed = set_connection_editor_password_source(&mut self.draft, source, true);
         if changed {
             self.close_icon_picker();
         }

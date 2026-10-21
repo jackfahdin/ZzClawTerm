@@ -24,6 +24,7 @@ mod selectable_text;
 mod selection;
 mod settings;
 mod sizing;
+pub mod tab_close;
 mod tabs;
 mod theme;
 mod theme_bridge;

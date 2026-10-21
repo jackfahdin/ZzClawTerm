@@ -16,10 +16,6 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let raw_encoding = self.settings.summary().interaction_default_encoding.clone();
-        let encoding = zzclawterm_core::character_encoding::CharacterEncoding::parse(&raw_encoding)
-            .map(|encoding| encoding.label().to_string())
-            .unwrap_or(raw_encoding);
         // Built before the form, which reads `self` throughout: creating the
         // box needs it mutably.
         let word_separators_input =
@@ -250,19 +246,6 @@ impl SettingsPanel {
                                 this.toggle_alt_as_meta(cx);
                             }),
                         ),
-                    ))
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.macImeCompatibility"),
-                        Some(SharedString::from(t!("settings.macImeCompatibilityDesc"))),
-                        settings_switch(
-                            palette,
-                            "interaction-mac-ime",
-                            self.settings.summary().interaction_mac_ime_compatibility,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_mac_ime_compatibility(cx);
-                            }),
-                        ),
                     )),
             ))
             .child(settings_form_section(
@@ -300,27 +283,6 @@ impl SettingsPanel {
                         },
                         cx,
                     )),
-            ))
-            .child(settings_form_section(
-                palette,
-                Some(t!("settings.interactionEncoding")),
-                Some(t!("settings.interactionEncodingDesc")),
-                self.settings_select_field(
-                    "settings.interaction.default-encoding",
-                    t!("settings.defaultEncoding"),
-                    Some(SharedString::from(t!("settings.defaultEncodingDesc"))),
-                    (
-                        zzclawterm_core::character_encoding::CharacterEncoding::ALL
-                            .into_iter()
-                            .map(|encoding| {
-                                ZzClawSelectOption::new(encoding.label(), encoding.label())
-                            })
-                            .collect(),
-                        encoding,
-                        false,
-                    ),
-                    cx,
-                ),
             ))
     }
 

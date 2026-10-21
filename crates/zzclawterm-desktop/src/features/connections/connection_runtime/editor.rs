@@ -195,7 +195,9 @@ impl ZzClawTermApp {
                 password_source: ConnectionEditorPasswordSource::Ask,
                 password_id: None,
                 account_id: None,
-                account_source_saved: false,
+                username_source: zzclawterm_core::ConnectionUsernameSource::Connection,
+                password_source_touched: false,
+                password_source_demoted: false,
                 password_edit: crate::models::ConnectionPasswordEdit::Replace,
                 field_errors: Default::default(),
                 password: zzclawterm_core::SecretString::default(),
@@ -458,8 +460,6 @@ impl ZzClawTermApp {
         ) {
             self.connection_state.hide_editor_secrets(cx);
         }
-        self.connection_state
-            .set_editor_select_value(select, value.map(ToOwned::to_owned));
         let account_selection = select == ConnectionEditorSelect::Account
             || (select == ConnectionEditorSelect::SavedPassword
                 && self
@@ -471,37 +471,130 @@ impl ZzClawTermApp {
                             ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
                         )
                     }));
-        if account_selection
-            && let Some(editor) = self.connection_state.active_editor_draft()
-            && editor.auth_mode == "password"
-        {
-            let has_password = value
-                .and_then(|id| {
-                    self.security
-                        .passwords()
-                        .iter()
-                        .find(|entry| entry.id == id)
-                })
-                .is_some_and(|entry| entry.has_password);
-            self.connection_state
-                .set_editor_password_source(if has_password {
-                    ConnectionEditorPasswordSource::Saved
-                } else {
-                    ConnectionEditorPasswordSource::Ask
-                });
+        let previous_account = account_selection.then(|| {
+            let id = self
+                .connection_state
+                .active_editor_draft()
+                .and_then(|editor| editor.account_id.clone());
+            let username = id.as_ref().and_then(|id| {
+                self.security
+                    .passwords()
+                    .iter()
+                    .find(|entry| entry.id == *id)
+                    .map(|entry| entry.username.clone())
+            });
+            (id, username)
+        });
+        self.connection_state
+            .set_editor_select_value(select, value.map(ToOwned::to_owned));
+        if let Some((previous_id, previous_username)) = previous_account {
+            let selected = value.and_then(|id| {
+                self.security
+                    .passwords()
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .cloned()
+            });
+            self.connection_state.apply_editor_account_selection(
+                previous_id.as_deref(),
+                previous_username.as_deref(),
+                selected.as_ref(),
+                cx,
+            );
         }
 
         cx.notify();
     }
 
-    pub(in crate::features) fn set_connection_account_source(
+    pub(in crate::features) fn use_connection_editor_username(&mut self, cx: &mut Context<Self>) {
+        let username = self.editor_bound_account().and_then(|account| {
+            let username = account.username.trim();
+            (!username.is_empty()).then(|| username.to_string())
+        });
+        self.connection_state
+            .use_connection_username(username.as_deref(), cx);
+        cx.notify();
+    }
+
+    pub(in crate::features) fn follow_connection_editor_account_username(
         &mut self,
-        saved: bool,
         cx: &mut Context<Self>,
     ) {
-        self.connection_state.hide_editor_secrets(cx);
-        self.connection_state.set_editor_account_source(saved);
+        self.connection_state.follow_account_username();
         cx.notify();
+    }
+
+    pub(in crate::features) fn editor_account_username_if_following(
+        &self,
+        id: &str,
+    ) -> Option<String> {
+        let editor = self.connection_state.active_editor_draft()?;
+        if !matches!(
+            editor.kind,
+            ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+        ) {
+            return None;
+        }
+        if editor.account_id.as_deref() != Some(id)
+            || editor.username_source != zzclawterm_core::ConnectionUsernameSource::Account
+        {
+            return None;
+        }
+        let username = self
+            .security
+            .passwords()
+            .iter()
+            .find(|entry| entry.id == id)?
+            .username
+            .trim();
+        (!username.is_empty()).then(|| username.to_string())
+    }
+
+    pub(in crate::features) fn adopt_released_account_username(
+        &mut self,
+        username: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state
+            .use_connection_username(Some(username), cx);
+        cx.notify();
+    }
+
+    pub(in crate::features) fn reconcile_open_editor_password_source(&mut self) {
+        let Some(editor) = self.connection_state.active_editor_draft() else {
+            return;
+        };
+        if editor.password_source != ConnectionEditorPasswordSource::Saved {
+            return;
+        }
+        let id = match editor.kind {
+            ConnectionKindTab::Ssh | ConnectionKindTab::Telnet => editor.account_id.clone(),
+            _ => editor.password_id.clone(),
+        };
+        let has_password = id
+            .as_ref()
+            .and_then(|id| {
+                self.security
+                    .passwords()
+                    .iter()
+                    .find(|entry| entry.id == *id)
+            })
+            .is_some_and(|entry| entry.has_password);
+        self.connection_state
+            .demote_saved_password_if_unavailable(has_password);
+    }
+
+    fn editor_bound_account(&self) -> Option<zzclawterm_core::SavedPassword> {
+        let id = self
+            .connection_state
+            .active_editor_draft()?
+            .account_id
+            .clone()?;
+        self.security
+            .passwords()
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
     }
 
     pub(in crate::features) fn set_connection_editor_password_source(
@@ -1062,6 +1155,8 @@ impl ZzClawTermApp {
             .is_some_and(|auth| auth.mode == "password" && auth.uses_account_password());
         let inspect_password =
             !self.settings.summary().has_master_password || self.security.secrets_unlocked();
+        let follow_account_username =
+            editor.username_source == zzclawterm_core::ConnectionUsernameSource::Account;
         let ssh_username_required =
             editor.kind == ConnectionKindTab::Ssh && editor.username.trim().is_empty();
         let missing_account = t!("passwordManager.missingAccount").to_string();
@@ -1078,7 +1173,9 @@ impl ZzClawTermApp {
                     let Some(account) = store.load_password_by_id(id)? else {
                         return Ok(Err((ConnectionEditorField::Username, missing_account)));
                     };
-                    if ssh_username_required && account.username.trim().is_empty() {
+                    if ssh_username_required
+                        && (!follow_account_username || account.username.trim().is_empty())
+                    {
                         return Ok(Err((ConnectionEditorField::Username, missing_username)));
                     }
                     if account_password {

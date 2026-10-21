@@ -21,6 +21,10 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
+        let raw_encoding = self.settings.summary().interaction_default_encoding.clone();
+        let encoding = zzclawterm_core::character_encoding::CharacterEncoding::parse(&raw_encoding)
+            .map(|encoding| encoding.label().to_string())
+            .unwrap_or(raw_encoding);
         let x11_display_input = self
             .existing_text_input_box("settings.terminal.x11-display", false)
             .into_any_element();
@@ -122,25 +126,6 @@ impl SettingsPanel {
                             ))
                             .child(div().w_full().max_w(px(520.)).child(x11_server_path_input)),
                     )
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.hardwareAcceleration"),
-                        Some(SharedString::from(t!("settings.hardwareAccelerationDesc"))),
-                        div().text_xs().child(t!("settings.nativeGpuRenderer")),
-                    ))
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.lowLatencyMode"),
-                        Some(SharedString::from(t!("settings.lowLatencyModeDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-low-latency-mode",
-                            self.settings.summary().terminal_low_latency_mode,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_terminal_low_latency_mode(cx);
-                            }),
-                        ),
-                    ))
                     .child(settings_form_row(
                         palette,
                         t!("settings.zebraStripes"),
@@ -251,135 +236,28 @@ impl SettingsPanel {
                                 this.toggle_terminal_reconnect_restore_cwd(cx);
                             }),
                         ),
-                    ))
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showNotesPanel"),
-                        Some(SharedString::from(t!("settings.showNotesPanelDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-notes-panel",
-                            self.settings.summary().ui_show_notes_panel,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_notes_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showRemoteStats"),
-                        Some(SharedString::from(t!("settings.showRemoteStatsDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-remote-stats",
-                            self.settings.summary().ui_show_remote_stats,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_remote_stats_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .when(self.settings.summary().ui_show_remote_stats, |this| {
-                        this.child(settings_form_row(
-                            palette,
-                            t!("settings.remoteStatsInterval"),
-                            Some(SharedString::from(t!("settings.remoteStatsIntervalDesc"))),
-                            self.existing_number_input_box("settings.number.remote-stats-interval"),
-                        ))
-                    })
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showGpuMonitor"),
-                        Some(SharedString::from(t!("settings.showGpuMonitorDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-gpu-monitor",
-                            self.settings.summary().ui_show_gpu_monitor,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_gpu_monitor_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .when(self.settings.summary().ui_show_gpu_monitor, |this| {
-                        this.child(settings_form_row(
-                            palette,
-                            t!("settings.gpuMonitorInterval"),
-                            Some(SharedString::from(t!("settings.gpuMonitorIntervalDesc"))),
-                            self.existing_number_input_box("settings.number.gpu-monitor-interval"),
-                        ))
-                    })
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showAscendNpuMonitor"),
-                        Some(SharedString::from(t!("settings.showAscendNpuMonitorDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-ascend-npu-monitor",
-                            self.settings.summary().ui_show_ascend_npu_monitor,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_ascend_npu_monitor_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .when(self.settings.summary().ui_show_ascend_npu_monitor, |this| {
-                        this.child(settings_form_row(
-                            palette,
-                            t!("settings.ascendNpuMonitorInterval"),
-                            Some(SharedString::from(t!(
-                                "settings.ascendNpuMonitorIntervalDesc"
-                            ))),
-                            self.existing_number_input_box(
-                                "settings.number.ascend-npu-monitor-interval",
-                            ),
-                        ))
-                    })
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showProcessManager"),
-                        Some(SharedString::from(t!("settings.showProcessManagerDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-process-manager",
-                            self.settings.summary().ui_show_process_manager,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_process_manager_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .when(self.settings.summary().ui_show_process_manager, |this| {
-                        this.child(settings_form_row(
-                            palette,
-                            t!("settings.processManagerInterval"),
-                            Some(SharedString::from(t!(
-                                "settings.processManagerIntervalDesc"
-                            ))),
-                            self.existing_number_input_box(
-                                "settings.number.process-manager-interval",
-                            ),
-                        ))
-                    })
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.showDockerManager"),
-                        Some(SharedString::from(t!("settings.showDockerManagerDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-docker-manager",
-                            self.settings.summary().ui_show_docker_manager,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_docker_manager_panel(cx);
-                            }),
-                        ),
-                    ))
-                    .when(self.settings.summary().ui_show_docker_manager, |this| {
-                        this.child(settings_form_row(
-                            palette,
-                            t!("settings.dockerManagerInterval"),
-                            Some(SharedString::from(t!("settings.dockerManagerIntervalDesc"))),
-                            self.existing_number_input_box(
-                                "settings.number.docker-manager-interval",
-                            ),
-                        ))
-                    }),
+                    )),
+            ))
+            .child(settings_form_section(
+                palette,
+                Some(t!("settings.interactionEncoding")),
+                Some(t!("settings.interactionEncodingDesc")),
+                self.settings_select_field(
+                    "settings.interaction.default-encoding",
+                    t!("settings.defaultEncoding"),
+                    Some(SharedString::from(t!("settings.defaultEncodingDesc"))),
+                    (
+                        zzclawterm_core::character_encoding::CharacterEncoding::ALL
+                            .into_iter()
+                            .map(|encoding| {
+                                ZzClawSelectOption::new(encoding.label(), encoding.label())
+                            })
+                            .collect(),
+                        encoding,
+                        false,
+                    ),
+                    cx,
+                ),
             ))
             .child(settings_form_section(
                 palette,

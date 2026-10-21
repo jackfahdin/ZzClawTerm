@@ -40,10 +40,10 @@ pub(in crate::features) struct ShellFeatureState {
     pub(super) runtime: ShellRuntimeState,
     pub(super) bottom_panel: ShellBottomPanelState,
     pub(super) viewport: ShellViewportState,
-    pub(super) navigation: ShellNavigationState,
-    pub(super) panels: ShellPanelState,
+    pub(in crate::features) navigation: ShellNavigationState,
+    pub(in crate::features) panels: ShellPanelState,
     pub(super) chrome: ShellChromeState,
-    pub(super) workspace: ShellWorkspaceState,
+    pub(in crate::features) workspace: ShellWorkspaceState,
     pub(super) diagnostics: ShellDiagnosticState,
     resize_handle_hover: ResizeHandleHoverState,
     /// The window `ZzClawTermApp` itself renders in.
@@ -128,9 +128,9 @@ pub(super) struct WallpaperCache {
 }
 
 /// Top-level page navigation and the settings-page/window lifecycle.
-pub(super) struct ShellNavigationState {
-    pub(super) selected_nav: NavItem,
-    pub(super) main_mode: MainMode,
+pub(in crate::features) struct ShellNavigationState {
+    pub(in crate::features) selected_nav: NavItem,
+    pub(in crate::features) main_mode: MainMode,
     pub(super) settings: ShellSettingsNavigationState,
 }
 
@@ -144,9 +144,9 @@ pub(super) struct ShellSettingsNavigationState {
 }
 
 /// Side-panel selection, stack layout and resize interaction state.
-pub(super) struct ShellPanelState {
-    pub(super) active_left: Option<NavItem>,
-    pub(super) active_right: Option<NavItem>,
+pub(in crate::features) struct ShellPanelState {
+    pub(in crate::features) active_left: Option<NavItem>,
+    pub(in crate::features) active_right: Option<NavItem>,
     pub(super) left_open: Vec<String>,
     pub(super) right_open: Vec<String>,
     pub(super) stack_sizes: HashMap<String, f32>,
@@ -158,8 +158,8 @@ pub(super) struct ShellPanelState {
     pub(super) floating_right: Option<NavItem>,
     pub(super) last_floating_side: Option<PanelSide>,
     pub(super) right_focus: RightFocus,
-    pub(super) left_collapsed: bool,
-    pub(super) right_collapsed: bool,
+    pub(in crate::features) left_collapsed: bool,
+    pub(in crate::features) right_collapsed: bool,
     pub(super) mobile_left_open: bool,
     pub(super) mobile_right_open: bool,
     pub(super) left_width: f32,
@@ -187,7 +187,13 @@ pub(super) struct ShellChromeState {
 }
 
 /// Global and per-tab pane trees for the workspace surface.
-pub(super) struct ShellWorkspaceState {
+pub(in crate::features) struct ShellWorkspaceState {
+    pub(super) windows: super::window_state::TerminalWindowState,
+    pub(in crate::features) focused_group: Option<String>,
+    pub(in crate::features) hidden_sessions: HashSet<String>,
+    pub(in crate::features) editor_exit_approvals:
+        std::collections::HashMap<String, super::editor_tabs::EditorCloseApproval>,
+    pub(in crate::features) editor_close: Option<super::editor_tabs::PendingWorkspaceClose>,
     pub(super) pane_focus_mode: bool,
     pub(super) split: Option<WorkspaceSplitState>,
     pub(super) split_resize: Option<WorkspaceSplitResizeState>,
@@ -198,6 +204,10 @@ pub(super) struct ShellWorkspaceState {
 }
 
 impl ShellFeatureState {
+    pub(in crate::features) fn session_tab_is_hidden(&self, id: &str) -> bool {
+        self.workspace.hidden_sessions.contains(id)
+    }
+
     pub(in crate::features) fn prune_tab_strips(&mut self, groups: &[String]) {
         self.tab_strip_views
             .retain(|group, _| group.as_ref().is_none_or(|id| groups.contains(id)));
@@ -308,6 +318,11 @@ impl ShellFeatureState {
                 last_connect_failure_error: None,
             },
             workspace: ShellWorkspaceState {
+                windows: Default::default(),
+                focused_group: None,
+                hidden_sessions: HashSet::new(),
+                editor_close: None,
+                editor_exit_approvals: Default::default(),
                 pane_focus_mode: false,
                 split: None,
                 split_resize: None,
@@ -379,6 +394,11 @@ impl ShellFeatureState {
 
     pub(in crate::features) fn viewport_size(&self) -> (f32, f32) {
         self.viewport.size
+    }
+
+    #[cfg(test)]
+    pub(in crate::features) fn set_viewport_size_for_test(&mut self, size: (f32, f32)) {
+        self.viewport.update_size(size, Instant::now());
     }
 
     pub(in crate::features) fn wallpaper_asset(&self) -> Option<&WallpaperAsset> {
@@ -908,6 +928,16 @@ impl ShellFeatureState {
         self.workspace.replace_session_id(old_id, new_id);
     }
 
+    pub(in crate::features) fn hide_workspace_session(&mut self, session_id: &str) {
+        self.workspace
+            .hidden_sessions
+            .insert(session_id.to_string());
+    }
+
+    pub(in crate::features) fn reveal_workspace_session(&mut self, session_id: &str) -> bool {
+        self.workspace.hidden_sessions.remove(session_id)
+    }
+
     pub(in crate::features) fn remove_workspace_session(&mut self, session_id: &str) {
         self.workspace.remove_session(session_id);
     }
@@ -1230,6 +1260,9 @@ impl ShellWorkspaceState {
     }
 
     pub(in crate::features) fn replace_session_id(&mut self, old_id: &str, new_id: &str) {
+        if self.hidden_sessions.remove(old_id) {
+            self.hidden_sessions.insert(new_id.to_string());
+        }
         for root in self.pane_roots.values_mut() {
             root.replace_session_id(old_id, new_id);
         }
@@ -1712,5 +1745,122 @@ mod tests {
         shell.panels.set_open_mode(PanelOpenMode::Docked);
         assert!(shell.panel_multi_open());
         assert!(!shell.panel_is_floating());
+    }
+    use super::super::window_state::{TerminalWindowDockResult, TerminalWindowReconcileResult};
+    use crate::models::{SmartSplitMode, TabDockEdge, TabDockZone};
+    #[test]
+    fn terminal_window_owner_reconciles_tabs_and_reconnect_ids_atomically() {
+        let mut state = shell(crate::models::BottomPanelMode::Hidden);
+        let initial = vec!["alpha".to_string(), "beta".to_string()];
+        let focused = state
+            .apply_smart_split(&initial, SmartSplitMode::Vertical, Some("beta"))
+            .expect("layout");
+
+        let live = vec!["beta".to_string(), "gamma".to_string()];
+        let result = state.reconcile_terminal_windows(&live, focused.as_deref(), Some("gamma"));
+        assert!(matches!(
+            result,
+            TerminalWindowReconcileResult::Reconciled { .. }
+        ));
+        assert!(state.replace_terminal_window_tab_id("beta", "beta-reconnected"));
+
+        let root = state.workspace.windows.tree.as_ref().expect("window tree");
+        assert_eq!(
+            root.collect_tab_ids()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            ["beta-reconnected".to_string(), "gamma".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+    #[test]
+    fn terminal_window_owner_docks_and_clears_transient_targets() {
+        let mut state = shell(crate::models::BottomPanelMode::Hidden);
+        let leaf_id = state
+            .ensure_terminal_windows_root(
+                vec!["alpha".to_string(), "beta".to_string()],
+                Some("alpha".to_string()),
+            )
+            .expect("leaf");
+        assert!(
+            state.set_terminal_window_drop(leaf_id.clone(), TabDockZone::Edge(TabDockEdge::Right),)
+        );
+        assert_eq!(
+            state.terminal_window_drop_for_leaf(&leaf_id),
+            Some(TabDockZone::Edge(TabDockEdge::Right))
+        );
+
+        let result = state.dock_tab_on_terminal_window_leaf(
+            "alpha",
+            &leaf_id,
+            TabDockZone::Edge(TabDockEdge::Right),
+        );
+        assert!(matches!(result, TerminalWindowDockResult::Docked { .. }));
+        assert!(state.terminal_windows_is_multi_leaf());
+        assert!(state.terminal_window_drop_for_leaf(&leaf_id).is_none());
+
+        assert!(state.set_terminal_file_drop_hover(Some("alpha".to_string())));
+        assert!(state.terminal_file_drop_hover_matches("alpha"));
+        assert!(!state.clear_terminal_file_drop_hover_for_session("beta"));
+        assert!(state.terminal_file_drop_hover_matches("alpha"));
+        assert!(state.clear_terminal_file_drop_hover_for_session("alpha"));
+        assert!(!state.terminal_file_drop_hover_is_pending());
+
+        assert!(state.set_terminal_file_drop_hover(Some("alpha".to_string())));
+        assert!(state.clear_terminal_file_drop_hover());
+        assert!(!state.terminal_file_drop_hover_is_pending());
+    }
+    #[test]
+    fn terminal_window_owner_round_trips_restorable_multi_leaf_layout() {
+        let mut state = shell(crate::models::BottomPanelMode::Hidden);
+        let ordered = vec!["alpha".to_string(), "beta".to_string()];
+        state
+            .apply_smart_split(&ordered, SmartSplitMode::Horizontal, Some("beta"))
+            .expect("layout");
+        let layout = state
+            .serialize_terminal_window_layout(&ordered)
+            .expect("serialized layout");
+
+        let mut restored = shell(crate::models::BottomPanelMode::Hidden);
+        restored.complete_terminal_windows_restore();
+        assert!(restored.terminal_windows_restore_is_complete());
+        restored.mark_terminal_windows_restore_pending();
+        assert!(!restored.terminal_windows_restore_is_complete());
+        restored
+            .restore_terminal_window_layout(&layout, &ordered, Some("beta"))
+            .expect("restored layout");
+
+        assert!(restored.terminal_windows_is_multi_leaf());
+        assert_eq!(
+            restored
+                .workspace
+                .windows
+                .tree
+                .as_ref()
+                .expect("window tree")
+                .collect_tab_ids()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            ordered.into_iter().collect()
+        );
+    }
+    #[test]
+    fn single_group_restore_keeps_the_saved_tab_selection_and_order() {
+        let mut state = shell(crate::models::BottomPanelMode::Hidden);
+        let ordered = vec!["alpha".to_string(), "beta".to_string()];
+        state.ensure_terminal_windows_root(ordered.clone(), Some("beta".to_string()));
+        let saved = state
+            .serialize_terminal_window_layout(&ordered)
+            .expect("single group layout");
+        let mut restored = shell(crate::models::BottomPanelMode::Hidden);
+        let group = restored
+            .restore_terminal_window_layout(&saved, &ordered, Some("alpha"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored.terminal_group_tabs(&group),
+            Some((ordered, Some("beta".to_string())))
+        );
     }
 }

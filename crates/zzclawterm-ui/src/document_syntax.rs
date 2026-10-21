@@ -115,7 +115,83 @@ pub fn document_fold_ranges(content: &str, language: &str) -> Vec<Range<usize>> 
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::component::highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter};
+    use zzclawterm_core::document_language::DOCUMENT_LANGUAGES;
+
     use super::{command_highlights, document_fold_ranges};
+
+    #[test]
+    fn every_document_language_has_a_working_highlighter() {
+        let samples = [
+            (
+                "astro",
+                "---\nconst title = 'Hello';\n---\n<h1>{title}</h1>",
+            ),
+            ("bash", "echo \"hello $HOME\" # comment"),
+            ("c", "int main(void) { return 42; }"),
+            ("cpp", "class Hello { public: int value = 42; };"),
+            ("css", "body { color: red; }"),
+            ("diff", "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n"),
+            ("ejs", "<h1><%= title %></h1>"),
+            ("elixir", "defmodule Hello do\n  def value, do: 42\nend"),
+            ("erb", "<h1><%= title %></h1>"),
+            ("go", "package main\nfunc main() { println(42) }"),
+            ("html", "<h1 class=\"title\">Hello</h1>"),
+            ("java", "class Hello { int value = 42; }"),
+            ("javascript", "const value = 42;"),
+            ("jsdoc", "/** @param {string} name */"),
+            ("json", "{\"value\": 42}"),
+            ("kotlin", "fun main() { val value = 42 }"),
+            ("lua", "local value = 42"),
+            ("make", "all:\n\techo hello\n"),
+            ("markdown", "# Hello\n\n**world**\n"),
+            ("php", "<?php echo 'hello'; ?>"),
+            ("python", "def hello():\n    return 42\n"),
+            ("ruby", "def hello\n  42\nend"),
+            ("rust", "fn main() { let value = 42; }"),
+            ("scala", "object Hello { val value = 42 }"),
+            ("sql", "SELECT name FROM users WHERE id = 42;"),
+            (
+                "svelte",
+                "<script>let title = 'Hello';</script><h1>{title}</h1>",
+            ),
+            ("toml", "value = 42"),
+            (
+                "tsx",
+                "type Props = { title: string }; const view = <div>Hello</div>;",
+            ),
+            ("typescript", "const value: number = 42;"),
+            ("yaml", "value: 42"),
+            ("zig", "const value: u32 = 42;"),
+        ];
+        assert_eq!(samples.len(), DOCUMENT_LANGUAGES.len());
+        for language in DOCUMENT_LANGUAGES {
+            let sample = samples
+                .iter()
+                .find(|(id, _)| *id == language.id)
+                .unwrap_or_else(|| panic!("missing sample for {}", language.id))
+                .1;
+            let grammar = LanguageRegistry::singleton()
+                .language(language.id)
+                .unwrap_or_else(|| panic!("missing grammar for {}", language.id));
+            assert!(grammar.has_grammar(), "{}", language.id);
+            assert!(!grammar.highlights.is_empty(), "{}", language.id);
+            let text = ropey::Rope::from(sample);
+            let mut highlighter = SyntaxHighlighter::new(language.id);
+            highlighter.update(None, &text, None);
+            assert!(highlighter.tree().is_some(), "{}", language.id);
+            assert!(
+                !highlighter
+                    .styles(&(0..sample.len()), HighlightTheme::default_dark().as_ref())
+                    .is_empty(),
+                "no highlights for {}",
+                language.id,
+            );
+            if language.id == "tsx" {
+                assert!(!highlighter.tree().unwrap().root_node().has_error());
+            }
+        }
+    }
 
     #[test]
     fn shell_highlights_use_theme_colors_and_preserve_utf8_ranges() {

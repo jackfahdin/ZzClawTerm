@@ -12,7 +12,7 @@ pub(in crate::features::pages::remote) fn usage_color(
     } else if ratio >= 0.7 {
         rgb(palette.warning).into()
     } else {
-        rgb(0x38bdf8).into()
+        rgb(palette.primary).into()
     }
 }
 

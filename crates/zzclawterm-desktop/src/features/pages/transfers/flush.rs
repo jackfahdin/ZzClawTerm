@@ -95,7 +95,6 @@ impl ZzClawTermApp {
             .shell
             .resize_handle_is_highlighted(&gpui::SharedString::from("transfer-height-resize"));
         let auto_sync_cwd_enabled = self.transfer_browser_auto_sync_cwd_enabled();
-        let cwd_sync_demand = self.transfer_cwd_sync_needs_polling();
         let connection_id = self.active_transfer_browser_connection_id();
         let download_path = self
             .resolved_transfer_download_dir()
@@ -153,8 +152,7 @@ impl ZzClawTermApp {
             external_drop_hover: browser.external_drop_hover,
             focus: browser.focus.clone(),
             rename,
-            auto_sync_cwd_enabled: auto_sync_cwd_enabled
-                && view_mode == zzclawterm_core::TransferBrowserViewMode::List,
+            auto_sync_cwd_enabled,
             connection_id,
             search_field,
             path_field,
@@ -170,7 +168,6 @@ impl ZzClawTermApp {
             resize_handle_highlighted,
             has_session: active_session_id.is_some(),
             browser,
-            cwd_sync_demand,
             queue: TransferQueuePresentation {
                 download_path: download_path
                     .map(|path| zzclawterm_core::truncate_preview(&path, 64))

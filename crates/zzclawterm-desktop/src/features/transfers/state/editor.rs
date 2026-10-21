@@ -1,6 +1,6 @@
 //! Built-in remote-editor workspace, tab lifecycle and window tracking.
 
-use gpui::{FocusHandle, SharedString};
+use gpui::FocusHandle;
 use zzclawterm_transport::{RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult};
 #[cfg(test)]
 use zzclawterm_transport::{RemoteTextMetadata, RemoteTextRevision, SftpWriteTextResult};
@@ -9,81 +9,156 @@ use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
 
 use crate::models::{TransferEditorState, TransferEditorWorkspaceState};
 
+#[cfg(test)]
 use super::{
     TransferEditorCloseAfterSave, TransferEditorCloseOutcome, TransferEditorDiscardOutcome,
-    TransferEditorFeatureState, TransferEditorSaveOutcome, TransferFeatureState,
 };
 
+use super::{TransferEditorFeatureState, TransferEditorSaveOutcome, TransferFeatureState};
+
 impl TransferFeatureState {
-    pub(in crate::features) fn editor_focus(&self) -> &FocusHandle {
-        &self.editor.focus
+    pub(in crate::features) fn window_editor_workspace(
+        &self,
+    ) -> Option<TransferEditorWorkspaceState> {
+        let mut workspace = self.editor.workspace.clone()?;
+        workspace
+            .tabs
+            .retain(|tab| tab.display == zzclawterm_core::InternalEditorDisplay::Window);
+        if workspace.tabs.is_empty() {
+            return None;
+        }
+        if !workspace
+            .tabs
+            .iter()
+            .any(|tab| tab.id == workspace.active_tab_id)
+        {
+            workspace.active_tab_id = workspace.tabs[0].id.clone();
+        }
+        Some(workspace)
+    }
+
+    pub(in crate::features) fn begin_editor_document_reload(&mut self, id: &str) {
+        if let Some(tab) = self
+            .editor
+            .workspace
+            .as_mut()
+            .and_then(|workspace| workspace.tabs.iter_mut().find(|tab| tab.id == id))
+        {
+            tab.generation = zzclawterm_transport::RemoteTextGeneration::next();
+            tab.loading = true;
+            tab.reload_confirm = false;
+            tab.error = None;
+        }
+    }
+
+    pub(in crate::features) fn editor_documents(&self) -> &[TransferEditorState] {
+        self.editor
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.tabs.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub(in crate::features) fn editor_references_session(&self, session: &str) -> bool {
+        self.editor_documents()
+            .iter()
+            .any(|tab| tab.session_id.as_deref() == Some(session))
+    }
+
+    pub(in crate::features) fn has_window_editor_documents(&self) -> bool {
+        self.editor_documents()
+            .iter()
+            .any(|tab| tab.display == zzclawterm_core::InternalEditorDisplay::Window)
+    }
+
+    pub(in crate::features) fn remove_editor_document(&mut self, id: &str) {
+        if let Some(workspace) = self.editor.workspace.as_mut() {
+            // Window navigation only considers its own documents, regardless of
+            // where workspace files are interleaved in the document collection.
+            let next_window = if workspace.active_tab_id == id {
+                let tabs = workspace
+                    .tabs
+                    .iter()
+                    .filter(|doc| doc.display == zzclawterm_core::InternalEditorDisplay::Window)
+                    .collect::<Vec<_>>();
+                tabs.iter().position(|doc| doc.id == id).and_then(|index| {
+                    let source = &tabs[index].session_id;
+                    tabs[..index]
+                        .iter()
+                        .rev()
+                        .chain(tabs[index + 1..].iter())
+                        .find(|doc| &doc.session_id == source)
+                        .or_else(|| tabs.get(index.saturating_sub(1)).filter(|doc| doc.id != id))
+                        .or_else(|| tabs.get(index + 1))
+                        .map(|doc| doc.id.clone())
+                })
+            } else {
+                None
+            };
+            workspace.remove_tab(id);
+            if let Some(next) = next_window {
+                workspace.active_tab_id = next;
+            }
+            Self::clear_editor_close_state(workspace);
+            if workspace.tabs.is_empty() {
+                self.editor.workspace = None;
+            }
+        }
+        self.editor.views.remove(id);
+    }
+
+    pub(in crate::features) fn workspace_editor_view(
+        &self,
+        id: &str,
+    ) -> Option<gpui::Entity<super::super::workspace_editor::WorkspaceEditorView>> {
+        self.editor.views.get(id).cloned()
+    }
+
+    pub(in crate::features) fn set_workspace_editor_view(
+        &mut self,
+        id: String,
+        view: gpui::Entity<super::super::workspace_editor::WorkspaceEditorView>,
+    ) {
+        self.editor.views.insert(id, view);
     }
 
     pub(in crate::features) fn editor_workspace(&self) -> Option<&TransferEditorWorkspaceState> {
         self.editor.workspace.as_ref()
     }
 
-    /// Cache the fallback presentation by immutable document identity and search state.
-    /// The view supplies formatting, so feature state does not construct UI elements.
-    pub(in crate::features) fn editor_content_preview(
-        &mut self,
-        build_preview: impl FnOnce(&str, &str, usize) -> String,
-    ) -> SharedString {
-        let Some(tab) = self
-            .editor
-            .workspace
-            .as_ref()
-            .and_then(TransferEditorWorkspaceState::active_tab)
-        else {
-            self.editor.preview_cache = None;
-            return SharedString::default();
-        };
-        if tab.loading {
-            return SharedString::default();
-        }
-        if let Some(cache) = &self.editor.preview_cache
-            && cache.content.same_version(&tab.content)
-            && cache.query == tab.search_query
-            && cache.active_match == tab.active_match
-        {
-            return cache.preview.clone();
-        }
-        let preview = SharedString::from(build_preview(
-            tab.content.as_str(),
-            &tab.search_query,
-            tab.active_match,
-        ));
-        self.editor.preview_cache = Some(EditorPreviewCache {
-            content: tab.content.clone(),
-            query: tab.search_query.clone(),
-            active_match: tab.active_match,
-            preview: preview.clone(),
-        });
-        preview
-    }
-
+    #[cfg(test)]
     pub(in crate::features) fn editor_has_workspace(&self) -> bool {
         self.editor.workspace.is_some()
     }
 
-    pub(in crate::features) fn editor_inline_overlay_is_open(&self) -> bool {
-        self.editor.workspace.is_some() && !self.editor.window.is_open_or_pending()
-    }
-
     pub(in crate::features) fn active_editor_tab(&self) -> Option<&TransferEditorState> {
-        self.editor
-            .workspace
-            .as_ref()
-            .and_then(TransferEditorWorkspaceState::active_tab)
+        let workspace = self.editor.workspace.as_ref()?;
+        workspace
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.id == workspace.active_tab_id
+                    && tab.display == zzclawterm_core::InternalEditorDisplay::Window
+            })
+            .or_else(|| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.display == zzclawterm_core::InternalEditorDisplay::Window)
+            })
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn active_editor_tab_mut(
         &mut self,
     ) -> Option<&mut TransferEditorState> {
+        let id = self.active_editor_tab()?.id.clone();
         self.editor
             .workspace
-            .as_mut()
-            .and_then(TransferEditorWorkspaceState::active_tab_mut)
+            .as_mut()?
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == id)
     }
 
     pub(in crate::features) fn editor_tab_snapshot(
@@ -101,6 +176,7 @@ impl TransferFeatureState {
 
     pub(in crate::features) fn open_editor_tab(&mut self, tab: TransferEditorState) -> bool {
         let tab_id = tab.id.clone();
+        let window_document = tab.display == zzclawterm_core::InternalEditorDisplay::Window;
         if let Some(workspace) = self.editor.workspace.as_mut() {
             let already_open = workspace.tabs.iter().any(|current| current.id == tab_id);
             if !already_open {
@@ -120,19 +196,18 @@ impl TransferFeatureState {
                 let index = insert_after.map_or(workspace.tabs.len(), |index| index + 1);
                 workspace.tabs.insert(index, tab);
             }
-            workspace.active_tab_id = tab_id;
+            if window_document {
+                workspace.active_tab_id = tab_id;
+            }
             Self::clear_editor_close_state(workspace);
-            self.editor.tabs_menu_open = false;
             already_open
         } else {
             self.editor.workspace = Some(TransferEditorWorkspaceState::new(tab));
-            self.editor.tabs_menu_open = false;
             false
         }
     }
 
     pub(in crate::features) fn activate_editor_tab(&mut self, tab_id: &str) -> bool {
-        self.editor.tabs_menu_open = false;
         let Some(workspace) = self.editor.workspace.as_mut() else {
             return false;
         };
@@ -144,11 +219,11 @@ impl TransferFeatureState {
         true
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn request_editor_tab_close(
         &mut self,
         tab_id: &str,
     ) -> TransferEditorCloseOutcome {
-        self.editor.tabs_menu_open = false;
         let Some(workspace) = self.editor.workspace.as_mut() else {
             return TransferEditorCloseOutcome::Missing;
         };
@@ -165,12 +240,12 @@ impl TransferFeatureState {
         workspace.remove_tab(tab_id);
         if workspace.tabs.is_empty() {
             self.editor.workspace = None;
-            self.editor.preview_cache = None;
             self.editor.window.cancel_open();
         }
         TransferEditorCloseOutcome::Closed
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn request_editor_close(&mut self) -> TransferEditorCloseOutcome {
         let Some(workspace) = self.editor.workspace.as_mut() else {
             return TransferEditorCloseOutcome::Missing;
@@ -188,12 +263,11 @@ impl TransferFeatureState {
             return TransferEditorCloseOutcome::ConfirmationRequired;
         }
         self.editor.workspace = None;
-        self.editor.preview_cache = None;
-        self.editor.tabs_menu_open = false;
         self.editor.window.cancel_open();
         TransferEditorCloseOutcome::Closed
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn discard_editor(&mut self) -> TransferEditorDiscardOutcome {
         let Some(workspace) = self.editor.workspace.as_mut() else {
             return TransferEditorDiscardOutcome::Missing;
@@ -211,7 +285,6 @@ impl TransferFeatureState {
             Self::clear_editor_close_state(workspace);
             if workspace.tabs.is_empty() {
                 self.editor.workspace = None;
-                self.editor.preview_cache = None;
                 self.editor.window.cancel_open();
             }
             TransferEditorDiscardOutcome::TabDiscarded
@@ -220,13 +293,12 @@ impl TransferFeatureState {
                 return TransferEditorDiscardOutcome::Missing;
             }
             self.editor.workspace = None;
-            self.editor.preview_cache = None;
-            self.editor.tabs_menu_open = false;
             self.editor.window.cancel_open();
             TransferEditorDiscardOutcome::WorkspaceDiscarded
         }
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn cancel_editor_close(&mut self) -> bool {
         let Some(workspace) = self.editor.workspace.as_mut() else {
             return false;
@@ -238,40 +310,7 @@ impl TransferFeatureState {
         true
     }
 
-    pub(in crate::features) fn cancel_editor_reload(&mut self) -> bool {
-        let Some(tab) = self.active_editor_tab_mut() else {
-            return false;
-        };
-        tab.reload_confirm = false;
-        if tab
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("Reload will discard"))
-        {
-            tab.error = None;
-        }
-        true
-    }
-
-    pub(in crate::features) fn cancel_editor_conflict(&mut self) -> bool {
-        let Some(tab) = self.active_editor_tab_mut() else {
-            return false;
-        };
-        tab.conflict = false;
-        true
-    }
-
-    pub(in crate::features) fn clear_editor_close_request(&mut self) -> bool {
-        let Some(workspace) = self.editor.workspace.as_mut() else {
-            return false;
-        };
-        let changed = workspace.close_confirm
-            || workspace.pending_close_tab_id.is_some()
-            || workspace.close_after_save_all;
-        Self::clear_editor_close_state(workspace);
-        changed
-    }
-
+    #[cfg(test)]
     pub(in crate::features) fn editor_close_confirmation_is_open(&self) -> bool {
         self.editor
             .workspace
@@ -336,6 +375,7 @@ impl TransferFeatureState {
         true
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn prepare_editor_close_after_save(
         &mut self,
     ) -> TransferEditorCloseAfterSave {
@@ -484,8 +524,6 @@ impl TransferFeatureState {
                 && workspace.tabs.iter().all(|tab| !tab.dirty && !tab.saving));
         if close_workspace {
             self.editor.workspace = None;
-            self.editor.preview_cache = None;
-            self.editor.tabs_menu_open = false;
             self.editor.window.cancel_open();
             Some(TransferEditorSaveOutcome::SavedAndClosed)
         } else {
@@ -541,8 +579,6 @@ impl TransferFeatureState {
         }
         if workspace.tabs.is_empty() {
             self.editor.workspace = None;
-            self.editor.preview_cache = None;
-            self.editor.tabs_menu_open = false;
             self.editor.window.cancel_open();
         } else if removed > 0 {
             Self::clear_editor_close_state(workspace);
@@ -583,33 +619,15 @@ impl TransferFeatureState {
         true
     }
 
-    pub(in crate::features) fn editor_tabs_menu_is_open(&self) -> bool {
-        self.editor.tabs_menu_open
-    }
-
-    pub(in crate::features) fn toggle_editor_tabs_menu(&mut self) -> bool {
-        self.editor.tabs_menu_open = !self.editor.tabs_menu_open;
-        self.editor.tabs_menu_open
-    }
-
-    pub(in crate::features) fn close_editor_tabs_menu(&mut self) -> bool {
-        std::mem::take(&mut self.editor.tabs_menu_open)
-    }
-
-    pub(in crate::features::transfers) fn editor_window(&self) -> Option<ZzClawWindowHandle> {
+    pub(in crate::features) fn editor_window(&self) -> Option<ZzClawWindowHandle> {
         self.editor.window.handle()
-    }
-
-    pub(in crate::features) fn editor_window_is_open(&self) -> bool {
-        self.editor.window.is_open()
     }
 
     pub(in crate::features) fn editor_window_open_is_pending(&self) -> bool {
         self.editor.window.is_pending()
     }
 
-    /// Claim the right to open the editor window; also refuses when there is no
-    /// workspace to show, so the caller can fall back to the inline overlay.
+    /// Claim the right to open the editor window while documents are available.
     pub(in crate::features) fn begin_editor_window_open(&mut self) -> bool {
         if self.editor.workspace.is_none() {
             return false;
@@ -657,20 +675,11 @@ impl TransferFeatureState {
 }
 
 impl TransferEditorFeatureState {
-    pub(super) fn new(focus: FocusHandle) -> Self {
+    pub(super) fn new(_focus: FocusHandle) -> Self {
         Self {
+            views: Default::default(),
             workspace: None,
-            preview_cache: None,
-            tabs_menu_open: false,
-            focus,
             window: ChildWindowSlot::default(),
         }
     }
-}
-
-pub(super) struct EditorPreviewCache {
-    content: ZzClawDocumentSnapshot,
-    query: String,
-    active_match: usize,
-    preview: SharedString,
 }

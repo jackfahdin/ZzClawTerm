@@ -14,11 +14,11 @@ use crate::features::{ZzClawTermApp, formatting::short_id, view_widgets::mono_ic
 use crate::theme::ThemePalette;
 
 #[derive(Clone, Debug)]
-pub(in crate::features) struct SessionTabDragPayload {
+pub(in crate::features) struct WorkspaceTabDragPayload {
     pub source_workspace_id: zzclawterm_core::WorkspaceId,
     pub root_tab_id: String,
     pub source_revision: u64,
-    pub session_id: String,
+    pub tab_id: super::session_tabs::SessionStripTabId,
     pub order_index: usize,
     pub source_group_id: Option<String>,
     pub display_name: String,
@@ -31,14 +31,14 @@ pub(in crate::features) struct SessionTabDragPayload {
 }
 
 pub(in crate::features) struct SessionTabDragPreview {
-    payload: SessionTabDragPayload,
+    payload: WorkspaceTabDragPayload,
     width: f32,
     icon: Option<Box<dyn Fn() -> gpui::AnyElement>>,
 }
 
 impl SessionTabDragPreview {
     pub(in crate::features) fn new(
-        payload: SessionTabDragPayload,
+        payload: WorkspaceTabDragPayload,
         _position: gpui::Point<gpui::Pixels>,
     ) -> Self {
         Self {
@@ -495,7 +495,7 @@ impl ZzClawTermApp {
             self.clear_session_tab_drag(cx);
             return;
         }
-        if let Some(mut root) = self.terminal.terminal_window_tree() {
+        if let Some(mut root) = self.shell.terminal_window_tree() {
             let before = if insert_after {
                 root.leaf_tab_ids_for_tab(&target_session_id)
                     .and_then(|tabs| {
@@ -514,7 +514,7 @@ impl ZzClawTermApp {
                 false
             };
             if changed {
-                self.terminal.restore_terminal_window_tree(Some(root));
+                self.shell.restore_terminal_window_tree(Some(root));
                 self.select_session(dragged_session_id, cx);
                 self.persist_open_tabs();
             }
@@ -563,6 +563,14 @@ impl ZzClawTermApp {
         dragged_session_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self.shell.terminal_window_tree_is_some() {
+            if let Some(last) = self.workspace_tab_ids().last().cloned() {
+                self.reorder_session_relative(dragged_session_id, last, true, cx);
+            } else {
+                self.clear_session_tab_drag(cx);
+            }
+            return;
+        }
         let sessions = self.ordered_tab_sessions();
         let Some(source_index) = sessions
             .iter()

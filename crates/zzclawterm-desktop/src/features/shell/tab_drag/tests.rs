@@ -13,7 +13,7 @@ use zzclawterm_core::{
 use crate::app_shell::{AppShellStartup, DesktopController};
 use crate::features::{
     ZzClawTermApp,
-    shell::{SessionTabDragPayload, SessionTabDragPreview},
+    shell::{SessionTabDragPreview, WorkspaceTabDragPayload},
     test_support::app_with_visible_local_session,
 };
 
@@ -28,11 +28,13 @@ impl Render for DragFixture {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let payload = self.app.update(cx, |app, cx| {
             window.focus(app.terminal.input_focus(), cx);
-            SessionTabDragPayload {
+            WorkspaceTabDragPayload {
                 source_workspace_id: app.workspace_id,
                 root_tab_id: "tab".into(),
                 source_revision: app.workspace_revision(),
-                session_id: "tab".into(),
+                tab_id: crate::features::shell::session_tabs::SessionStripTabId::Workspace(
+                    crate::models::WorkspaceTabId::Session("tab".into()),
+                ),
                 order_index: 0,
                 source_group_id: None,
                 display_name: "Test".into(),
@@ -64,7 +66,7 @@ impl Render for DragFixture {
             let drop_app = self.app.clone();
             let controller = self.controller.clone();
             let release_seen = self.release_seen.clone();
-            root = root.on_drop(move |payload: &SessionTabDragPayload, _, cx| {
+            root = root.on_drop(move |payload: &WorkspaceTabDragPayload, _, cx| {
                 release_seen.set(controller.update(cx, |controller, _| {
                     controller.update_tab_drag(|drag| {
                         drag.pending_release().map(|release| release.outside_source)
@@ -226,8 +228,7 @@ fn pointer_cancel_clears_hover_and_resize_without_detaching_or_removing_the_tab(
                 id: "target".into(),
                 position: QuickCommandDropPosition::Before,
             });
-            app.terminal
-                .set_terminal_file_drop_hover(Some("tab".into()));
+            app.shell.set_terminal_file_drop_hover(Some("tab".into()));
             app.transfer.set_browser_external_drop_hover(true);
             app.shell
                 .panels

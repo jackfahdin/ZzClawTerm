@@ -637,6 +637,7 @@ impl ZzClawTermApp {
     }
 
     fn finish_settings_page(&mut self, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         self.hide_secret_inputs(cx);
         self.settings.theme_designer_mut().reset();
         self.forget_text_inputs("theme.designer.");
@@ -651,6 +652,7 @@ impl ZzClawTermApp {
         if self.shell.finish_settings_navigation() {
             self.persist_ui_layout();
         }
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         self.shell
             .set_status(t!("settings.settingsClosed").to_string());
         cx.notify();
@@ -708,6 +710,141 @@ mod tests {
             overlays: cx.new(|_| OverlayStore::default()),
         };
         cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx))
+    }
+
+    #[test]
+    fn scrollback_number_input_retains_business_bounds_and_draft_rollback() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let (input, original) = app.update(&mut cx, |app, cx| {
+            let original = app.settings.summary().terminal_scrollback_lines;
+            app.begin_settings_draft(cx);
+            app.ensure_settings_tab_inputs(crate::models::SettingsTab::TerminalGeneral, cx);
+            (
+                app.number_input_fields_snapshot()["settings.number.terminal-scrollback-lines"]
+                    .clone(),
+                original,
+            )
+        });
+        for (text, expected) in [("100000", 100_000), ("999999", 100_000), ("1", 100)] {
+            input.update(&mut cx, |_, cx| {
+                cx.emit(zzclawterm_ui::ZzClawNumberInputEvent::Changed(text.into()));
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                app.read_with(&cx, |app, _| app
+                    .settings
+                    .summary()
+                    .terminal_scrollback_lines),
+                expected,
+            );
+        }
+        app.update(&mut cx, |app, cx| {
+            app.cancel_settings(cx);
+            assert_eq!(app.settings.summary().terminal_scrollback_lines, original);
+            assert_eq!(input.read(cx).value(cx), original.to_string());
+        });
+    }
+
+    #[test]
+    fn internal_editor_font_input_and_draft_cancel_restore_the_same_authoritative_value() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let input = app.update(&mut cx, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.ensure_settings_tab_inputs(crate::models::SettingsTab::Transfer, cx);
+            app.number_input_fields_snapshot()["settings.number.transfer-internal-editor-font-size"]
+                .clone()
+        });
+        app.update(&mut cx, |app, cx| {
+            let original = app.settings.summary().transfer_internal_editor_font_size;
+            app.set_transfer_internal_editor_font_size(original, cx);
+            assert!(app.settings.draft_dirty_domains().is_empty());
+            app.adjust_transfer_internal_editor_font_size(100, cx);
+            assert_eq!(input.read(cx).value(cx), "72");
+            app.reset_transfer_internal_editor_font_size(cx);
+            assert_eq!(input.read(cx).value(cx), "13");
+            app.set_transfer_internal_editor_font_size(21, cx);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().transfer_internal_editor_font_size,
+                original
+            );
+            assert_eq!(input.read(cx).value(cx), original.to_string());
+        });
+        let saved = app.update(&mut cx, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+        });
+        assert_eq!(saved.transfer_internal_editor_font_size, 13);
+    }
+
+    #[test]
+    fn internal_editor_font_number_input_routes_valid_edits_and_ignores_invalid_text() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let input = app.update(&mut cx, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.ensure_settings_tab_inputs(crate::models::SettingsTab::Transfer, cx);
+            app.number_input_fields_snapshot()["settings.number.transfer-internal-editor-font-size"]
+                .clone()
+        });
+        for (text, expected) in [("20", 20), ("invalid", 20), ("0", 8), ("65535", 72)] {
+            input.update(&mut cx, |_, cx| {
+                cx.emit(zzclawterm_ui::ZzClawNumberInputEvent::Changed(text.into()))
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                app.read_with(&cx, |app, _| app
+                    .settings
+                    .summary()
+                    .transfer_internal_editor_font_size),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn internal_editor_font_saves_through_transfer_settings_with_and_without_a_draft() {
+        for draft_open in [false, true] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            app.update(&mut cx, |app, cx| {
+                if draft_open {
+                    app.begin_settings_draft(cx);
+                }
+                app.set_transfer_internal_editor_font_size(19, cx);
+            });
+            cx.run_until_parked();
+            if draft_open {
+                let saved = app.update(&mut cx, |app, _| {
+                    app.store_blocking_client()
+                        .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                            store.load_app_settings_summary()
+                        })
+                        .unwrap()
+                });
+                assert_eq!(saved.transfer_internal_editor_font_size, 13);
+                app.update(&mut cx, |app, cx| app.apply_settings_draft(false, cx));
+                cx.run_until_parked();
+            }
+            let saved = app.update(&mut cx, |app, _| {
+                app.store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap()
+            });
+            assert_eq!(saved.transfer_internal_editor_font_size, 19);
+        }
     }
 
     fn stored_header_status(

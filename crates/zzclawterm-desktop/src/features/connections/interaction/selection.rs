@@ -52,6 +52,23 @@ impl ZzClawTermApp {
         connections: Vec<SavedConnection>,
         cx: &mut Context<Self>,
     ) {
+        self.submit_connection_copies_with_selection(connections, true, cx);
+    }
+
+    pub(in crate::features) fn submit_connection_copies_preserving_selection(
+        &mut self,
+        connections: Vec<SavedConnection>,
+        cx: &mut Context<Self>,
+    ) {
+        self.submit_connection_copies_with_selection(connections, false, cx);
+    }
+
+    fn submit_connection_copies_with_selection(
+        &mut self,
+        connections: Vec<SavedConnection>,
+        clear_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
         let count = connections.len();
         self.submit_store_request(
             0,
@@ -65,7 +82,9 @@ impl ZzClawTermApp {
             move |this, event, cx| match event.outcome {
                 Ok(sessions) => {
                     this.apply_loaded_sessions(sessions, cx);
-                    this.connection_state.clear_list_selection();
+                    if clear_selection {
+                        this.connection_state.clear_list_selection();
+                    }
                     this.shell
                         .set_status(format!("copied {count} saved connection(s)"));
                     this.settings

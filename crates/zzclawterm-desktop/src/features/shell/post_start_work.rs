@@ -55,7 +55,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn has_post_start_work(&self) -> bool {
-        !self.terminal.terminal_windows_restore_is_complete()
+        !self.shell.terminal_windows_restore_is_complete()
     }
 
     /// Returns whether the clock should keep running.
@@ -75,9 +75,9 @@ impl ZzClawTermApp {
         }
 
         // Layout restore opens the config DB.
-        if !self.terminal.terminal_windows_restore_is_complete() {
+        if !self.shell.terminal_windows_restore_is_complete() {
             self.try_restore_terminal_window_layout(cx);
-            if self.terminal.terminal_window_tree_is_some() {
+            if self.shell.terminal_window_tree_is_some() {
                 self.reconcile_terminal_windows();
             }
         }

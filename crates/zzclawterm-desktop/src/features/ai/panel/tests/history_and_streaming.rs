@@ -126,7 +126,7 @@ fn history_header_preserves_conversation_and_gives_the_list_a_visible_viewport()
     let app = app(&mut cx, root.path());
     let original = cx.update_entity(&app, |app, cx| {
         app.sync_component_theme(cx);
-        app.ensure_panel_open(crate::models::NavItem::AiAssistant);
+        app.ensure_panel_open(crate::models::NavItem::AiAssistant, cx);
         let source = app.ai.chat_session_id().to_string();
         let job = app.ai.begin_history_operation("fixture").unwrap();
         app.ai.finish_history_message_load(

@@ -15,41 +15,72 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    pub(in crate::features) fn copy_connection_by_id(
+    pub(in crate::features) fn resolve_saved_connection_targets(
         &mut self,
-        connection_id: String,
+        connection_ids: &[String],
         cx: &mut Context<Self>,
-    ) {
-        let Some(connection) = self
-            .connection_state
-            .connections()
+    ) -> Option<Vec<SavedConnection>> {
+        let connections = connection_ids
             .iter()
-            .find(|connection| connection.id == connection_id)
-            .cloned()
-        else {
-            self.shell
-                .set_status("connection is no longer available".to_string());
-            cx.notify();
-            return;
-        };
-        self.submit_connection_copies(vec![connection], cx);
+            .map(|id| self.connection_state.connection_by_id(id).cloned())
+            .collect::<Option<Vec<_>>>();
+        match connections {
+            Some(connections) if !connections.is_empty() => Some(connections),
+            _ => {
+                self.shell
+                    .set_status("connection is no longer available".to_string());
+                cx.notify();
+                None
+            }
+        }
     }
 
-    pub(in crate::features) fn start_selected_saved_connections(
+    pub(in crate::features) fn edit_saved_connection_by_id(
         &mut self,
+        connection_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = self.connection_state.selected_connections();
-        if selected.is_empty() {
-            self.shell
-                .set_status("select saved connections before connecting".to_string());
-            cx.notify();
-            return;
+        if self
+            .resolve_saved_connection_targets(&[connection_id.to_string()], cx)
+            .is_some()
+        {
+            self.rename_connection(connection_id.to_string(), window, cx);
         }
-        let started = self.start_saved_connection_starts(selected, window, cx);
-        self.shell
-            .set_status(format!("starting {started} connection(s)"));
+    }
+
+    pub(in crate::features) fn copy_connections_by_ids(
+        &mut self,
+        connection_ids: &[String],
+        clear_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(connections) = self.resolve_saved_connection_targets(connection_ids, cx) {
+            if clear_selection {
+                self.submit_connection_copies(connections, cx);
+            } else {
+                self.submit_connection_copies_preserving_selection(connections, cx);
+            }
+        }
+    }
+
+    pub(in crate::features) fn start_saved_connections_by_ids(
+        &mut self,
+        connection_ids: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut connections) = self.resolve_saved_connection_targets(connection_ids, cx)
+        else {
+            return;
+        };
+        if connections.len() == 1 {
+            self.start_saved_connection(connections.remove(0), window, cx);
+        } else {
+            let started = self.start_saved_connection_starts(connections, window, cx);
+            self.shell
+                .set_status(format!("starting {started} connection(s)"));
+        }
     }
 
     pub(in crate::features) fn start_group_connections(

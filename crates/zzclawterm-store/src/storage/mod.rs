@@ -227,6 +227,7 @@ impl ConnectionStore {
         };
         store.ensure_tables()?;
         store.ensure_portable_key()?;
+        store.migrate_legacy_panel_visibility()?;
         store.migrate_legacy_rdp_known_hosts()?;
         store.import_legacy_known_hosts_if_needed()?;
         Ok(store)

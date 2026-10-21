@@ -9,6 +9,7 @@ use zzclawterm_transport::{
 };
 
 use super::NativeHostKeyVerifier;
+use super::session_runtime::SessionStartFocusTarget;
 use crate::features::{ZzClawTermApp, session::SavedConnectionStartOptions};
 use crate::models::SessionLaunchConfig;
 use crate::temporary_ssh_link::{
@@ -52,14 +53,18 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn submit_temporary_ssh_link_dialog(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        match self.session.dialogs.temporary_link_protocol() {
+        let submitted = match self.session.dialogs.temporary_link_protocol() {
             TemporaryLinkProtocol::Ssh => self.submit_temporary_ssh_link(cx),
             TemporaryLinkProtocol::Telnet => self.submit_temporary_telnet_link(cx),
             TemporaryLinkProtocol::Serial => self.submit_temporary_serial_link(cx),
+        };
+        if submitted && self.session.start_has_active_pending() {
+            self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);
         }
+        submitted
     }
 
     pub(in crate::features) fn apply_temporary_ssh_link(
@@ -301,6 +306,94 @@ impl ZzClawTermApp {
             port_name: parsed.port_name,
             baud_rate: parsed.baud_rate,
             ..SerialSessionConfig::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use crate::features::test_support::{
+        app_with_visible_local_session, session_focus_test_window,
+    };
+    use crate::temporary_ssh_link::TemporaryLinkProtocol;
+    use crate::test_support::TestConfigDir;
+
+    #[test]
+    fn temporary_connection_focus_handoff_survives_dialog_dismissal() {
+        for protocol in [
+            TemporaryLinkProtocol::Ssh,
+            TemporaryLinkProtocol::Telnet,
+            TemporaryLinkProtocol::Serial,
+        ] {
+            let root = TestConfigDir::new("zzclawterm-temporary-link-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.session.dialogs.open_temporary_ssh_link();
+                    app.session.dialogs.set_temporary_link_protocol(protocol);
+                    match protocol {
+                        TemporaryLinkProtocol::Ssh => app
+                            .session
+                            .dialogs
+                            .apply_temporary_ssh_link("ssh://root@127.0.0.1:1".into()),
+                        TemporaryLinkProtocol::Telnet => app
+                            .session
+                            .dialogs
+                            .apply_temporary_ssh_link("telnet://127.0.0.1:1".into()),
+                        TemporaryLinkProtocol::Serial => app
+                            .session
+                            .dialogs
+                            .apply_temporary_serial_port_name("missing-test-port".into()),
+                    }
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                    assert!(app.submit_temporary_ssh_link_dialog(window, cx));
+                    assert!(app.session.start_has_active_pending());
+                    assert!(app.terminal.input_focus().is_focused(window));
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(app.read(cx).terminal.input_focus().is_focused(window));
+            });
+        }
+    }
+
+    #[test]
+    fn invalid_temporary_connection_preserves_dialog_focus() {
+        for protocol in [
+            TemporaryLinkProtocol::Ssh,
+            TemporaryLinkProtocol::Telnet,
+            TemporaryLinkProtocol::Serial,
+        ] {
+            let root = TestConfigDir::new("zzclawterm-temporary-link-invalid-focus");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+            let cx = session_focus_test_window(&mut cx, &app);
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.session.dialogs.open_temporary_ssh_link();
+                    app.session.dialogs.set_temporary_link_protocol(protocol);
+                    window.focus(app.session.dialog_tab_actions_focus(), cx);
+                    assert!(!app.submit_temporary_ssh_link_dialog(window, cx));
+                    assert!(!app.session.start_has_active_pending());
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(
+                    app.read(cx)
+                        .session
+                        .dialog_tab_actions_focus()
+                        .is_focused(window)
+                );
+            });
         }
     }
 }

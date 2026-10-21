@@ -16,6 +16,7 @@ mod persistence_debounce;
 mod post_start_work;
 mod quick_switch_runtime;
 mod runtime_state;
+pub(in crate::features) mod session_tabs;
 mod shortcut_action_runtime;
 mod state;
 mod status_clocks;
@@ -39,8 +40,13 @@ pub(in crate::features) use appearance::{
 pub(in crate::features) use state::ResizeHandleHoverState;
 pub(in crate::features) use state::{NewSessionMenuAnchor, ShellFeatureInit, ShellFeatureState};
 pub(in crate::features) use tab_mouse::{
-    SessionTabDragPayload, SessionTabDragPreview, SessionTabTooltip, TAB_MOUSE_ACTIONS,
-    TabMouseActionTarget,
+    SessionTabDragPreview, SessionTabTooltip, TAB_MOUSE_ACTIONS, TabMouseActionTarget,
+    WorkspaceTabDragPayload,
 };
 
 mod workspace_groups;
+
+mod window_state;
+pub(in crate::features) use window_state::TerminalWindowDockResult;
+
+mod editor_tabs;

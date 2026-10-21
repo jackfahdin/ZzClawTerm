@@ -23,7 +23,7 @@ pub(in crate::features) fn stats_progress_bar(
                 } else if ratio >= 0.7_f32 {
                     rgb(palette.warning)
                 } else {
-                    rgb(0x38bdf8)
+                    rgb(palette.primary)
                 }),
         )
 }

@@ -484,15 +484,8 @@ fn prepare_json_ssh_auth(
 ) -> AppResult<ConnectionAuth> {
     let Some(auth) = auth else {
         return Ok(ConnectionAuth {
-            account_id: None,
-            password_source: None,
             mode: "none".to_string(),
-            password_id: None,
-            password: None,
-            key_id: None,
-            otp_id: None,
-            auto_fill_otp: false,
-            has_password: false,
+            ..ConnectionAuth::default()
         });
     };
 
@@ -516,12 +509,7 @@ fn prepare_json_ssh_auth(
                 account_id,
                 password_source,
                 mode: "none".to_string(),
-                password_id: None,
-                password: None,
-                key_id: None,
-                otp_id: None,
-                auto_fill_otp: false,
-                has_password: false,
+                ..ConnectionAuth::default()
             })
         }
         "password" => {
@@ -567,10 +555,7 @@ fn prepare_json_ssh_auth(
                 mode: "password".to_string(),
                 password_id,
                 password,
-                key_id: None,
-                otp_id: None,
-                auto_fill_otp: false,
-                has_password: false,
+                ..ConnectionAuth::default()
             })
         }
         "key" => {
@@ -589,12 +574,8 @@ fn prepare_json_ssh_auth(
                 account_id,
                 password_source,
                 mode: "key".to_string(),
-                password_id: None,
-                password: None,
                 key_id: Some(key_id),
-                otp_id: None,
-                auto_fill_otp: false,
-                has_password: false,
+                ..ConnectionAuth::default()
             })
         }
         mode => Err(AppError::Config(format!(

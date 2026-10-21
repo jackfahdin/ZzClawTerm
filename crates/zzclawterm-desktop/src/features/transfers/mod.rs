@@ -1,6 +1,6 @@
 //! Transfer jobs, transfer options, path prompts and transfer widgets.
 
-mod cwd_sync_clock;
+mod cwd_sync;
 mod delete_runtime;
 mod drag_aggregate;
 mod drag_download;
@@ -13,6 +13,7 @@ mod remote_text_editor;
 mod state;
 pub(in crate::features) use state::TransferSessionTransferBundle;
 pub(in crate::features) use state::TransferTreePresentation;
+pub(in crate::features) use state::{BrowserFilterCache, BrowserFilterKey, record_browser_history};
 mod transfer_events;
 pub(in crate::features) mod transfer_jobs;
 mod transfer_options;
@@ -207,16 +208,16 @@ impl ZzClawTermApp {
     }
 }
 
-pub(in crate::features) use cwd_sync_clock::TRANSFER_CWD_SYNC_POLL_INTERVAL;
 pub(in crate::features) use remote_text_editor::RemoteTextEditor;
 pub(in crate::features) use state::natural_compare_ascii;
 #[cfg(test)]
 pub(in crate::features) use state::transfer_browser_entry_is_visible;
 pub(in crate::features) use state::{
-    PdfPageRequest, TransferEditorCloseAfterSave, TransferEditorCloseOutcome,
-    TransferEditorDiscardOutcome, TransferFeatureFocus, TransferFeatureState,
-    TransferFileClipboard, TransferPreviewCloseOutcome,
+    PdfPageRequest, TransferFeatureFocus, TransferFeatureState, TransferFileClipboard,
+    TransferPreviewCloseOutcome,
 };
 pub(in crate::features) use transfer_widgets::{
     duplicate_decision_label, duplicate_policy_label, format_file_size,
 };
+
+mod workspace_editor;

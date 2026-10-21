@@ -23,7 +23,7 @@ pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String 
         TransferJobKind::DragExport { remote_path } => {
             format!("Export {remote_path} to native destination")
         }
-        TransferJobKind::SyncCwd => "Sync remote cwd".to_string(),
+        TransferJobKind::SyncCwd { .. } => "Sync remote cwd".to_string(),
         TransferJobKind::Download {
             remote_path,
             local_path,

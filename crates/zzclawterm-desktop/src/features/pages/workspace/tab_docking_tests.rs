@@ -35,7 +35,7 @@ fn setup(cx: &mut TestAppContext, root: &TestTempDir, edge: TabDockEdge) -> Enti
         app.sync_component_theme(cx);
         app.session.mark_restore_complete();
         app.shell.set_workspace_pane_layout_restored(true);
-        app.terminal.complete_terminal_windows_restore();
+        app.shell.complete_terminal_windows_restore();
         for id in ["b", "c"] {
             app.session.register_session_metadata(
                 id,
@@ -52,9 +52,9 @@ fn setup(cx: &mut TestAppContext, root: &TestTempDir, edge: TabDockEdge) -> Enti
                 .seed_session_view(id.into(), String::new(), "UTF-8");
         }
         app.reconcile_terminal_windows();
-        let first = app.terminal.terminal_group_for_tab("a").unwrap();
+        let first = app.shell.terminal_group_for_tab("a").unwrap();
         app.dock_tab_on_terminal_window_leaf("b".into(), first, TabDockZone::Edge(edge), cx);
-        let second = app.terminal.terminal_group_for_tab("b").unwrap();
+        let second = app.shell.terminal_group_for_tab("b").unwrap();
         app.dock_tab_on_terminal_window_leaf("c".into(), second, TabDockZone::Center, cx);
     });
     app
@@ -66,8 +66,8 @@ fn content_bounds(
     cx: &VisualTestContext,
 ) -> Bounds<Pixels> {
     app.read_with(cx, |app, _| {
-        let group = app.terminal.terminal_group_for_tab(session).unwrap();
-        let mut bounds = app.terminal.terminal_split_bounds(&group).unwrap();
+        let group = app.shell.terminal_group_for_tab(session).unwrap();
+        let mut bounds = app.shell.terminal_split_bounds(&group).unwrap();
         bounds.origin.y += px(36.);
         bounds.size.height -= px(36.);
         bounds
@@ -97,10 +97,10 @@ fn hover(
     cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::default());
     draw(cx);
     app.read_with(cx, |app, _| {
-        let target = app.terminal.terminal_group_for_tab(session).unwrap();
-        for leaf in app.terminal.terminal_window_tree().unwrap().leaf_ids() {
+        let target = app.shell.terminal_group_for_tab(session).unwrap();
+        for leaf in app.shell.terminal_window_tree().unwrap().leaf_ids() {
             assert_eq!(
-                app.terminal.terminal_window_drop_for_leaf(&leaf),
+                app.shell.terminal_window_drop_for_leaf(&leaf),
                 (leaf == target).then_some(zone),
                 "only the hovered group may own the drop preview"
             );
@@ -131,7 +131,7 @@ fn tab_drag_back_to_first_group_previews_and_splits_in_horizontal_vertical_and_n
         for nested in [false, true] {
             if nested {
                 app.update(cx, |app, cx| {
-                    let group = app.terminal.terminal_group_for_tab("b").unwrap();
+                    let group = app.shell.terminal_group_for_tab("b").unwrap();
                     app.dock_tab_on_terminal_window_leaf(
                         "c".into(),
                         group,
@@ -150,7 +150,7 @@ fn tab_drag_back_to_first_group_previews_and_splits_in_horizontal_vertical_and_n
             cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
             draw(cx);
             app.read_with(cx, |app, _| {
-                let tree = app.terminal.terminal_window_tree().unwrap();
+                let tree = app.shell.terminal_window_tree().unwrap();
                 assert_eq!(tree.leaf_ids().len(), 3);
                 assert_ne!(tree.leaf_for_tab("a"), tree.leaf_for_tab("c"));
                 let mut tabs = tree.collect_tab_ids();
@@ -165,7 +165,7 @@ fn tab_drag_back_to_first_group_previews_and_splits_in_horizontal_vertical_and_n
             cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
             draw(cx);
             app.read_with(cx, |app, _| {
-                let tree = app.terminal.terminal_window_tree().unwrap();
+                let tree = app.shell.terminal_window_tree().unwrap();
                 assert_eq!(tree.leaf_ids().len(), 2);
                 assert_eq!(tree.leaf_for_tab("b"), tree.leaf_for_tab("c"));
             });
@@ -192,8 +192,8 @@ fn tab_drag_clears_preview_outside_content_and_on_cancellation_then_can_merge_in
     cx.simulate_mouse_move(tab, Some(MouseButton::Left), Modifiers::default());
     draw(cx);
     app.read_with(cx, |app, _| {
-        for leaf in app.terminal.terminal_window_tree().unwrap().leaf_ids() {
-            assert!(app.terminal.terminal_window_drop_for_leaf(&leaf).is_none());
+        for leaf in app.shell.terminal_window_tree().unwrap().leaf_ids() {
+            assert!(app.shell.terminal_window_drop_for_leaf(&leaf).is_none());
         }
     });
     assert!(cx.debug_bounds("tab-dock-drop-overlay").is_none());
@@ -204,10 +204,10 @@ fn tab_drag_clears_preview_outside_content_and_on_cancellation_then_can_merge_in
     });
     draw(cx);
     app.read_with(cx, |app, _| {
-        let tree = app.terminal.terminal_window_tree().unwrap();
+        let tree = app.shell.terminal_window_tree().unwrap();
         assert_eq!(tree.leaf_ids().len(), 2);
         for leaf in tree.leaf_ids() {
-            assert!(app.terminal.terminal_window_drop_for_leaf(&leaf).is_none());
+            assert!(app.shell.terminal_window_drop_for_leaf(&leaf).is_none());
         }
     });
     assert!(cx.debug_bounds("tab-dock-drop-overlay").is_none());
@@ -217,7 +217,7 @@ fn tab_drag_clears_preview_outside_content_and_on_cancellation_then_can_merge_in
     cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
     draw(cx);
     app.read_with(cx, |app, _| {
-        let tree = app.terminal.terminal_window_tree().unwrap();
+        let tree = app.shell.terminal_window_tree().unwrap();
         assert_eq!(tree.leaf_ids().len(), 2);
         assert_eq!(tree.leaf_for_tab("a"), tree.leaf_for_tab("c"));
     });

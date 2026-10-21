@@ -5,6 +5,7 @@ use super::ai::{AiFeatureState, AiPanel};
 use super::assets::StartWorkspaceFeatureState;
 use super::commands::CommandFeatureState;
 use super::connections::ConnectionFeatureState;
+use super::file_manager::FileManagerFeatureState;
 use super::mcp::McpHostFeatureState;
 use super::notes::{NotesCatalogEvent, NotesFeatureState, NotesPanel};
 use super::pages::connections::panel::ConnectionPanel;
@@ -104,6 +105,7 @@ pub struct ZzClawTermApp {
     pub(in crate::features) terminal: TerminalFeatureState,
     pub(in crate::features) send_command: SendCommandFeatureState,
     pub(in crate::features) transfer: TransferFeatureState,
+    pub(in crate::features) file_manager: FileManagerFeatureState,
     pub(in crate::features) translation: TranslationFeatureState,
     pub(in crate::features) update: gpui::Entity<super::update::UpdateStore>,
     pub(in crate::features) cloud_sync: CloudSyncFeatureState,

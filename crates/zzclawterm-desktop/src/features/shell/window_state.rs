@@ -1,13 +1,14 @@
-//! Authoritative split/tab window ownership for the terminal feature.
+//! Authoritative split/tab window ownership for the workspace shell.
 
 use gpui::{Bounds, Pixels, ScrollHandle};
 use std::collections::HashMap;
 use zzclawterm_core::RestorableTerminalWindowNode;
 
-use super::state::TerminalFeatureState;
+use super::state::ShellFeatureState;
 use crate::models::{SmartSplitMode, TabDockZone, TerminalWindowNode, WorkspaceSplitDirection};
 
 /// Split/tab window tree and drag-and-drop targets over it.
+#[derive(Default)]
 pub(super) struct TerminalWindowState {
     pub(super) tree: Option<TerminalWindowNode>,
     pub(super) drop: Option<(String, TabDockZone)>,
@@ -37,33 +38,40 @@ pub(in crate::features) enum TerminalWindowDockResult {
     Docked { focused_leaf_id: Option<String> },
 }
 
-impl TerminalFeatureState {
+impl ShellFeatureState {
     pub(in crate::features) fn terminal_layout_persistence_is_supported(&self) -> bool {
-        !self.windows.persistence_blocked
+        !self.workspace.windows.persistence_blocked
     }
     pub(in crate::features) fn preserve_unread_terminal_layout(&mut self) {
-        self.windows.persistence_blocked = true;
+        self.workspace.windows.persistence_blocked = true;
     }
     fn prune_terminal_group_caches(&mut self) {
         let ids = self
+            .workspace
             .windows
             .tree
             .as_ref()
             .map(TerminalWindowNode::node_ids)
             .unwrap_or_default();
         let leaves = self
+            .workspace
             .windows
             .tree
             .as_ref()
             .map(TerminalWindowNode::leaf_ids)
             .unwrap_or_default();
-        self.windows
+        self.workspace
+            .windows
             .group_scrolls
             .retain(|id, _| leaves.contains(id));
-        self.windows.split_bounds.retain(|id, _| ids.contains(id));
+        self.workspace
+            .windows
+            .split_bounds
+            .retain(|id, _| ids.contains(id));
     }
     pub(in crate::features) fn terminal_group_for_tab(&self, tab: &str) -> Option<String> {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_ref()?
             .leaf_for_tab(tab)
@@ -74,7 +82,8 @@ impl TerminalFeatureState {
         &self,
         leaf: &str,
     ) -> Option<(Vec<String>, Option<String>)> {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_ref()?
             .leaf_tabs(leaf)
@@ -82,7 +91,8 @@ impl TerminalFeatureState {
     }
 
     pub(in crate::features) fn terminal_group_scroll(&mut self, leaf: &str) -> ScrollHandle {
-        self.windows
+        self.workspace
+            .windows
             .group_scrolls
             .entry(leaf.to_string())
             .or_default()
@@ -94,11 +104,15 @@ impl TerminalFeatureState {
         sequence: u64,
         leaf: String,
     ) {
-        self.windows.start_groups.insert(sequence, leaf);
+        self.workspace.windows.start_groups.insert(sequence, leaf);
     }
 
     pub(in crate::features) fn terminal_start_group(&self, sequence: u64) -> Option<&str> {
-        self.windows.start_groups.get(&sequence).map(String::as_str)
+        self.workspace
+            .windows
+            .start_groups
+            .get(&sequence)
+            .map(String::as_str)
     }
     pub(in crate::features) fn terminal_start_display_group(
         &self,
@@ -110,16 +124,16 @@ impl TerminalFeatureState {
             .or_else(|| self.first_terminal_group())
     }
     pub(in crate::features) fn first_terminal_group(&self) -> Option<String> {
-        self.windows.tree.as_ref()?.first_leaf_id()
+        self.workspace.windows.tree.as_ref()?.first_leaf_id()
     }
 
     pub(in crate::features) fn clear_terminal_start_groups(&mut self) {
-        self.windows.start_groups.clear();
+        self.workspace.windows.start_groups.clear();
     }
 
     pub(in crate::features) fn place_started_terminal_tab(&mut self, tab: &str, sequence: u64) {
-        let group = self.windows.start_groups.get(&sequence).cloned();
-        if let Some(root) = self.windows.tree.as_mut()
+        let group = self.workspace.windows.start_groups.get(&sequence).cloned();
+        if let Some(root) = self.workspace.windows.tree.as_mut()
             && let Some(group) = group.filter(|group| root.leaf_tabs(group).is_some())
         {
             root.move_tab_to_leaf(tab, &group);
@@ -128,7 +142,7 @@ impl TerminalFeatureState {
     }
 
     pub(in crate::features) fn terminal_split_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
-        self.windows.split_bounds.get(id).copied()
+        self.workspace.windows.split_bounds.get(id).copied()
     }
 
     pub(in crate::features) fn record_terminal_split_bounds(
@@ -136,17 +150,18 @@ impl TerminalFeatureState {
         id: String,
         bounds: Bounds<Pixels>,
     ) {
-        self.windows.split_bounds.insert(id, bounds);
+        self.workspace.windows.split_bounds.insert(id, bounds);
     }
 
     pub(in crate::features) fn terminal_workspace_size(&self) -> Option<(f32, f32)> {
-        self.windows
+        self.workspace
+            .windows
             .workspace_bounds
             .map(|bounds| (f32::from(bounds.size.width), f32::from(bounds.size.height)))
     }
 
     pub(in crate::features) fn record_terminal_workspace_bounds(&mut self, bounds: Bounds<Pixels>) {
-        self.windows.workspace_bounds = Some(bounds);
+        self.workspace.windows.workspace_bounds = Some(bounds);
     }
 
     pub(in crate::features) fn tile_terminal_groups(
@@ -164,24 +179,24 @@ impl TerminalFeatureState {
             .and_then(|tab| root.leaf_for_tab(tab))
             .map(str::to_string)
             .or_else(|| root.first_leaf_id());
-        self.windows.tree = Some(root);
-        self.windows.drop = None;
-        self.windows.split_bounds.clear();
+        self.workspace.windows.tree = Some(root);
+        self.workspace.windows.drop = None;
+        self.workspace.windows.split_bounds.clear();
         self.prune_terminal_group_caches();
         Some(group)
     }
 
     pub(in crate::features) fn merge_terminal_groups(&mut self, active: Option<String>) {
-        if let Some(root) = self.windows.tree.take() {
+        if let Some(root) = self.workspace.windows.tree.take() {
             let id = root.first_leaf_id();
             let mut leaf = TerminalWindowNode::leaf(root.collect_tab_ids(), active);
             if let (Some(id), TerminalWindowNode::Leaf { id: leaf_id, .. }) = (id, &mut leaf) {
                 *leaf_id = id;
             }
-            self.windows.tree = Some(leaf);
+            self.workspace.windows.tree = Some(leaf);
         }
-        self.windows.drop = None;
-        self.windows.split_bounds.clear();
+        self.workspace.windows.drop = None;
+        self.workspace.windows.split_bounds.clear();
         self.prune_terminal_group_caches();
     }
 
@@ -191,23 +206,23 @@ impl TerminalFeatureState {
         preferred_leaf_id: Option<&str>,
         active_tab_id: Option<&str>,
     ) -> TerminalWindowReconcileResult {
-        if self.windows.tree.is_none() {
+        if self.workspace.windows.tree.is_none() {
             if live_ids.is_empty() {
                 return TerminalWindowReconcileResult::Inactive;
             }
-            self.windows.tree = Some(TerminalWindowNode::leaf(
+            self.workspace.windows.tree = Some(TerminalWindowNode::leaf(
                 live_ids.to_vec(),
                 active_tab_id.map(str::to_string),
             ));
         }
         if live_ids.is_empty() {
-            self.windows.tree = None;
+            self.workspace.windows.tree = None;
             self.prune_terminal_group_caches();
             return TerminalWindowReconcileResult::Cleared;
         }
 
         let mut tree_cleared = false;
-        if let Some(root) = self.windows.tree.as_mut() {
+        if let Some(root) = self.workspace.windows.tree.as_mut() {
             for tab_id in root.collect_tab_ids() {
                 if !live_ids.iter().any(|id| id == &tab_id) {
                     if let Some(next) = root.remove_tab(&tab_id) {
@@ -220,15 +235,15 @@ impl TerminalFeatureState {
             }
         }
         if tree_cleared {
-            self.windows.tree = None;
+            self.workspace.windows.tree = None;
             // All old groups vanished, but new live sessions must still have a home.
-            self.windows.tree = Some(TerminalWindowNode::leaf(
+            self.workspace.windows.tree = Some(TerminalWindowNode::leaf(
                 live_ids.to_vec(),
                 active_tab_id.map(str::to_string),
             ));
         }
 
-        let Some(root) = self.windows.tree.as_mut() else {
+        let Some(root) = self.workspace.windows.tree.as_mut() else {
             return TerminalWindowReconcileResult::Inactive;
         };
         for tab_id in live_ids {
@@ -250,28 +265,36 @@ impl TerminalFeatureState {
         tab_ids: Vec<String>,
         active_tab_id: Option<String>,
     ) -> Option<String> {
-        if self.windows.tree.is_some() || tab_ids.is_empty() {
+        if self.workspace.windows.tree.is_some() || tab_ids.is_empty() {
             return None;
         }
         let root = TerminalWindowNode::leaf(tab_ids, active_tab_id);
         let focused_leaf_id = root.first_leaf_id();
-        self.windows.tree = Some(root);
+        self.workspace.windows.tree = Some(root);
         focused_leaf_id
     }
 
     pub(in crate::features) fn terminal_windows_is_multi_leaf(&self) -> bool {
-        matches!(self.windows.tree, Some(TerminalWindowNode::Split { .. }))
+        matches!(
+            self.workspace.windows.tree,
+            Some(TerminalWindowNode::Split { .. })
+        )
     }
 
     pub(in crate::features) fn terminal_window_tree_is_some(&self) -> bool {
-        self.windows.tree.is_some()
+        self.workspace.windows.tree.is_some()
+    }
+
+    pub(in crate::features) fn terminal_window_tree_ref(&self) -> Option<&TerminalWindowNode> {
+        self.workspace.windows.tree.as_ref()
     }
 
     pub(in crate::features) fn terminal_window_tree(&self) -> Option<TerminalWindowNode> {
-        self.windows.tree.clone()
+        self.workspace.windows.tree.clone()
     }
     pub(in crate::features) fn terminal_window_tab_ids(&self) -> Vec<String> {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_ref()
             .map(TerminalWindowNode::collect_tab_ids)
@@ -282,12 +305,13 @@ impl TerminalFeatureState {
         &mut self,
         tree: Option<TerminalWindowNode>,
     ) {
-        self.windows.tree = tree;
+        self.workspace.windows.tree = tree;
         self.prune_terminal_group_caches();
     }
 
     pub(in crate::features) fn terminal_window_has_leaf(&self, leaf_id: &str) -> bool {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_ref()
             .is_some_and(|tree| tree.leaf_ids().iter().any(|id| id == leaf_id))
@@ -297,7 +321,7 @@ impl TerminalFeatureState {
         &mut self,
         tab_id: &str,
     ) -> Option<String> {
-        let root = self.windows.tree.as_mut()?;
+        let root = self.workspace.windows.tree.as_mut()?;
         let _ = root.set_active_tab(tab_id);
         terminal_window_leaf_with_tab(root, tab_id)
     }
@@ -307,8 +331,8 @@ impl TerminalFeatureState {
         tab_id: &str,
         before_tab_id: &str,
     ) -> Option<Option<String>> {
-        self.windows.drop = None;
-        let root = self.windows.tree.as_mut()?;
+        self.workspace.windows.drop = None;
+        let root = self.workspace.windows.tree.as_mut()?;
         if !root.place_tab_before(tab_id, before_tab_id) {
             return None;
         }
@@ -320,7 +344,8 @@ impl TerminalFeatureState {
         &self,
         leaf_id: &str,
     ) -> Option<TabDockZone> {
-        self.windows
+        self.workspace
+            .windows
             .drop
             .as_ref()
             .filter(|(leaf, _)| leaf == leaf_id)
@@ -333,15 +358,15 @@ impl TerminalFeatureState {
         zone: TabDockZone,
     ) -> bool {
         let next = Some((leaf_id, zone));
-        if self.windows.drop == next {
+        if self.workspace.windows.drop == next {
             return false;
         }
-        self.windows.drop = next;
+        self.workspace.windows.drop = next;
         true
     }
 
     pub(in crate::features) fn clear_terminal_window_drop(&mut self) -> bool {
-        self.windows.drop.take().is_some()
+        self.workspace.windows.drop.take().is_some()
     }
 
     pub(in crate::features) fn clear_terminal_window_drop_for_leaf(
@@ -360,8 +385,8 @@ impl TerminalFeatureState {
         target_leaf_id: &str,
         zone: TabDockZone,
     ) -> TerminalWindowDockResult {
-        self.windows.drop = None;
-        let Some(root) = self.windows.tree.as_mut() else {
+        self.workspace.windows.drop = None;
+        let Some(root) = self.workspace.windows.tree.as_mut() else {
             return TerminalWindowDockResult::MissingTree;
         };
         if !root.contains_tab(tab_id) {
@@ -391,7 +416,7 @@ impl TerminalFeatureState {
         let focused_leaf_id = active_tab_id
             .and_then(|active| terminal_window_leaf_with_tab(&root, active))
             .or_else(|| root.first_leaf_id());
-        self.windows.tree = Some(root);
+        self.workspace.windows.tree = Some(root);
         Some(focused_leaf_id)
     }
 
@@ -399,7 +424,7 @@ impl TerminalFeatureState {
         &self,
         split_id: &str,
     ) -> Option<(WorkspaceSplitDirection, u8)> {
-        let root = self.windows.tree.as_ref()?;
+        let root = self.workspace.windows.tree.as_ref()?;
         Some((
             root.direction_for_split(split_id)?,
             root.ratio_for_split(split_id)?,
@@ -411,7 +436,8 @@ impl TerminalFeatureState {
         split_id: &str,
         ratio_percent: u8,
     ) -> bool {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_mut()
             .is_some_and(|root| root.set_ratio_for_split(split_id, ratio_percent))
@@ -422,7 +448,8 @@ impl TerminalFeatureState {
         old_id: &str,
         new_id: &str,
     ) -> bool {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_mut()
             .is_some_and(|root| root.replace_tab_id(old_id, new_id))
@@ -432,31 +459,32 @@ impl TerminalFeatureState {
         &self,
         ordered_tab_ids: &[String],
     ) -> Option<RestorableTerminalWindowNode> {
-        self.windows
+        self.workspace
+            .windows
             .tree
             .as_ref()
             .and_then(|root| root.serialize_layout(ordered_tab_ids))
     }
 
     pub(in crate::features) fn terminal_windows_restore_is_in_flight(&self) -> bool {
-        self.windows.restore_in_flight
+        self.workspace.windows.restore_in_flight
     }
     pub(in crate::features) fn begin_terminal_windows_restore(&mut self) {
-        self.windows.restore_in_flight = true;
+        self.workspace.windows.restore_in_flight = true;
     }
 
     pub(in crate::features) fn terminal_windows_restore_is_complete(&self) -> bool {
-        self.windows.restored
+        self.workspace.windows.restored
     }
 
     pub(in crate::features) fn mark_terminal_windows_restore_pending(&mut self) {
-        self.windows.restored = false;
-        self.windows.restore_in_flight = false;
+        self.workspace.windows.restored = false;
+        self.workspace.windows.restore_in_flight = false;
     }
 
     pub(in crate::features) fn complete_terminal_windows_restore(&mut self) {
-        self.windows.restored = true;
-        self.windows.restore_in_flight = false;
+        self.workspace.windows.restored = true;
+        self.workspace.windows.restore_in_flight = false;
     }
 
     pub(in crate::features) fn restore_terminal_window_layout(
@@ -472,41 +500,41 @@ impl TerminalFeatureState {
         let focused_leaf_id = active_tab_id
             .and_then(|active| terminal_window_leaf_with_tab(&root, active))
             .or_else(|| root.first_leaf_id());
-        self.windows.tree = Some(root);
+        self.workspace.windows.tree = Some(root);
         Some(focused_leaf_id)
     }
 
     pub(in crate::features) fn terminal_file_drop_hover_is_pending(&self) -> bool {
-        self.windows.file_drop_hover.is_some()
+        self.workspace.windows.file_drop_hover.is_some()
     }
 
     pub(in crate::features) fn terminal_file_drop_hover_matches(&self, session_id: &str) -> bool {
-        self.windows.file_drop_hover.as_deref() == Some(session_id)
+        self.workspace.windows.file_drop_hover.as_deref() == Some(session_id)
     }
 
     pub(in crate::features) fn set_terminal_file_drop_hover(
         &mut self,
         session_id: Option<String>,
     ) -> bool {
-        if self.windows.file_drop_hover == session_id {
+        if self.workspace.windows.file_drop_hover == session_id {
             return false;
         }
-        self.windows.file_drop_hover = session_id;
+        self.workspace.windows.file_drop_hover = session_id;
         true
     }
 
     pub(in crate::features) fn clear_terminal_file_drop_hover(&mut self) -> bool {
-        self.windows.file_drop_hover.take().is_some()
+        self.workspace.windows.file_drop_hover.take().is_some()
     }
 
     pub(in crate::features) fn clear_terminal_file_drop_hover_for_session(
         &mut self,
         session_id: &str,
     ) -> bool {
-        if self.windows.file_drop_hover.as_deref() != Some(session_id) {
+        if self.workspace.windows.file_drop_hover.as_deref() != Some(session_id) {
             return false;
         }
-        self.windows.file_drop_hover = None;
+        self.workspace.windows.file_drop_hover = None;
         true
     }
 }

@@ -264,11 +264,11 @@ impl ZzClawTermApp {
             TrayAction::SyncPush => self.prompt_provider_cloud_sync_push(window, cx),
             TrayAction::SyncPull => self.prompt_provider_cloud_sync_pull(window, cx),
             TrayAction::ActiveSessions => {
-                self.ensure_panel_open(NavItem::ActiveSessions);
+                self.ensure_panel_open(NavItem::ActiveSessions, cx);
                 self.persist_ui_layout();
             }
             TrayAction::SyncHistory => {
-                self.ensure_panel_open(NavItem::SyncBackupHistory);
+                self.ensure_panel_open(NavItem::SyncBackupHistory, cx);
                 self.persist_ui_layout();
                 self.queue_cloud_sync_history_refresh(None, cx);
             }
@@ -528,12 +528,12 @@ mod tests {
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let root = std::env::temp_dir().join(format!("zzclawterm-tray-panels-{}", uuid()));
         let app = app_with_visible_local_session(&mut cx, &root, "session");
-        cx.update_entity(&app, |app, _| {
+        cx.update_entity(&app, |app, cx| {
             for multi_open in [false, true] {
                 app.shell.panels.multi_open = multi_open;
                 for item in [NavItem::ActiveSessions, NavItem::SyncBackupHistory] {
-                    app.ensure_panel_open(item);
-                    app.ensure_panel_open(item);
+                    app.ensure_panel_open(item, cx);
+                    app.ensure_panel_open(item, cx);
                     assert!(
                         app.current_left_panel() == Some(item)
                             || app.current_right_panel() == Some(item)
@@ -543,8 +543,8 @@ mod tests {
             app.shell.panels.set_open_mode(PanelOpenMode::Floating);
             for item in [NavItem::ActiveSessions, NavItem::SyncBackupHistory] {
                 let side = app.panel_side_for_item(item).unwrap_or(PanelSide::Right);
-                app.ensure_panel_open(item);
-                app.ensure_panel_open(item);
+                app.ensure_panel_open(item, cx);
+                app.ensure_panel_open(item, cx);
                 assert_eq!(app.shell.floating_panel(side), Some(item));
             }
         });

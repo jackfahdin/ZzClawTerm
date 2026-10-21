@@ -1,6 +1,6 @@
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    Render, ScrollDelta, ScrollWheelEvent, Subscription, Window, div, prelude::*, px,
+    Render, ScrollWheelEvent, Subscription, Window, div, prelude::*, px,
 };
 use zzclawterm_ui::document_snapshot::ZzClawDocumentSnapshot;
 use zzclawterm_ui::{ZzClawDocumentEditor, ZzClawDocumentEditorEvent, ZzClawDocumentEditorState};
@@ -9,7 +9,7 @@ use crate::features::ZzClawTermApp;
 use crate::models::{TransferEditorField, TransferEditorState};
 
 pub(in crate::features) struct RemoteTextEditor {
-    app: Entity<ZzClawTermApp>,
+    app: gpui::WeakEntity<ZzClawTermApp>,
     tab_id: String,
     document: Entity<ZzClawDocumentEditorState>,
     synced_content: ZzClawDocumentSnapshot,
@@ -33,13 +33,13 @@ impl RemoteTextEditor {
             )
         });
         let tab_id = tab.id.clone();
-        let app_for_events = app.clone();
+        let app_for_events = app.downgrade();
         let subscription = cx.subscribe(
             &document,
             move |this, _, event: &ZzClawDocumentEditorEvent, cx| match event {
                 ZzClawDocumentEditorEvent::Changed(content) => {
                     this.synced_content = content.clone();
-                    app_for_events.update(cx, |app, cx| {
+                    let _ = app_for_events.update(cx, |app, cx| {
                         app.transfer.sync_editor_content(&tab_id, content.clone());
                         app.mark_user_activity();
                         cx.notify();
@@ -55,7 +55,7 @@ impl RemoteTextEditor {
             document.update(cx, |document, cx| document.move_cursor_to_end(cx));
         }
         Self {
-            app,
+            app: app.downgrade(),
             tab_id: tab.id.clone(),
             document,
             synced_content: tab.content.clone(),
@@ -76,7 +76,7 @@ impl RemoteTextEditor {
         });
         let subscription = cx.subscribe(&document, |_, _, _: &ZzClawDocumentEditorEvent, _| {});
         Self {
-            app,
+            app: app.downgrade(),
             tab_id: id,
             document,
             synced_content: Default::default(),
@@ -120,6 +120,11 @@ impl RemoteTextEditor {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn document_for_test(&self) -> Entity<ZzClawDocumentEditorState> {
+        self.document.clone()
+    }
+
     pub(in crate::features) fn cursor_position(&self, cx: &App) -> (usize, usize) {
         self.document.read(cx).cursor_position(cx)
     }
@@ -128,11 +133,17 @@ impl RemoteTextEditor {
         self.document.read(cx).focus_handle(cx)
     }
 
+    pub(in crate::features) fn open_search(&self, cx: &mut Context<Self>) {
+        self.document
+            .update(cx, |document, cx| document.open_search(false, cx));
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
         if (modifiers.platform || modifiers.control) && event.keystroke.key == "s" {
-            self.app
-                .update(cx, |app, cx| app.save_transfer_editor(false, window, cx));
+            let _ = self.app.update(cx, |app, cx| {
+                app.save_transfer_editor_tab(&self.tab_id, false, window, cx)
+            });
             cx.stop_propagation();
         }
     }
@@ -146,7 +157,10 @@ impl Focusable for RemoteTextEditor {
 
 impl Render for RemoteTextEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (font_size, font) = self.app.read_with(cx, |app, _| {
+        let Some(app) = self.app.upgrade() else {
+            return div().into_any_element();
+        };
+        let (font_size, font) = app.read_with(cx, |app, _| {
             (
                 app.settings
                     .summary()
@@ -167,52 +181,23 @@ impl Render for RemoteTextEditor {
             .font(font)
             .text_size(px(font_size))
             .capture_key_down(cx.listener(|this, _, _, cx| {
-                this.app.update(cx, |app, _| app.mark_user_activity());
+                let _ = this.app.update(cx, |app, _| app.mark_user_activity());
             }))
             .on_key_down(cx.listener(Self::on_key_down))
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                this.app.update(cx, |app, _| app.mark_user_activity());
+                let _ = this.app.update(cx, |app, _| app.mark_user_activity());
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                this.app.update(cx, |app, _| app.mark_user_activity());
-                if !event.modifiers.control && !event.modifiers.platform {
-                    return;
-                }
-                let delta_y = match event.delta {
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(delta) => delta.y,
-                };
-                if delta_y != 0.0 {
-                    let step = if delta_y < 0.0 { 1 } else { -1 };
-                    this.app.update(cx, |app, cx| {
-                        app.adjust_transfer_internal_editor_font_size(step, cx);
-                    });
-                    cx.stop_propagation();
-                }
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                let _ = this.app.update(cx, |app, _| app.mark_user_activity());
             }))
             .child(ZzClawDocumentEditor::new(&self.document))
+            .into_any_element()
     }
 }
 
 fn language_for_path(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or("") {
-        "json" => "json",
-        "yaml" | "yml" => "yaml",
-        "toml" => "toml",
-        "rs" => "rust",
-        "py" => "python",
-        "js" | "jsx" => "javascript",
-        "ts" | "tsx" => "typescript",
-        "sh" => "bash",
-        "go" => "go",
-        "c" | "h" => "c",
-        "cpp" | "hpp" => "cpp",
-        "css" => "css",
-        "html" | "htm" => "html",
-        "xml" | "svg" => "xml",
-        "md" => "markdown",
-        _ => "plain",
-    }
+    zzclawterm_core::document_language::document_language_for_path(path)
+        .map_or("plain", |language| language.id)
 }
 
 #[cfg(test)]
@@ -223,6 +208,9 @@ mod tests {
     fn remote_editor_chooses_supported_syntax_from_extension() {
         assert_eq!(language_for_path("/home/user/main.rs"), "rust");
         assert_eq!(language_for_path("/home/user/config.yaml"), "yaml");
+        assert_eq!(language_for_path("/home/user/component.tsx"), "tsx");
+        assert_eq!(language_for_path("/home/user/query.SQL"), "sql");
+        assert_eq!(language_for_path("/home/user/image.svg"), "plain");
         assert_eq!(language_for_path("/home/user/unknown.bin"), "plain");
     }
 }

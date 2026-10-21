@@ -749,14 +749,20 @@ impl ZzClawTermApp {
         kind: RemoteMonitorKind,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.session.active_ssh_config().is_none() {
+        if !self.remote_monitor_session_active() || !self.remote_monitor_demand(kind) {
             return false;
         }
         if self.remote_refresh_is_deferred() {
             return false;
         }
         match kind {
-            RemoteMonitorKind::Stats => self.refresh_stats_if_due(cx),
+            RemoteMonitorKind::Stats => {
+                if self.panel_is_rendered(kind.nav_item()) || self.header_status_needs_stats() {
+                    self.refresh_stats_if_due(cx)
+                } else {
+                    self.refresh_connection_icon_if_due(cx)
+                }
+            }
             RemoteMonitorKind::Gpu => self.refresh_gpu_if_due(cx),
             RemoteMonitorKind::Npu => self.refresh_npu_if_due(cx),
             RemoteMonitorKind::Processes => self.refresh_processes_if_due(cx),
@@ -764,49 +770,36 @@ impl ZzClawTermApp {
         }
     }
 
-    /// Whether anything currently wants this metric kept fresh.
-    ///
-    /// Two sources of demand, not one. A panel being on screen is the obvious one; the
-    /// header status bar is the other, and it can be showing stats, GPU or NPU with
-    /// that panel closed. Treating only the panel as demand would stop the header
-    /// updating, which is the case the "armed on mount, dropped on unmount" sketch of
-    /// this design missed -- and the reason the panel entities are owned for the app's
-    /// whole life rather than created when shown.
-    ///
-    /// The settings flag is checked here as well as by `panel_body`, because a panel
-    /// switched off in settings renders a placeholder rather than nothing, and a
-    /// placeholder must not poll.
+    /// Persistent panel entities own their clocks even when only the header or a
+    /// bounded connection-icon probe consumes the data.
     pub(in crate::features) fn remote_monitor_demand(&self, kind: RemoteMonitorKind) -> bool {
-        let summary = self.settings.summary();
         let shown = self.panel_is_rendered(kind.nav_item());
         match kind {
-            RemoteMonitorKind::Stats => summary.ui_show_remote_stats,
-            RemoteMonitorKind::Gpu => {
-                (shown || self.header_status_needs_gpu()) && summary.ui_show_gpu_monitor
+            RemoteMonitorKind::Stats => {
+                shown || self.header_status_needs_stats() || self.connection_icon_probe_needed()
             }
-            RemoteMonitorKind::Npu => {
-                (shown || self.header_status_needs_npu()) && summary.ui_show_ascend_npu_monitor
-            }
-            RemoteMonitorKind::Processes => shown && summary.ui_show_process_manager,
-            RemoteMonitorKind::Docker => shown && summary.ui_show_docker_manager,
+            RemoteMonitorKind::Gpu => shown || self.header_status_needs_gpu(),
+            RemoteMonitorKind::Npu => shown || self.header_status_needs_npu(),
+            RemoteMonitorKind::Processes | RemoteMonitorKind::Docker => shown,
         }
     }
 
-    /// Start the clocks for panels that are wanted and stop the rest.
-    ///
-    /// Called from `render`, for the same reason `ensure_idle_lock_clock` is: every
-    /// input this reads -- which panels are on screen, what the header is showing,
-    /// which panels settings enable, whether a session with an SSH config is active --
-    /// changes alongside a repaint, and there is no single event that covers all four.
-    /// Enumerating the mutation sites instead would mean a new one silently leaving a
-    /// panel unrefreshed -- which is the bug `3904c69b` fixed, where the one call site
-    /// ran before any session existed and so never armed anything.
-    ///
-    /// Cheap enough to run per paint: one settings read, one rendered-panel test per
-    /// kind, and five `Option::is_some` compares that do nothing unless demand
-    /// actually flipped.
+    fn remote_monitor_session_active(&self) -> bool {
+        self.session
+            .active_ssh_config()
+            .is_some_and(|config| config.remote_stats_enabled())
+            && self
+                .session
+                .active_id()
+                .and_then(|id| self.session.metadata(id))
+                .is_some_and(|metadata| !metadata.disconnected)
+    }
+
+    /// Rendering reconciles all layout consumers; session activation and replies
+    /// also reconcile immediately, so no session or completed probe leaves a clock.
+    /// This only updates task ownership; blocking work runs from the clock's jobs.
     pub(in crate::features) fn sync_remote_panel_demand(&mut self, cx: &mut Context<Self>) {
-        let session_active = self.session.active_ssh_config().is_some();
+        let session_active = self.remote_monitor_session_active();
         for kind in RemoteMonitorKind::ALL {
             let demand = session_active && self.remote_monitor_demand(kind);
             let panel = self.remote_panels.entity(kind).clone();
@@ -1103,10 +1096,6 @@ mod tests {
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = true;
-            summary.ui_show_process_manager = true;
-            app.settings.replace_summary(summary);
             // The real activation path, so this cannot pass by poking a combination of
             // panel fields the UI never produces.
             app.open_or_toggle_panel(panel, cx);
@@ -1187,6 +1176,108 @@ mod tests {
         assert_eq!(polling(&app, &mut cx), Vec::new());
     }
 
+    #[test]
+    fn every_header_mode_requests_only_the_data_it_displays() {
+        let test_dir = TestConfigDir::new("zzclawterm-monitor-header-demand");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        activate_ssh_session(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            for (mode, expected) in [
+                (crate::models::HeaderStatusMode::Session, None),
+                (crate::models::HeaderStatusMode::DateTime, None),
+                (
+                    crate::models::HeaderStatusMode::Resources,
+                    Some(RemoteMonitorKind::Stats),
+                ),
+                (
+                    crate::models::HeaderStatusMode::Host,
+                    Some(RemoteMonitorKind::Stats),
+                ),
+                (
+                    crate::models::HeaderStatusMode::Gpu,
+                    Some(RemoteMonitorKind::Gpu),
+                ),
+                (
+                    crate::models::HeaderStatusMode::Npu,
+                    Some(RemoteMonitorKind::Npu),
+                ),
+            ] {
+                let mut summary = app.settings.summary().clone();
+                summary.ui_header_status_visible = true;
+                summary.ui_header_status_mode = mode.persistence_id().into();
+                app.settings.replace_summary(summary);
+                app.sync_remote_panel_demand(cx);
+                for kind in RemoteMonitorKind::ALL {
+                    assert_eq!(
+                        app.remote_panels.entity(kind).read(cx).is_polling(),
+                        expected == Some(kind),
+                        "{mode:?}: {kind:?}"
+                    );
+                }
+                let mut summary = app.settings.summary().clone();
+                summary.ui_header_status_visible = false;
+                app.settings.replace_summary(summary);
+                app.sync_remote_panel_demand(cx);
+                assert!(
+                    RemoteMonitorKind::ALL.into_iter().all(|kind| !app
+                        .remote_panels
+                        .entity(kind)
+                        .read(cx)
+                        .is_polling())
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn panels_poll_only_while_their_layout_is_actually_displayed() {
+        use crate::models::{ActivityBarZone, NavItem, PanelOpenMode, PanelSide};
+        let test_dir = TestConfigDir::new("zzclawterm-monitor-layout-demand");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        activate_ssh_session(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            for kind in RemoteMonitorKind::ALL {
+                app.open_or_toggle_panel(kind.nav_item(), cx);
+                assert!(app.remote_monitor_demand(kind));
+                app.open_or_toggle_panel(kind.nav_item(), cx);
+                assert!(!app.remote_monitor_demand(kind));
+                assert!(!app.refresh_remote_monitor_if_due(kind, cx));
+            }
+            app.show_activity_entry("gpuMonitor".into(), cx);
+            app.move_activity_entry("gpuMonitor".into(), ActivityBarZone::LeftTop, None, cx);
+            app.open_or_toggle_panel(NavItem::GpuMonitor, cx);
+            assert!(app.panel_is_rendered(NavItem::GpuMonitor));
+            app.toggle_left_sidebar(cx);
+            assert!(!app.panel_is_rendered(NavItem::GpuMonitor));
+            app.toggle_left_sidebar(cx);
+            app.ensure_panel_in_stack(NavItem::GpuMonitor, cx);
+            assert!(app.panel_is_rendered(NavItem::GpuMonitor));
+            app.shell.show_page(NavItem::Settings);
+            assert!(!app.panel_is_rendered(NavItem::GpuMonitor));
+            app.shell.show_workspace();
+            if !cfg!(target_os = "macos") {
+                app.shell.set_viewport_size_for_test((600., 800.));
+                app.shell.close_mobile_panels();
+                assert!(!app.panel_is_rendered(NavItem::GpuMonitor));
+                app.toggle_mobile_left_drawer(cx);
+                assert!(app.panel_is_rendered(NavItem::GpuMonitor));
+            }
+            app.set_panel_open_mode(PanelOpenMode::Floating, cx);
+            app.open_or_toggle_panel(NavItem::GpuMonitor, cx);
+            assert_eq!(
+                app.shell.floating_panel(PanelSide::Left),
+                Some(NavItem::GpuMonitor)
+            );
+            assert!(app.panel_is_rendered(NavItem::GpuMonitor));
+            app.open_or_toggle_panel(NavItem::GpuMonitor, cx);
+            assert!(!app.panel_is_rendered(NavItem::GpuMonitor));
+        });
+    }
+
     /// An open panel polls, and only that one.
     ///
     /// The session is required: demand is gated on an active SSH config, so a panel
@@ -1198,9 +1289,6 @@ mod tests {
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         cx.update_entity(&app, |app, cx| {
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = true;
-            app.settings.replace_summary(summary);
             app.open_or_toggle_panel(crate::models::NavItem::GpuMonitor, cx);
             app.sync_remote_panel_demand(cx);
         });
@@ -1212,10 +1300,7 @@ mod tests {
 
         activate_ssh_session(&app, &mut cx);
         cx.update_entity(&app, |app, cx| app.sync_remote_panel_demand(cx));
-        assert_eq!(
-            polling(&app, &mut cx),
-            vec![RemoteMonitorKind::Stats, RemoteMonitorKind::Gpu]
-        );
+        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Gpu]);
     }
 
     /// Closing the panel must drop the clock, not merely mark it unwanted.
@@ -1231,16 +1316,10 @@ mod tests {
         let app = app(&mut cx, test_dir.path());
         activate_ssh_session(&app, &mut cx);
         cx.update_entity(&app, |app, cx| {
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = true;
-            app.settings.replace_summary(summary);
             app.open_or_toggle_panel(crate::models::NavItem::GpuMonitor, cx);
             app.sync_remote_panel_demand(cx);
         });
-        assert_eq!(
-            polling(&app, &mut cx),
-            vec![RemoteMonitorKind::Stats, RemoteMonitorKind::Gpu]
-        );
+        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Gpu]);
 
         cx.update_entity(&app, |app, cx| {
             // Toggling the same panel again closes it, which is what the activity bar
@@ -1248,7 +1327,7 @@ mod tests {
             app.open_or_toggle_panel(crate::models::NavItem::GpuMonitor, cx);
             app.sync_remote_panel_demand(cx);
         });
-        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Stats]);
+        assert!(polling(&app, &mut cx).is_empty());
     }
 
     /// The header status bar keeps stats polling with the Stats panel closed.
@@ -1282,7 +1361,7 @@ mod tests {
         );
         assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Stats]);
 
-        // Switching the header away does not stop Tauri-compatible background stats polling.
+        // Switching away removes the final resource consumer.
         cx.update_entity(&app, |app, cx| {
             let mut summary = app.settings.summary().clone();
             summary.ui_header_status_mode = crate::models::HeaderStatusMode::Session
@@ -1291,26 +1370,22 @@ mod tests {
             app.settings.replace_summary(summary);
             app.sync_remote_panel_demand(cx);
         });
-        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Stats]);
+        assert!(polling(&app, &mut cx).is_empty());
     }
 
-    /// A panel switched off in settings renders a placeholder, and a placeholder must
-    /// not poll.
+    /// Hidden entries remain usable through explicit panel management.
     #[test]
-    fn a_panel_disabled_in_settings_does_not_poll() {
+    fn a_hidden_entry_does_not_disable_its_explicitly_opened_panel() {
         let test_dir = TestConfigDir::new("zzclawterm-remote-panels");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, test_dir.path());
         activate_ssh_session(&app, &mut cx);
         cx.update_entity(&app, |app, cx| {
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = false;
-            app.settings.replace_summary(summary);
             app.open_or_toggle_panel(crate::models::NavItem::GpuMonitor, cx);
             app.sync_remote_panel_demand(cx);
         });
-        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Stats]);
+        assert_eq!(polling(&app, &mut cx), vec![RemoteMonitorKind::Gpu]);
     }
 
     /// A paint must arm the clock, with nothing calling the reconcile by hand.
@@ -1331,9 +1406,6 @@ mod tests {
         activate_ssh_session(&app, &mut cx);
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_gpu_monitor = true;
-            app.settings.replace_summary(summary);
             app.open_or_toggle_panel(crate::models::NavItem::GpuMonitor, cx);
         });
         assert_eq!(
@@ -1361,8 +1433,8 @@ mod tests {
         });
         assert_eq!(
             armed,
-            vec![RemoteMonitorKind::Stats, RemoteMonitorKind::Gpu],
-            "a paint arms persistent stats plus the open GPU panel"
+            vec![RemoteMonitorKind::Gpu],
+            "a paint arms only the visible GPU panel"
         );
     }
 }
@@ -1445,11 +1517,6 @@ mod isolation_tests {
         let app = app(cx, root);
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_remote_stats = true;
-            summary.ui_show_gpu_monitor = true;
-            summary.ui_show_ascend_npu_monitor = true;
-            app.settings.replace_summary(summary);
             app.session.register_session_metadata(
                 "ssh-a",
                 SessionRuntimeMetadata {
@@ -1734,9 +1801,6 @@ mod isolation_tests {
         let app = app(cx, root);
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_process_manager = true;
-            app.settings.replace_summary(summary);
             app.session.register_session_metadata(
                 "ssh-a",
                 SessionRuntimeMetadata {
@@ -2033,9 +2097,6 @@ mod isolation_tests {
         let app = app(cx, root);
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
-            let mut summary = app.settings.summary().clone();
-            summary.ui_show_docker_manager = true;
-            app.settings.replace_summary(summary);
             app.session.register_session_metadata(
                 "ssh-a",
                 SessionRuntimeMetadata {

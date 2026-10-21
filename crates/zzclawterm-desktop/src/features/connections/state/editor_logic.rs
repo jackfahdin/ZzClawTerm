@@ -133,7 +133,6 @@ pub(super) fn set_connection_editor_select_value(
                 editor.kind,
                 ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
             ) {
-                editor.account_source_saved = value.is_some();
                 editor.account_id = value;
                 editor.password_id = None;
             } else {
@@ -141,14 +140,8 @@ pub(super) fn set_connection_editor_select_value(
             }
         }
         ConnectionEditorSelect::Account => {
-            editor.account_source_saved = value.is_some();
             editor.account_id = value;
             editor.password_id = None;
-            if editor.account_id.is_none()
-                && editor.password_source == ConnectionEditorPasswordSource::Saved
-            {
-                editor.password_source = ConnectionEditorPasswordSource::Ask;
-            }
         }
         ConnectionEditorSelect::SshKey => editor.key_id = value,
         ConnectionEditorSelect::Otp => {
@@ -280,11 +273,16 @@ pub(super) fn set_connection_editor_select_value(
 pub(super) fn set_connection_editor_password_source(
     draft: &mut Option<ConnectionEditorState>,
     source: ConnectionEditorPasswordSource,
+    explicit: bool,
 ) -> bool {
     let Some(editor) = draft.as_mut() else {
         return false;
     };
     editor.password_source = source;
+    if explicit {
+        editor.password_source_touched = true;
+        editor.password_source_demoted = false;
+    }
     editor.error = None;
     editor.field_errors.clear();
     true
@@ -1155,7 +1153,19 @@ pub(super) fn set_connection_editor_field_text(
         ConnectionEditorField::NewGroupName => draft.new_group_name = text,
         ConnectionEditorField::Host => draft.host = text,
         ConnectionEditorField::Port => draft.port = text,
-        ConnectionEditorField::Username => draft.username = text,
+        ConnectionEditorField::Username => {
+            let changed = draft.username != text;
+            draft.username = text;
+            if changed
+                && draft.account_id.is_some()
+                && matches!(
+                    draft.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                )
+            {
+                draft.username_source = zzclawterm_core::ConnectionUsernameSource::Connection;
+            }
+        }
         ConnectionEditorField::AgentEnvironmentVariable => {
             draft.agent_endpoint =
                 zzclawterm_core::SshAgentEndpoint::Environment { variable: text };

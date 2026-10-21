@@ -2,7 +2,7 @@ use rust_i18n::t;
 
 use std::collections::HashMap;
 
-use gpui::{AppContext as _, Context, Window};
+use gpui::{AppContext as _, Context, Focusable as _, Window};
 use zzclawterm_core::fuzzy_search_items;
 use zzclawterm_ui::ZzClawCommandState;
 
@@ -98,6 +98,23 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(key) = self.active_workspace_tab() {
+            match crate::models::WorkspaceTabId::from_layout_key(&key) {
+                crate::models::WorkspaceTabId::Editor(id) => {
+                    if let Some(view) = self.transfer.workspace_editor_view(&id) {
+                        view.update(cx, |view, cx| view.focus(window, cx));
+                        return;
+                    }
+                }
+                crate::models::WorkspaceTabId::FileManager(id) => {
+                    if let Some(view) = self.file_manager.workspace(&id) {
+                        window.focus(&view.read(cx).focus_handle(cx), cx);
+                        return;
+                    }
+                }
+                crate::models::WorkspaceTabId::Session(_) => {}
+            }
+        }
         match workspace_surface_focus_target(self.session.active_id(), |session_id| {
             self.remote_desktop.is_session(session_id)
         }) {
@@ -109,11 +126,14 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn quick_switch_items(&self) -> Vec<QuickSwitchItem> {
-        let sessions = self.session.ordered_sessions();
+        let sessions = self.ordered_tab_sessions();
+        let active_tab = self
+            .selected_session_strip_tab(&self.current_terminal_group())
+            .map(|id| id.layout_key());
         let mut session_items = Vec::new();
         for session in &sessions {
             let title = self.session.display_name_by_info(session);
-            let active = self.session.active_id() == Some(session.id.as_str());
+            let active = active_tab.as_deref() == Some(session.id.as_str());
             let mut subtitle = format!(
                 "{} - {}",
                 session_kind_label(session.kind),
@@ -131,6 +151,36 @@ impl ZzClawTermApp {
             });
         }
 
+        for key in self.workspace_tab_ids() {
+            match crate::models::WorkspaceTabId::from_layout_key(&key) {
+                crate::models::WorkspaceTabId::Editor(id) => {
+                    if let Some(document) = self.transfer.editor_tab_snapshot(&id) {
+                        session_items.push(QuickSwitchItem::Session {
+                            active: active_tab.as_deref() == Some(&key),
+                            id: key,
+                            title: document.name,
+                            subtitle: document.remote_path,
+                        });
+                    }
+                }
+                crate::models::WorkspaceTabId::FileManager(id) => {
+                    session_items.push(QuickSwitchItem::Session {
+                        active: active_tab.as_deref() == Some(&key),
+                        id: key,
+                        title: t!("fileManager.tabTitle").to_string(),
+                        subtitle: id,
+                    });
+                }
+                crate::models::WorkspaceTabId::Session(_) => {}
+            }
+        }
+        let order = self.workspace_tab_ids();
+        session_items.sort_by_key(|item| {
+            order
+                .iter()
+                .position(|key| item.id() == *key)
+                .unwrap_or(usize::MAX)
+        });
         let mut transient_items = self
             .session
             .start_pending_entries()

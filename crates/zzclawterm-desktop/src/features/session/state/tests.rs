@@ -127,6 +127,688 @@ fn pending(name: &str) -> PendingSessionStart {
     }
 }
 
+fn failed_start(
+    app: &mut crate::features::ZzClawTermApp,
+    id: &str,
+    index: usize,
+    config: Option<SessionLaunchConfig>,
+) -> super::SessionStartTabPlacement {
+    let placement = app.session.start.allocate_tab_placement(index);
+    let mut request = pending(id);
+    request.tab_placement = Some(placement);
+    request.launch_config = config;
+    request.custom_name = Some(format!("custom {id}"));
+    request.tab_color = Some(0x123456);
+    request.locked = true;
+    app.session.start.register_pending(id.to_string(), request);
+    let SessionStartEventRequest::Pending {
+        pending,
+        was_active,
+    } = app.session.start.take_event_request(id)
+    else {
+        unreachable!()
+    };
+    app.session.start.record_failure(
+        id.to_string(),
+        pending,
+        "test failure".to_string(),
+        was_active,
+        false,
+    );
+    placement
+}
+
+#[test]
+fn failed_retry_keeps_one_tab_and_preserves_presentation_on_preparation_failure() {
+    let root = TestConfigDir::new("zzclawterm-failed-retry");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+    let cx = session_focus_test_window(&mut cx, &app);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let placement = failed_start(
+                app,
+                "failure",
+                1,
+                Some(SessionLaunchConfig::Local(LocalSessionConfig {
+                    encoding: "invalid-test-encoding".into(),
+                    ..LocalSessionConfig::default()
+                })),
+            );
+            app.retry_failed_session_start("failure".into(), window, cx);
+            assert!(!app.session.start.has_pending());
+            assert_eq!(app.session.start.failed_entries().count(), 1);
+            let new_id = app.session.active_failed_request_id().unwrap().to_string();
+            assert_ne!(new_id, "failure");
+            let failed = app.session.start.failed(&new_id).unwrap();
+            assert_eq!(
+                failed.pending.tab_placement.unwrap().request_sequence,
+                placement.request_sequence
+            );
+            assert_eq!(
+                failed.pending.custom_name.as_deref(),
+                Some("custom failure")
+            );
+            assert_eq!(failed.pending.tab_color, Some(0x123456));
+            assert!(failed.pending.locked);
+            assert!(failed.pending.reconnect_session_id.is_none());
+            assert_ne!(failed.error, "test failure");
+            app.retry_failed_session_start("failure".into(), window, cx);
+            assert_eq!(
+                app.session.active_failed_request_id(),
+                Some(new_id.as_str())
+            );
+        })
+    });
+}
+
+#[test]
+fn failed_retry_replaces_the_moved_tab_on_success_with_a_fresh_attempt() {
+    use crate::features::runtime_jobs::SessionStartSuccess;
+    use crate::features::shell::session_tabs::SessionStripTabId;
+    use zzclawterm_transport::SessionInfo;
+    let root = TestConfigDir::new("zzclawterm-failed-retry-success");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+    let cx = session_focus_test_window(&mut cx, &app);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            let config = SessionLaunchConfig::Local(LocalSessionConfig {
+                shell_path: Some(
+                    root.path()
+                        .join("missing-test-shell")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            });
+            let placement = failed_start(app, "failure", 1, Some(config.clone()));
+            app.session
+                .start
+                .failed("failure")
+                .unwrap()
+                .pending
+                .attempt
+                .cancel();
+            let key = SessionStripTabId::Start(placement.request_sequence).layout_key();
+            app.commit_session_strip_order(&None, &[key.clone(), "source".into()], &key, cx);
+            app.retry_failed_session_start("failure".into(), window, cx);
+            assert!(!app.session.start.has_failed());
+            assert_eq!(app.session.start.pending_count(), 1);
+            let request_id = app.session.start.active_pending.clone().unwrap();
+            assert_ne!(request_id, "failure");
+            assert!(app.session.start.attempt(&request_id).check().is_ok());
+            assert_eq!(app.session_strip_tabs(&None)[0].id.layout_key(), key);
+            app.retry_failed_session_start("failure".into(), window, cx);
+            assert_eq!(app.session.start.pending_count(), 1);
+            let now = Instant::now();
+            app.apply_session_start_event(
+                SessionStartResult {
+                    request_id,
+                    connection_name: "retry".into(),
+                    kind: SessionKind::LocalPty,
+                    worker_started_at: now,
+                    worker_finished_at: now,
+                    result: Ok(SessionStartSuccess {
+                        session_info: SessionInfo {
+                            id: "connected".into(),
+                            name: "retry".into(),
+                            kind: SessionKind::LocalPty,
+                            working_dir: None,
+                            cols: 80,
+                            rows: 24,
+                        },
+                        multiplex_handle: None,
+                        launch_config: Some(config),
+                        cleanup: None,
+                    }),
+                },
+                cx,
+            );
+            assert!(!app.session.start.has_pending());
+            assert!(!app.session.start.has_failed());
+            assert_eq!(app.workspace_tab_ids(), ["connected", "source"]);
+            assert_eq!(app.session.custom_name("connected"), Some("custom failure"));
+            assert_eq!(app.session.tab_color("connected"), Some(0x123456));
+            assert!(app.session.tab_is_locked("connected"));
+            assert_eq!(app.session.active_id(), Some("connected"));
+        })
+    });
+}
+
+#[test]
+fn failed_retry_uses_current_saved_configuration_and_retains_deleted_sources() {
+    let root = TestConfigDir::new("zzclawterm-failed-saved-retry");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+    let cx = session_focus_test_window(&mut cx, &app);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            failed_start(app, "deleted", 1, None);
+            app.retry_failed_session_start("deleted".into(), window, cx);
+            assert!(app.session.start.failed("deleted").is_some());
+            assert!(!app.session.start.has_pending());
+
+            let connection =
+                serde_json::from_value::<zzclawterm_core::SavedConnection>(serde_json::json!({
+                    "id": "saved", "name": "updated", "type": "local_terminal", "shell_args": "'"
+                }))
+                .unwrap();
+            app.connection_state
+                .replace_loaded(vec![connection], Vec::new());
+            failed_start(app, "saved-failure", 2, None);
+            app.session
+                .start
+                .failed
+                .get_mut("saved-failure")
+                .unwrap()
+                .pending
+                .source_connection_id = Some("saved".into());
+            app.retry_failed_session_start("saved-failure".into(), window, cx);
+            let failed = app.session.start.active_failed().unwrap();
+            assert_eq!(
+                failed.pending.source_connection_id.as_deref(),
+                Some("saved")
+            );
+            assert!(!app.session.start.has_pending());
+            assert_ne!(failed.error, "test failure");
+            assert!(!app.session.start.saved_connection_is_preparing("saved"));
+        })
+    });
+}
+
+#[test]
+fn closing_retry_preparation_prevents_stale_callbacks_and_worker_results() {
+    let mut starts = SessionStartFeatureState::new();
+    starts.begin_retry_preparation("preparing".into(), pending("retry"));
+    let options = super::SavedConnectionStartOptions {
+        retry_request_id: Some("preparing".into()),
+        ..Default::default()
+    };
+    assert!(starts.retry_is_pending(&options));
+    let attempt = starts.attempt("preparing");
+    starts.close_pending("preparing").unwrap();
+    assert!(attempt.check().is_err());
+    assert!(!starts.retry_is_pending(&options));
+    assert!(
+        !starts.has_cancelled_results(),
+        "no worker was submitted during preparation"
+    );
+
+    starts.begin_retry_preparation("worker".into(), pending("retry"));
+    starts.finish_retry_preparation("worker");
+    starts.close_pending("worker").unwrap();
+    assert!(matches!(
+        starts.take_event_request("worker"),
+        SessionStartEventRequest::Cancelled
+    ));
+    assert!(!starts.has_failed());
+}
+
+struct FailureViewHost {
+    app: gpui::Entity<crate::features::ZzClawTermApp>,
+    strip: bool,
+}
+
+struct StartupWorkspaceHost {
+    app: gpui::Entity<crate::features::ZzClawTermApp>,
+}
+
+impl gpui::Render for StartupWorkspaceHost {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{IntoElement as _, ParentElement as _, Styled as _};
+        let workspace = self
+            .app
+            .update(cx, |app, cx| app.workspace_view(cx).into_any_element());
+        gpui::div().size_full().flex().flex_col().child(workspace)
+    }
+}
+
+#[test]
+fn grouped_connection_failure_and_retry_fill_and_center_in_the_content_area() {
+    use gpui::px;
+
+    let root = TestConfigDir::new("zzclawterm-startup-workspace-layout");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+    app.update(&mut cx, |app, cx| {
+        app.sync_component_theme(cx);
+        app.reconcile_terminal_windows();
+        let group = app.current_terminal_group().unwrap();
+        let placement = failed_start(app, "failure", 1, None);
+        app.shell
+            .reserve_terminal_start_group(placement.request_sequence, group);
+    });
+    let fixture_app = app.clone();
+    let (_, cx) = cx.add_window_view(move |_, cx| {
+        cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+        StartupWorkspaceHost { app: fixture_app }
+    });
+    for (panel, message) in [
+        ("failed-workspace-state", "failed-workspace-message"),
+        ("pending-workspace-state", "pending-workspace-name"),
+    ] {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        let content = app.read_with(cx, |app, _| {
+            let group = app.current_terminal_group().unwrap();
+            let mut bounds = app.shell.terminal_split_bounds(&group).unwrap();
+            bounds.origin.y += px(36.);
+            bounds.size.height -= px(36.);
+            bounds
+        });
+        let panel = cx.debug_bounds(panel).unwrap();
+        let message = cx.debug_bounds(message).unwrap();
+        assert_eq!(panel, content);
+        assert!(
+            (message.center().y - panel.center().y).abs() < panel.size.height / 6.,
+            "the connection status must stay near the content area's vertical center"
+        );
+        app.update(cx, |app, cx| {
+            if let Some(failed) = app.session.start.take_failed_for_retry("failure") {
+                app.session
+                    .start
+                    .register_pending("retry".into(), failed.pending);
+                cx.notify();
+            }
+        });
+    }
+}
+
+impl gpui::Render for FailureViewHost {
+    fn render(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
+        self.app.update(cx, |app, cx| {
+            window.focus(app.terminal.input_focus(), cx);
+            let content = if self.strip {
+                app.session_tab_strip(cx)
+            } else {
+                app.failed_workspace_state(cx).into_any_element()
+            };
+            gpui::div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .track_focus(app.terminal.input_focus())
+                .on_key_down(cx.listener(|app, event, window, cx| {
+                    app.cancel_internal_drag_on_escape(event, window, cx);
+                }))
+                .child(app.session_tab_drag_listener_layer(cx))
+                .child(content)
+        })
+    }
+}
+
+#[test]
+fn selected_failed_and_retry_tabs_replace_the_previous_tab_highlight() {
+    use gpui::VisualTestContext;
+    use zzclawterm_core::InternalEditorDisplay;
+
+    use crate::features::test_support::editor_document;
+    use crate::models::{QuickSwitchItem, WorkspaceTabId};
+
+    let draw_and_assert =
+        |cx: &mut VisualTestContext, selected: &'static str, unselected: &[&'static str]| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(cx.debug_bounds(selected).is_some(), "selected: {selected}");
+            for selector in unselected {
+                assert!(
+                    cx.debug_bounds(selector).is_none(),
+                    "unselected: {selector}"
+                );
+            }
+        };
+    for (grouped, editor) in [(false, false), (true, false), (true, true)] {
+        let root = TestConfigDir::new("zzclawterm-startup-tab-selection");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+        let (formal_tab, formal_highlight) = app.update(&mut cx, |app, cx| {
+            app.sync_component_theme(cx);
+            if grouped {
+                app.reconcile_terminal_windows();
+            }
+            let (tab, highlight) = if editor {
+                let mut document =
+                    editor_document("source", "/test.txt", InternalEditorDisplay::Workspace);
+                document.id = "editor".into();
+                let id = document.id.clone();
+                app.transfer.open_editor_tab(document);
+                app.open_workspace_editor_tab(&id, cx);
+                ("editor-tab-editor", "editor-tab-active-editor")
+            } else {
+                ("session-tab-source", "session-tab-active-source")
+            };
+            let group = app.current_terminal_group();
+            let placement = failed_start(app, "failure", 1, None);
+            if let Some(group) = group {
+                app.shell
+                    .reserve_terminal_start_group(placement.request_sequence, group);
+            }
+            (tab, highlight)
+        });
+        let fixture_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |_, cx| {
+            cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+            StartupWorkspaceHost { app: fixture_app }
+        });
+        draw_and_assert(cx, "failed-session-tab-active-failure", &[formal_highlight]);
+        app.read_with(cx, |app, _| {
+            let selected = app
+                .quick_switch_items()
+                .into_iter()
+                .filter_map(|item| match item {
+                    QuickSwitchItem::Session {
+                        id, active: true, ..
+                    } => Some(id),
+                    QuickSwitchItem::Pending {
+                        request_id,
+                        active: true,
+                        ..
+                    } => Some(request_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(selected, ["failure"]);
+        });
+        let bounds = cx.debug_bounds(formal_tab).unwrap();
+        cx.simulate_click(bounds.center(), Default::default());
+        draw_and_assert(cx, formal_highlight, &["failed-session-tab-active-failure"]);
+        let bounds = cx.debug_bounds("failed-session-tab-failure").unwrap();
+        cx.simulate_click(bounds.center(), Default::default());
+        draw_and_assert(cx, "failed-session-tab-active-failure", &[formal_highlight]);
+        app.update(cx, |app, cx| {
+            let failed = app.session.start.take_failed_for_retry("failure").unwrap();
+            app.session
+                .start
+                .begin_retry_preparation("retry".into(), failed.pending);
+            cx.notify();
+        });
+        draw_and_assert(cx, "pending-session-tab-active-retry", &[formal_highlight]);
+        app.update(cx, |app, cx| {
+            app.session.simulate_start_failure("retry");
+            cx.notify();
+        });
+        draw_and_assert(cx, "failed-session-tab-active-retry", &[formal_highlight]);
+        app.update(cx, |app, cx| {
+            app.close_failed_session_start("retry".into(), cx)
+        });
+        draw_and_assert(cx, formal_highlight, &["failed-session-tab-active-retry"]);
+        app.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.selected_session_strip_tab(&app.current_terminal_group()),
+                Some(
+                    crate::features::shell::session_tabs::SessionStripTabId::Workspace(
+                        WorkspaceTabId::Session(_)
+                            | WorkspaceTabId::Editor(_)
+                            | WorkspaceTabId::FileManager(_)
+                    )
+                )
+            ));
+        });
+    }
+}
+
+#[test]
+fn failure_view_reconnect_button_retries_the_selected_request() {
+    let root = TestConfigDir::new("zzclawterm-failure-button");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+    app.update(&mut cx, |app, cx| {
+        failed_start(
+            app,
+            "button",
+            1,
+            Some(SessionLaunchConfig::Local(LocalSessionConfig {
+                encoding: "invalid-test-encoding".into(),
+                ..Default::default()
+            })),
+        );
+        app.sync_component_theme(cx);
+    });
+    let fixture_app = app.clone();
+    let (_, cx) = cx.add_window_view(move |_, cx| {
+        cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+        FailureViewHost {
+            app: fixture_app,
+            strip: false,
+        }
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let button = cx.debug_bounds("failed-session-reconnect-target").unwrap();
+    assert!(button.size.width > gpui::px(0.) && button.size.height > gpui::px(0.));
+    cx.simulate_click(button.center(), Default::default());
+    app.update(cx, |app, _| {
+        assert!(app.session.start.failed("button").is_none());
+        assert_eq!(app.session.start.failed_entries().count(), 1);
+        assert!(!app.session.start.has_pending());
+    });
+}
+
+#[test]
+fn real_failed_tabs_drag_both_directions_cancel_and_never_detach() {
+    use crate::app_shell::{AppShellStartup, DesktopController};
+    use gpui::{MouseButton, point, px};
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
+    for (failed_source, action) in [
+        (true, "commit"),
+        (false, "commit"),
+        (true, "escape"),
+        (true, "close"),
+        (true, "outside"),
+    ] {
+        let root = TestConfigDir::new("zzclawterm-failure-drag");
+        let controller_root = TestConfigDir::new("zzclawterm-failure-drag-controller");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            controller_root.path().to_path_buf(),
+            controller_root.path().join("config"),
+            controller_root.path().join("logs"),
+            controller_root.path().join("cache"),
+            None,
+        );
+        let startup = AppShellStartup::prepare(&runtime);
+        let controller = cx.new(|cx| DesktopController::new(runtime, startup, cx));
+        let app = app_with_visible_local_session(&mut cx, root.path(), "a");
+        let key = app.update(&mut cx, |app, cx| {
+            let metadata = app.session.metadata("a").unwrap().clone();
+            app.session.register_session_metadata("b", metadata);
+            let placement = failed_start(app, "failure", 1, None);
+            app.desktop_controller = Some(controller.downgrade());
+            app.sync_component_theme(cx);
+            crate::features::shell::session_tabs::SessionStripTabId::Start(
+                placement.request_sequence,
+            )
+            .layout_key()
+        });
+        let fixture_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |_, cx| {
+            cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+            FailureViewHost {
+                app: fixture_app,
+                strip: true,
+            }
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = cx
+            .debug_bounds(if failed_source {
+                "failed-session-tab-failure"
+            } else {
+                "session-tab-a"
+            })
+            .unwrap();
+        let start = bounds.origin + point(px(30.), px(16.));
+        let end = if action == "outside" {
+            point(px(-40.), start.y)
+        } else {
+            point(
+                cx.debug_bounds("session-tab-b").unwrap().right() - px(12.),
+                start.y,
+            )
+        };
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + point(px(10.), px(0.)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        if failed_source {
+            cx.read(|cx| assert!(controller.read(cx).tab_drag_source().is_none()));
+        }
+        if action == "escape" {
+            cx.simulate_keystrokes("escape");
+        }
+        if action == "close" {
+            app.update(cx, |app, cx| {
+                app.session.remove_session_catalog("b");
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        // Releases outside a drop target are cleaned by the existing hover clock.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            let expected: Vec<String> = match (failed_source, action) {
+                (true, "commit") => vec!["a".into(), "b".into(), key.clone()],
+                (false, "commit") => vec![key.clone(), "b".into(), "a".into()],
+                (_, "close") => vec!["a".into(), key.clone()],
+                _ => vec!["a".into(), key.clone(), "b".into()],
+            };
+            assert_eq!(
+                app.session_strip_tabs(&None)
+                    .iter()
+                    .map(|tab| tab.id.layout_key())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{failed_source} {action}"
+            );
+            assert!(
+                !app.session.tab_drag_is_pending(),
+                "{failed_source} {action}"
+            );
+        });
+        cx.read(|cx| assert!(controller.read(cx).tab_drag_source().is_none()));
+    }
+}
+
+#[test]
+fn mixed_failed_pending_editor_and_session_tabs_keep_dragged_order_on_completion() {
+    use crate::features::shell::session_tabs::SessionStripTabId;
+    use crate::models::{TerminalWindowNode, WorkspaceTabId};
+    let root = TestConfigDir::new("zzclawterm-failed-order");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "a");
+    cx.update_entity(&app, |app, cx| {
+        let metadata = app.session.metadata("a").unwrap().clone();
+        app.session.register_session_metadata("b", metadata.clone());
+        let document = crate::features::test_support::editor_document(
+            "a",
+            "/editor.txt",
+            zzclawterm_core::InternalEditorDisplay::Workspace,
+        );
+        let editor = WorkspaceTabId::Editor(document.id.clone()).layout_key();
+        app.transfer.open_editor_tab(document);
+        app.shell
+            .restore_terminal_window_tree(Some(TerminalWindowNode::Leaf {
+                id: "group".into(),
+                tab_ids: vec!["a".into(), "b".into(), editor.clone()],
+                active_tab_id: Some("a".into()),
+            }));
+        let x = failed_start(app, "x", 1, None);
+        let y = failed_start(app, "y", 3, None);
+        let z = app.session.start.allocate_tab_placement(5);
+        let mut request = pending("z");
+        request.tab_placement = Some(z);
+        app.session.start.register_pending("z".into(), request);
+        for placement in [x, y, z] {
+            app.shell
+                .reserve_terminal_start_group(placement.request_sequence, "group".into());
+        }
+        let x_key = SessionStripTabId::Start(x.request_sequence).layout_key();
+        let y_key = SessionStripTabId::Start(y.request_sequence).layout_key();
+        let z_key = SessionStripTabId::Start(z.request_sequence).layout_key();
+        let group = Some("group".into());
+        let order = vec![
+            y_key.clone(),
+            editor.clone(),
+            z_key.clone(),
+            "a".into(),
+            x_key.clone(),
+            "b".into(),
+        ];
+        app.commit_session_strip_order(&group, &order, &x_key, cx);
+        assert_eq!(
+            app.session_strip_tabs(&group)
+                .iter()
+                .map(|tab| tab.id.layout_key())
+                .collect::<Vec<_>>(),
+            order
+        );
+        assert_eq!(app.session.active_failed_request_id(), Some("x"));
+        assert_eq!(
+            app.workspace_tab_ids(),
+            [editor.clone(), "a".into(), "b".into()]
+        );
+        assert_eq!(app.session.resolve_start_tab_placement(z).insert_index, 2);
+
+        // The callback still has its original placement snapshot (index 5).
+        let _ = app.session.start.take_event_request("z");
+        app.register_session_for_start("finished", metadata, Some(z), None);
+        let expected = vec![
+            y_key,
+            editor,
+            "finished".into(),
+            "a".into(),
+            x_key,
+            "b".into(),
+        ];
+        assert_eq!(
+            app.session_strip_tabs(&group)
+                .iter()
+                .map(|tab| tab.id.layout_key())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            app.workspace_tab_ids()
+                .iter()
+                .all(|key| !key.starts_with("\0start:"))
+        );
+    });
+}
+
 fn test_otp_provider(root: &Path) -> Arc<NativeOtpProvider> {
     let store = blocking_test_store(root);
     Arc::new(NativeOtpProvider::new(store))

@@ -15,10 +15,11 @@ mod browser_logic;
 mod tree;
 pub(in crate::features) use tree::TransferTreePresentation;
 
-use self::browser_logic::BrowserFilterCache;
-pub(in crate::features) use self::browser_logic::natural_compare_ascii;
 #[cfg(test)]
 pub(in crate::features) use self::browser_logic::transfer_browser_entry_is_visible;
+pub(in crate::features) use self::browser_logic::{
+    BrowserFilterCache, BrowserFilterKey, natural_compare_ascii, record_browser_history,
+};
 mod editor;
 mod preview;
 pub(in crate::features) use self::preview::{PdfPageRequest, TransferPreviewCloseOutcome};
@@ -190,7 +191,9 @@ pub(super) struct TransferBrowserState {
     /// Latest SFTP navigation job per session; older results must not rewind the browser.
     pub(super) navigation_jobs: HashMap<String, String>,
     pub(super) pending_navigations: HashMap<String, TransferBrowserNavigationSnapshot>,
-    pub(super) auto_sync_cwd_last_at: Option<Instant>,
+    pub(super) pending_cwd_sync: bool,
+    #[cfg(test)]
+    pub(super) directory_requests: Option<Vec<(String, zzclawterm_transport::RemoteFilePath)>>,
     pub(super) favorites: VecDeque<String>,
     pub(super) sort_column: TransferBrowserSortColumn,
     pub(super) sort_direction: TransferBrowserSortDirection,
@@ -227,10 +230,8 @@ struct TransferFileOpsState {
 
 /// Built-in remote file editor workspace.
 struct TransferEditorFeatureState {
+    views: HashMap<String, gpui::Entity<super::workspace_editor::WorkspaceEditorView>>,
     workspace: Option<TransferEditorWorkspaceState>,
-    preview_cache: Option<editor::EditorPreviewCache>,
-    tabs_menu_open: bool,
-    focus: FocusHandle,
     window: ChildWindowSlot,
 }
 
@@ -246,6 +247,7 @@ struct TransferPreviewFeatureState {
     window: ChildWindowSlot,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::features) enum TransferEditorCloseOutcome {
     Missing,
@@ -254,6 +256,7 @@ pub(in crate::features) enum TransferEditorCloseOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(in crate::features) enum TransferEditorDiscardOutcome {
     Missing,
     TabDiscarded,
@@ -269,6 +272,7 @@ pub(in crate::features) enum TransferEditorSaveOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(in crate::features) enum TransferEditorCloseAfterSave {
     Missing,
     Loading,
@@ -366,7 +370,9 @@ impl TransferFeatureState {
                 session_cache: HashMap::new(),
                 navigation_jobs: HashMap::new(),
                 pending_navigations: HashMap::new(),
-                auto_sync_cwd_last_at: None,
+                pending_cwd_sync: false,
+                #[cfg(test)]
+                directory_requests: None,
                 favorites: VecDeque::new(),
                 sort_column: TransferBrowserSortColumn::Name,
                 sort_direction: TransferBrowserSortDirection::Ascending,
@@ -1270,6 +1276,14 @@ impl TransferFeatureState {
         }
 
         let mut changed = false;
+        if let Some(workspace) = &mut self.editor.workspace {
+            for document in &mut workspace.tabs {
+                if document.session_id.as_deref() == Some(old_id) {
+                    document.session_id = Some(new_id.to_string());
+                    changed = true;
+                }
+            }
+        }
         self.tree.replace_session(old_id, new_id);
         if self.file_ops.delete_refresh_pending.remove(old_id) {
             self.file_ops
@@ -1283,24 +1297,14 @@ impl TransferFeatureState {
         }
 
         if let Some(job_id) = self.browser.navigation_jobs.remove(old_id) {
-            if let Some(replaced_job_id) = self
-                .browser
-                .navigation_jobs
-                .insert(new_id.to_string(), job_id)
-            {
-                self.browser.pending_navigations.remove(&replaced_job_id);
-            }
+            self.browser.pending_navigations.remove(&job_id);
             changed = true;
         }
         self.prune_unreferenced_browser_navigation_snapshots();
 
         for job in &mut self.queue.jobs {
             if (job.is_user_transfer()
-                || matches!(
-                    job.kind,
-                    crate::models::TransferJobKind::ListTree { .. }
-                        | crate::models::TransferJobKind::Delete { .. }
-                ))
+                || matches!(job.kind, crate::models::TransferJobKind::Delete { .. }))
                 && job.session_id.as_deref() == Some(old_id)
             {
                 job.session_id = Some(new_id.to_string());

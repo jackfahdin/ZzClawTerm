@@ -279,11 +279,6 @@ impl ZzClawTermApp {
         self.save_interaction_settings(cx);
     }
 
-    pub(in crate::features) fn toggle_mac_ime_compatibility(&mut self, cx: &mut Context<Self>) {
-        self.settings.toggle_mac_ime_compatibility();
-        self.save_interaction_settings(cx);
-    }
-
     pub(in crate::features) fn set_interaction_encoding(
         &mut self,
         encoding: &'static str,

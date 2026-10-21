@@ -211,6 +211,9 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !entry.is_directory() && self.focus_existing_transfer_editor(&entry, cx) {
+            return;
+        }
         match remote_file_text_kind(&entry.name) {
             RemoteFileTextKind::Text => self.open_transfer_editor_direct(entry, window, cx),
             RemoteFileTextKind::Binary => {
@@ -229,6 +232,41 @@ impl ZzClawTermApp {
         }
     }
 
+    fn focus_existing_transfer_editor(
+        &mut self,
+        entry: &SftpFileEntry,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(document) = self
+            .transfer
+            .editor_documents()
+            .iter()
+            .find(|document| {
+                document.session_id.as_deref() == self.session.active_id()
+                    && document.remote_file_path().identity_key()
+                        == entry.remote_path().identity_key()
+            })
+            .cloned()
+        {
+            let tab_id = document.id.clone();
+            let status = format!("remote text file already open: {}", entry.path);
+            if document.display == zzclawterm_core::InternalEditorDisplay::Window {
+                self.transfer.activate_editor_tab(&tab_id);
+                self.open_remote_file_editor_window(cx);
+            } else {
+                self.activate_workspace_tab(
+                    &crate::models::WorkspaceTabId::Editor(tab_id.clone()).layout_key(),
+                    cx,
+                );
+            }
+            self.transfer.set_browser_status(status.clone());
+            self.shell.set_status(status);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     pub(in crate::features) fn open_transfer_editor_direct(
         &mut self,
         entry: SftpFileEntry,
@@ -245,31 +283,13 @@ impl ZzClawTermApp {
         let remote_file_path = entry.remote_path();
         let tab_id =
             TransferEditorState::tab_id_for_remote_path(session_id.as_deref(), &remote_file_path);
-        if self
-            .transfer
-            .editor_workspace()
-            .is_some_and(|workspace| workspace.tabs.iter().any(|tab| tab.id == tab_id))
-        {
-            self.transfer.activate_editor_tab(&tab_id);
-            let status = format!("remote text file already open: {}", entry.path);
-            if self.settings.summary().transfer_internal_editor_display
-                == zzclawterm_core::InternalEditorDisplay::Window
-            {
-                self.open_remote_file_editor_window(cx);
-            }
-            if !self.transfer.editor_window_is_open()
-                && !self.transfer.editor_window_open_is_pending()
-            {
-                window.focus(self.transfer.editor_focus(), cx);
-            }
-            self.transfer.set_browser_status(status.clone());
-            self.shell.set_status(status);
-            cx.notify();
+        if self.focus_existing_transfer_editor(&entry, cx) {
             return;
         }
         self.transfer.select_browser_path(entry.path.clone());
         self.transfer.set_remote_path(entry.path.clone());
         let tab = TransferEditorState {
+            display: self.settings.summary().transfer_internal_editor_display,
             id: tab_id.clone(),
             session_id: session_id.clone(),
             remote_path: entry.path.clone(),
@@ -297,10 +317,8 @@ impl ZzClawTermApp {
             == zzclawterm_core::InternalEditorDisplay::Window
         {
             self.open_remote_file_editor_window(cx);
-        }
-        if !self.transfer.editor_window_is_open() && !self.transfer.editor_window_open_is_pending()
-        {
-            window.focus(self.transfer.editor_focus(), cx);
+        } else {
+            self.open_workspace_editor_tab(&tab_id, cx);
         }
         self.start_sftp_editor_load_job(session_id, tab_id, remote_file_path, window, cx);
         cx.notify();
@@ -355,11 +373,12 @@ impl ZzClawTermApp {
         self.open_transfer_external_for_session(entry, session_id, cx);
     }
 
-    pub(in crate::features) fn open_active_transfer_editor_external(
+    pub(in crate::features) fn open_editor_document_external(
         &mut self,
+        id: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.transfer.active_editor_tab().cloned() else {
+        let Some(tab) = self.transfer.editor_tab_snapshot(id) else {
             return;
         };
         let entry = SftpFileEntry {

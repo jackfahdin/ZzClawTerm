@@ -50,7 +50,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn has_drop_hover(&self) -> bool {
-        self.terminal.terminal_file_drop_hover_is_pending()
+        self.shell.terminal_file_drop_hover_is_pending()
             || self.transfer.browser_external_drop_hover_is_pending()
             || self.session.tab_drag_is_pending()
             || self.security.drop_target().is_some()
@@ -83,8 +83,8 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn clear_drop_hover(&mut self, cx: &mut Context<Self>) {
         self.shell.finish_tab_strip_motion();
-        let mut dirty = self.terminal.clear_terminal_file_drop_hover();
-        dirty |= self.terminal.clear_terminal_window_drop();
+        let mut dirty = self.shell.clear_terminal_file_drop_hover();
+        dirty |= self.shell.clear_terminal_window_drop();
         let transfer_dirty = self.transfer.set_browser_external_drop_hover(false);
         dirty |= transfer_dirty;
         dirty |= self.session.clear_tab_drag();

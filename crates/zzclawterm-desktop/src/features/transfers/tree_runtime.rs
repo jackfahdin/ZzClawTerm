@@ -60,6 +60,12 @@ impl ZzClawTermApp {
             control: None,
             speed: Default::default(),
         });
+        #[cfg(test)]
+        if let Some(requests) = self.transfer.browser.directory_requests.as_mut() {
+            requests.push((id, path));
+            cx.notify();
+            return;
+        }
         let tx = self.transfer.transfer_event_sender();
         self.submit_transfer_blocking_job("sftp-tree-listing", id.clone(), tx.clone(), move || {
             let result = service

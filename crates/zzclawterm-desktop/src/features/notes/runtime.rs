@@ -518,7 +518,7 @@ mod tests {
             if app.shell.panel_multi_open() {
                 app.toggle_panel_multi_open(cx);
             }
-            app.ensure_panel_open(NavItem::Notes);
+            app.ensure_panel_open(NavItem::Notes, cx);
 
             app.ensure_visible_notes_loaded(cx);
 
@@ -535,7 +535,7 @@ mod tests {
             if app.shell.panel_multi_open() {
                 app.toggle_panel_multi_open(cx);
             }
-            app.ensure_panel_open(NavItem::Notes);
+            app.ensure_panel_open(NavItem::Notes, cx);
             app.toggle_left_sidebar(cx);
 
             app.ensure_visible_notes_loaded(cx);

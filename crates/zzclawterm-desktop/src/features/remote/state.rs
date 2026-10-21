@@ -81,6 +81,25 @@ impl RemoteOpsFeatureState {
         self.stats.activate_session(session_id);
     }
 
+    pub(in crate::features) fn icon_probe_needed(&self, session_id: &str) -> bool {
+        self.stats.icon_probe_needed(session_id)
+    }
+
+    pub(in crate::features) fn icon_probe_due(&self, session_id: &str) -> bool {
+        self.stats.icon_probe_due(session_id)
+    }
+
+    pub(in crate::features) fn begin_icon_probe(&mut self, session_id: &str, job_id: u64) {
+        self.stats.begin_icon_probe(session_id, job_id);
+    }
+
+    pub(in crate::features) fn take_icon_probe_snapshot(
+        &mut self,
+        session_id: &str,
+    ) -> Option<zzclawterm_transport::RemoteStats> {
+        self.stats.take_icon_probe_snapshot(session_id)
+    }
+
     pub(in crate::features) fn docker_presentation(&self) -> DockerPresentationState {
         self.docker.docker_presentation()
     }

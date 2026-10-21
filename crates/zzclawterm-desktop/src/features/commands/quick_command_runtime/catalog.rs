@@ -230,7 +230,7 @@ impl ZzClawTermApp {
         self.ai
             .set_chat_response_preview("Quick command generation ready");
         self.ai.set_panel_status("quick command AI assist");
-        self.ensure_panel_open(NavItem::AiAssistant);
+        self.ensure_panel_open(NavItem::AiAssistant, cx);
         window.focus(self.ai.chat_focus(), cx);
         cx.notify();
     }

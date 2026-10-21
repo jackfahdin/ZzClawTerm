@@ -43,6 +43,12 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn close_active_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.active_workspace_tab()
+            && !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
+        {
+            self.request_workspace_tabs_close(vec![key], None, cx);
+            return;
+        }
         let Some(session_id) = self.session.active_id_owned() else {
             self.shell.set_status("no active session".to_string());
             cx.notify();
@@ -56,11 +62,14 @@ impl ZzClawTermApp {
         session_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self.hide_referenced_session_tab(&session_id, cx) {
+            return;
+        }
         if self.tab_tree_is_locked(&session_id) {
             self.notify_locked_tab_close_blocked(cx);
             return;
         }
-        let preferred_next = self.terminal.terminal_window_tree().and_then(|mut root| {
+        let preferred_next = self.shell.terminal_window_tree().and_then(|mut root| {
             let group = root.leaf_for_tab(&session_id).map(str::to_string)?;
             let groups = root.leaf_ids();
             let index = groups.iter().position(|id| id == &group).unwrap_or(0);
@@ -129,15 +138,17 @@ impl ZzClawTermApp {
         if was_active {
             self.ai.reset_agent_runtime();
             self.sync_session_event_bridge_policy();
-            if let Some(next_session_id) = preferred_next
-                .filter(|id| self.session.has_session(id))
-                .or_else(|| self.session.next_session_after(&session_id))
+            if let Some(next_tab) = preferred_next
+                .filter(|id| self.workspace_tab_ids().contains(id))
+                .or_else(|| {
+                    self.session
+                        .next_session_after(&session_id)
+                        .filter(|id| !self.shell.session_tab_is_hidden(id))
+                })
+                .or_else(|| self.workspace_tab_ids().first().cloned())
             {
-                self.activate_session_id(&next_session_id, cx);
-                self.shell.set_status(format!(
-                    "session closed; active {}",
-                    short_id(&next_session_id)
-                ));
+                self.activate_workspace_tab(&next_tab, cx);
+                self.shell.set_status("session closed".to_string());
             } else {
                 self.session.clear_active_session();
                 self.sync_ai_active_scope(cx);
@@ -192,6 +203,26 @@ impl ZzClawTermApp {
                 .rekey_workspace_pane_root(tab_root_id, survivor_id);
         }
 
+        if self.workspace_references_session(&pane_id, cx) {
+            let next = self
+                .tab_tree_session_ids(&pane_id)
+                .into_iter()
+                .find(|id| id != &pane_id)
+                .or_else(|| {
+                    self.tab_tree_session_ids(tab_root_id)
+                        .into_iter()
+                        .find(|id| id != &pane_id)
+                });
+            self.shell.hide_workspace_session(&pane_id);
+            self.prune_workspace_split();
+            self.reconcile_terminal_windows();
+            if let Some(next) = next {
+                self.activate_session_id(&next, cx);
+            }
+            self.persist_open_tabs();
+            cx.notify();
+            return;
+        }
         let was_active = self.session.active_id() == Some(pane_id.as_str());
         let disconnected = self.session.is_disconnected(&pane_id);
         let close_result = if self.remote_desktop.is_session(&pane_id) {
@@ -233,79 +264,6 @@ impl ZzClawTermApp {
         self.shell
             .set_status(format!("closed {}", short_id(&pane_id)));
         cx.notify();
-    }
-
-    pub(in crate::features) fn close_session_batch(
-        &mut self,
-        session_ids: Vec<String>,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        if session_ids.is_empty() {
-            self.shell
-                .set_status(format!("no {label} sessions to close"));
-            return;
-        }
-
-        let active_before = self.session.active_id_owned();
-        let mut closed = 0usize;
-        let mut failed = 0usize;
-        for session_id in session_ids {
-            let close_result = if self.remote_desktop.is_session(&session_id) {
-                self.close_remote_desktop_runtime(&session_id)
-            } else {
-                self.session
-                    .manager()
-                    .close(&session_id)
-                    .map_err(anyhow::Error::from)
-            };
-            match close_result {
-                Ok(()) => {
-                    self.cleanup_recording_for_session(&session_id);
-                    self.remove_session_state(&session_id, cx);
-                    closed += 1;
-                }
-                Err(_) => {
-                    failed += 1;
-                }
-            }
-        }
-        self.prune_workspace_split();
-
-        // After close_session_batch, local metadata is the source of truth for
-        // remaining tabs (includes disconnected). Avoid transport map lock.
-        let active_is_live = active_before
-            .as_deref()
-            .is_some_and(|session_id| self.session.has_session(session_id));
-
-        if !active_is_live {
-            self.ai.reset_agent_runtime();
-            self.sync_session_event_bridge_policy();
-            if let Some(next_session_id) = self.session.next_live_session() {
-                self.activate_session_id(&next_session_id, cx);
-            } else {
-                self.session.clear_active_session();
-                self.sync_ai_active_scope(cx);
-                self.terminal.view.output = String::from(INITIAL_TERMINAL_BANNER);
-                self.terminal.view.output_decoder.reset_decoder();
-                self.terminal.view.screen = initial_terminal_screen();
-                if let Err(error) = self
-                    .terminal
-                    .view
-                    .screen
-                    .set_encoding(&self.settings.summary().interaction_default_encoding)
-                {
-                    self.shell
-                        .set_status(crate::features::terminal::encoding_error_text(error));
-                }
-            }
-        }
-
-        self.shell.set_status(if failed == 0 {
-            format!("closed {closed} {label} session(s)")
-        } else {
-            format!("closed {closed} {label} session(s), {failed} failed")
-        });
     }
 
     pub(in crate::features) fn handle_window_minimize(
@@ -373,6 +331,16 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        if self.has_unconfirmed_editor_changes() {
+            let targets = self
+                .transfer
+                .editor_documents()
+                .iter()
+                .map(|doc| crate::models::WorkspaceTabId::Editor(doc.id.clone()).layout_key())
+                .collect();
+            self.request_workspace_tabs_close(targets, Some(open_sessions), cx);
+            return;
+        }
         // Persist workspace before exit when startup restore is enabled.
         if self.settings.summary().startup_restore {
             self.flush_open_tabs_now(cx);
@@ -430,6 +398,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if self.session.dialog_should_quit_after_close_all() {
+            self.cancel_editor_exit_approval();
             cx.emit(AppLifecycleEvent::ShutdownCancelled);
         }
         self.update
@@ -442,18 +411,12 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn confirm_close_all_sessions(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let quit_after = self.session.dialog_take_close_all_sessions_confirm();
         if quit_after {
-            if self.settings.summary().startup_restore {
-                self.flush_open_tabs_now(cx);
-            }
-            self.shell.set_status("closing window".to_string());
-            if self.prepare_native_update_exit(cx) {
-                cx.emit(AppLifecycleEvent::ShutdownRequested);
-            }
+            self.handle_window_close_request_with_count(0, window, cx);
             return true;
         }
         self.close_all_sessions(cx);
@@ -462,13 +425,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn close_all_sessions(&mut self, cx: &mut Context<Self>) {
-        let roots = self
-            .ordered_tab_sessions()
-            .into_iter()
-            .map(|session| session.id)
-            .collect::<Vec<_>>();
-        self.close_tab_roots_batch(roots, "active", cx);
-        cx.notify();
+        self.request_workspace_tabs_close(self.workspace_tab_ids(), None, cx);
     }
 
     pub(in crate::features) fn close_inactive_sessions(
@@ -476,14 +433,13 @@ impl ZzClawTermApp {
         keep_session_id: String,
         cx: &mut Context<Self>,
     ) {
-        let roots = self
-            .ordered_tab_sessions()
+        let targets = self
+            .workspace_tab_ids()
             .into_iter()
-            .filter_map(|session| (session.id != keep_session_id).then_some(session.id))
-            .collect::<Vec<_>>();
-        self.activate_session_id_with_surface_sync(&keep_session_id, cx);
-        self.close_tab_roots_batch(roots, "inactive", cx);
-        cx.notify();
+            .filter(|key| key != &keep_session_id)
+            .collect();
+        self.activate_workspace_tab(&keep_session_id, cx);
+        self.request_workspace_tabs_close(targets, None, cx);
     }
 
     pub(in crate::features) fn close_sessions_to_right(
@@ -491,47 +447,17 @@ impl ZzClawTermApp {
         anchor_session_id: String,
         cx: &mut Context<Self>,
     ) {
-        let sessions = self.ordered_tab_sessions();
-        let Some(anchor_index) = sessions
-            .iter()
-            .position(|session| session.id == anchor_session_id)
-        else {
-            self.shell
-                .set_status("session no longer exists".to_string());
-            cx.notify();
+        let tabs = self
+            .shell
+            .terminal_group_for_tab(&anchor_session_id)
+            .as_deref()
+            .and_then(|group| self.shell.terminal_group_tabs(group))
+            .map(|(tabs, _)| tabs)
+            .unwrap_or_else(|| self.workspace_tab_ids());
+        let Some(index) = tabs.iter().position(|key| key == &anchor_session_id) else {
             return;
         };
-        let roots = sessions
-            .into_iter()
-            .skip(anchor_index + 1)
-            .map(|session| session.id)
-            .collect::<Vec<_>>();
-        self.close_tab_roots_batch(roots, "right-side", cx);
-        cx.notify();
-    }
-
-    fn close_tab_roots_batch(
-        &mut self,
-        tab_roots: Vec<String>,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        let mut skipped = 0usize;
-        let mut close_ids = Vec::new();
-        for tab_root in tab_roots {
-            if self.tab_tree_is_locked(&tab_root) {
-                skipped += 1;
-            } else {
-                close_ids.extend(self.tab_tree_session_ids(&tab_root));
-            }
-        }
-        close_ids.sort();
-        close_ids.dedup();
-        self.close_session_batch(close_ids, label, cx);
-        if skipped > 0 {
-            self.shell
-                .set_status(format!("{} ({skipped})", t!("tabCtx.lockedTabsSkipped")));
-        }
+        self.request_workspace_tabs_close(tabs.into_iter().skip(index + 1).collect(), None, cx);
     }
 
     pub(in crate::features) fn navigate_terminal_command(

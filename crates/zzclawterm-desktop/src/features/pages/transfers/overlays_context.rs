@@ -218,8 +218,8 @@ impl ZzClawTermApp {
                             ZzClawMenuItem::separator(),
                             ZzClawMenuItem::action(t!("fileExplorer.cmTerminalDirPath"))
                                 .icon("icons/fe/send-path.svg")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.send_current_transfer_browser_path_to_terminal(cx);
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.send_current_transfer_browser_path_to_terminal(window, cx);
                                 })),
                         ],
                     )
@@ -430,10 +430,9 @@ impl ZzClawTermApp {
                 Node::Action(Action::SendTo) => {
                     let send_items = send_targets
                         .iter()
-                        .cloned()
                         .map(|target| {
                             let session_id = target.session_id.clone();
-                            let mut item = ZzClawMenuItem::action(target.label.clone())
+                            ZzClawMenuItem::action(target.label.clone())
                                 .icon("icons/send.svg")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.start_send_selected_transfers_to_session(
@@ -442,11 +441,7 @@ impl ZzClawTermApp {
                                         cx,
                                     );
                                     this.defer_transfer_panel_snapshot_flush(cx);
-                                }));
-                            if let Some(meta) = target.meta {
-                                item = item.shortcut(meta);
-                            }
-                            item
+                                }))
                         })
                         .collect::<Vec<_>>();
                     ZzClawMenuItem::submenu(t!("fileExplorer.cmSendTo"), send_items)
@@ -510,25 +505,28 @@ impl ZzClawTermApp {
                     terminal_items.extend([
                         ZzClawMenuItem::action(t!("fileExplorer.cmTerminalPath"))
                             .icon("icons/fe/send-path.svg")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.send_selected_transfer_path_to_terminal(
                                     TransferPathPart::Full,
+                                    window,
                                     cx,
                                 );
                             })),
                         ZzClawMenuItem::action(t!("fileExplorer.cmTerminalName"))
                             .icon("icons/fe/send-path.svg")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.send_selected_transfer_path_to_terminal(
                                     TransferPathPart::Name,
+                                    window,
                                     cx,
                                 );
                             })),
                         ZzClawMenuItem::action(t!("fileExplorer.cmTerminalDirPath"))
                             .icon("icons/fe/send-path.svg")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.send_selected_transfer_path_to_terminal(
                                     TransferPathPart::Directory,
+                                    window,
                                     cx,
                                 );
                             })),

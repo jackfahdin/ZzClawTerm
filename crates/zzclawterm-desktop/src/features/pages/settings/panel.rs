@@ -54,6 +54,7 @@ pub(in crate::features) enum SettingsSectionPresentation {
     Interaction,
     Keybindings,
     TerminalGeneral,
+    RemoteMonitoring,
     Search,
     Translation,
     AiGeneral,
@@ -123,6 +124,7 @@ impl SettingsSnapshot {
             | SettingsTab::Appearance
             | SettingsTab::Interaction
             | SettingsTab::Keybindings
+            | SettingsTab::RemoteMonitoring
             | SettingsTab::TerminalGeneral
             | SettingsTab::Search
             | SettingsTab::Security => self.settings == other.settings,
@@ -1262,6 +1264,7 @@ impl SettingsPanel {
                 settings_nav_item(SettingsTab::TerminalGeneral),
                 settings_nav_item(SettingsTab::Search),
                 settings_nav_item(SettingsTab::Translation),
+                settings_nav_item(SettingsTab::RemoteMonitoring),
             ]),
             ZzClawSettingsNavGroup::new("ai_group", t!("ai.title"), "icons/settings/ai.svg")
                 .accent(0xbc8cff)
@@ -1292,6 +1295,9 @@ impl SettingsPanel {
             SettingsTab::Keybindings => self.keybindings_settings_section(cx).into_any_element(),
             SettingsTab::TerminalGeneral => self
                 .terminal_general_settings_section(cx)
+                .into_any_element(),
+            SettingsTab::RemoteMonitoring => self
+                .remote_monitoring_settings_section(cx)
                 .into_any_element(),
             SettingsTab::Search => self.terminal_search_settings_section(cx).into_any_element(),
             SettingsTab::Translation => self.translation_settings_section(cx).into_any_element(),
@@ -1463,6 +1469,7 @@ fn settings_tab_nav_id(tab: SettingsTab) -> &'static str {
         SettingsTab::Interaction => "settings-tab-interaction",
         SettingsTab::Keybindings => "settings-tab-keybindings",
         SettingsTab::TerminalGeneral => "settings-tab-terminal-general",
+        SettingsTab::RemoteMonitoring => "settings-tab-remote-monitoring",
         SettingsTab::Search => "settings-tab-search",
         SettingsTab::Translation => "settings-tab-translation",
         SettingsTab::AiGeneral => "settings-tab-ai-general",
@@ -1482,6 +1489,7 @@ fn settings_tab_from_nav_id(id: &str) -> Option<SettingsTab> {
         "settings-tab-interaction" => Some(SettingsTab::Interaction),
         "settings-tab-keybindings" => Some(SettingsTab::Keybindings),
         "settings-tab-terminal-general" => Some(SettingsTab::TerminalGeneral),
+        "settings-tab-remote-monitoring" => Some(SettingsTab::RemoteMonitoring),
         "settings-tab-search" => Some(SettingsTab::Search),
         "settings-tab-translation" => Some(SettingsTab::Translation),
         "settings-tab-ai-general" => Some(SettingsTab::AiGeneral),
@@ -1953,6 +1961,7 @@ forward_app_action!(
     prompt_diagnostics_export,
     prompt_keyword_highlight_import,
     reset_all_keybindings,
+    reset_remote_monitoring_intervals,
     reveal_log_dir,
     run_provider_cloud_sync_test,
     start_github_gist_auth,
@@ -1966,7 +1975,6 @@ forward_app_action!(
     toggle_ai_record_history,
     toggle_ai_redaction,
     toggle_alt_as_meta,
-    toggle_ascend_npu_monitor_panel,
     toggle_cloud_sync_auto_check,
     toggle_cloud_sync_auto_pull_remote_changes,
     toggle_cloud_sync_auto_push,
@@ -1976,26 +1984,20 @@ forward_app_action!(
     toggle_credential_autofill,
     toggle_cursor_blink,
     toggle_bold_default_foreground,
-    toggle_docker_manager_panel,
-    toggle_gpu_monitor_panel,
     toggle_interaction_copy_on_select,
     toggle_mouse_events_require_alt,
     toggle_keyword_highlights,
-    toggle_mac_ime_compatibility,
     toggle_minimize_to_tray,
     toggle_multi_line_paste_dialog,
-    toggle_notes_panel,
     toggle_osc52_clipboard_write,
     toggle_panel_multi_open,
     toggle_paste_image_as_path,
-    toggle_process_manager_panel,
     toggle_recording_auto_start,
     toggle_recording_binary_transfer_payloads,
     toggle_recording_io_labels,
     toggle_recording_input,
     toggle_recording_session_metadata,
     toggle_recording_timestamps,
-    toggle_remote_stats_panel,
     toggle_s3_virtual_host_style,
     toggle_startup_lock_enabled,
     toggle_idle_lock_enabled,
@@ -2004,12 +2006,12 @@ forward_app_action!(
     toggle_startup_restore_window_layout,
     toggle_terminal_action_links,
     toggle_terminal_line_numbers,
-    toggle_terminal_low_latency_mode,
     toggle_terminal_reconnect_restore_cwd,
     toggle_terminal_timestamps,
     toggle_terminal_workspace_padding,
     toggle_terminal_zebra_stripes,
     toggle_terminal_zoom_enabled,
+    toggle_file_manager_auto_collapse,
     toggle_transfer_ask_save_location,
     toggle_transfer_preserve_timestamps,
     toggle_transfer_resume_broken,

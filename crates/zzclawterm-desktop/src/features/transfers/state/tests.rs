@@ -841,17 +841,10 @@ fn transfer_session_id_migration_preserves_reconnected_sftp_state() {
             .as_deref(),
         Some("/srv")
     );
-    assert_eq!(
-        transfer
-            .browser
-            .navigation_jobs
-            .get("new-session")
-            .map(String::as_str),
-        Some("sftp-list-1")
-    );
+    assert!(!transfer.browser.navigation_jobs.contains_key("new-session"));
     assert!(!transfer.browser.navigation_jobs.contains_key("old-session"));
     assert!(
-        transfer
+        !transfer
             .browser
             .pending_navigations
             .contains_key("sftp-list-1")
@@ -941,6 +934,7 @@ fn external_sync_prompt(session_id: Option<&str>, job_id: &str) -> TransferExter
 
 fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
     TransferEditorState {
+        display: zzclawterm_core::InternalEditorDisplay::Window,
         id: TransferEditorState::tab_id(Some(session_id), remote_path),
         session_id: Some(session_id.to_string()),
         remote_path: remote_path.to_string(),
@@ -967,43 +961,6 @@ fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
         backup_warning_path: None,
         focused_field: TransferEditorField::Content,
     }
-}
-
-#[test]
-fn editor_preview_cache_tracks_content_query_match_and_tab_changes() {
-    let cx = TestAppContext::single();
-    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
-    let mut transfer = transfer_state(&cx);
-    let mut tab = editor_tab("session-a", "/a.txt");
-    tab.content = "中 a a".into();
-    transfer.open_editor_tab(tab);
-    let builds = std::cell::Cell::new(0);
-    let build = |content: &str, query: &str, active_match: usize| {
-        builds.set(builds.get() + 1);
-        format!("{content}/{query}/{active_match}")
-    };
-    assert_eq!(transfer.editor_content_preview(build).as_ref(), "中 a a//0");
-    transfer.active_editor_tab_mut().unwrap().dirty = true;
-    transfer.editor_content_preview(build);
-    assert_eq!(builds.get(), 1);
-    transfer.active_editor_tab_mut().unwrap().search_query = "a".to_string();
-    assert_eq!(
-        transfer.editor_content_preview(build).as_ref(),
-        "中 a a/a/0"
-    );
-    transfer.active_editor_tab_mut().unwrap().active_match = 1;
-    assert_eq!(
-        transfer.editor_content_preview(build).as_ref(),
-        "中 a a/a/1"
-    );
-    transfer.active_editor_tab_mut().unwrap().content.push('🙂');
-    assert_eq!(
-        transfer.editor_content_preview(build).as_ref(),
-        "中 a a🙂/a/1"
-    );
-    transfer.open_editor_tab(editor_tab("session-b", "/b.txt"));
-    assert_eq!(transfer.editor_content_preview(build).as_ref(), "//0");
-    assert_eq!(builds.get(), 5);
 }
 
 #[test]

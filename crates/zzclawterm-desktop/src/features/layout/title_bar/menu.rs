@@ -57,7 +57,57 @@ impl ZzClawTermApp {
         if !self.title_menu_command_enabled(command, cx) {
             return;
         }
+        if let Some(tab) = self
+            .active_workspace_tab()
+            .as_deref()
+            .map(crate::models::WorkspaceTabId::from_layout_key)
+            && !tab.is_session()
+        {
+            if let crate::models::WorkspaceTabId::FileManager(_) = tab {
+                match command {
+                    TitleMenuCommand::TerminalCopy
+                    | TitleMenuCommand::TerminalPaste
+                    | TitleMenuCommand::TerminalFind
+                    | TitleMenuCommand::TerminalSelectAll
+                    | TitleMenuCommand::TerminalClear
+                    | TitleMenuCommand::ToggleBroadcast => return,
+                    _ => {}
+                }
+            }
+            if let crate::models::WorkspaceTabId::Editor(id) = tab {
+                match command {
+                    TitleMenuCommand::TerminalCopy
+                    | TitleMenuCommand::TerminalPaste
+                    | TitleMenuCommand::TerminalFind
+                    | TitleMenuCommand::TerminalSelectAll => {
+                        if let Some(view) = self.transfer.workspace_editor_view(&id) {
+                            view.update(cx, |view, cx| {
+                                view.execute_edit_command(command, window, cx)
+                            });
+                        }
+                        return;
+                    }
+                    TitleMenuCommand::TerminalClear | TitleMenuCommand::ToggleBroadcast => return,
+                    TitleMenuCommand::ZoomIn => {
+                        self.adjust_transfer_internal_editor_font_size(1, cx);
+                        return;
+                    }
+                    TitleMenuCommand::ZoomOut => {
+                        self.adjust_transfer_internal_editor_font_size(-1, cx);
+                        return;
+                    }
+                    TitleMenuCommand::ResetZoom => {
+                        self.reset_transfer_internal_editor_font_size(cx);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         match command {
+            TitleMenuCommand::OpenFileManager => {
+                self.open_file_manager_tab(None, cx);
+            }
             TitleMenuCommand::NewWindow => {
                 cx.emit(crate::features::AppLifecycleEvent::NewWindowRequested)
             }
@@ -233,6 +283,9 @@ impl ZzClawTermApp {
                 .icon("icons/conn/add.svg")
                 .shortcut(self.display_shortcut_for("tab.newSession", "Ctrl+Shift+T"))
                 .command(TitleMenuCommand::NewSession),
+            TitleMenuDefinition::action(t!("fileManager.tabTitle"))
+                .icon("icons/file-manager.svg")
+                .command(TitleMenuCommand::OpenFileManager),
             TitleMenuDefinition::separator(),
             TitleMenuDefinition::action(t!("settings.importConfig"))
                 .icon("icons/import.svg")
@@ -486,7 +539,6 @@ impl ZzClawTermApp {
             .into_iter()
             .flat_map(|zone| self.shell.activity_bar_layout().zone(zone))
             .filter_map(|id| ActivityBarEntry::from_persistence_id(id))
-            .filter(|entry| self.activity_entry_visible(*entry))
             .filter(|entry| match entry {
                 ActivityBarEntry::Panel(item) => !item.opens_settings(),
                 ActivityBarEntry::Recording => true,
@@ -621,11 +673,19 @@ mod tests {
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = menu_app(&mut cx);
         let before = cx.read_entity(&app, |app, _| app.settings.summary().terminal_font_size);
-        cx.update(|cx| {
-            crate::shortcuts::rebuild_keymap(
-                &std::collections::HashMap::from([("view.zoomIn".into(), "Ctrl+Alt+U".into())]),
-                cx,
-            )
+        cx.update_entity(&app, |app, cx| {
+            // Zoom saves appearance settings and reapplies the stored keymap on
+            // completion, so the override must also exist in persistent settings.
+            let saved = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.save_keybindings(&std::collections::HashMap::from([(
+                        "view.zoomIn".into(),
+                        "Ctrl+Alt+U".into(),
+                    )]))
+                })
+                .expect("save custom zoom shortcut");
+            app.apply_gpui_settings(saved, cx);
         });
         let window = cx.add_window(|window, cx| {
             let focus = cx.focus_handle();

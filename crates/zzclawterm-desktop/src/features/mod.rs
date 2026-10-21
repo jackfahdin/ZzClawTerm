@@ -5,6 +5,7 @@ mod assets;
 mod capability_runtime;
 mod commands;
 mod connections;
+mod file_manager;
 mod font_catalog;
 mod formatting;
 mod icons;

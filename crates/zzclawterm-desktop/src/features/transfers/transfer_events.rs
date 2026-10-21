@@ -47,6 +47,9 @@ use super::transfer_widgets::{format_file_size, format_transfer_progress};
 struct TransferBrowserEventSnapshot {
     remote_path: String,
     browser_path: String,
+    raw_path_token: Option<String>,
+    list_scroll: gpui::UniformListScrollHandle,
+    horizontal_scroll: gpui::ScrollHandle,
     home_dir: String,
     home_dir_pending: bool,
     entries: Arc<Vec<SftpFileEntry>>,
@@ -70,6 +73,9 @@ impl TransferFeatureState {
         TransferBrowserEventSnapshot {
             remote_path: self.remote_path().to_string(),
             browser_path: self.browser.path.clone(),
+            raw_path_token: self.browser.raw_path_token.clone(),
+            list_scroll: self.browser.list_scroll.clone(),
+            horizontal_scroll: self.browser.horizontal_scroll.clone(),
             home_dir: self.browser.home_dir.clone(),
             home_dir_pending: self.browser.home_dir_pending,
             entries: self.browser.entries.clone(),
@@ -87,6 +93,9 @@ impl TransferFeatureState {
     fn restore_browser_event_snapshot(&mut self, snapshot: TransferBrowserEventSnapshot) {
         self.set_remote_path(snapshot.remote_path);
         self.browser.path = snapshot.browser_path;
+        self.browser.raw_path_token = snapshot.raw_path_token;
+        self.browser.list_scroll = snapshot.list_scroll;
+        self.browser.horizontal_scroll = snapshot.horizontal_scroll;
         self.browser.home_dir = snapshot.home_dir;
         self.browser.home_dir_pending = snapshot.home_dir_pending;
         self.browser.entries = snapshot.entries;
@@ -106,6 +115,7 @@ impl ZzClawTermApp {
         let Some(cache) = self.transfer.browser.session_cache.get(session_id).cloned() else {
             self.transfer.set_remote_path(".");
             self.transfer.browser.path = ".".to_string();
+            self.transfer.browser.raw_path_token = None;
             self.transfer.browser.home_dir.clear();
             self.transfer.browser.home_dir_pending = false;
             self.transfer.browser.entries = Arc::new(Vec::new());
@@ -123,6 +133,7 @@ impl ZzClawTermApp {
 
         self.transfer.set_remote_path(cache.current_path.clone());
         self.transfer.browser.path = cache.current_path;
+        self.transfer.browser.raw_path_token = cache.current_raw_path_token;
         self.transfer.browser.home_dir = cache.home_dir;
         self.transfer.browser.home_dir_pending = false;
         self.transfer.browser.entries = cache.entries;
@@ -256,7 +267,7 @@ impl ZzClawTermApp {
     }
 
     /// Apply one job event, reporting whether the UI needs a repaint.
-    fn apply_transfer_event(
+    pub(super) fn apply_transfer_event(
         &mut self,
         event: TransferJobResult,
         window: &mut Window,
@@ -310,6 +321,10 @@ impl ZzClawTermApp {
             // The job was cancelled or removed while its worker was still running.
             return false;
         };
+        let editor_event = matches!(
+            job.kind,
+            TransferJobKind::LoadEditor { .. } | TransferJobKind::SaveEditor { .. }
+        );
         let mut dirty = false;
         let event_id = event.id.clone();
         let job_session_id = job.session_id.clone();
@@ -330,11 +345,11 @@ impl ZzClawTermApp {
             &job.kind,
             TransferJobKind::InitialDirectory
                 | TransferJobKind::ListDir { .. }
+                | TransferJobKind::SyncCwd { .. }
                 | TransferJobKind::ResolveHome
-        ) || matches!(&event.event, TransferJobEvent::Finished(Ok(TransferJobOutput::CwdSynced { remote_path, .. })) if remote_path != &self.transfer.browser.path)
-            || job_session_id
-                .as_deref()
-                .is_some_and(|id| !self.transfer.tree_is_initialized(id));
+        ) || job_session_id
+            .as_deref()
+            .is_some_and(|id| !self.transfer.tree_is_initialized(id));
         if let TransferJobKind::ListTree { path, generation } = &job.kind {
             if let TransferJobEvent::Finished(result) = event.event {
                 let result = match result {
@@ -355,7 +370,7 @@ impl ZzClawTermApp {
             &job.kind,
             TransferJobKind::InitialDirectory
                 | TransferJobKind::ListDir { .. }
-                | TransferJobKind::SyncCwd
+                | TransferJobKind::SyncCwd { .. }
         )
         .then(|| job_session_id.clone().unwrap_or_default());
         if transfer_navigation_job_is_stale(
@@ -432,6 +447,9 @@ impl ZzClawTermApp {
                     TransferJobEvent::Finished(Ok(TransferJobOutput::Sent { .. }))
                 ),
             );
+            if let TransferJobEvent::Finished(Ok(output)) = &event.event {
+                self.apply_file_manager_job_output(&event_id, output, cx);
+            }
         }
         let cleanup_internal_job = event_finished
             && !job.is_user_transfer()
@@ -614,6 +632,7 @@ impl ZzClawTermApp {
                 remote_path,
                 entries,
             })) => {
+                browser_listing_completed = true;
                 job.status = TransferJobStatus::Completed;
                 job.detail = format!("Synced cwd {remote_path}");
                 remote_path_to_set = Some(remote_path.clone());
@@ -638,12 +657,9 @@ impl ZzClawTermApp {
                 if was_loading || path_changed || entries_changed {
                     self.transfer.browser.loading = false;
                     self.transfer.browser.error = None;
-                    self.transfer.browser.status =
-                        format!("remote exec cwd · {} item(s)", entries.len());
+                    self.transfer.browser.status = format!("{} item(s)", entries.len());
                 } else {
-                    // SyncCwd jobs are internal and not shown in the transfer queue.
-                    // Avoid invalidating the browser when a periodic check found no
-                    // directory or listing change.
+                    // Redundant results must preserve selection and scroll state.
                     dirty = false;
                 }
                 job.entries = entries;
@@ -1066,7 +1082,7 @@ impl ZzClawTermApp {
                         format!("AI file action ready: {action_name} ({action_id})"),
                         true,
                     );
-                    self.ensure_panel_open(NavItem::AiAssistant);
+                    self.ensure_panel_open(NavItem::AiAssistant, cx);
                     self.transfer.browser.status = format!("AI action ready for {remote_path}");
                     self.shell.set_status(format!(
                         "AI assistant opened for remote file: {remote_path}"
@@ -1250,7 +1266,12 @@ impl ZzClawTermApp {
                 }
             }
             TransferJobEvent::Finished(Err(error)) => {
-                if matches!(&job.kind, TransferJobKind::ListDir { .. }) {
+                if matches!(
+                    &job.kind,
+                    TransferJobKind::InitialDirectory
+                        | TransferJobKind::ListDir { .. }
+                        | TransferJobKind::SyncCwd { .. }
+                ) {
                     browser_navigation_rollback = self
                         .transfer
                         .browser
@@ -1263,7 +1284,7 @@ impl ZzClawTermApp {
                     TransferJobKind::InitialDirectory
                         | TransferJobKind::ListDir { .. }
                         | TransferJobKind::ResolveHome
-                        | TransferJobKind::SyncCwd
+                        | TransferJobKind::SyncCwd { .. }
                 );
                 let property_remote_path = match &job.kind {
                     TransferJobKind::LoadProperties { remote_path }
@@ -1438,6 +1459,13 @@ impl ZzClawTermApp {
         }
         if let Some(prompt_id) = external_sync_prompt_to_open {
             self.open_transfer_external_sync_window(prompt_id, cx);
+        }
+        if event_finished {
+            if editor_event {
+                cx.notify();
+            }
+            self.continue_workspace_tabs_close(cx);
+            self.release_unreferenced_editor_sessions(cx);
         }
         dirty
     }
@@ -1730,7 +1758,9 @@ mod tests {
         TransferJobState {
             id: id.to_string(),
             session_id: None,
-            kind: TransferJobKind::SyncCwd,
+            kind: TransferJobKind::SyncCwd {
+                reason: crate::models::TransferCwdSyncReason::Explicit,
+            },
             status: TransferJobStatus::Running,
             detail: "Resolving cwd".to_string(),
             created_at_ms: 0,

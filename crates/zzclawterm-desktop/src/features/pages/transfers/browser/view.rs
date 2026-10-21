@@ -229,7 +229,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
             can_transfer && !transfer_browser_path_is_root(&current_browser_path);
         let show_list_scrollbar = can_transfer && !browser.loading && !visible_entries.is_empty();
         let auto_sync_cwd = browser.auto_sync_cwd_enabled;
-        let cwd_tracking_available = browser.connection_id.clone().is_some();
+        let auto_cwd_tracking_available = can_transfer && browser.connection_id.is_some();
         let external_drop_hover = browser.external_drop_hover;
         let rows: AnyElement = if browser.loading {
             div()
@@ -544,6 +544,16 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                     cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
                                         this.toggle_transfer_browser_hidden_files(cx);
                                     })),
+                                ))
+                                .child(transfer_toolbar_divider(palette))
+                                .child(compact_transfer_toolbar_button(
+                                    palette,
+                                    "transfer-browser-open-file-manager",
+                                    "icons/file-manager.svg",
+                                    t!("fileManager.openWorkspace"),
+                                    cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
+                                        this.open_file_manager_tab(None, cx);
+                                    })),
                                 )),
                         )
                         .when(search_expanded && !tree_mode, |toolbar| {
@@ -752,7 +762,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                 },
                             ),
                     )
-                    .when(!tree_mode, |this| this.child(
+                    .child(
                         div()
                             .flex()
                             .items_center()
@@ -761,44 +771,42 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                 palette,
                                 "transfer-browser-footer-sync-cwd",
                                 "icons/fe/folder-sync.svg",
-                                if cwd_tracking_available {
+                                if can_transfer {
                                     t!("fileExplorer.syncTerminalPath")
                                 } else {
                                     t!("fileExplorer.cwdTrackingUnavailable")
                                 },
-                                cwd_tracking_available,
+                                can_transfer,
                                 cx.listener(|panel, _, _window, cx| panel.with_app(cx, |this, cx| {
                                     this.start_transfer_sync_cwd_job(cx);
                                 })),
                             ))
-                            .when(!tree_mode, |footer| {
-                                footer.child(compact_transfer_footer_button_active(
+                            .child(compact_transfer_footer_button_active(
                                     palette,
                                     "transfer-browser-footer-auto-sync",
                                     "icons/fe/sync.svg",
-                                    if cwd_tracking_available {
+                                    if auto_cwd_tracking_available {
                                         t!("fileExplorer.autoSyncTerminalPath")
                                     } else {
                                         t!("fileExplorer.cwdTrackingUnavailable")
                                     },
                                     auto_sync_cwd,
-                                    cwd_tracking_available,
+                                    auto_cwd_tracking_available,
                                     cx.listener(|panel, _, _window, cx| panel.with_app(cx, |this, cx| {
                                         this.toggle_transfer_browser_auto_sync_cwd(cx);
                                     })),
                                 ))
-                            })
                             .child(compact_transfer_footer_button(
                                 palette,
                                 "transfer-browser-footer-send-path",
                                 "icons/fe/send-path.svg",
                                 t!("fileExplorer.sendToTerminal"),
                                 true,
-                                cx.listener(|panel, _, _, cx| panel.with_app(cx, |this, cx| {
-                                    this.send_current_transfer_browser_path_to_terminal(cx);
+                                cx.listener(|panel, _, window, cx| panel.with_app(cx, |this, cx| {
+                                    this.send_current_transfer_browser_path_to_terminal(window, cx);
                                 })),
                             )),
-                    )),
+                    ),
             )
             .when(external_drop_hover, |this| {
                 this.child(

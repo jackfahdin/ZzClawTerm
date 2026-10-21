@@ -91,7 +91,7 @@ impl ZzClawTermApp {
                 .collect::<Vec<_>>();
             let terminal_window_layout = settings
                 .startup_restore_window_layout
-                .then(|| self.terminal.serialize_terminal_window_layout(&ordered))
+                .then(|| self.shell.serialize_terminal_window_layout(&ordered))
                 .flatten();
             let workspace_pane_layout = if settings.startup_restore_window_layout {
                 self.sync_workspace_split_from_active_tab();

@@ -5,6 +5,7 @@ use crate::models::{MainMode, NavItem, PanelSide, RightFocus};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_page(&mut self, item: NavItem, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         self.hide_secret_inputs(cx);
         if item == NavItem::Settings || item.opens_settings() {
             if let Some(controller) = self
@@ -50,6 +51,7 @@ impl ZzClawTermApp {
             self.shell.navigation.selected_nav = NavItem::Settings;
             self.shell.panels.left_collapsed = true;
             self.shell.panels.right_collapsed = true;
+            self.transfer_browser_visibility_changed(browser_was_visible, cx);
             self.shell.set_status("settings opened".to_string());
             self.request_settings_panel_refresh(cx);
             cx.notify();
@@ -60,6 +62,10 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn open_panel(&mut self, item: NavItem, cx: &mut Context<Self>) {
+        if item == NavItem::Transfers {
+            self.note_file_manager_manual_sidebar_open();
+        }
+        let browser_was_visible = self.transfer_browser_is_visible();
         self.hide_secret_inputs(cx);
         if item == NavItem::Settings || item.opens_settings() {
             self.open_page(NavItem::Settings, cx);
@@ -79,12 +85,6 @@ impl ZzClawTermApp {
 
         if self.shell.panels.multi_open && self.panel_side_for_item(item).is_some() {
             self.open_or_toggle_panel(item, cx);
-            if item == NavItem::Transfers
-                && (self.current_left_panel() == Some(item)
-                    || self.current_right_panel() == Some(item))
-            {
-                self.load_transfer_browser_for_active_session_if_needed(cx);
-            }
             return;
         }
 
@@ -131,25 +131,23 @@ impl ZzClawTermApp {
         }
 
         self.persist_ui_layout();
-        if item == NavItem::Transfers
-            && (self.current_left_panel() == Some(item) || self.current_right_panel() == Some(item))
-        {
-            self.load_transfer_browser_for_active_session_if_needed(cx);
-        }
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         cx.notify();
-        // Revealing or hiding the browser changes the panel's cwd-poll demand.
+        // Publish the new panel visibility and browser state.
         self.flush_transfer_panel_snapshot(cx);
     }
 
-    pub(in crate::features) fn ensure_panel_open(&mut self, item: NavItem) {
+    pub(in crate::features) fn ensure_panel_open(&mut self, item: NavItem, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         if self.shell.panel_is_floating()
             && let Some(side) = self.panel_side_for_item(item)
         {
             self.shell.panels.set_floating_panel(side, Some(item));
+            self.transfer_browser_visibility_changed(browser_was_visible, cx);
             return;
         }
         if self.shell.panels.multi_open && self.panel_side_for_item(item).is_some() {
-            self.ensure_panel_in_stack(item);
+            self.ensure_panel_in_stack(item, cx);
             return;
         }
         self.shell.navigation.main_mode = MainMode::Workspace;
@@ -170,6 +168,7 @@ impl ZzClawTermApp {
             }
             None => {}
         }
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
     }
 
     pub(in crate::features) fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -177,6 +176,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn toggle_left_sidebar(&mut self, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         if self.shell.panels.multi_open {
             if self.left_side_open() {
                 self.shell.panels.left_open.clear();
@@ -215,10 +215,12 @@ impl ZzClawTermApp {
         }
         self.persist_ui_layout();
         self.ensure_visible_notes_loaded(cx);
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         cx.notify();
     }
 
     pub(in crate::features) fn toggle_right_inspector(&mut self, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         if self.shell.panels.multi_open {
             if self.right_side_open() {
                 self.shell.panels.right_open.clear();
@@ -257,10 +259,12 @@ impl ZzClawTermApp {
         }
         self.persist_ui_layout();
         self.ensure_visible_notes_loaded(cx);
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         cx.notify();
     }
 
     pub(in crate::features) fn toggle_mobile_left_drawer(&mut self, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         if self.shell.panels.mobile_left_open {
             self.shell.panels.mobile_left_open = false;
         } else {
@@ -275,10 +279,12 @@ impl ZzClawTermApp {
             self.shell.panels.mobile_left_open = true;
         }
         self.ensure_visible_notes_loaded(cx);
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         cx.notify();
     }
 
     pub(in crate::features) fn toggle_mobile_right_drawer(&mut self, cx: &mut Context<Self>) {
+        let browser_was_visible = self.transfer_browser_is_visible();
         if self.shell.panels.mobile_right_open {
             self.shell.panels.mobile_right_open = false;
         } else {
@@ -293,6 +299,7 @@ impl ZzClawTermApp {
             self.shell.panels.mobile_right_open = true;
         }
         self.ensure_visible_notes_loaded(cx);
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
         cx.notify();
     }
 

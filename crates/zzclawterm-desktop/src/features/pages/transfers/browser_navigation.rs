@@ -14,7 +14,6 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         let mode = self.settings.toggle_file_explorer_view_mode();
-        self.transfer.reset_browser_auto_sync_cwd();
         self.persist_transfer_browser_ui_settings(cx);
         if mode == zzclawterm_core::TransferBrowserViewMode::Tree {
             self.reveal_transfer_tree_current_path(cx);
@@ -44,18 +43,34 @@ impl ZzClawTermApp {
             return;
         }
 
-        let current_path = normalized_transfer_browser_path(self.transfer.browser_view().path);
+        // A loading path still displays the previous listing. Cache the stable
+        // snapshot so switching away cannot associate those entries with a new path.
+        let browser = self.transfer.browser_view();
+        let stable = browser
+            .loading
+            .then(|| self.transfer.browser_navigation_rollback(session_id))
+            .flatten();
+        let current_path =
+            normalized_transfer_browser_path(stable.map_or(browser.path.as_str(), |snapshot| {
+                snapshot.browser_path.as_str()
+            }));
         if current_path.is_empty() {
             return;
         }
 
-        let current_raw_path_token = self.transfer.browser_remote_file_path().raw_path_token;
-        let browser = self.transfer.browser_view();
-        let mut history = browser.history.clone();
+        let current_raw_path_token = stable.map_or_else(
+            || self.transfer.browser_remote_file_path().raw_path_token,
+            |snapshot| snapshot.browser_raw_path_token.clone(),
+        );
+        let mut history = stable
+            .map_or(browser.history, |snapshot| &snapshot.history)
+            .clone();
         if history.is_empty() {
             history.push_back(current_path.clone());
         }
-        let history_index = browser.history_index.min(history.len().saturating_sub(1));
+        let history_index = stable
+            .map_or(browser.history_index, |snapshot| snapshot.history_index)
+            .min(history.len().saturating_sub(1));
 
         let home_dir = normalized_transfer_browser_path(browser.home_dir);
         let home_dir = if home_dir == "." {
@@ -65,13 +80,19 @@ impl ZzClawTermApp {
         };
 
         let cache = TransferBrowserSessionCacheState {
-            entries: browser.entries.clone(),
+            entries: stable
+                .map_or(browser.entries, |snapshot| &snapshot.entries)
+                .clone(),
             current_path,
             current_raw_path_token,
             home_dir,
             history,
             history_index,
-            visited_history: browser.visited_history.clone(),
+            visited_history: stable
+                .map_or(browser.visited_history, |snapshot| {
+                    &snapshot.visited_history
+                })
+                .clone(),
         };
         self.transfer
             .store_browser_session_cache(session_id.to_string(), cache);
@@ -295,7 +316,7 @@ impl ZzClawTermApp {
         cx.notify();
     }
 
-    pub(in crate::features::pages::transfers) fn toggle_transfer_browser_auto_sync_cwd(
+    pub(in crate::features) fn toggle_transfer_browser_auto_sync_cwd(
         &mut self,
         cx: &mut Context<Self>,
     ) {
@@ -315,13 +336,17 @@ impl ZzClawTermApp {
             self.transfer
                 .set_browser_status("Auto CWD disabled for this connection");
         }
-        self.transfer.reset_browser_auto_sync_cwd();
         self.persist_transfer_browser_ui_settings(cx);
         if enabled {
-            self.start_transfer_sync_cwd_job(cx);
+            self.sync_transfer_browser_to_cwd(crate::models::TransferCwdSyncReason::Automatic, cx);
         } else {
-            cx.notify();
+            if let Some(session_id) = self.session.active_id_owned() {
+                self.transfer.cancel_browser_auto_cwd_sync(&session_id);
+            }
+            self.transfer.clear_pending_cwd_sync();
         }
+        self.defer_transfer_panel_snapshot_flush(cx);
+        cx.notify();
     }
 
     pub(in crate::features::pages::transfers) fn toggle_transfer_browser_hidden_files(
@@ -468,7 +493,9 @@ impl ZzClawTermApp {
 }
 
 impl ZzClawTermApp {
-    fn prepare_transfer_browser_navigation(&mut self) -> TransferBrowserNavigationSnapshot {
+    pub(in crate::features) fn prepare_transfer_browser_navigation(
+        &mut self,
+    ) -> TransferBrowserNavigationSnapshot {
         let session_key = self.session.active_id_owned().unwrap_or_default();
         let remote_path = self.transfer.remote_path().to_string();
         let snapshot = self

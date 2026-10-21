@@ -20,7 +20,7 @@ impl ZzClawTermApp {
         // Match the Tauri shell: tab strip sits directly above the terminal surface.
         // Do not reconcile/prune layout here — paint must stay pure. Session
         // register/close/idle already keep terminal_windows coherent.
-        let multi_leaf = self.terminal.terminal_window_tree_is_some();
+        let multi_leaf = self.shell.terminal_window_tree_is_some();
         let has_connect_failure = self.session.start_has_failed()
             || (self.shell.last_connect_failure_name().is_some()
                 && self.shell.last_connect_failure_error().is_some());
@@ -34,7 +34,7 @@ impl ZzClawTermApp {
                 let app = app.clone();
                 cx.defer(move |cx| {
                     let _ = app.update(cx, |this, _| {
-                        this.terminal.record_terminal_workspace_bounds(bounds)
+                        this.shell.record_terminal_workspace_bounds(bounds)
                     });
                 });
             },
@@ -49,7 +49,12 @@ impl ZzClawTermApp {
             .flex()
             .flex_col()
             .bg(self.shell_transparent_color(palette.bg));
-        if self.shell.pane_focus_mode() && self.session.active_id().is_some() {
+        if self.shell.pane_focus_mode()
+            && self
+                .session
+                .active_id()
+                .is_some_and(|id| !self.shell.session_tab_is_hidden(id))
+        {
             workspace = workspace.child(
                 div()
                     .h(gpui::px(30.))
@@ -105,7 +110,7 @@ impl ZzClawTermApp {
         if !self.shell.pane_focus_mode() {
             // Multi-leaf tab windows (Tauri TabWindowsWorkspace) take precedence over
             // single-tree pane splits when active.
-            if let Some(window_root) = self.terminal.terminal_window_tree() {
+            if let Some(window_root) = self.shell.terminal_window_tree() {
                 return div()
                     .flex_1()
                     .min_h_0()
@@ -119,9 +124,13 @@ impl ZzClawTermApp {
             return self.pending_workspace_state().into_any_element();
         }
         if self.session.start_has_active_failed() {
-            return self.failed_workspace_state().into_any_element();
+            return self.failed_workspace_state(cx).into_any_element();
         }
-        if self.session.active_id().is_none() {
+        if self
+            .session
+            .active_id()
+            .is_none_or(|id| self.shell.session_tab_is_hidden(id))
+        {
             if self.session.start_has_pending() {
                 return self.pending_workspace_state().into_any_element();
             }
@@ -129,7 +138,7 @@ impl ZzClawTermApp {
                 || (self.shell.last_connect_failure_name().is_some()
                     && self.shell.last_connect_failure_error().is_some())
             {
-                return self.failed_workspace_state().into_any_element();
+                return self.failed_workspace_state(cx).into_any_element();
             }
             return self.empty_workspace_state(cx).into_any_element();
         }

@@ -24,7 +24,11 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn prune_workspace_split(&mut self) {
-        let live_ids = self.live_session_ids_with_disconnected();
+        let live_ids = self
+            .live_session_ids_with_disconnected()
+            .into_iter()
+            .filter(|id| !self.shell.session_tab_is_hidden(id))
+            .collect();
         let before_roots = self.shell.workspace.pane_roots.clone();
         let root_keys: Vec<String> = self.shell.workspace.pane_roots.keys().cloned().collect();
         for tab_root in root_keys {
@@ -129,13 +133,12 @@ impl ZzClawTermApp {
             .session
             .session_start_tab_placement(&secondary_session_id)
             .and_then(|p| {
-                self.terminal
+                self.shell
                     .terminal_start_group(p.request_sequence)
                     .map(str::to_string)
             })
-            .or_else(|| self.terminal.terminal_group_for_tab(&primary_session_id));
-        let Some(group) =
-            original_group.filter(|group| self.terminal.terminal_window_has_leaf(group))
+            .or_else(|| self.shell.terminal_group_for_tab(&primary_session_id));
+        let Some(group) = original_group.filter(|group| self.shell.terminal_window_has_leaf(group))
         else {
             return false;
         };
@@ -152,9 +155,9 @@ impl ZzClawTermApp {
         // Session-start completion already decided whether to change focus.
         // Docking its result must preserve that decision for background requests.
         if !matches!(
-            self.terminal
+            self.shell
                 .dock_tab_on_terminal_window_leaf(&secondary_session_id, &group, zone),
-            crate::features::terminal::TerminalWindowDockResult::Docked { .. }
+            crate::features::shell::TerminalWindowDockResult::Docked { .. }
         ) {
             return false;
         }
@@ -239,8 +242,11 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn unsplit_workspace(&mut self, cx: &mut Context<Self>) {
         self.normalize_legacy_terminal_groups();
-        let active = self.session.active_id_owned();
-        self.terminal.merge_terminal_groups(active);
+        let active = self.active_workspace_tab();
+        self.shell.merge_terminal_groups(active.clone());
+        if let Some(active) = active {
+            self.sync_terminal_windows_active_tab(&active);
+        }
         self.shell.workspace.split_resize = None;
         self.shell.set_status("workspace groups merged".to_string());
         self.persist_open_tabs();
@@ -256,7 +262,7 @@ impl ZzClawTermApp {
     ) {
         // Prefer multi-leaf tab-window splits when active; otherwise pane splits.
         let (direction, start_ratio) =
-            if let Some(geometry) = self.terminal.terminal_window_split_geometry(&split_id) {
+            if let Some(geometry) = self.shell.terminal_window_split_geometry(&split_id) {
                 geometry
             } else {
                 let Some(root) = self.shell.workspace.split.as_ref() else {
@@ -280,7 +286,7 @@ impl ZzClawTermApp {
             start_pos,
             start_ratio,
             container_size: self
-                .terminal
+                .shell
                 .terminal_split_bounds(&split_id)
                 .map(|bounds| match direction {
                     WorkspaceSplitDirection::Horizontal => f32::from(bounds.size.height),
@@ -313,7 +319,7 @@ impl ZzClawTermApp {
         }
         let delta_ratio = ((delta_px / container) * 100.).round() as i16;
         let minima = self
-            .terminal
+            .shell
             .terminal_window_tree()
             .and_then(|root| root.split_minimum_extents(&state.split_id))
             .unwrap_or((80., 80.));
@@ -331,7 +337,7 @@ impl ZzClawTermApp {
             .clamp(lower.clamp(1, 99), upper.clamp(lower.clamp(1, 99), 99))
             as u8;
         let mut applied = self
-            .terminal
+            .shell
             .set_terminal_window_split_ratio(&state.split_id, next);
         if !applied
             && let Some(root) = self.shell.workspace.split.as_mut()
@@ -349,7 +355,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn finish_workspace_split_resize(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.shell.workspace.split_resize.take() {
             let ratio = self
-                .terminal
+                .shell
                 .terminal_window_split_geometry(&state.split_id)
                 .map(|(_, ratio)| ratio)
                 .or_else(|| {
@@ -413,7 +419,7 @@ impl ZzClawTermApp {
                         this.activate_resize_handle_immediately(drag_id.clone(), cx);
                         cx.stop_propagation();
                         if event.click_count == 2 {
-                            this.terminal.set_terminal_window_split_ratio(&split_id, 50);
+                            this.shell.set_terminal_window_split_ratio(&split_id, 50);
                             this.persist_terminal_window_layout();
                             cx.notify();
                         } else {
@@ -440,7 +446,7 @@ impl ZzClawTermApp {
                         this.activate_resize_handle_immediately(drag_id.clone(), cx);
                         cx.stop_propagation();
                         if event.click_count == 2 {
-                            this.terminal.set_terminal_window_split_ratio(&split_id, 50);
+                            this.shell.set_terminal_window_split_ratio(&split_id, 50);
                             this.persist_terminal_window_layout();
                             cx.notify();
                         } else {
@@ -552,7 +558,7 @@ impl ZzClawTermApp {
                 return;
             };
             let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
-                self.terminal.preserve_unread_terminal_layout();
+                self.shell.preserve_unread_terminal_layout();
                 return;
             };
             if self.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {
@@ -580,7 +586,7 @@ impl ZzClawTermApp {
                     Ok(Some(layout)) => layout,
                     Ok(None) => return,
                     Err(error) => {
-                        this.terminal.preserve_unread_terminal_layout();
+                        this.shell.preserve_unread_terminal_layout();
                         this.shell
                             .set_status(format!("failed to restore pane layout: {error}"));
                         cx.notify();
@@ -588,7 +594,7 @@ impl ZzClawTermApp {
                     }
                 };
                 let Some(restored) = WorkspacePaneNode::restore_layout(&layout, &ordered) else {
-                    this.terminal.preserve_unread_terminal_layout();
+                    this.shell.preserve_unread_terminal_layout();
                     return;
                 };
                 if !this.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {

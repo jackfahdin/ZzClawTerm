@@ -336,7 +336,7 @@ fn omitted_fields(path: &str) -> &'static [&'static str] {
             "keep_alive_interval_secs",
             "encoding",
         ],
-        "/auth" => &["account_id", "password_source"],
+        "/auth" => &["account_id", "password_source", "username_source"],
         "/sftp" => &[
             "compatibility_mode",
             "enabled",

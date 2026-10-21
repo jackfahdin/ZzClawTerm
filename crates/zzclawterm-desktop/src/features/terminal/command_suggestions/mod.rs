@@ -232,10 +232,6 @@ impl ZzClawTermApp {
         {
             return;
         }
-        if self.settings.summary().terminal_low_latency_mode {
-            self.clear_command_suggestion_draft(cx);
-            finish!("low_latency_mode", 0);
-        }
         if !self
             .settings
             .summary()
@@ -377,10 +373,6 @@ impl ZzClawTermApp {
                     if this.terminal.assist.command_suggestion_search_gen != request_id {
                         return None;
                     }
-                    if this.settings.summary().terminal_low_latency_mode {
-                        this.hide_command_suggestions_if_present(cx);
-                        return None;
-                    }
                     let now = Instant::now();
                     if let Some(delay) = command_suggestion_refresh_input_delay(
                         this.shell.last_terminal_input_at(),
@@ -446,7 +438,6 @@ impl ZzClawTermApp {
         if self.terminal.assist.credential_suggestions.is_some()
             || self.is_credential_prompt_input_mode()
             || self.terminal.assist.command_suggestions_suppressed
-            || self.settings.summary().terminal_low_latency_mode
             || !self
                 .settings
                 .summary()

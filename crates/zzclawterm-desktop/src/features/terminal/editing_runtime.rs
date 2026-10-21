@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn ime_preedit_stays_local_and_committed_selection_replacement_is_sent_once() {
+    fn native_ime_ignores_disabled_legacy_setting_and_commits_selection_replacement_once() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-ime");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -525,6 +525,9 @@ mod tests {
         let (_, vcx) = cx.add_window_view(|_, _| InputHost);
         vcx.update(|window, cx| {
             app.update(cx, |app, cx| {
+                let mut settings = app.settings.summary().clone();
+                settings.interaction_mac_ime_compatibility = false;
+                app.settings.replace_summary(settings);
                 let version = app.terminal.editing.state().unwrap().model.version;
                 app.replace_and_mark_text_in_range(None, "zhong", None, window, cx);
                 assert_eq!(app.terminal.input.ime_marked_text, "zhong");
@@ -575,7 +578,6 @@ mod tests {
         cx.update_entity(&app, |app, cx| {
             let mut settings = app.settings.summary().clone();
             settings.interaction_command_suggestions_enabled = false;
-            settings.terminal_low_latency_mode = true;
             app.settings.replace_summary(settings);
             app.terminal.assist.command_suggestions_suppressed = true;
             app.note_shell_editing_input(b"echo abc", cx);

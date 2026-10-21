@@ -199,6 +199,10 @@ pub(in crate::features) struct SessionDisconnectUpdate {
 }
 
 impl SessionFeatureState {
+    pub(in crate::features) fn clear_active_start_selection(&mut self) {
+        self.start.clear_active_selection();
+    }
+
     pub(crate) fn can_transfer_sessions(&self, session_ids: &[String]) -> Result<(), &'static str> {
         if self.start.has_pending() {
             return Err("wait for the session connection attempt to finish");
@@ -260,7 +264,10 @@ impl SessionFeatureState {
             entries.push(SessionCatalogTransferEntry {
                 session_id: session_id.clone(),
                 metadata,
-                start_tab_placement: self.start_tab_placements.remove(session_id),
+                start_tab_placement: self
+                    .start_tab_placements
+                    .remove(session_id)
+                    .map(|p| self.start.resolve_placement(p)),
                 custom_name: self.custom_names.remove(session_id),
                 dynamic_title: self.dynamic_titles.remove(session_id),
                 cwd: self.cwds.remove(session_id),
@@ -1382,7 +1389,39 @@ impl SessionFeatureState {
         &self,
         session_id: &str,
     ) -> Option<SessionStartTabPlacement> {
-        self.start_tab_placements.get(session_id).copied()
+        self.start_tab_placements
+            .get(session_id)
+            .copied()
+            .map(|placement| self.start.resolve_placement(placement))
+    }
+
+    pub(in crate::features) fn resolve_start_tab_placement(
+        &self,
+        placement: SessionStartTabPlacement,
+    ) -> SessionStartTabPlacement {
+        self.start.resolve_placement(placement)
+    }
+
+    pub(in crate::features) fn set_start_tab_position(
+        &mut self,
+        placement: SessionStartTabPlacement,
+        index: usize,
+    ) {
+        self.start.set_tab_position(placement, index);
+    }
+
+    pub(in crate::features) fn active_failed_request_id(&self) -> Option<&str> {
+        self.start.active_failed_request_id()
+    }
+
+    pub(in crate::features) fn set_workspace_tab_position(&mut self, key: &str, index: usize) {
+        let placement = self
+            .start_tab_placements
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| self.start.allocate_tab_placement(index));
+        self.start.set_tab_position(placement, index);
+        self.start_tab_placements.insert(key.to_string(), placement);
     }
 
     pub(in crate::features) fn metadata(
@@ -1449,7 +1488,9 @@ impl SessionFeatureState {
             self.order.push(session_id.to_string());
         }
         self.metadata.insert(session_id.to_string(), metadata);
-        if let Some(tab_placement) = tab_placement {
+        if let Some(tab_placement) =
+            tab_placement.map(|placement| self.start.resolve_placement(placement))
+        {
             self.start_tab_placements
                 .insert(session_id.to_string(), tab_placement);
             self.order.retain(|id| id != session_id);
@@ -1459,7 +1500,7 @@ impl SessionFeatureState {
                 .iter()
                 .enumerate()
                 .find_map(|(index, existing_id)| {
-                    if let Some(existing) = self.start_tab_placements.get(existing_id) {
+                    if let Some(existing) = self.session_start_tab_placement(existing_id) {
                         ((existing.insert_index, existing.request_sequence) > target_key)
                             .then_some(index)
                     } else {
@@ -1499,6 +1540,7 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn clear_start_tab_placements(&mut self) {
         self.start_tab_placements.clear();
+        self.start.placements.clear();
     }
 
     pub(in crate::features) fn move_session_after(
@@ -1820,6 +1862,10 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn cwd(&self, session_id: &str) -> Option<&str> {
         self.cwds.get(session_id).map(String::as_str)
+    }
+
+    pub(in crate::features) fn clear_cwd(&mut self, session_id: &str) {
+        self.cwds.remove(session_id);
     }
 
     pub(in crate::features) fn update_cwd(&mut self, session_id: &str, cwd: String) -> bool {
@@ -2830,6 +2876,12 @@ pub(super) struct SessionStartFeatureState {
     pending_workspace_split: Option<(WorkspaceSplitDirection, String)>,
     preparing_saved_connections: HashMap<String, SessionStartTabPlacement>,
     next_request_sequence: u64,
+    // Positions are resolved by sequence, including in callbacks holding an old
+    // options snapshot. A drag must survive credential loading and worker completion.
+    // Allocation time disambiguates completed tabs imported from another
+    // workspace, whose local request sequences can overlap ours.
+    placements: HashMap<(u64, Instant), SessionStartTabPlacement>,
+    retry_preparations: HashSet<String>,
 }
 
 pub(in crate::features) enum SessionStartEventRequest {
@@ -2852,6 +2904,7 @@ pub(in crate::features) struct SavedConnectionStartOptions {
     pub reconnect_session_id: Option<String>,
     pub workspace_split: Option<(WorkspaceSplitDirection, String)>,
     pub tab_placement: Option<SessionStartTabPlacement>,
+    pub retry_request_id: Option<String>,
 }
 
 impl SessionStartFeatureState {
@@ -2870,6 +2923,8 @@ impl SessionStartFeatureState {
             pending_workspace_split: None,
             preparing_saved_connections: HashMap::new(),
             next_request_sequence: 0,
+            placements: HashMap::new(),
+            retry_preparations: HashSet::new(),
         }
     }
 
@@ -2915,7 +2970,102 @@ impl SessionStartFeatureState {
             requested_at: Instant::now(),
         };
         self.next_request_sequence = self.next_request_sequence.saturating_add(1);
+        self.placements.insert(
+            (placement.request_sequence, placement.requested_at),
+            placement,
+        );
         placement
+    }
+
+    pub(in crate::features) fn resolve_placement(
+        &self,
+        placement: SessionStartTabPlacement,
+    ) -> SessionStartTabPlacement {
+        self.placements
+            .get(&(placement.request_sequence, placement.requested_at))
+            .copied()
+            .unwrap_or(placement)
+    }
+
+    pub(in crate::features) fn set_tab_position(
+        &mut self,
+        placement: SessionStartTabPlacement,
+        index: usize,
+    ) {
+        self.placements.insert(
+            (placement.request_sequence, placement.requested_at),
+            SessionStartTabPlacement {
+                insert_index: index,
+                ..placement
+            },
+        );
+    }
+
+    pub(in crate::features) fn retry_is_pending(
+        &self,
+        options: &SavedConnectionStartOptions,
+    ) -> bool {
+        options
+            .retry_request_id
+            .as_ref()
+            .is_none_or(|id| self.pending.contains_key(id))
+    }
+
+    pub(in crate::features) fn begin_retry_preparation(
+        &mut self,
+        request_id: String,
+        pending: PendingSessionStart,
+    ) {
+        self.retry_preparations.insert(request_id.clone());
+        self.register_pending(request_id, pending);
+    }
+
+    pub(in crate::features) fn finish_retry_preparation(&mut self, request_id: &str) {
+        self.retry_preparations.remove(request_id);
+    }
+
+    pub(in crate::features) fn preparing_retry_request(
+        &self,
+        placement: Option<SessionStartTabPlacement>,
+    ) -> Option<&str> {
+        let placement = placement?;
+        self.retry_preparations
+            .iter()
+            .find(|id| {
+                self.pending
+                    .get(*id)
+                    .and_then(|p| p.tab_placement)
+                    .is_some_and(|p| {
+                        p.request_sequence == placement.request_sequence
+                            && p.requested_at == placement.requested_at
+                    })
+            })
+            .map(String::as_str)
+    }
+
+    pub(in crate::features) fn active_failed_request_id(&self) -> Option<&str> {
+        self.active_failed.as_deref()
+    }
+
+    pub(in crate::features) fn failed(&self, request_id: &str) -> Option<&FailedSessionStart> {
+        self.failed.get(request_id)
+    }
+
+    pub(in crate::features) fn set_failed_error(&mut self, request_id: &str, error: String) {
+        if let Some(failed) = self.failed.get_mut(request_id) {
+            failed.error = error;
+        }
+    }
+
+    pub(in crate::features) fn take_failed_for_retry(
+        &mut self,
+        request_id: &str,
+    ) -> Option<FailedSessionStart> {
+        let failed = self.failed.remove(request_id)?;
+        if self.active_failed.as_deref() == Some(request_id) {
+            self.active_failed = None;
+        }
+        Some(failed)
     }
 
     #[cfg(test)]
@@ -2990,8 +3140,12 @@ impl SessionStartFeatureState {
     pub(in crate::features) fn register_pending(
         &mut self,
         request_id: String,
-        pending: PendingSessionStart,
+        mut pending: PendingSessionStart,
     ) -> bool {
+        if pending.reconnect_session_id.is_none() && pending.tab_placement.is_none() {
+            pending.tab_placement =
+                Some(self.allocate_tab_placement(pending.insert_index.unwrap_or(usize::MAX)));
+        }
         if let (Some(connection_id), Some(placement)) = (
             pending.source_connection_id.as_deref(),
             pending.tab_placement,
@@ -3019,6 +3173,7 @@ impl SessionStartFeatureState {
             return SessionStartEventRequest::Cancelled;
         }
         let was_active = self.active_pending.as_deref() == Some(request_id);
+        self.retry_preparations.remove(request_id);
         let pending = self.pending.remove(request_id);
         if was_active {
             self.active_pending = None;
@@ -3181,7 +3336,9 @@ impl SessionStartFeatureState {
     ) -> Option<PendingSessionStart> {
         let pending = self.pending.remove(request_id)?;
         pending.attempt.cancel();
-        self.cancelled.insert(request_id.to_string());
+        if !self.retry_preparations.remove(request_id) {
+            self.cancelled.insert(request_id.to_string());
+        }
         if self.active_pending.as_deref() == Some(request_id) {
             self.active_pending = self.latest_pending_request_id();
             if self.active_pending.is_none() {

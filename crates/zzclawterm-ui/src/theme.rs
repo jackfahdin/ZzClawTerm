@@ -127,6 +127,8 @@ fn ensure_contrast(fg: u32, bg: u32, min_ratio: f32) -> u32 {
 /// All selectable appearance theme ids (Tauri theme list order).
 pub const APPEARANCE_THEME_IDS: &[&str] = &[
     "github-dark",
+    "windterm-dark",
+    "windterm-light",
     "nya-high-contrast",
     "nya-high-contrast-white",
     "dracula",
@@ -149,6 +151,8 @@ pub const APPEARANCE_THEME_IDS: &[&str] = &[
 pub fn appearance_theme_label(theme: &str) -> &'static str {
     match theme {
         "github-dark" => "GitHub Dark",
+        "windterm-dark" => "WindTerm Dark",
+        "windterm-light" => "WindTerm Light",
         "nya-high-contrast" => "ZzClaw HC",
         "nya-high-contrast-white" => "ZzClaw HC White",
         "dracula" => "Dracula",
@@ -868,8 +872,13 @@ pub fn available_themes(catalog: &zzclawterm_core::themes::ThemeCatalog) -> Vec<
         .collect()
 }
 pub fn theme_palette(id: &str) -> ThemePalette {
-    let mut palette = builtin_palette(id);
     let theme = zzclawterm_core::themes::resolve_theme(id, &Default::default());
+    // WindTerm uses the bundled JSON as its single color source; older built-ins
+    // retain their established RGB palettes.
+    if matches!(id, "windterm-dark" | "windterm-light") {
+        return palette_from_theme(&theme);
+    }
+    let mut palette = builtin_palette(id);
     fill_extended_tokens(&mut palette, &theme);
     palette
 }
@@ -953,6 +962,65 @@ pub fn palette_from_theme(theme: &zzclawterm_core::themes::ThemeConfig) -> Theme
 #[cfg(test)]
 mod tests {
     use super::theme_palette;
+
+    #[test]
+    fn selectable_builtins_match_the_core_theme_catalog() {
+        let catalog = zzclawterm_core::themes::ThemeCatalog::default();
+        let available = super::available_themes(&catalog);
+        let mut ids: Vec<_> = available.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        let mut builtin_ids: Vec<_> = zzclawterm_core::themes::builtins()
+            .iter()
+            .map(|theme| theme.id.as_str())
+            .collect();
+        builtin_ids.sort_unstable();
+        assert_eq!(ids, builtin_ids);
+        for (id, label) in [
+            ("windterm-dark", "WindTerm Dark"),
+            ("windterm-light", "WindTerm Light"),
+        ] {
+            assert!(available.contains(&(id.into(), label.into())));
+        }
+    }
+
+    #[test]
+    fn windterm_runtime_palettes_match_json_previews_and_original_ansi_colors() {
+        let catalog = zzclawterm_core::themes::ThemeCatalog::default();
+        for (id, bg, fg, shadow, find_bg, ansi) in [
+            (
+                "windterm-dark",
+                0x1c1c1c,
+                0xf8f8f2,
+                0x00000073,
+                0x123560,
+                [
+                    0x333333, 0xc4265e, 0x86b42b, 0xd0a500, 0x3465a4, 0x8c6bc8, 0x56adbc, 0xe3e3dd,
+                    0x666666, 0xf92672, 0xa6e22e, 0x9e862f, 0x819aff, 0xae81ff, 0x66d9ef, 0xf8f8f2,
+                ],
+            ),
+            (
+                "windterm-light",
+                0xffffff,
+                0x333333,
+                0x00000026,
+                0xffe57f,
+                [
+                    0x272822, 0xdc322f, 0x32cd32, 0xffd700, 0x3465a4, 0xd33682, 0x3a96dd, 0xd3d3d3,
+                    0x333333, 0xff7882, 0x3cb371, 0xd2691e, 0x80baff, 0xd778ff, 0x78ffff, 0x708090,
+                ],
+            ),
+        ] {
+            let theme = zzclawterm_core::themes::resolve_theme(id, &catalog);
+            let palette = theme_palette(id);
+            assert_eq!(palette, super::palette_from_theme(&theme), "{id} preview");
+            assert_eq!(palette, super::resolve_theme_palette(id, &catalog), "{id}");
+            assert_eq!(palette.terminal_bg, bg, "{id}");
+            assert_eq!(palette.terminal_fg, fg, "{id}");
+            assert_eq!(palette.terminal_ansi, ansi, "{id}");
+            assert_eq!(palette.shadow, shadow, "{id}");
+            assert_eq!(palette.terminal_find_bg, find_bg, "{id}");
+        }
+    }
 
     #[test]
     fn semantic_colors_match_tauri_theme_tokens() {

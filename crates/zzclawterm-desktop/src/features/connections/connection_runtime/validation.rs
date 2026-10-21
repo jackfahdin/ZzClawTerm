@@ -140,11 +140,12 @@ impl ConnectionEditorValidationError {
                 ConnectionEditorFocusTarget::Select(ConnectionEditorSelect::SerialPort)
             }
             ConnectionEditorField::Username
-                if editor.account_source_saved
-                    && matches!(
-                        editor.kind,
-                        ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
-                    ) =>
+                if matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                ) && editor.username_source
+                    == zzclawterm_core::ConnectionUsernameSource::Account
+                    && editor.account_id.is_some() =>
             {
                 ConnectionEditorFocusTarget::Select(ConnectionEditorSelect::Account)
             }

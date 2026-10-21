@@ -3,7 +3,7 @@ use gpui::{
     Pixels, Point, PointerCancelEvent, Styled as _, Window, canvas,
 };
 
-use super::tab_mouse::SessionTabDragPayload;
+use super::tab_mouse::WorkspaceTabDragPayload;
 use crate::app_shell::tab_drag::{TabDragSource, release_at, screen_bounds};
 use crate::features::ZzClawTermApp;
 
@@ -13,10 +13,17 @@ mod tests;
 impl ZzClawTermApp {
     pub(in crate::features) fn drop_session_tab_on_strip(
         &mut self,
-        payload: &SessionTabDragPayload,
+        payload: &WorkspaceTabDragPayload,
         group: &Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if payload.tab_id.is_start()
+            && (payload.source_workspace_id != self.workspace_id
+                || &payload.source_group_id != group)
+        {
+            self.clear_session_tab_drag(cx);
+            return;
+        }
         self.accept_session_tab_drop(payload, cx);
         if self.commit_session_tab_preview(payload, group, cx) {
             return;
@@ -24,13 +31,13 @@ impl ZzClawTermApp {
         if payload.source_workspace_id == self.workspace_id {
             if let Some(group) = group {
                 self.dock_tab_on_terminal_window_leaf(
-                    payload.session_id.clone(),
+                    payload.tab_id.layout_key(),
                     group.clone(),
                     crate::models::TabDockZone::Center,
                     cx,
                 );
             } else {
-                self.reorder_session_to_end(payload.session_id.clone(), cx);
+                self.reorder_session_to_end(payload.tab_id.layout_key(), cx);
             }
         } else {
             self.request_tab_tree_move(
@@ -49,7 +56,7 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn commit_session_tab_preview(
         &mut self,
-        payload: &SessionTabDragPayload,
+        payload: &WorkspaceTabDragPayload,
         group: &Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -59,7 +66,7 @@ impl ZzClawTermApp {
         let motion = self.shell.tab_strip_motion(group.clone());
         let preview = motion
             .borrow()
-            .preview(&payload.session_id)
+            .preview(&payload.tab_id.layout_key())
             .map(<[String]>::to_vec);
         let Some(preview) = preview else {
             // Membership changed or measurement was incomplete: a stale
@@ -67,26 +74,23 @@ impl ZzClawTermApp {
             self.clear_session_tab_drag(cx);
             return true;
         };
-        let live = if let Some(group) = group {
-            self.terminal
-                .terminal_group_tabs(group)
-                .map(|(ids, _)| ids)
-                .unwrap_or_default()
-        } else {
-            self.ordered_tab_sessions()
-                .into_iter()
-                .map(|session| session.id)
-                .collect()
-        };
-        let preview = preview
-            .into_iter()
-            .filter(|id| live.contains(id))
+        let tabs = self.session_strip_tabs(group);
+        let live = tabs
+            .iter()
+            .map(|tab| tab.id.layout_key())
             .collect::<Vec<_>>();
-        if !motion.borrow().matches_sessions(&live) {
+        let snapshot = tabs
+            .iter()
+            .map(|tab| tab.snapshot_key())
+            .collect::<Vec<_>>();
+        if !motion.borrow().matches_sessions(&snapshot) {
             self.clear_session_tab_drag(cx);
             return true;
         }
-        let Some(index) = preview.iter().position(|id| id == &payload.session_id) else {
+        let Some(_index) = preview
+            .iter()
+            .position(|id| id == &payload.tab_id.layout_key())
+        else {
             self.clear_session_tab_drag(cx);
             return true;
         };
@@ -99,18 +103,7 @@ impl ZzClawTermApp {
             return true;
         }
         motion.borrow_mut().finish(std::time::Instant::now());
-        if let Some(next) = preview.get(index + 1) {
-            self.reorder_session_relative(payload.session_id.clone(), next.clone(), false, cx);
-        } else if index > 0 {
-            self.reorder_session_relative(
-                payload.session_id.clone(),
-                preview[index - 1].clone(),
-                true,
-                cx,
-            );
-        } else {
-            self.clear_session_tab_drag(cx);
-        }
+        self.commit_session_strip_order(group, &preview, &payload.tab_id.layout_key(), cx);
         true
     }
 
@@ -137,7 +130,7 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn begin_session_tab_drag(
         &mut self,
-        payload: &SessionTabDragPayload,
+        payload: &WorkspaceTabDragPayload,
         grab_offset: Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
@@ -145,7 +138,16 @@ impl ZzClawTermApp {
         self.shell
             .tab_strip_motion(payload.source_group_id.clone())
             .borrow_mut()
-            .begin(&payload.session_id, f32::from(grab_offset.x));
+            .begin(&payload.tab_id.layout_key(), f32::from(grab_offset.x));
+        if !matches!(
+            payload.tab_id,
+            super::session_tabs::SessionStripTabId::Workspace(
+                crate::models::WorkspaceTabId::Session(_)
+            )
+        ) {
+            self.update_session_tab_drag(payload.tab_id.layout_key(), cx);
+            return;
+        }
         // The new workspace has one strip tab. Include the strip's offset in
         // the window so its first tab, rather than the window corner, follows
         // the grab point (including the sidebar and title-bar space).
@@ -164,14 +166,17 @@ impl ZzClawTermApp {
                 });
             });
         }
-        self.update_session_tab_drag(payload.session_id.clone(), cx);
+        self.update_session_tab_drag(payload.tab_id.layout_key(), cx);
     }
 
     pub(in crate::features) fn accept_session_tab_drop(
         &self,
-        payload: &SessionTabDragPayload,
+        payload: &WorkspaceTabDragPayload,
         cx: &mut Context<Self>,
     ) {
+        if payload.tab_id.is_start() {
+            return;
+        }
         if let Some(controller) = &self.desktop_controller {
             let _ = controller.update(cx, |controller, _| {
                 controller.update_tab_drag(|drag| {

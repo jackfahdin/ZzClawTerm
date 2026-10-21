@@ -6,6 +6,7 @@
 //! made the state layer unable to reach them without inverting the dependency.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use zzclawterm_transport::SftpFileEntry;
@@ -209,4 +210,22 @@ pub(in crate::features) fn natural_compare_ascii(left: &str, right: &str) -> Ord
             }
         }
     }
+}
+
+/// Shared back/forward history used by the sidebar browser and file-manager panes.
+pub(in crate::features) fn record_browser_history(
+    history: &mut VecDeque<String>,
+    history_index: &mut usize,
+    path: &str,
+) -> bool {
+    if history.get(*history_index).map(String::as_str) == Some(path) {
+        return false;
+    }
+    if !history.is_empty() {
+        let current_index = (*history_index).min(history.len() - 1);
+        history.drain(..current_index);
+    }
+    history.push_front(path.to_string());
+    *history_index = 0;
+    true
 }

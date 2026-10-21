@@ -185,6 +185,7 @@ pub(crate) struct TransferPropertiesState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransferEditorState {
+    pub(crate) display: zzclawterm_core::InternalEditorDisplay,
     pub(crate) id: String,
     pub(crate) session_id: Option<String>,
     pub(crate) remote_path: String,
@@ -258,15 +259,6 @@ impl TransferEditorWorkspaceState {
             .or_else(|| self.tabs.first())
     }
 
-    pub(crate) fn active_tab_mut(&mut self) -> Option<&mut TransferEditorState> {
-        let active_index = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == self.active_tab_id)
-            .unwrap_or(0);
-        self.tabs.get_mut(active_index)
-    }
-
     #[cfg(test)]
     pub(crate) fn tab_mut(
         &mut self,
@@ -322,6 +314,7 @@ mod tests {
 
     fn editor_tab(session_id: &str, remote_path: &str) -> TransferEditorState {
         TransferEditorState {
+            display: zzclawterm_core::InternalEditorDisplay::Window,
             id: TransferEditorState::tab_id(Some(session_id), remote_path),
             session_id: Some(session_id.to_string()),
             remote_path: remote_path.to_string(),

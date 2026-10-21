@@ -475,6 +475,64 @@ impl DesktopController {
         }
     }
 
+    /// Run each workspace's editor gate before releasing any process resources.
+    pub fn defer_quit_for_dirty_editors(
+        &mut self,
+        current: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let target = self.windows.iter().find_map(|(id, entry)| {
+            if *id == current {
+                return None;
+            }
+            let dirty = entry
+                .shell
+                .update(cx, |shell, cx| {
+                    shell
+                        .app
+                        .as_ref()
+                        .is_some_and(|app| app.read(cx).has_unconfirmed_editor_changes())
+                })
+                .unwrap_or(false);
+            dirty.then(|| (entry.shell.clone(), entry.handle))
+        });
+        let Some((shell, handle)) = target else {
+            return false;
+        };
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = shell.update(cx, |shell, cx| {
+                    show_tray_window(window, cx);
+                    shell.quit_requested = true;
+                    if let Some(app) = &shell.app {
+                        app.update(cx, |app, cx| {
+                            app.handle_window_close_request_with_count(0, window, cx)
+                        });
+                    }
+                });
+            });
+        });
+        true
+    }
+
+    pub fn cancel_editor_quit_gates(&mut self, cx: &mut Context<Self>) {
+        let shells = self
+            .windows
+            .values()
+            .map(|entry| entry.shell.clone())
+            .collect::<Vec<_>>();
+        cx.defer(move |cx| {
+            for shell in shells {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.quit_requested = false;
+                    if let Some(app) = &shell.app {
+                        app.update(cx, |app, _| app.cancel_editor_exit_approval());
+                    }
+                });
+            }
+        });
+    }
+
     pub fn prepare_other_workspaces_for_quit(
         &mut self,
         current_workspace_id: WorkspaceId,

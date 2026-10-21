@@ -804,10 +804,27 @@ mod tests {
                 assert_eq!(labels.timestamp, formatter.format(timestamp));
                 assert_eq!(
                     labels.line_number,
-                    if row_index == 0 { " 37" } else { "  -" }
+                    if row_index == 0 { "  1" } else { "  -" }
                 );
             }
         }
+    }
+
+    #[test]
+    fn continuation_dashes_do_not_consume_gutter_line_numbers() {
+        let mut terminal = TerminalScreen::new(4, 4);
+        terminal.advance(b"abcdefghijkl\r\nnext");
+        let snapshot = terminal.snapshot();
+        let formatter = TerminalTimestampFormatter::new("HH:mm:ss");
+        let labels = snapshot
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                terminal_gutter_labels(Some(row), index + 1, false, true, 1, &formatter).line_number
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["1", "-", "-", "2"]);
     }
 
     #[test]
@@ -866,6 +883,8 @@ mod tests {
                                 ""
                             } else if snapshot_row.is_some_and(|row| row.wrapped) {
                                 "  -"
+                            } else if snapshot_row.is_some() {
+                                "  1"
                             } else {
                                 "  2"
                             }

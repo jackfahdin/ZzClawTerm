@@ -249,16 +249,6 @@ pub(in crate::features) struct TerminalScrollWheelStateResult {
     pub handled: bool,
 }
 
-fn terminal_should_apply_session_cwd(
-    changed: bool,
-    active_session: bool,
-    auto_sync_enabled: bool,
-    path_editing: bool,
-    cwd: &str,
-) -> bool {
-    changed && active_session && auto_sync_enabled && !path_editing && !cwd.trim().is_empty()
-}
-
 impl ZzClawTermApp {
     pub(in crate::features) fn active_terminal_display_offset(&self) -> usize {
         self.terminal_display_offset_for_session(self.session.active_id())
@@ -920,7 +910,7 @@ impl ZzClawTermApp {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal.clear_terminal_file_drop_hover();
+        self.shell.clear_terminal_file_drop_hover();
         if session_id.is_empty() || paths.is_empty() {
             cx.notify();
             return;
@@ -1015,7 +1005,7 @@ impl ZzClawTermApp {
         session_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.set_terminal_file_drop_hover(session_id) {
+        if self.shell.set_terminal_file_drop_hover(session_id) {
             cx.notify();
         }
         // A drag can end without a drop on this element, and only `has_active_drag`
@@ -1029,26 +1019,11 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if self
-            .terminal
+            .shell
             .clear_terminal_file_drop_hover_for_session(session_id)
         {
             cx.notify();
         }
-    }
-
-    pub(in crate::features) fn apply_session_cwd(&mut self, session_id: &str, cwd: String) -> bool {
-        let changed = self.session.update_cwd(session_id, cwd.clone());
-        // Auto-sync the transfer browser path when enabled for the active SSH session.
-        if terminal_should_apply_session_cwd(
-            changed,
-            self.session.active_id() == Some(session_id),
-            self.transfer_browser_auto_sync_cwd_enabled(),
-            self.transfer.browser_view().path_editing,
-            &cwd,
-        ) {
-            return self.transfer.apply_terminal_cwd_to_browser(cwd);
-        }
-        false
     }
 
     /// Apply OSC 133 command-start / command-finish edges (Tauri shell integration).
@@ -1689,7 +1664,7 @@ mod tests {
         terminal_scroll_residual_clamped_for_offset, terminal_scroll_should_consume_raw_lines,
         terminal_scroll_should_request_immediate_text_snapshot,
         terminal_scroll_to_bottom_state_needs_update,
-        terminal_scrollbar_track_bounds_for_session_state, terminal_should_apply_session_cwd,
+        terminal_scrollbar_track_bounds_for_session_state,
         terminal_user_scroll_idle_remaining_delay, terminal_visual_scroll_active_for_state,
     };
 
@@ -1708,52 +1683,6 @@ mod tests {
             TerminalViewportInsets::symmetric(padding),
             gutter_width,
         )
-    }
-
-    #[test]
-    fn terminal_cwd_sync_applies_only_to_an_active_enabled_session() {
-        assert!(terminal_should_apply_session_cwd(
-            true,
-            true,
-            true,
-            false,
-            "/home/nya"
-        ));
-        assert!(!terminal_should_apply_session_cwd(
-            false,
-            true,
-            true,
-            false,
-            "/home/nya"
-        ));
-        assert!(!terminal_should_apply_session_cwd(
-            true,
-            false,
-            true,
-            false,
-            "/home/nya"
-        ));
-        assert!(!terminal_should_apply_session_cwd(
-            true,
-            true,
-            false,
-            false,
-            "/home/nya"
-        ));
-        assert!(!terminal_should_apply_session_cwd(
-            true, true, true, false, "   "
-        ));
-    }
-
-    #[test]
-    fn terminal_cwd_sync_does_not_replace_a_path_being_edited() {
-        assert!(!terminal_should_apply_session_cwd(
-            true,
-            true,
-            true,
-            true,
-            "/home/nya"
-        ));
     }
 
     #[test]

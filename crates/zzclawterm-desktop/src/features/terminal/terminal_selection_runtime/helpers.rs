@@ -69,14 +69,7 @@ pub(in crate::features) fn terminal_bounds_tracker(
                 return;
             }
             let focus = input_entity.read(cx).terminal.input.focus.clone();
-            if input_entity
-                .read(cx)
-                .settings
-                .summary()
-                .interaction_mac_ime_compatibility
-            {
-                window.handle_input(&focus, ElementInputHandler::new(bounds, input_entity), cx);
-            }
+            window.handle_input(&focus, ElementInputHandler::new(bounds, input_entity), cx);
         },
     )
     .absolute()

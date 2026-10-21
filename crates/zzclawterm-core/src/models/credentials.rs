@@ -22,6 +22,16 @@ pub enum ConnectionPasswordSource {
     Connection,
 }
 
+/// Whether an SSH or Telnet connection takes its username from the linked account.
+///
+/// Absent on older records, which keep the account username when it is non-empty.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionUsernameSource {
+    Account,
+    Connection,
+}
+
 #[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 pub enum AccountAuthError {
     #[error("saved account was not found")]
@@ -42,6 +52,8 @@ pub struct ConnectionAuth {
     pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_source: Option<ConnectionPasswordSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username_source: Option<ConnectionUsernameSource>,
     #[serde(default)]
     pub password: Option<SecretString>,
     #[serde(default)]
@@ -69,6 +81,14 @@ impl ConnectionAuth {
             })
     }
 
+    /// Older records omit the field and still prefer a non-empty account username.
+    pub fn follows_account_username(&self) -> bool {
+        !matches!(
+            self.username_source,
+            Some(ConnectionUsernameSource::Connection)
+        )
+    }
+
     pub fn uses_account_password(&self) -> bool {
         match self.password_source {
             Some(ConnectionPasswordSource::Account) => true,
@@ -90,11 +110,15 @@ impl ConnectionAuth {
         {
             return Err(AccountAuthError::MissingAccount);
         }
-        let username = account
-            .map(|entry| entry.username.trim())
-            .filter(|username| !username.is_empty())
-            .unwrap_or(connection_username)
-            .to_string();
+        let username = if self.follows_account_username() {
+            account
+                .map(|entry| entry.username.trim())
+                .filter(|username| !username.is_empty())
+                .unwrap_or(connection_username)
+        } else {
+            connection_username
+        }
+        .to_string();
         if self.mode == "none" {
             return Ok((username, None));
         }
@@ -269,6 +293,7 @@ impl_redacted_debug!(
         password_id,
         account_id,
         password_source,
+        username_source,
         key_id,
         otp_id,
         auto_fill_otp,

@@ -560,6 +560,14 @@ impl ZzClawTermApp {
         )
     }
 
+    pub(in crate::features) fn header_status_needs_stats(&self) -> bool {
+        self.settings.summary().ui_header_status_visible
+            && matches!(
+                HeaderStatusMode::from_setting(&self.settings.summary().ui_header_status_mode),
+                HeaderStatusMode::Resources | HeaderStatusMode::Host
+            )
+    }
+
     pub(in crate::features) fn header_status_needs_gpu(&self) -> bool {
         self.settings.summary().ui_header_status_visible
             && HeaderStatusMode::from_setting(&self.settings.summary().ui_header_status_mode)
@@ -686,7 +694,7 @@ mod tests {
             app.shell.show_workspace();
             // A fresh app starts with the terminal window layout restore
             // outstanding; complete it so these tests start from a settled app.
-            app.terminal.complete_terminal_windows_restore();
+            app.shell.complete_terminal_windows_restore();
         });
         app
     }
