@@ -193,13 +193,16 @@ jobs:
           )
           existing_code="$(curl -sS -o "${RUNNER_TEMP}/gitee-existing.json" -w '%{http_code}' \
             "${api}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${tag_q}?access_token=${GITEE_TOKEN}")"
-          if [[ "${existing_code}" == '404' ]]; then
+          # Gitee also returns HTTP 200 with JSON null when no release exists.
+          if [[ "${existing_code}" == '404' ]] || {
+            [[ "${existing_code}" == '200' ]] && jq -e '. == null' "${RUNNER_TEMP}/gitee-existing.json" > /dev/null
+          }; then
             curl -sfS -X POST "${args[@]}" \
               --data-urlencode "target_commitish=$(jq -r '.targetCommitish // empty' github-release.json)" \
               "${api}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases?access_token=${GITEE_TOKEN}" > /dev/null
             echo "created Gitee release ${TAG}"
           elif [[ "${existing_code}" == '200' ]]; then
-            release_id="$(jq -r '.id' "${RUNNER_TEMP}/gitee-existing.json")"
+            release_id="$(jq -er '.id | numbers | select(. > 0 and . == floor)' "${RUNNER_TEMP}/gitee-existing.json")"
             curl -sfS -X PATCH "${args[@]}" \
               "${api}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${release_id}?access_token=${GITEE_TOKEN}" > /dev/null
             echo "updated Gitee release ${TAG}"

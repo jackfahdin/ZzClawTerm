@@ -1,4 +1,9 @@
+import json
+import os
+import shutil
+import subprocess
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -455,3 +460,60 @@ class StableVersionTests(unittest.TestCase):
         for invalid in ({}, {"version": "0.01.2"}, {"version": "1.2"}, {"version": "v1.2.3"}):
             with self.assertRaises(RuntimeError):
                 _stable_version(invalid)
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "requires bash and jq")
+class ReleaseWorkflowTests(unittest.TestCase):
+    def run_lookup(self, status, body):
+        """Execute the workflow's real lookup branch with HTTP replaced by a local stub."""
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/publish-gitee-release.yml").read_text()
+        branch = "          existing_code=" + workflow.split("          existing_code=", 1)[1]
+        branch = textwrap.dedent(branch.split("\n      - name: Cleanup", 1)[0])
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / "github-release.json").write_text(json.dumps({"targetCommitish": "verified-sha"}))
+            stub = r'''
+set -euo pipefail
+api=https://gitee.invalid/api/v5
+tag_q=v0.1.5
+args=()
+curl() {
+    case " $* " in
+        *" -X "*) printf '%s\n' "$@" > "${RUNNER_TEMP}/mutation.txt" ;;
+        *) printf '%s' "${LOOKUP_BODY}" > "${RUNNER_TEMP}/gitee-existing.json"
+           printf '%s' "${LOOKUP_STATUS}" ;;
+    esac
+}
+'''
+            result = subprocess.run(
+                ["bash", "-c", stub + branch], cwd=work, capture_output=True, text=True,
+                env={**os.environ, "RUNNER_TEMP": directory, "LOOKUP_STATUS": status,
+                     "LOOKUP_BODY": json.dumps(body), "GITEE_OWNER": "owner", "GITEE_REPO": "repo",
+                     "GITEE_TOKEN": "synthetic-token", "TAG": "v0.1.5"},
+            )
+            mutation = work / "mutation.txt"
+            return result, mutation.read_text().splitlines() if mutation.exists() else []
+
+    def test_missing_release_returned_as_200_null_is_created(self):
+        result, request = self.run_lookup("200", None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("POST", request)
+        self.assertNotIn("PATCH", request)
+
+    def test_missing_release_returned_as_404_is_created(self):
+        result, request = self.run_lookup("404", {"message": "Not Found"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("POST", request)
+
+    def test_existing_release_is_updated_by_numeric_id(self):
+        result, request = self.run_lookup("200", {"id": 123})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PATCH", request)
+        self.assertTrue(any("/releases/123?" in arg for arg in request))
+
+    def test_invalid_lookup_never_writes_a_release(self):
+        for status, body in [("403", {}), ("500", None), ("200", {}), ("200", {"id": "bad"})]:
+            with self.subTest(status=status, body=body):
+                result, request = self.run_lookup(status, body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(request, [])
