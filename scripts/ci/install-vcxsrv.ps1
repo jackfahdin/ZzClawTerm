@@ -10,12 +10,12 @@ $ErrorActionPreference = 'Stop'
 $version = if ($env:ZZCLAWTERM_VCXSRV_VERSION) {
     $env:ZZCLAWTERM_VCXSRV_VERSION
 } else {
-    '21.1.16.1'
+    '21.1.16.2'
 }
 $expectedHash = if ($env:ZZCLAWTERM_VCXSRV_SHA256) {
     $env:ZZCLAWTERM_VCXSRV_SHA256
 } else {
-    '9aa4dc87a98d07abe1ea44954974300823fddf4bf9344be6d18da5ddd2b99711'
+    '4d9f6225addb6ebcad860a0a9747eca910d77a77fffa38621e62f93cee557ddf'
 }
 
 Write-Output "::group::Install ZzXsrv $version"
