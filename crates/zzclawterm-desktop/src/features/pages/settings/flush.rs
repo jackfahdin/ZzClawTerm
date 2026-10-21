@@ -8,7 +8,7 @@ use crate::models::{SettingsTab, SnapshotPasswordPromptKind};
 use super::panel::{
     AiSettingsPresentation, CloudSyncPresentation, MasterPasswordPresentation, SettingsChrome,
     SettingsPresentation, SettingsSectionPresentation, SettingsSnapshot, SettingsSurface,
-    TransferSettingsPresentation, TranslationPresentation,
+    TransferSettingsPresentation, TranslationPresentation, X11ServerPresentation,
 };
 
 impl ZzClawTermApp {
@@ -71,6 +71,23 @@ impl ZzClawTermApp {
                     MasterPasswordPresentation {
                         enabled: master_password.enabled,
                         draft: master_password.draft.to_owned().into(),
+                    }
+                },
+                x11_server: {
+                    // Non-blocking read of the managed-server state; rebuilt
+                    // on every flush so server state changes repaint.
+                    let status = zzclawterm_transport::managed_x11_status();
+                    X11ServerPresentation {
+                        known: status.is_some(),
+                        running: status.as_ref().is_some_and(|status| status.running),
+                        display: status.as_ref().and_then(|status| status.display),
+                        server_path: status
+                            .as_ref()
+                            .and_then(|status| status.server_path.as_ref())
+                            .map(|path| path.display().to_string()),
+                        started_by_us: status.as_ref().is_some_and(|status| status.started_by_us),
+                        tray_icon: status.as_ref().and_then(|status| status.tray_icon),
+                        path_select_custom: self.settings.x11_server_path_select_custom(),
                     }
                 },
                 font_catalog: FontCatalogPresentation::new(
@@ -146,6 +163,7 @@ impl ZzClawTermApp {
                 SettingsTab::Interaction => SettingsSectionPresentation::Interaction,
                 SettingsTab::Keybindings => SettingsSectionPresentation::Keybindings,
                 SettingsTab::TerminalGeneral => SettingsSectionPresentation::TerminalGeneral,
+                SettingsTab::X11 => SettingsSectionPresentation::X11,
                 SettingsTab::RemoteMonitoring => SettingsSectionPresentation::RemoteMonitoring,
                 SettingsTab::Search => SettingsSectionPresentation::Search,
                 SettingsTab::Translation => SettingsSectionPresentation::Translation,

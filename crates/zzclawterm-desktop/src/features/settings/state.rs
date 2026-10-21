@@ -35,6 +35,12 @@ pub(in crate::features) struct SettingsFeatureState {
     persistence: HashMap<SettingsPersistenceDomain, SettingsPersistenceSlot>,
     draft_dirty_domains: HashSet<SettingsPersistenceDomain>,
     panel_refresh_requested: bool,
+    /// A managed X server start/stop action is on the blocking-job scheduler;
+    /// the X11 settings tab disables its buttons while this is set.
+    x11_server_action_pending: bool,
+    /// Transient UI state (never persisted): the X server path select shows
+    /// "custom" while the user has not typed a path yet.
+    x11_server_path_select_custom: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -248,6 +254,8 @@ impl SettingsFeatureState {
             persistence: HashMap::new(),
             draft_dirty_domains: HashSet::new(),
             panel_refresh_requested: false,
+            x11_server_action_pending: false,
+            x11_server_path_select_custom: false,
         }
     }
 
@@ -553,6 +561,26 @@ impl SettingsFeatureState {
 
     pub(in crate::features) fn toggle_x11_server_autostart(&mut self) {
         self.summary.x11_server_autostart = !self.summary.x11_server_autostart;
+    }
+
+    pub(in crate::features) fn toggle_x11_server_tray_icon(&mut self) {
+        self.summary.x11_server_tray_icon = !self.summary.x11_server_tray_icon;
+    }
+
+    pub(in crate::features) fn x11_server_path_select_custom(&self) -> bool {
+        self.x11_server_path_select_custom
+    }
+
+    pub(in crate::features) fn set_x11_server_path_select_custom(&mut self, custom: bool) {
+        self.x11_server_path_select_custom = custom;
+    }
+
+    pub(in crate::features) fn x11_server_action_pending(&self) -> bool {
+        self.x11_server_action_pending
+    }
+
+    pub(in crate::features) fn set_x11_server_action_pending(&mut self, pending: bool) {
+        self.x11_server_action_pending = pending;
     }
 
     pub(in crate::features) fn toggle_terminal_zebra_stripes(&mut self) {

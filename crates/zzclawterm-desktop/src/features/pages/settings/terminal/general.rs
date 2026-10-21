@@ -14,6 +14,7 @@ use crate::theme::ThemePalette;
 use super::super::{
     settings_form_row, settings_form_section, settings_switch, settings_switch_with_enabled,
 };
+use super::helpers::terminal_settings_field_meta;
 
 impl SettingsPanel {
     pub(in crate::features) fn terminal_general_settings_section(
@@ -25,12 +26,6 @@ impl SettingsPanel {
         let encoding = zzclawterm_core::character_encoding::CharacterEncoding::parse(&raw_encoding)
             .map(|encoding| encoding.label().to_string())
             .unwrap_or(raw_encoding);
-        let x11_display_input = self
-            .existing_text_input_box("settings.terminal.x11-display", false)
-            .into_any_element();
-        let x11_server_path_input = self
-            .existing_text_input_box("settings.terminal.x11-server-path", false)
-            .into_any_element();
         let timestamp_format_input = self
             .existing_text_input_box("settings.terminal.timestamp-format", false)
             .into_any_element();
@@ -89,43 +84,6 @@ impl SettingsPanel {
                             "settings.number.terminal-keep-alive-interval",
                         ),
                     ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(terminal_settings_field_meta(
-                                palette,
-                                t!("settings.x11Display"),
-                                t!("settings.x11DisplayDesc"),
-                            ))
-                            .child(div().w_full().max_w(px(520.)).child(x11_display_input)),
-                    )
-                    .child(settings_form_row(
-                        palette,
-                        t!("settings.x11ServerAutostart"),
-                        Some(SharedString::from(t!("settings.x11ServerAutostartDesc"))),
-                        settings_switch(
-                            palette,
-                            "terminal-x11-server-autostart",
-                            self.settings.summary().x11_server_autostart,
-                            cx.listener(|this, _, _, cx| {
-                                this.toggle_x11_server_autostart(cx);
-                            }),
-                        ),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(terminal_settings_field_meta(
-                                palette,
-                                t!("settings.x11ServerPath"),
-                                t!("settings.x11ServerPathDesc"),
-                            ))
-                            .child(div().w_full().max_w(px(520.)).child(x11_server_path_input)),
-                    )
                     .child(settings_form_row(
                         palette,
                         t!("settings.zebraStripes"),
@@ -351,31 +309,6 @@ impl SettingsPanel {
             .child(self.keyword_highlights_settings_section(cx))
             .child(self.recording_settings_section(cx))
     }
-}
-
-fn terminal_settings_field_meta(
-    palette: ThemePalette,
-    label: impl Into<SharedString>,
-    desc: impl Into<SharedString>,
-) -> impl IntoElement {
-    let label: SharedString = label.into();
-    let desc: SharedString = desc.into();
-    div()
-        .min_w_0()
-        .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(FontWeight(500.))
-                .text_color(rgb(palette.text))
-                .child(label),
-        )
-        .child(
-            div()
-                .mt_1()
-                .text_size(px(11.))
-                .text_color(rgb(palette.text_dimmed))
-                .child(desc),
-        )
 }
 
 fn terminal_action_matcher_row(

@@ -309,6 +309,9 @@ impl ZzClawTermApp {
                 "disabled" => self.set_terminal_keep_alive_mode("disabled", cx),
                 _ => self.set_terminal_keep_alive_mode("compatible", cx),
             },
+            "settings.terminal.x11-server-path-select" => {
+                self.select_terminal_x11_server_path_mode(value, cx)
+            }
             "settings.interaction.default-encoding" => {
                 match zzclawterm_core::character_encoding::CharacterEncoding::parse(value) {
                     Ok(encoding) => self.set_interaction_encoding(encoding.label(), cx),

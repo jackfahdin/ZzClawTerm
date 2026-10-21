@@ -72,6 +72,22 @@ pub struct ManagedX11Info {
     pub started_by_us: bool,
 }
 
+/// Point-in-time view of the local X server known to this process, for the
+/// settings UI. `None` from [`managed_x11_status`] means no server has ever
+/// been started or detected in this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedX11Status {
+    /// A server we spawned is alive, or an external server was detected.
+    pub running: bool,
+    pub display: Option<u16>,
+    /// Executable path; only known for a server we spawned ourselves.
+    pub server_path: Option<PathBuf>,
+    pub started_by_us: bool,
+    /// Tray icon preference the running instance was spawned with; only known
+    /// for a server we spawned, `None` for an externally provided one.
+    pub tray_icon: Option<bool>,
+}
+
 /// Process-wide managed server. Only a server we spawned is ever stored here,
 /// so `shutdown_managed_x11_server` can never kill a foreign process.
 #[cfg(windows)]
@@ -82,13 +98,21 @@ struct ManagedX11Server {
     /// process exit path — including crash and Task Manager kills where
     /// `shutdown_managed_x11_server` never runs.
     _kill_on_close_job: Option<kill_on_close_job::KillOnCloseJob>,
+    path: PathBuf,
     display: u16,
+    tray_icon: bool,
     cookie_hex: String,
     xauthority_path: PathBuf,
 }
 
 #[cfg(windows)]
 static MANAGED_X11: RwLock<Option<ManagedX11Server>> = RwLock::new(None);
+
+/// The last externally provided server `ensure_x11_server` reused, kept so
+/// `managed_x11_status` can still report it. Servers we spawn are read from
+/// `MANAGED_X11` directly and are never recorded here.
+#[cfg(windows)]
+static DETECTED_EXTERNAL_X11: RwLock<Option<ManagedX11Status>> = RwLock::new(None);
 
 /// Resolve the VcXsrv executable, in order: `ZZCLAWTERM_XSERVER`, the
 /// configured settings path, then `vcxsrv/vcxsrv.exe` beside the running
@@ -192,12 +216,20 @@ fn port_occupied(port: u16) -> bool {
 /// existing xauth lookup), and the first free display is used for a server we
 /// spawn ourselves.
 ///
+/// `tray_icon` controls the tray icon of a server we spawn (`-notrayicon`
+/// when false); it is ignored when an existing server is reused, and only
+/// affects servers started after it changes.
+///
 /// Blocking (process spawn plus up to 10s of readiness polling); call from a
 /// blocking context, not a GPUI update callback.
-pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Info, X11ServerError> {
+pub fn ensure_x11_server(
+    configured_path: Option<&Path>,
+    tray_icon: bool,
+) -> Result<ManagedX11Info, X11ServerError> {
     #[cfg(not(windows))]
     {
         let _ = configured_path;
+        let _ = tray_icon;
         Err(X11ServerError::Unsupported)
     }
 
@@ -229,6 +261,15 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
         let mut last_early_exit: Option<X11ServerError> = None;
         for display in 0..MAX_DISPLAY_PROBES {
             if x_server_port_listening(display) {
+                *DETECTED_EXTERNAL_X11
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(ManagedX11Status {
+                    running: true,
+                    display: Some(display),
+                    server_path: None,
+                    started_by_us: false,
+                    tray_icon: None,
+                });
                 return Ok(ManagedX11Info {
                     display,
                     cookie_hex: None,
@@ -239,7 +280,7 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
 
             let path = resolve_x_server_path(configured_path).ok_or(X11ServerError::NotFound)?;
             let (xauthority_path, cookie_hex) = write_xauthority_file(display)?;
-            let child = spawn_x_server(&path, display, &xauthority_path)?;
+            let child = spawn_x_server(&path, display, &xauthority_path, tray_icon)?;
             // Arm kill-on-close right after spawn so even a crash during the
             // readiness wait cannot orphan VcXsrv.
             let job = match kill_on_close_job::assign(&child) {
@@ -266,7 +307,9 @@ pub fn ensure_x11_server(configured_path: Option<&Path>) -> Result<ManagedX11Inf
                     *guard = Some(ManagedX11Server {
                         child,
                         _kill_on_close_job: job,
+                        path: path.clone(),
                         display,
+                        tray_icon,
                         cookie_hex,
                         xauthority_path,
                     });
@@ -299,6 +342,44 @@ pub fn managed_x11_cookie_for_display(display: u16) -> Option<String> {
 #[cfg(not(windows))]
 pub fn managed_x11_cookie_for_display(_display: u16) -> Option<String> {
     None
+}
+
+/// Current state of the local X server known to this process: the server we
+/// spawned (queried live, so a crashed child reports `running: false` until
+/// the watchdog reaps it) or, failing that, the external server the last
+/// `ensure_x11_server` call reused. `None` when neither has ever happened.
+/// Non-blocking; safe to call from a render path.
+#[cfg(windows)]
+pub fn managed_x11_status() -> Option<ManagedX11Status> {
+    {
+        let mut guard = MANAGED_X11.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(server) = guard.as_mut() {
+            return Some(ManagedX11Status {
+                running: matches!(server.child.try_wait(), Ok(None)),
+                display: Some(server.display),
+                server_path: Some(server.path.clone()),
+                started_by_us: true,
+                tray_icon: Some(server.tray_icon),
+            });
+        }
+    }
+    DETECTED_EXTERNAL_X11
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Always `None` off Windows, where no server is ever managed.
+#[cfg(not(windows))]
+pub fn managed_x11_status() -> Option<ManagedX11Status> {
+    None
+}
+
+/// Stop the managed server and clear its state, for the settings UI's stop
+/// button. Only a server we spawned is ever killed; an externally provided
+/// server is left running. Shares the exit-path teardown.
+pub fn stop_managed_x11_server() {
+    shutdown_managed_x11_server();
 }
 
 /// Kill and reap the managed server. A no-op unless we started it ourselves.
@@ -408,25 +489,39 @@ mod kill_on_close_job {
 #[cfg(not(windows))]
 pub fn shutdown_managed_x11_server() {}
 
+/// Command-line arguments for a spawned VcXsrv. Without `-noreset` the server
+/// resets when its last client disconnects; a reset during the multiwindow
+/// WM's startup races the WM_S0 selection and VcXsrv terminates itself.
+/// `-notrayicon` is only passed when the tray icon is disabled; VcXsrv shows
+/// one by default.
+#[cfg(any(windows, test))]
+fn x_server_args(display: u16, xauthority_path: &Path, tray_icon: bool) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        std::ffi::OsString::from(format!(":{display}")),
+        std::ffi::OsString::from("-multiwindow"),
+        std::ffi::OsString::from("-clipboard"),
+        std::ffi::OsString::from("-noreset"),
+        std::ffi::OsString::from("-auth"),
+        xauthority_path.as_os_str().to_os_string(),
+    ];
+    if !tray_icon {
+        args.push(std::ffi::OsString::from("-notrayicon"));
+    }
+    args
+}
+
 #[cfg(windows)]
 fn spawn_x_server(
     path: &Path,
     display: u16,
     xauthority_path: &Path,
+    tray_icon: bool,
 ) -> Result<Child, X11ServerError> {
     use std::os::windows::process::CommandExt;
 
     let mut command = Command::new(path);
     command
-        .arg(format!(":{display}"))
-        .arg("-multiwindow")
-        .arg("-clipboard")
-        // Without -noreset the server resets when its last client disconnects;
-        // a reset during the multiwindow WM's startup races the WM_S0
-        // selection and VcXsrv terminates itself.
-        .arg("-noreset")
-        .arg("-auth")
-        .arg(xauthority_path)
+        .args(x_server_args(display, xauthority_path, tray_icon))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -471,6 +566,8 @@ fn wait_for_x_server(mut child: Child, path: &Path, display: u16) -> Result<Chil
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         INTERNET_FAMILY, encode_xauthority_entry, resolve_x_server_path, write_xauthority_file,
     };
@@ -550,9 +647,35 @@ mod tests {
     #[test]
     fn ensure_x11_server_is_unsupported_off_windows() {
         assert!(matches!(
-            super::ensure_x11_server(None),
+            super::ensure_x11_server(None, true),
             Err(super::X11ServerError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn x_server_args_omit_tray_flag_by_default() {
+        let args = super::x_server_args(0, Path::new("xauth"), true);
+        assert_eq!(args[0], ":0");
+        assert!(args.iter().any(|arg| arg == "-noreset"));
+        assert!(!args.iter().any(|arg| arg == "-notrayicon"));
+    }
+
+    #[test]
+    fn x_server_args_pass_notrayicon_when_tray_icon_disabled() {
+        let args = super::x_server_args(3, Path::new("xauth"), false);
+        assert_eq!(args[0], ":3");
+        assert!(args.iter().any(|arg| arg == "-notrayicon"));
+    }
+
+    #[test]
+    fn managed_x11_status_is_none_before_any_start() {
+        assert!(super::managed_x11_status().is_none());
+    }
+
+    #[test]
+    fn stop_managed_x11_server_is_a_noop_without_a_managed_server() {
+        super::stop_managed_x11_server();
+        assert!(super::managed_x11_status().is_none());
     }
 
     #[cfg(windows)]

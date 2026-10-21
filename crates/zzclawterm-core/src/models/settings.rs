@@ -303,13 +303,23 @@ pub struct AppSettingsSummary {
     #[serde(default)]
     pub bold_default_foreground: bool,
     pub x11_display: String,
-    /// Automatically ensure an X Server (VcXsrv) is running on app startup.
+    /// Master "Enable X Server" switch: start the managed X Server (VcXsrv)
+    /// at app startup, shut it down on exit, and let the next SSH session
+    /// with X11 forwarding restart it if it died. Default on, MobaXterm-style.
     #[serde(default = "default_true")]
     pub x11_server_autostart: bool,
+    /// Retired standalone on-demand switch, folded into `x11_server_autostart`
+    /// as always-on internal behavior. Kept purely as a load/save passthrough
+    /// so the key never disappears from existing settings files.
+    #[serde(default = "default_true")]
+    pub x11_server_on_demand: bool,
     /// Explicit X Server executable path; empty means auto-discover
     /// (environment variables, then a `vcxsrv` directory next to the exe).
     #[serde(default)]
     pub x11_server_path: String,
+    /// Show the managed X Server's tray icon for instances we spawn.
+    #[serde(default = "default_true")]
+    pub x11_server_tray_icon: bool,
     pub terminal_scrollback_lines: u32,
     #[serde(default = "default_terminal_keep_alive_mode")]
     pub terminal_keep_alive_mode: String,
@@ -595,7 +605,9 @@ impl Default for AppSettingsSummary {
             bold_default_foreground: false,
             x11_display: String::new(),
             x11_server_autostart: true,
+            x11_server_on_demand: true,
             x11_server_path: String::new(),
+            x11_server_tray_icon: true,
             terminal_scrollback_lines: 5000,
             terminal_keep_alive_mode: default_terminal_keep_alive_mode(),
             terminal_keep_alive_interval: 30,
@@ -1042,9 +1054,12 @@ mod tests {
         assert!(!summary.terminal_reconnect_restore_cwd);
         assert_eq!(summary.transfer_internal_editor_font_size, 13);
         // Legacy documents lack the X Server management keys; they must fall
-        // back to autostart-on and empty (auto-discover) path.
+        // back to autostart-on, on-demand-on and empty (auto-discover) path.
         assert!(summary.x11_server_autostart);
+        assert!(summary.x11_server_on_demand);
         assert!(summary.x11_server_path.is_empty());
+        // The tray-icon key joins with a default-on fallback as well.
+        assert!(summary.x11_server_tray_icon);
         // The credential autofill switch joins the command-suggestion switch in
         // defaulting on, so legacy documents keep the panel enabled.
         assert!(summary.interaction_credential_autofill_enabled);
@@ -1054,14 +1069,18 @@ mod tests {
     fn summary_roundtrips_x11_server_settings() {
         let summary = AppSettingsSummary {
             x11_server_autostart: false,
+            x11_server_on_demand: false,
             x11_server_path: "D:\\tools\\vcxsrv\\vcxsrv.exe".to_string(),
+            x11_server_tray_icon: false,
             ..AppSettingsSummary::default()
         };
 
         let encoded = serde_json::to_string(&summary).expect("serializes");
         let decoded: AppSettingsSummary = serde_json::from_str(&encoded).expect("round-trips");
         assert!(!decoded.x11_server_autostart);
+        assert!(!decoded.x11_server_on_demand);
         assert_eq!(decoded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
+        assert!(!decoded.x11_server_tray_icon);
     }
 
     #[test]

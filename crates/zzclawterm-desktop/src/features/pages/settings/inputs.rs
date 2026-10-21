@@ -128,6 +128,7 @@ impl ZzClawTermApp {
             SettingsTab::Interaction => self.ensure_interaction_inputs(cx),
             SettingsTab::Keybindings => self.ensure_keybinding_inputs(cx),
             SettingsTab::TerminalGeneral => self.ensure_terminal_inputs(cx),
+            SettingsTab::X11 => self.ensure_x11_inputs(cx),
             SettingsTab::RemoteMonitoring => self.ensure_remote_monitoring_inputs(cx),
             SettingsTab::Search => self.ensure_expanded_search_engine_inputs(cx),
             SettingsTab::Translation => self.ensure_translation_inputs(cx),
@@ -356,7 +357,8 @@ impl ZzClawTermApp {
         );
     }
 
-    fn ensure_terminal_inputs(&mut self, cx: &mut Context<Self>) {
+    /// The X11 tab owns the display and server-path inputs.
+    fn ensure_x11_inputs(&mut self, cx: &mut Context<Self>) {
         let summary = self.settings.summary().clone();
         self.ensure_text_input(
             "settings.terminal.x11-display",
@@ -370,6 +372,10 @@ impl ZzClawTermApp {
             TextInputSetup::placeholder(t!("settings.x11ServerPathPlaceholder")),
             cx,
         );
+    }
+
+    fn ensure_terminal_inputs(&mut self, cx: &mut Context<Self>) {
+        let summary = self.settings.summary().clone();
         self.ensure_text_input(
             "settings.terminal.timestamp-format",
             &summary.terminal_timestamp_format,
@@ -795,12 +801,13 @@ impl ZzClawTermApp {
 
 /// Every tab, so the tests below cannot silently miss one that gets added.
 #[cfg(test)]
-pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 15] = [
+pub(in crate::features::pages::settings) const ALL_SETTINGS_TABS: [SettingsTab; 16] = [
     SettingsTab::General,
     SettingsTab::Appearance,
     SettingsTab::Interaction,
     SettingsTab::Keybindings,
     SettingsTab::TerminalGeneral,
+    SettingsTab::X11,
     SettingsTab::RemoteMonitoring,
     SettingsTab::Search,
     SettingsTab::Translation,

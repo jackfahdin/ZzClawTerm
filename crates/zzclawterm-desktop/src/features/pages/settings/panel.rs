@@ -54,6 +54,7 @@ pub(in crate::features) enum SettingsSectionPresentation {
     Interaction,
     Keybindings,
     TerminalGeneral,
+    X11,
     RemoteMonitoring,
     Search,
     Translation,
@@ -126,6 +127,7 @@ impl SettingsSnapshot {
             | SettingsTab::Keybindings
             | SettingsTab::RemoteMonitoring
             | SettingsTab::TerminalGeneral
+            | SettingsTab::X11
             | SettingsTab::Search
             | SettingsTab::Security => self.settings == other.settings,
         }
@@ -144,6 +146,7 @@ pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) keyword_highlight_presentation: KeywordHighlightPresentationState,
     pub(in crate::features) keybinding_presentation: KeybindingPresentationState,
     pub(in crate::features) master_password: MasterPasswordPresentation,
+    pub(in crate::features) x11_server: X11ServerPresentation,
     pub(in crate::features) font_catalog: FontCatalogPresentation,
     pub(in crate::features) search_engine_focus: gpui::FocusHandle,
     pub(in crate::features) keyword_highlight_focus: gpui::FocusHandle,
@@ -179,6 +182,7 @@ impl SettingsPresentation {
                 search_draft: String::new(),
             },
             master_password: MasterPasswordPresentation::default(),
+            x11_server: X11ServerPresentation::default(),
             font_catalog: FontCatalogPresentation::empty(),
             search_engine_focus: cx.focus_handle(),
             keyword_highlight_focus: cx.focus_handle(),
@@ -196,6 +200,24 @@ impl SettingsPresentation {
 pub(in crate::features) struct MasterPasswordPresentation {
     pub enabled: bool,
     pub draft: zzclawterm_core::SecretString,
+}
+
+/// Live view of the local X server for the X11 settings tab, rebuilt on every
+/// snapshot flush so server state changes repaint the status icon.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(in crate::features) struct X11ServerPresentation {
+    /// A server was started by us or detected at least once in this process.
+    pub known: bool,
+    pub running: bool,
+    pub display: Option<u16>,
+    /// Executable path; only known for a server ZzClawTerm spawned.
+    pub server_path: Option<String>,
+    pub started_by_us: bool,
+    /// Tray icon preference the running instance was spawned with; `None` for
+    /// an externally provided server.
+    pub tray_icon: Option<bool>,
+    /// Transient: the path select shows "custom" before a path is typed.
+    pub path_select_custom: bool,
 }
 
 impl SettingsPresentation {
@@ -1262,6 +1284,7 @@ impl SettingsPanel {
             .expanded(snapshot.group_is_expanded("terminal_session"))
             .items([
                 settings_nav_item(SettingsTab::TerminalGeneral),
+                settings_nav_item(SettingsTab::X11),
                 settings_nav_item(SettingsTab::Search),
                 settings_nav_item(SettingsTab::Translation),
                 settings_nav_item(SettingsTab::RemoteMonitoring),
@@ -1296,6 +1319,7 @@ impl SettingsPanel {
             SettingsTab::TerminalGeneral => self
                 .terminal_general_settings_section(cx)
                 .into_any_element(),
+            SettingsTab::X11 => self.terminal_x11_settings_section(cx).into_any_element(),
             SettingsTab::RemoteMonitoring => self
                 .remote_monitoring_settings_section(cx)
                 .into_any_element(),
@@ -1469,6 +1493,7 @@ fn settings_tab_nav_id(tab: SettingsTab) -> &'static str {
         SettingsTab::Interaction => "settings-tab-interaction",
         SettingsTab::Keybindings => "settings-tab-keybindings",
         SettingsTab::TerminalGeneral => "settings-tab-terminal-general",
+        SettingsTab::X11 => "settings-tab-x11",
         SettingsTab::RemoteMonitoring => "settings-tab-remote-monitoring",
         SettingsTab::Search => "settings-tab-search",
         SettingsTab::Translation => "settings-tab-translation",
@@ -1489,6 +1514,7 @@ fn settings_tab_from_nav_id(id: &str) -> Option<SettingsTab> {
         "settings-tab-interaction" => Some(SettingsTab::Interaction),
         "settings-tab-keybindings" => Some(SettingsTab::Keybindings),
         "settings-tab-terminal-general" => Some(SettingsTab::TerminalGeneral),
+        "settings-tab-x11" => Some(SettingsTab::X11),
         "settings-tab-remote-monitoring" => Some(SettingsTab::RemoteMonitoring),
         "settings-tab-search" => Some(SettingsTab::Search),
         "settings-tab-translation" => Some(SettingsTab::Translation),
@@ -1960,6 +1986,7 @@ forward_app_action!(
     prompt_background_image,
     prompt_diagnostics_export,
     prompt_keyword_highlight_import,
+    prompt_x11_server_path,
     reset_all_keybindings,
     reset_remote_monitoring_intervals,
     reveal_log_dir,
@@ -2016,6 +2043,7 @@ forward_app_action!(
     toggle_transfer_preserve_timestamps,
     toggle_transfer_resume_broken,
     toggle_x11_server_autostart,
+    toggle_x11_server_tray_icon,
 );
 
 #[cfg(test)]

@@ -193,6 +193,9 @@ impl ZzClawTermApp {
         if let Some(error) = self.ai_provider_validation_error() {
             return Some(error);
         }
+        if let Some(error) = self.x11_server_path_validation_error() {
+            return Some(error);
+        }
         let master_password = self.settings.master_password();
         if master_password.enabled
             && !self.settings.summary().has_master_password
@@ -1441,6 +1444,54 @@ mod tests {
         });
         assert_eq!(cloud.webdav.endpoint, "https://dav.example.com");
         assert!(!cloud.enabled, "cloud sync must stay disabled");
+    }
+
+    /// Custom X server path mode requires an existing vcxsrv.exe: an empty or
+    /// bogus path blocks the draft apply with an explanatory error, while the
+    /// default mode (empty path, auto-discover) stays valid.
+    #[test]
+    fn custom_x11_server_path_requires_a_valid_executable() {
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            assert_eq!(
+                app.pending_settings_validation_error(),
+                None,
+                "default mode with an empty path means auto-discover"
+            );
+
+            // Custom mode selected but no path typed yet.
+            app.select_terminal_x11_server_path_mode("custom", cx);
+            assert!(
+                app.pending_settings_validation_error().is_some(),
+                "custom mode without a path must be rejected"
+            );
+
+            // A missing .exe path is rejected...
+            app.apply_terminal_x11_server_path("D:\\tools\\missing-vcxsrv.exe".to_string(), cx);
+            assert!(app.pending_settings_validation_error().is_some());
+
+            // ...as is an existing file that is not an .exe...
+            let not_exe = std::env::temp_dir().join("zzclawterm-x11-validation-not-exe.txt");
+            std::fs::write(&not_exe, b"").expect("write fixture");
+            app.apply_terminal_x11_server_path(not_exe.display().to_string(), cx);
+            assert!(app.pending_settings_validation_error().is_some());
+
+            // ...while a real .exe path passes.
+            let exe = std::env::temp_dir().join("zzclawterm-x11-validation.exe");
+            std::fs::write(&exe, b"").expect("write exe fixture");
+            app.apply_terminal_x11_server_path(exe.display().to_string(), cx);
+            assert_eq!(app.pending_settings_validation_error(), None);
+
+            // Back to default mode clears the path and validates clean.
+            app.select_terminal_x11_server_path_mode("default", cx);
+            assert_eq!(app.pending_settings_validation_error(), None);
+
+            let _ = std::fs::remove_file(&not_exe);
+            let _ = std::fs::remove_file(&exe);
+        });
     }
 
     /// The apply button reads the panel's flushed snapshot, not the draft directly.

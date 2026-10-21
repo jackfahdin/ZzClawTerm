@@ -3414,6 +3414,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
         },
         "terminal": {
             "x11_display": "localhost:1",
+            "x11_server_on_demand": false,
             "scrollback_lines": 8000,
             "keep_alive_mode": "strict",
             "keep_alive_interval": 45,
@@ -3488,6 +3489,11 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert_eq!(summary.terminal_font_family, "Iosevka");
     assert_eq!(summary.terminal_font_size, 14);
     assert_eq!(summary.x11_display, "localhost:1");
+    // The retired on-demand key is kept as a load/save passthrough so it
+    // never vanishes from existing settings files.
+    assert!(!summary.x11_server_on_demand);
+    // The fixture predates the tray-icon key; it must default on.
+    assert!(summary.x11_server_tray_icon);
     assert_eq!(summary.terminal_scrollback_lines, 8000);
     assert_eq!(summary.terminal_keep_alive_mode, "strict");
     assert_eq!(summary.terminal_keep_alive_interval, 45);
@@ -3637,12 +3643,22 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     let mut terminal_update = summary.clone();
     terminal_update.terminal_show_line_numbers = false;
     terminal_update.terminal_reconnect_restore_cwd = false;
+    terminal_update.x11_server_tray_icon = false;
     store
         .save_terminal_settings(&terminal_update)
         .expect("save terminal settings");
     let stored = store
         .load_settings_value()
         .expect("stored terminal settings");
+    assert_eq!(
+        json_path(&stored, &["terminal", "x11_server_tray_icon"]).and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        json_path(&stored, &["terminal", "x11_server_on_demand"]).and_then(|value| value.as_bool()),
+        Some(false),
+        "the retired on-demand key must round-trip unchanged through unrelated saves"
+    );
     assert_eq!(
         json_path(&stored, &["terminal", "show_timestamp_milliseconds"])
             .and_then(|value| value.as_bool()),

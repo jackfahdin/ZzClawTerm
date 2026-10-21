@@ -81,8 +81,9 @@ pub use x11::{
 };
 use x11::{X11ChannelOpen, X11Forwarder, enable_x11_failed_message, spawn_x11_forwarder};
 pub use x11_server::{
-    ManagedX11Info, X11ServerError, ensure_x11_server, managed_x11_cookie_for_display,
-    resolve_x_server_path, shutdown_managed_x11_server,
+    ManagedX11Info, ManagedX11Status, X11ServerError, ensure_x11_server,
+    managed_x11_cookie_for_display, managed_x11_status, resolve_x_server_path,
+    shutdown_managed_x11_server, stop_managed_x11_server,
 };
 mod sftp_transfer_types;
 mod trzsz;
@@ -2911,6 +2912,35 @@ async fn push_ssh_integration_output(
     }
 }
 
+/// Restart the managed X server before the forwarding setup needs it when the
+/// app manages the X server lifecycle (the master "Enable X Server" switch)
+/// and the server has died since startup. Best-effort: `ensure_x11_server`
+/// blocks for up to ~10s, so it runs on the blocking pool, and a failure is
+/// logged without failing the connection — forwarding then takes its existing
+/// error path. Off Windows the system X server is used, so this is a no-op.
+async fn ensure_managed_x11_server(config: &SshSessionConfig) {
+    if !cfg!(windows) || !config.x11_server_managed {
+        return;
+    }
+    let configured = config.x11_server_path.trim().to_string();
+    let tray_icon = config.x11_server_tray_icon;
+    let result = tokio::task::spawn_blocking(move || {
+        let path = std::path::PathBuf::from(&configured);
+        let path = (!path.as_os_str().is_empty()).then_some(path);
+        ensure_x11_server(path.as_deref(), tray_icon)
+    })
+    .await;
+    match result {
+        Ok(Ok(info)) => tracing::debug!(
+            display = info.display,
+            started_by_us = info.started_by_us,
+            "managed X server is ready"
+        ),
+        Ok(Err(error)) => tracing::warn!(%error, "managed X server start failed"),
+        Err(error) => tracing::warn!(%error, "managed X server task failed"),
+    }
+}
+
 async fn open_ssh_shell(
     session_id: &str,
     config: &SshSessionConfig,
@@ -2941,6 +2971,7 @@ async fn open_pending_ssh_shell(
         "opening SSH transport"
     );
     let x11_config = if config.x11_forwarding {
+        ensure_managed_x11_server(config).await;
         Some(prepare_x11_forwarding(&config.x11_display).await)
     } else {
         None

@@ -51,6 +51,11 @@ pub(in crate::features) struct SshSessionConfigBuildContext {
     pub(in crate::features) store: StoreBlockingClient,
     pub(in crate::features) host_key_policy: String,
     pub(in crate::features) x11_display: String,
+    /// Mirrors the master "Enable X Server" switch: the session restarts the
+    /// managed X server before X11 forwarding when it has died.
+    pub(in crate::features) x11_server_managed: bool,
+    pub(in crate::features) x11_server_path: String,
+    pub(in crate::features) x11_server_tray_icon: bool,
     pub(in crate::features) default_encoding: String,
     pub(in crate::features) keep_alive_interval_secs: u32,
     pub(in crate::features) keep_alive_mode:
@@ -978,6 +983,9 @@ impl ZzClawTermApp {
             store: self.store_blocking_client(),
             host_key_policy: self.settings.summary().host_key_policy.clone(),
             x11_display: self.settings.summary().x11_display.clone(),
+            x11_server_managed: self.settings.summary().x11_server_autostart,
+            x11_server_path: self.settings.summary().x11_server_path.clone(),
+            x11_server_tray_icon: self.settings.summary().x11_server_tray_icon,
             default_encoding: self.settings.summary().interaction_default_encoding.clone(),
             keep_alive_interval_secs,
             keep_alive_mode: zzclawterm_core::terminal::connection_input::KeepaliveMode::parse(
@@ -1166,6 +1174,9 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
             .to_string(),
         x11_forwarding,
         x11_display: context.x11_display.clone(),
+        x11_server_managed: context.x11_server_managed,
+        x11_server_path: context.x11_server_path.clone(),
+        x11_server_tray_icon: context.x11_server_tray_icon,
         encoding,
         ssh_algorithms: connection
             .ssh_algorithms
@@ -1549,6 +1560,9 @@ mod tests {
             store: store.clone(),
             host_key_policy: "accept".to_string(),
             x11_display: String::new(),
+            x11_server_managed: false,
+            x11_server_path: String::new(),
+            x11_server_tray_icon: true,
             default_encoding: "UTF-8".to_string(),
             terminal_shell_integration: true,
             keep_alive_interval_secs: 30,

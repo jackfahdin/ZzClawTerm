@@ -172,7 +172,11 @@ impl ConnectionStore {
             ),
             x11_display: json_string(&value, &["terminal", "x11_display"], ""),
             x11_server_autostart: json_bool(&value, &["terminal", "x11_server_autostart"], true),
+            // Retired key, folded into x11_server_autostart. Loaded and written
+            // back unchanged so it never vanishes from existing settings files.
+            x11_server_on_demand: json_bool(&value, &["terminal", "x11_server_on_demand"], true),
             x11_server_path: json_string(&value, &["terminal", "x11_server_path"], ""),
+            x11_server_tray_icon: json_bool(&value, &["terminal", "x11_server_tray_icon"], true),
             terminal_scrollback_lines: json_u32(&value, &["terminal", "scrollback_lines"], 5000)
                 .clamp(100, 100_000),
             terminal_keep_alive_mode: normalize_keep_alive_mode(&json_string(
@@ -1285,10 +1289,20 @@ impl ConnectionStore {
             &["terminal", "x11_server_autostart"],
             settings.x11_server_autostart,
         );
+        set_nested_json_bool(
+            &mut value,
+            &["terminal", "x11_server_on_demand"],
+            settings.x11_server_on_demand,
+        );
         set_nested_json_string(
             &mut value,
             &["terminal", "x11_server_path"],
             settings.x11_server_path.trim().to_string(),
+        );
+        set_nested_json_bool(
+            &mut value,
+            &["terminal", "x11_server_tray_icon"],
+            settings.x11_server_tray_icon,
         );
         set_nested_json_value(
             &mut value,

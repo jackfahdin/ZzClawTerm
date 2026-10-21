@@ -109,6 +109,7 @@ pub(crate) enum SettingsTab {
     Interaction,
     Keybindings,
     TerminalGeneral,
+    X11,
     RemoteMonitoring,
     Search,
     Translation,
@@ -128,6 +129,7 @@ impl SettingsTab {
             Self::Appearance => "settings.appearance",
             Self::Interaction => "settings.interaction",
             Self::Keybindings => "settings.keybindings",
+            Self::X11 => "settings.x11",
             Self::RemoteMonitoring => "settings.remoteMonitoring",
             Self::Search => "settings.search",
             Self::Translation => "settings.translation",
@@ -146,9 +148,11 @@ impl SettingsTab {
             Self::General | Self::Appearance | Self::Interaction | Self::Keybindings => {
                 "settings.groupWorkspace"
             }
-            Self::TerminalGeneral | Self::RemoteMonitoring | Self::Search | Self::Translation => {
-                "settings.groupTerminalSession"
-            }
+            Self::TerminalGeneral
+            | Self::X11
+            | Self::RemoteMonitoring
+            | Self::Search
+            | Self::Translation => "settings.groupTerminalSession",
             Self::AiGeneral | Self::AiModels | Self::AiRules | Self::AiAgents => "ai.title",
             Self::Transfer => "settings.groupTransfer",
             Self::Security => "settings.groupSecurity",
@@ -163,6 +167,7 @@ impl SettingsTab {
             Self::Interaction => "icons/settings/mouse.svg",
             Self::Keybindings => "icons/settings/keyboard.svg",
             Self::TerminalGeneral => "icons/settings/settings.svg",
+            Self::X11 => "icons/settings/x11.svg",
             Self::RemoteMonitoring => "icons/resources.svg",
             Self::Search => "icons/settings/search.svg",
             Self::Translation => "icons/settings/translate.svg",
@@ -181,9 +186,11 @@ impl SettingsTab {
             Self::General | Self::Appearance | Self::Interaction | Self::Keybindings => {
                 Some("workspace")
             }
-            Self::TerminalGeneral | Self::RemoteMonitoring | Self::Search | Self::Translation => {
-                Some("terminal_session")
-            }
+            Self::TerminalGeneral
+            | Self::X11
+            | Self::RemoteMonitoring
+            | Self::Search
+            | Self::Translation => Some("terminal_session"),
             Self::AiGeneral | Self::AiModels | Self::AiRules | Self::AiAgents => Some("ai_group"),
             Self::Transfer | Self::Security | Self::SyncBackup => None,
         }

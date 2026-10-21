@@ -293,6 +293,16 @@ pub struct SshSessionConfig {
     pub term: String,
     pub x11_forwarding: bool,
     pub x11_display: String,
+    /// The managed X server (VcXsrv) lifecycle is owned by the app: started
+    /// at launch, restarted on demand before X11 forwarding needs it, and
+    /// shut down on exit. Windows-only in effect; ignored elsewhere.
+    pub x11_server_managed: bool,
+    /// Explicit X server executable path for the managed server; empty means
+    /// auto-discover (environment variable, then the bundled `vcxsrv` folder).
+    pub x11_server_path: String,
+    /// Show the X server's tray icon for instances we spawn (`-notrayicon`
+    /// when false). Only affects servers started after it changes.
+    pub x11_server_tray_icon: bool,
     pub encoding: String,
     pub ssh_algorithms: Option<SshAlgorithmPreferences>,
     pub sftp: SftpSettings,
@@ -448,6 +458,8 @@ impl std::fmt::Debug for SshSessionConfig {
             .field("term", &self.term)
             .field("x11_forwarding", &self.x11_forwarding)
             .field("x11_display", &self.x11_display)
+            .field("x11_server_managed", &self.x11_server_managed)
+            .field("x11_server_tray_icon", &self.x11_server_tray_icon)
             .field("encoding", &self.encoding)
             .field("ssh_algorithms", &self.ssh_algorithms)
             .field("sftp", &self.sftp)
@@ -686,6 +698,9 @@ impl Default for SshSessionConfig {
             term: "xterm-256color".to_string(),
             x11_forwarding: false,
             x11_display: String::new(),
+            x11_server_managed: false,
+            x11_server_path: String::new(),
+            x11_server_tray_icon: true,
             encoding: "UTF-8".to_string(),
             ssh_algorithms: None,
             sftp: SftpSettings::default(),

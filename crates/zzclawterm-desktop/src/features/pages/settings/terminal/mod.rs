@@ -4,3 +4,4 @@ mod keywords;
 mod recording;
 mod remote_monitoring;
 mod search;
+mod x11;
