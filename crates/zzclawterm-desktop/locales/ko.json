@@ -3038,7 +3038,7 @@
     "x11ServerStatusStartedByApp": "실행 중(ZzClawTerm이 관리)",
     "x11ServerStatusExternal": "실행 중(외부 X 서버 감지됨, 관리되지 않음)",
     "x11ServerStatusNotRunning": "실행 중 아님",
-    "x11ServerDisplayLabel": "디스플레이",
+    "x11ServerDisplayLabel": "디스플레이 번호",
     "x11ServerExecutableLabel": "실행 파일",
     "x11ServerSystemProvided": "이 플랫폼에서는 시스템 X 서버가 X11 포워딩을 제공하므로 관리되는 서버가 필요하지 않습니다.",
     "x11ServerClipboard": "클립보드 공유",

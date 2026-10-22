@@ -3038,7 +3038,7 @@
     "x11ServerStatusStartedByApp": "執行中（由 ZzClawTerm 託管）",
     "x11ServerStatusExternal": "執行中（偵測到外部 X Server，不受託管）",
     "x11ServerStatusNotRunning": "未執行",
-    "x11ServerDisplayLabel": "Display",
+    "x11ServerDisplayLabel": "顯示編號",
     "x11ServerExecutableLabel": "程式路徑",
     "x11ServerSystemProvided": "目前平台由系統 X Server 提供 X11 轉發能力，無需託管實例。",
     "x11ServerClipboard": "共用剪貼簿",

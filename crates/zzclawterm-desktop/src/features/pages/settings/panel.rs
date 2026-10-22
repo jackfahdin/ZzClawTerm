@@ -210,8 +210,6 @@ pub(in crate::features) struct X11ServerPresentation {
     pub known: bool,
     pub running: bool,
     pub display: Option<u16>,
-    /// Executable path; only known for a server ZzClawTerm spawned.
-    pub server_path: Option<String>,
     pub started_by_us: bool,
     /// Tray icon preference the running instance was spawned with; `None` for
     /// an externally provided server.

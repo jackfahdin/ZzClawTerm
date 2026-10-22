@@ -81,10 +81,6 @@ impl ZzClawTermApp {
                         known: status.is_some(),
                         running: status.as_ref().is_some_and(|status| status.running),
                         display: status.as_ref().and_then(|status| status.display),
-                        server_path: status
-                            .as_ref()
-                            .and_then(|status| status.server_path.as_ref())
-                            .map(|path| path.display().to_string()),
                         started_by_us: status.as_ref().is_some_and(|status| status.started_by_us),
                         tray_icon: status.as_ref().and_then(|status| status.tray_icon),
                         options: status.as_ref().and_then(|status| status.options),

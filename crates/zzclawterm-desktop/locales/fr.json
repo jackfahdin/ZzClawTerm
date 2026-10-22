@@ -3038,7 +3038,7 @@
     "x11ServerStatusStartedByApp": "En cours d'exécution (géré par ZzClawTerm)",
     "x11ServerStatusExternal": "En cours d'exécution (serveur externe détecté, non géré)",
     "x11ServerStatusNotRunning": "Arrêté",
-    "x11ServerDisplayLabel": "Display",
+    "x11ServerDisplayLabel": "Numéro d’affichage",
     "x11ServerExecutableLabel": "Exécutable",
     "x11ServerSystemProvided": "Sur cette plateforme, le transfert X11 utilise le serveur X du système ; il n'y a pas de serveur géré à démarrer ou arrêter.",
     "x11ServerClipboard": "Partager le presse-papiers",

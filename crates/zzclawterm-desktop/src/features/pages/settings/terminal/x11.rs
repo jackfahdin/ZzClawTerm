@@ -296,14 +296,8 @@ fn x11_server_status_section(
     let mut tooltip_lines = vec![status_text.to_string()];
     if let Some(display) = status.display {
         tooltip_lines.push(format!(
-            "{}: :{display}",
+            "{}: {display}",
             t!("settings.x11ServerDisplayLabel")
-        ));
-    }
-    if let Some(path) = status.server_path.as_ref() {
-        tooltip_lines.push(format!(
-            "{}: {path}",
-            t!("settings.x11ServerExecutableLabel")
         ));
     }
     if let Some(error) = &status.error {

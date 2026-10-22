@@ -3038,7 +3038,7 @@
     "x11ServerStatusStartedByApp": "実行中（ZzClawTerm が管理）",
     "x11ServerStatusExternal": "実行中（外部の X サーバーを検出、管理外）",
     "x11ServerStatusNotRunning": "停止中",
-    "x11ServerDisplayLabel": "ディスプレイ",
+    "x11ServerDisplayLabel": "ディスプレイ番号",
     "x11ServerExecutableLabel": "実行ファイル",
     "x11ServerSystemProvided": "このプラットフォームではシステムの X サーバーが X11 転送を提供するため、管理対象のサーバーは不要です。",
     "x11ServerClipboard": "クリップボードを共有",

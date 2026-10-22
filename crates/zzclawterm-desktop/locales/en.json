@@ -3031,7 +3031,7 @@
     "x11ServerStatusStartedByApp": "Running (managed by ZzClawTerm)",
     "x11ServerStatusExternal": "Running (external server detected, not managed)",
     "x11ServerStatusNotRunning": "Not running",
-    "x11ServerDisplayLabel": "Display",
+    "x11ServerDisplayLabel": "Display number",
     "x11ServerExecutableLabel": "Executable",
     "x11ServerSystemProvided": "On this platform X11 forwarding uses the system X server; there is no managed server to start or stop.",
     "x11ServerClipboard": "Share clipboard",
