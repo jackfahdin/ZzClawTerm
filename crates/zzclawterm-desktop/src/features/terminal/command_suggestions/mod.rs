@@ -1194,7 +1194,7 @@ impl ZzClawTermApp {
             .absolute()
             .occlude()
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if event.button == MouseButton::Right {
+                if event.button == MouseButton::Left {
                     this.dismiss_command_suggestions(cx);
                 }
             }))

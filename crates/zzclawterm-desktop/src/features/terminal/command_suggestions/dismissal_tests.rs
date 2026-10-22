@@ -17,6 +17,7 @@ struct SuggestionHost {
     app: Entity<ZzClawTermApp>,
     other_focus: FocusHandle,
     right_clicks: usize,
+    left_clicks: usize,
 }
 
 impl Render for SuggestionHost {
@@ -28,6 +29,12 @@ impl Render for SuggestionHost {
         div()
             .size_full()
             .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| {
+                    this.left_clicks += 1;
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, _, _| {
@@ -104,7 +111,7 @@ fn assert_dismissed_without_losing_input(
 }
 
 #[test]
-fn right_click_outside_dismisses_suggestions_but_inside_does_not() {
+fn left_click_outside_dismisses_suggestions_without_blurring_terminal() {
     let dir = TestConfigDir::new("zzclawterm-suggestion-click-dismiss");
     let mut cx = TestAppContext::single();
     let _cleanup = TestAppCleanup::new(&cx);
@@ -116,11 +123,20 @@ fn right_click_outside_dismisses_suggestions_but_inside_does_not() {
             app,
             other_focus: cx.focus_handle(),
             right_clicks: 0,
+            left_clicks: 0,
         }
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
+        window.activate_window();
+        let focus = app.read(cx).terminal.input_focus().clone();
+        window.focus(&focus, cx);
     });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(app.read_with(cx, |app, _| app.terminal.input.focus_active));
     let inside = app.read_with(cx, |app, _| {
         let placement = app
             .suggestion_overlay_position_for_session(Some("s1"), 0, 0, 380., 76.)
@@ -129,7 +145,7 @@ fn right_click_outside_dismisses_suggestions_but_inside_does_not() {
     });
     cx.simulate_event(MouseDownEvent {
         position: inside,
-        button: MouseButton::Right,
+        button: MouseButton::Left,
         ..Default::default()
     });
     assert!(app.read_with(cx, |app, _| app.terminal.command_suggestions_open()));
@@ -140,6 +156,18 @@ fn right_click_outside_dismisses_suggestions_but_inside_does_not() {
         ..Default::default()
     });
     assert_eq!(host.read_with(cx, |host, _| host.right_clicks), before + 1);
+    assert!(
+        app.read_with(cx, |app, _| app.terminal.command_suggestions_open()),
+        "right-click outside must not dismiss suggestions"
+    );
+    let before = host.read_with(cx, |host, _| host.left_clicks);
+    cx.simulate_event(MouseDownEvent {
+        position: point(px(700.), px(500.)),
+        button: MouseButton::Left,
+        ..Default::default()
+    });
+    assert_eq!(host.read_with(cx, |host, _| host.left_clicks), before + 1);
+    assert!(cx.update(|window, cx| app.read(cx).terminal.input_focus().is_focused(window)));
     app.update(cx, |app, cx| {
         assert_dismissed_without_losing_input(app, request, cx)
     });
@@ -158,6 +186,7 @@ fn terminal_focus_loss_dismisses_suggestions_and_late_results() {
             app,
             other_focus: cx.focus_handle(),
             right_clicks: 0,
+            left_clicks: 0,
         }
     });
     cx.update(|window, cx| {
