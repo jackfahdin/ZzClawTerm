@@ -56,6 +56,8 @@ pub(in crate::features) struct SshSessionConfigBuildContext {
     pub(in crate::features) x11_server_managed: bool,
     pub(in crate::features) x11_server_path: String,
     pub(in crate::features) x11_server_tray_icon: bool,
+    pub(in crate::features) x11_server_options:
+        zzclawterm_core::models::settings::x11::X11ServerOptions,
     pub(in crate::features) default_encoding: String,
     pub(in crate::features) keep_alive_interval_secs: u32,
     pub(in crate::features) keep_alive_mode:
@@ -986,6 +988,7 @@ impl ZzClawTermApp {
             x11_server_managed: self.settings.summary().x11_server_autostart,
             x11_server_path: self.settings.summary().x11_server_path.clone(),
             x11_server_tray_icon: self.settings.summary().x11_server_tray_icon,
+            x11_server_options: self.settings.summary().x11_server_options,
             default_encoding: self.settings.summary().interaction_default_encoding.clone(),
             keep_alive_interval_secs,
             keep_alive_mode: zzclawterm_core::terminal::connection_input::KeepaliveMode::parse(
@@ -1177,6 +1180,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
         x11_server_managed: context.x11_server_managed,
         x11_server_path: context.x11_server_path.clone(),
         x11_server_tray_icon: context.x11_server_tray_icon,
+        x11_server_options: context.x11_server_options,
         encoding,
         ssh_algorithms: connection
             .ssh_algorithms
@@ -1563,6 +1567,7 @@ mod tests {
             x11_server_managed: false,
             x11_server_path: String::new(),
             x11_server_tray_icon: true,
+            x11_server_options: Default::default(),
             default_encoding: "UTF-8".to_string(),
             terminal_shell_integration: true,
             keep_alive_interval_secs: 30,

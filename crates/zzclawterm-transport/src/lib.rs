@@ -2924,10 +2924,11 @@ async fn ensure_managed_x11_server(config: &SshSessionConfig) {
     }
     let configured = config.x11_server_path.trim().to_string();
     let tray_icon = config.x11_server_tray_icon;
+    let options = config.x11_server_options;
     let result = tokio::task::spawn_blocking(move || {
         let path = std::path::PathBuf::from(&configured);
         let path = (!path.as_os_str().is_empty()).then_some(path);
-        ensure_x11_server(path.as_deref(), tray_icon)
+        ensure_x11_server(path.as_deref(), tray_icon, options)
     })
     .await;
     match result {

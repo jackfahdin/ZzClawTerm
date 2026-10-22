@@ -3414,6 +3414,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
         },
         "terminal": {
             "x11_display": "localhost:1",
+            "x11_server_options": {"future_option": "keep"},
             "x11_server_on_demand": false,
             "scrollback_lines": 8000,
             "keep_alive_mode": "strict",
@@ -3494,6 +3495,10 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(!summary.x11_server_on_demand);
     // The fixture predates the tray-icon key; it must default on.
     assert!(summary.x11_server_tray_icon);
+    assert_eq!(
+        summary.x11_server_options,
+        zzclawterm_core::models::settings::x11::X11ServerOptions::default()
+    );
     assert_eq!(summary.terminal_scrollback_lines, 8000);
     assert_eq!(summary.terminal_keep_alive_mode, "strict");
     assert_eq!(summary.terminal_keep_alive_interval, 45);
@@ -3644,9 +3649,26 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     terminal_update.terminal_show_line_numbers = false;
     terminal_update.terminal_reconnect_restore_cwd = false;
     terminal_update.x11_server_tray_icon = false;
+    terminal_update.x11_server_options = zzclawterm_core::models::settings::x11::X11ServerOptions {
+        clipboard: false,
+        primary: false,
+        native_opengl: false,
+        dpi: 144,
+    };
     store
         .save_terminal_settings(&terminal_update)
         .expect("save terminal settings");
+    let reloaded = store
+        .load_app_settings_summary()
+        .expect("reload terminal options");
+    assert_eq!(
+        reloaded.x11_server_options,
+        terminal_update.x11_server_options
+    );
+    assert_eq!(
+        store.load_settings_value().unwrap()["terminal"]["x11_server_options"]["future_option"],
+        "keep"
+    );
     let stored = store
         .load_settings_value()
         .expect("stored terminal settings");

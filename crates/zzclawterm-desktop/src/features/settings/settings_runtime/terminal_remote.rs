@@ -45,6 +45,28 @@ impl ZzClawTermApp {
         self.save_terminal_settings(cx);
     }
 
+    pub(in crate::features) fn toggle_x11_server_clipboard(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_x11_server_clipboard();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_x11_server_primary(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_x11_server_primary();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_x11_server_opengl(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_x11_server_opengl();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn set_x11_server_dpi(&mut self, value: &str, cx: &mut Context<Self>) {
+        if let Ok(dpi) = value.parse::<u16>() {
+            self.settings.set_x11_server_dpi(dpi);
+            self.save_terminal_settings(cx);
+        }
+    }
+
     /// The X server path select maps "default" to an empty stored path
     /// (auto-discover) and "custom" to revealing the path input. The custom
     /// mode is transient UI state until the user actually types a path.
@@ -132,11 +154,12 @@ impl ZzClawTermApp {
         }
         let configured_path = self.settings.summary().x11_server_path.trim().to_string();
         let tray_icon = self.settings.summary().x11_server_tray_icon;
+        let options = self.settings.summary().x11_server_options;
         self.settings.set_x11_server_action_pending(true);
         self.run_x11_server_action("x11-server-start", cx, move || {
             let path = std::path::PathBuf::from(&configured_path);
             let path = (!path.as_os_str().is_empty()).then_some(path);
-            match zzclawterm_transport::ensure_x11_server(path.as_deref(), tray_icon) {
+            match zzclawterm_transport::ensure_x11_server(path.as_deref(), tray_icon, options) {
                 Ok(info) => tracing::info!(
                     display = info.display,
                     started_by_us = info.started_by_us,
@@ -200,12 +223,13 @@ impl ZzClawTermApp {
         }
         let configured_path = summary.x11_server_path.trim().to_string();
         let tray_icon = summary.x11_server_tray_icon;
+        let options = summary.x11_server_options;
         if let Err(error) = self
             .blocking_jobs
             .submit_detached("x11-server-autostart", move |_| {
                 let path = std::path::PathBuf::from(&configured_path);
                 let path = (!path.as_os_str().is_empty()).then_some(path);
-                match zzclawterm_transport::ensure_x11_server(path.as_deref(), tray_icon) {
+                match zzclawterm_transport::ensure_x11_server(path.as_deref(), tray_icon, options) {
                     Ok(info) => tracing::info!(
                         display = info.display,
                         started_by_us = info.started_by_us,

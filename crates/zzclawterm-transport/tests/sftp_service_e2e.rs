@@ -68,6 +68,7 @@ fn test_config() -> SshSessionConfig {
         x11_server_managed: false,
         x11_server_path: String::new(),
         x11_server_tray_icon: true,
+        x11_server_options: Default::default(),
         encoding: "UTF-8".to_string(),
         ssh_algorithms: None,
         sftp: SftpSettings::default(),

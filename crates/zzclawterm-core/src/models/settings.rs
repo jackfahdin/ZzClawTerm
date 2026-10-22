@@ -1,4 +1,5 @@
 pub mod panel_visibility;
+pub mod x11;
 
 use std::collections::HashMap;
 
@@ -320,6 +321,8 @@ pub struct AppSettingsSummary {
     /// Show the managed X Server's tray icon for instances we spawn.
     #[serde(default = "default_true")]
     pub x11_server_tray_icon: bool,
+    #[serde(default)]
+    pub x11_server_options: x11::X11ServerOptions,
     pub terminal_scrollback_lines: u32,
     #[serde(default = "default_terminal_keep_alive_mode")]
     pub terminal_keep_alive_mode: String,
@@ -608,6 +611,7 @@ impl Default for AppSettingsSummary {
             x11_server_on_demand: true,
             x11_server_path: String::new(),
             x11_server_tray_icon: true,
+            x11_server_options: x11::X11ServerOptions::default(),
             terminal_scrollback_lines: 5000,
             terminal_keep_alive_mode: default_terminal_keep_alive_mode(),
             terminal_keep_alive_interval: 30,
@@ -1060,9 +1064,27 @@ mod tests {
         assert!(summary.x11_server_path.is_empty());
         // The tray-icon key joins with a default-on fallback as well.
         assert!(summary.x11_server_tray_icon);
+        assert_eq!(
+            summary.x11_server_options,
+            super::x11::X11ServerOptions::default()
+        );
         // The credential autofill switch joins the command-suggestion switch in
         // defaulting on, so legacy documents keep the panel enabled.
         assert!(summary.interaction_credential_autofill_enabled);
+    }
+
+    #[test]
+    fn summary_preserves_x11_launch_options() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        value["x11_server_options"] = serde_json::json!({
+            "clipboard": false, "primary": false, "native_opengl": false, "dpi": 144
+        });
+        let decoded: AppSettingsSummary = serde_json::from_value(value).unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert_eq!(encoded["x11_server_options"]["clipboard"], false);
+        assert_eq!(encoded["x11_server_options"]["primary"], false);
+        assert_eq!(encoded["x11_server_options"]["native_opengl"], false);
+        assert_eq!(encoded["x11_server_options"]["dpi"], 144);
     }
 
     #[test]

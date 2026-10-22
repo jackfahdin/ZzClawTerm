@@ -309,6 +309,7 @@ impl ZzClawTermApp {
                 "disabled" => self.set_terminal_keep_alive_mode("disabled", cx),
                 _ => self.set_terminal_keep_alive_mode("compatible", cx),
             },
+            "settings.terminal.x11-server-dpi" => self.set_x11_server_dpi(value, cx),
             "settings.terminal.x11-server-path-select" => {
                 self.select_terminal_x11_server_path_mode(value, cx)
             }

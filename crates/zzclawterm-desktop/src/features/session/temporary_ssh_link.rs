@@ -264,6 +264,7 @@ impl ZzClawTermApp {
             x11_server_managed: false,
             x11_server_path: String::new(),
             x11_server_tray_icon: true,
+            x11_server_options: Default::default(),
             encoding: self.settings.summary().interaction_default_encoding.clone(),
             ssh_algorithms: None,
             sftp: zzclawterm_transport::SftpSettings::default(),

@@ -303,6 +303,7 @@ pub struct SshSessionConfig {
     /// Show the X server's tray icon for instances we spawn (`-notrayicon`
     /// when false). Only affects servers started after it changes.
     pub x11_server_tray_icon: bool,
+    pub x11_server_options: zzclawterm_core::models::settings::x11::X11ServerOptions,
     pub encoding: String,
     pub ssh_algorithms: Option<SshAlgorithmPreferences>,
     pub sftp: SftpSettings,
@@ -460,6 +461,7 @@ impl std::fmt::Debug for SshSessionConfig {
             .field("x11_display", &self.x11_display)
             .field("x11_server_managed", &self.x11_server_managed)
             .field("x11_server_tray_icon", &self.x11_server_tray_icon)
+            .field("x11_server_options", &self.x11_server_options)
             .field("encoding", &self.encoding)
             .field("ssh_algorithms", &self.ssh_algorithms)
             .field("sftp", &self.sftp)
@@ -701,6 +703,7 @@ impl Default for SshSessionConfig {
             x11_server_managed: false,
             x11_server_path: String::new(),
             x11_server_tray_icon: true,
+            x11_server_options: Default::default(),
             encoding: "UTF-8".to_string(),
             ssh_algorithms: None,
             sftp: SftpSettings::default(),

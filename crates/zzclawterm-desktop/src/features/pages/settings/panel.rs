@@ -216,6 +216,13 @@ pub(in crate::features) struct X11ServerPresentation {
     /// Tray icon preference the running instance was spawned with; `None` for
     /// an externally provided server.
     pub tray_icon: Option<bool>,
+    pub options: Option<zzclawterm_core::models::settings::x11::X11ServerOptions>,
+    pub arguments: Option<String>,
+    pub listening_displays: Vec<String>,
+    pub listeners_known: bool,
+    pub starting: bool,
+    pub error: Option<String>,
+    pub action_pending: bool,
     /// Transient: the path select shows "custom" before a path is typed.
     pub path_select_custom: bool,
 }
@@ -532,6 +539,30 @@ impl SettingsPanel {
         surface: SettingsSurface,
         cx: &mut Context<Self>,
     ) -> Self {
+        if cfg!(windows) {
+            cx.spawn(async move |this, cx| {
+                let mut last_status = zzclawterm_transport::managed_x11_status();
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    let status = zzclawterm_transport::managed_x11_status();
+                    let changed = status != last_status;
+                    last_status = status;
+                    if this
+                        .update(cx, |panel, cx| {
+                            if changed {
+                                panel.with_app(cx, |_, _| ());
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let image_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(100.));
         let content_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(82.));
         let window_opacity_slider = cx.new(|_| ZzClawSliderState::new().default_value(20.));
@@ -2044,6 +2075,9 @@ forward_app_action!(
     toggle_transfer_resume_broken,
     toggle_x11_server_autostart,
     toggle_x11_server_tray_icon,
+    toggle_x11_server_clipboard,
+    toggle_x11_server_primary,
+    toggle_x11_server_opengl,
 );
 
 #[cfg(test)]

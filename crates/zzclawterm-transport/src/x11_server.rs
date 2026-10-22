@@ -20,7 +20,11 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::time::Instant;
 
+#[cfg(any(windows, test))]
+mod listeners;
+
 use super::MIT_MAGIC_COOKIE;
+use zzclawterm_core::models::settings::x11::X11ServerOptions;
 
 /// Environment variable that overrides every other X server location.
 pub const X_SERVER_ENV_VAR: &str = "ZZCLAWTERM_XSERVER";
@@ -75,7 +79,7 @@ pub struct ManagedX11Info {
 /// Point-in-time view of the local X server known to this process, for the
 /// settings UI. `None` from [`managed_x11_status`] means no server has ever
 /// been started or detected in this process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagedX11Status {
     /// A server we spawned is alive, or an external server was detected.
     pub running: bool,
@@ -86,6 +90,12 @@ pub struct ManagedX11Status {
     /// Tray icon preference the running instance was spawned with; only known
     /// for a server we spawned, `None` for an externally provided one.
     pub tray_icon: Option<bool>,
+    pub options: Option<X11ServerOptions>,
+    pub arguments: Option<String>,
+    pub listening_displays: Vec<String>,
+    pub listeners_known: bool,
+    pub starting: bool,
+    pub error: Option<String>,
 }
 
 /// Process-wide managed server. Only a server we spawned is ever stored here,
@@ -101,12 +111,17 @@ struct ManagedX11Server {
     path: PathBuf,
     display: u16,
     tray_icon: bool,
+    options: X11ServerOptions,
     cookie_hex: String,
     xauthority_path: PathBuf,
 }
 
 #[cfg(windows)]
 static MANAGED_X11: RwLock<Option<ManagedX11Server>> = RwLock::new(None);
+
+// This cache never shares the spawn/poll lock. UI reads cannot wait for startup.
+#[cfg(windows)]
+static STATUS: RwLock<Option<ManagedX11Status>> = RwLock::new(None);
 
 /// The last externally provided server `ensure_x11_server` reused, kept so
 /// `managed_x11_status` can still report it. Servers we spawn are read from
@@ -225,11 +240,40 @@ fn port_occupied(port: u16) -> bool {
 pub fn ensure_x11_server(
     configured_path: Option<&Path>,
     tray_icon: bool,
+    options: X11ServerOptions,
+) -> Result<ManagedX11Info, X11ServerError> {
+    #[cfg(windows)]
+    {
+        let mut status = STATUS.write().unwrap_or_else(|e| e.into_inner());
+        let status = status.get_or_insert_with(ManagedX11Status::default);
+        status.starting = true;
+        status.error = None;
+    }
+    let result = ensure_x11_server_inner(configured_path, tray_icon, options);
+    #[cfg(windows)]
+    {
+        if let Err(error) = &result {
+            *STATUS.write().unwrap_or_else(|e| e.into_inner()) = Some(ManagedX11Status {
+                error: Some(error.to_string()),
+                ..Default::default()
+            });
+        } else {
+            refresh_status();
+        }
+        start_status_monitor();
+    }
+    result
+}
+
+fn ensure_x11_server_inner(
+    configured_path: Option<&Path>,
+    tray_icon: bool,
+    options: X11ServerOptions,
 ) -> Result<ManagedX11Info, X11ServerError> {
     #[cfg(not(windows))]
     {
         let _ = configured_path;
-        let _ = tray_icon;
+        let _ = (tray_icon, options);
         Err(X11ServerError::Unsupported)
     }
 
@@ -269,6 +313,7 @@ pub fn ensure_x11_server(
                     server_path: None,
                     started_by_us: false,
                     tray_icon: None,
+                    ..Default::default()
                 });
                 return Ok(ManagedX11Info {
                     display,
@@ -278,9 +323,12 @@ pub fn ensure_x11_server(
                 });
             }
 
+            *DETECTED_EXTERNAL_X11
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             let path = resolve_x_server_path(configured_path).ok_or(X11ServerError::NotFound)?;
             let (xauthority_path, cookie_hex) = write_xauthority_file(display)?;
-            let child = spawn_x_server(&path, display, &xauthority_path, tray_icon)?;
+            let child = spawn_x_server(&path, display, &xauthority_path, tray_icon, options)?;
             // Arm kill-on-close right after spawn so even a crash during the
             // readiness wait cannot orphan VcXsrv.
             let job = match kill_on_close_job::assign(&child) {
@@ -310,11 +358,11 @@ pub fn ensure_x11_server(
                         path: path.clone(),
                         display,
                         tray_icon,
+                        options,
                         cookie_hex,
                         xauthority_path,
                     });
                     drop(guard);
-                    spawn_exit_watchdog();
                     return Ok(info);
                 }
                 // The port can be grabbed between our probe and VcXsrv's bind;
@@ -344,29 +392,66 @@ pub fn managed_x11_cookie_for_display(_display: u16) -> Option<String> {
     None
 }
 
-/// Current state of the local X server known to this process: the server we
-/// spawned (queried live, so a crashed child reports `running: false` until
-/// the watchdog reaps it) or, failing that, the external server the last
-/// `ensure_x11_server` call reused. `None` when neither has ever happened.
-/// Non-blocking; safe to call from a render path.
+/// Cached snapshot only; never queries processes or the network on the UI thread.
 #[cfg(windows)]
 pub fn managed_x11_status() -> Option<ManagedX11Status> {
-    {
-        let mut guard = MANAGED_X11.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(server) = guard.as_mut() {
-            return Some(ManagedX11Status {
+    STATUS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(windows)]
+fn refresh_status() {
+    let mut guard = MANAGED_X11.write().unwrap_or_else(|e| e.into_inner());
+    let (mut status, pid) = if let Some(server) = guard.as_mut() {
+        (
+            ManagedX11Status {
                 running: matches!(server.child.try_wait(), Ok(None)),
                 display: Some(server.display),
                 server_path: Some(server.path.clone()),
                 started_by_us: true,
                 tray_icon: Some(server.tray_icon),
-            });
-        }
-    }
-    DETECTED_EXTERNAL_X11
+                options: Some(server.options),
+                arguments: Some(format_arguments(&x_server_args(
+                    server.display,
+                    &server.xauthority_path,
+                    server.tray_icon,
+                    server.options,
+                ))),
+                ..Default::default()
+            },
+            Some(server.child.id()),
+        )
+    } else if let Some(external) = DETECTED_EXTERNAL_X11
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
+    {
+        (external, None)
+    } else {
+        return;
+    };
+    if status.started_by_us && !status.running {
+        // Keep the stopped presentation, but discard the process and cookie.
+        // Another X server may now occupy this display with different auth.
+        *guard = None;
+    }
+    if let Some(display) = status
+        .display
+        .filter(|_| status.running || !status.started_by_us)
+    {
+        match listeners::query(display, pid) {
+            Ok(displays) => {
+                if !status.started_by_us {
+                    status.running = !displays.is_empty();
+                }
+                status.listening_displays = displays;
+                status.listeners_known = true;
+            }
+            Err(_) => {
+                status.listeners_known = false;
+            }
+        }
+    }
+    *STATUS.write().unwrap_or_else(|e| e.into_inner()) = Some(status);
 }
 
 /// Always `None` off Windows, where no server is ever managed.
@@ -389,37 +474,26 @@ pub fn shutdown_managed_x11_server() {
     if let Some(mut server) = guard.take() {
         let _ = server.child.kill();
         let _ = server.child.wait();
+        let mut status = STATUS.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(status) = status.as_mut() {
+            status.running = false;
+            status.starting = false;
+            status.listening_displays.clear();
+        }
     }
 }
 
-/// Watch the managed child and clear the state when it exits on its own, so a
-/// later `ensure_x11_server` starts a fresh server instead of trusting a dead
-/// one. Exits silently once the state is gone (normal shutdown path).
+/// One monitor for owned and external endpoints; OS queries never run in render.
 #[cfg(windows)]
-fn spawn_exit_watchdog() {
-    std::thread::spawn(|| {
-        loop {
-            std::thread::sleep(Duration::from_secs(2));
-            let mut guard = MANAGED_X11.write().unwrap_or_else(|e| e.into_inner());
-            let Some(server) = guard.as_mut() else { break };
-            match server.child.try_wait() {
-                Ok(None) => {}
-                Ok(Some(status)) => {
-                    tracing::warn!(
-                        display = server.display,
-                        %status,
-                        "managed X server exited unexpectedly"
-                    );
-                    *guard = None;
-                    break;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "managed X server state query failed");
-                    *guard = None;
-                    break;
-                }
+fn start_status_monitor() {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                refresh_status();
             }
-        }
+        });
     });
 }
 
@@ -494,12 +568,20 @@ pub fn shutdown_managed_x11_server() {}
 /// WM's startup races the WM_S0 selection and VcXsrv terminates itself.
 /// `-notrayicon` is only passed when the tray icon is disabled; VcXsrv shows
 /// one by default.
-#[cfg(any(windows, test))]
-fn x_server_args(display: u16, xauthority_path: &Path, tray_icon: bool) -> Vec<std::ffi::OsString> {
+fn x_server_args(
+    display: u16,
+    xauthority_path: &Path,
+    tray_icon: bool,
+    options: X11ServerOptions,
+) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         std::ffi::OsString::from(format!(":{display}")),
         std::ffi::OsString::from("-multiwindow"),
-        std::ffi::OsString::from("-clipboard"),
+        std::ffi::OsString::from(if options.clipboard {
+            "-clipboard"
+        } else {
+            "-noclipboard"
+        }),
         std::ffi::OsString::from("-noreset"),
         std::ffi::OsString::from("-auth"),
         xauthority_path.as_os_str().to_os_string(),
@@ -507,7 +589,56 @@ fn x_server_args(display: u16, xauthority_path: &Path, tray_icon: bool) -> Vec<s
     if !tray_icon {
         args.push(std::ffi::OsString::from("-notrayicon"));
     }
+    if !options.primary || !options.clipboard {
+        args.push("-noprimary".into());
+    }
+    if !options.native_opengl {
+        args.push("-nowgl".into());
+    }
+    if options.dpi != 0 {
+        args.extend(["-dpi".into(), options.dpi.to_string().into()]);
+    }
     args
+}
+
+/// Read-only display of arguments; placeholders are resolved at startup.
+/// Execution always passes the original OsString arguments directly to Command.
+pub fn x_server_arguments_preview(tray_icon: bool, options: X11ServerOptions) -> String {
+    let mut args = x_server_args(0, Path::new("<Xauthority>"), tray_icon, options);
+    args[0] = ":<auto>".into();
+    format_arguments(&args)
+}
+
+fn format_arguments(args: &[std::ffi::OsString]) -> String {
+    args.iter()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            if text.chars().any(|ch| ch.is_whitespace() || ch == '"') {
+                // Windows argv quoting: double backslashes only before quotes and
+                // at the end of a quoted argument.
+                let mut quoted = String::from("\"");
+                let mut slashes = 0;
+                for ch in text.chars() {
+                    if ch == '\\' {
+                        slashes += 1;
+                        continue;
+                    }
+                    quoted.extend(std::iter::repeat_n(
+                        '\\',
+                        if ch == '"' { slashes * 2 + 1 } else { slashes },
+                    ));
+                    quoted.push(ch);
+                    slashes = 0;
+                }
+                quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+                quoted.push('"');
+                quoted
+            } else {
+                text.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(windows)]
@@ -516,12 +647,13 @@ fn spawn_x_server(
     display: u16,
     xauthority_path: &Path,
     tray_icon: bool,
+    options: X11ServerOptions,
 ) -> Result<Child, X11ServerError> {
     use std::os::windows::process::CommandExt;
 
     let mut command = Command::new(path);
     command
-        .args(x_server_args(display, xauthority_path, tray_icon))
+        .args(x_server_args(display, xauthority_path, tray_icon, options))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -647,14 +779,14 @@ mod tests {
     #[test]
     fn ensure_x11_server_is_unsupported_off_windows() {
         assert!(matches!(
-            super::ensure_x11_server(None, true),
+            super::ensure_x11_server(None, true, Default::default()),
             Err(super::X11ServerError::Unsupported)
         ));
     }
 
     #[test]
     fn x_server_args_omit_tray_flag_by_default() {
-        let args = super::x_server_args(0, Path::new("xauth"), true);
+        let args = super::x_server_args(0, Path::new("xauth"), true, Default::default());
         assert_eq!(args[0], ":0");
         assert!(args.iter().any(|arg| arg == "-noreset"));
         assert!(!args.iter().any(|arg| arg == "-notrayicon"));
@@ -662,9 +794,66 @@ mod tests {
 
     #[test]
     fn x_server_args_pass_notrayicon_when_tray_icon_disabled() {
-        let args = super::x_server_args(3, Path::new("xauth"), false);
+        let args = super::x_server_args(3, Path::new("xauth"), false, Default::default());
         assert_eq!(args[0], ":3");
         assert!(args.iter().any(|arg| arg == "-notrayicon"));
+    }
+
+    #[test]
+    fn launch_options_disable_integrations_and_keep_auth_path_one_argument() {
+        let options = zzclawterm_core::models::settings::x11::X11ServerOptions {
+            clipboard: false,
+            primary: false,
+            native_opengl: false,
+            dpi: 144,
+        };
+        let args = super::x_server_args(2, Path::new("C:/User Name/xauth"), false, options);
+        for flag in [
+            "-noclipboard",
+            "-noprimary",
+            "-nowgl",
+            "-noreset",
+            "-notrayicon",
+        ] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-auth" && pair[1] == "C:/User Name/xauth")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-dpi" && pair[1] == "144")
+        );
+        assert!(!args.iter().any(|arg| arg == "-ac" || arg == "-nolisten"));
+    }
+
+    #[test]
+    fn clipboard_off_disables_primary_without_losing_saved_preference() {
+        let options = zzclawterm_core::models::settings::x11::X11ServerOptions {
+            clipboard: false,
+            ..Default::default()
+        };
+        let args = super::x_server_args(0, Path::new("xauth"), true, options);
+        assert!(args.iter().any(|arg| arg == "-noprimary"));
+        assert!(!args.iter().any(|arg| arg == "-dpi" || arg == "-nowgl"));
+        assert!(options.primary);
+    }
+
+    #[test]
+    fn displayed_arguments_quote_windows_paths_and_never_include_cookie_contents() {
+        let args = super::x_server_args(
+            1,
+            Path::new(r"C:\User Name\xauthority"),
+            true,
+            Default::default(),
+        );
+        assert_eq!(
+            super::format_arguments(&args),
+            r#":1 -multiwindow -clipboard -noreset -auth "C:\User Name\xauthority""#
+        );
+        let args = vec![std::ffi::OsString::from("C:\\directory name\\")];
+        assert_eq!(super::format_arguments(&args), "\"C:\\directory name\\\\\"");
     }
 
     #[test]

@@ -87,6 +87,18 @@ impl ZzClawTermApp {
                             .map(|path| path.display().to_string()),
                         started_by_us: status.as_ref().is_some_and(|status| status.started_by_us),
                         tray_icon: status.as_ref().and_then(|status| status.tray_icon),
+                        options: status.as_ref().and_then(|status| status.options),
+                        arguments: status.as_ref().and_then(|status| status.arguments.clone()),
+                        listening_displays: status
+                            .as_ref()
+                            .map(|status| status.listening_displays.clone())
+                            .unwrap_or_default(),
+                        listeners_known: status
+                            .as_ref()
+                            .is_some_and(|status| status.listeners_known),
+                        starting: status.as_ref().is_some_and(|status| status.starting),
+                        error: status.as_ref().and_then(|status| status.error.clone()),
+                        action_pending: self.settings.x11_server_action_pending(),
                         path_select_custom: self.settings.x11_server_path_select_custom(),
                     }
                 },

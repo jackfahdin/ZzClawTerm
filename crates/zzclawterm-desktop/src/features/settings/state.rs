@@ -567,6 +567,23 @@ impl SettingsFeatureState {
         self.summary.x11_server_tray_icon = !self.summary.x11_server_tray_icon;
     }
 
+    pub(in crate::features) fn toggle_x11_server_clipboard(&mut self) {
+        self.summary.x11_server_options.clipboard = !self.summary.x11_server_options.clipboard;
+    }
+
+    pub(in crate::features) fn toggle_x11_server_primary(&mut self) {
+        self.summary.x11_server_options.primary = !self.summary.x11_server_options.primary;
+    }
+
+    pub(in crate::features) fn toggle_x11_server_opengl(&mut self) {
+        self.summary.x11_server_options.native_opengl =
+            !self.summary.x11_server_options.native_opengl;
+    }
+
+    pub(in crate::features) fn set_x11_server_dpi(&mut self, dpi: u16) {
+        self.summary.x11_server_options.dpi = dpi;
+    }
+
     pub(in crate::features) fn x11_server_path_select_custom(&self) -> bool {
         self.x11_server_path_select_custom
     }

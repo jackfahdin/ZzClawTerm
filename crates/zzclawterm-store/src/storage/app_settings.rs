@@ -177,6 +177,25 @@ impl ConnectionStore {
             x11_server_on_demand: json_bool(&value, &["terminal", "x11_server_on_demand"], true),
             x11_server_path: json_string(&value, &["terminal", "x11_server_path"], ""),
             x11_server_tray_icon: json_bool(&value, &["terminal", "x11_server_tray_icon"], true),
+            x11_server_options: zzclawterm_core::models::settings::x11::X11ServerOptions {
+                clipboard: json_bool(
+                    &value,
+                    &["terminal", "x11_server_options", "clipboard"],
+                    true,
+                ),
+                primary: json_bool(&value, &["terminal", "x11_server_options", "primary"], true),
+                native_opengl: json_bool(
+                    &value,
+                    &["terminal", "x11_server_options", "native_opengl"],
+                    true,
+                ),
+                dpi: u16::try_from(json_u32(
+                    &value,
+                    &["terminal", "x11_server_options", "dpi"],
+                    0,
+                ))
+                .unwrap_or(0),
+            },
             terminal_scrollback_lines: json_u32(&value, &["terminal", "scrollback_lines"], 5000)
                 .clamp(100, 100_000),
             terminal_keep_alive_mode: normalize_keep_alive_mode(&json_string(
@@ -1303,6 +1322,23 @@ impl ConnectionStore {
             &mut value,
             &["terminal", "x11_server_tray_icon"],
             settings.x11_server_tray_icon,
+        );
+        // Update known members individually so newer/unknown options survive saves.
+        for (key, enabled) in [
+            ("clipboard", settings.x11_server_options.clipboard),
+            ("primary", settings.x11_server_options.primary),
+            ("native_opengl", settings.x11_server_options.native_opengl),
+        ] {
+            set_nested_json_bool(
+                &mut value,
+                &["terminal", "x11_server_options", key],
+                enabled,
+            );
+        }
+        set_nested_json_value(
+            &mut value,
+            &["terminal", "x11_server_options", "dpi"],
+            serde_json::Value::from(settings.x11_server_options.dpi),
         );
         set_nested_json_value(
             &mut value,
