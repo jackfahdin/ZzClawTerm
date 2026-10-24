@@ -10,6 +10,27 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.1.6] - 2026-10-25',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (29 commits): connection editor save flow, WSL command construction and working directory handling, bulk admission and queuing for transfer jobs, clipboard input handling, terminal selection text management, AI system-prompt context, cloud sync snapshot heads, SFTP directory downloads, terminal execution recording, ping sequence counters and numeric-pattern semantic highlighting, minimum contrast ratio, Windows application version resources, macOS app icon and title-bar double-click resize, and more.',
+          '**settings:** X11 gains clipboard / PRIMARY selection, native OpenGL, and DPI launch options; Windows IPv4 listen addresses are queried in the background, and copyable current / next-launch arguments are shown.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**connections:** Selecting a shell preset in the local terminal editor now fills the path input immediately instead of leaving it blank until save.',
+          '**connections:** New local terminal connections are named after the selected shell (localized preset names; custom paths use the file name without `.exe`) instead of always "Local Terminal".',
+          '**desktop:** Dismiss the command suggestion popup on left-click outside it or when the terminal loses focus.',
+          '**ci:** Handle empty Gitee Release query results that broke release syncing.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.1.5] - 2026-10-21',
     sections: [
       {
@@ -116,6 +137,27 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.1.6] - 2026-10-25',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 NyaTerm（29 个提交）：连接编辑器保存功能完善、WSL 命令构造与工作目录处理、传输任务批量准入与排队、剪贴板输入处理、终端选择文本管理、AI 请求系统提示上下文、云同步快照 heads 管理、SFTP 目录下载增强、终端执行录制增强、ping 序列计数与数值模式语义高亮、对比度下限调整、Windows 应用版本资源、macOS 应用图标与标题栏双击缩放等。',
+          '**settings:** X11 增加剪贴板 / PRIMARY 选择、原生 OpenGL、DPI 等启动参数设置；后台查询 Windows IPv4 监听地址，展示可复制的当前及下次启动参数。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**connections:** 本地终端编辑器从下拉选择 shell 预设（PowerShell / 命令提示符 / Bash / WSL / Windows Terminal）后，路径输入框同步显示对应程序，不再停留空白。',
+          '**connections:** 新建本地终端连接的默认名按所选 shell 派生（预设用本地化名称，自定义路径取文件名去 `.exe`），不再一律叫 "Local Terminal"。',
+          '**desktop:** 左键点击建议框外部或终端失焦时，正确关闭命令建议弹窗。',
+          '**ci:** 修复 Gitee Release 查询返回空值导致的同步失败。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.1.5] - 2026-10-21',
     sections: [
