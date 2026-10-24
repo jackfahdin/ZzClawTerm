@@ -7,6 +7,13 @@
 
 0.0.2 至 0.1.1 的历史版本未整理，仅保留首个版本说明作为锚点。
 
+## [Unreleased]
+
+### 修复
+
+- **connections:** 本地终端编辑器从下拉选择 shell 预设（PowerShell / 命令提示符 / Bash / WSL / Windows Terminal）后，路径输入框同步显示对应程序，不再停留空白。
+- **connections:** 新建本地终端连接的默认名按所选 shell 派生（预设用本地化名称，自定义路径取文件名去 `.exe`），不再一律叫 "Local Terminal"。
+
 ## [0.1.5] - 2026-10-21
 
 ### 新增

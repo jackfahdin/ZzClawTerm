@@ -1,4 +1,6 @@
 use gpui::Context;
+use rust_i18n::t;
+use std::borrow::Cow;
 use zzclawterm_core::{
     AiExecutionProfile, ConnectionAuth, ConnectionNetwork, ConnectionPostLogin, ConnectionType,
     RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
@@ -738,7 +740,9 @@ pub(super) fn build_saved_connection_from_editor(
             | ConnectionType::Vnc { host, port, .. } => {
                 format!("{host}:{port}")
             }
-            ConnectionType::LocalTerminal { .. } => "Local Terminal".to_string(),
+            ConnectionType::LocalTerminal { shell_path, .. } => {
+                local_terminal_default_name(shell_path).into_owned()
+            }
             ConnectionType::Serial { port_name, .. } => port_name.clone(),
         }
     } else {
@@ -1005,8 +1009,48 @@ pub(super) fn non_empty_or(value: String, fallback: &str) -> String {
     }
 }
 
+/// Localized label of a known local-shell preset value. Shared by the
+/// editor's shell label and the default connection name so the two cannot
+/// drift.
+pub(in crate::features) fn shell_preset_label(shell_path: &str) -> Option<Cow<'static, str>> {
+    match shell_path {
+        "powershell.exe" => Some(t!("dialog.shellPowerShell")),
+        "cmd.exe" => Some(t!("dialog.shellCmd")),
+        "bash" => Some(t!("dialog.shellBash")),
+        "wsl.exe" => Some(t!("dialog.shellWsl")),
+        "wt.exe" => Some(t!("dialog.shellWindowsTerminal")),
+        _ => None,
+    }
+}
+
+/// Default name for a newly saved local terminal connection, derived from the
+/// selected shell: the preset label for a known preset, the file name without
+/// a trailing `.exe` for a custom path or bare command, and the generic
+/// local-terminal label when nothing can be derived.
+pub(in crate::features) fn local_terminal_default_name(shell_path: &str) -> Cow<'static, str> {
+    let shell_path = shell_path.trim();
+    if let Some(label) = shell_preset_label(shell_path) {
+        return label;
+    }
+    // Split on both separators by hand: `Path::file_stem` only honors the
+    // platform's own separator, but this code compiles for every platform.
+    let file_name = shell_path.rsplit(['\\', '/']).next().unwrap_or(shell_path);
+    let stem = file_name
+        .to_ascii_lowercase()
+        .strip_suffix(".exe")
+        .map(|_| &file_name[..file_name.len() - ".exe".len()])
+        .unwrap_or(file_name)
+        .trim();
+    if stem.is_empty() {
+        t!("dialog.localTerminal")
+    } else {
+        Cow::Owned(stem.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use rust_i18n::t;
     use zzclawterm_core::{
         AiExecutionProfile, ConnectionAuth, ConnectionRecordingSettings, ConnectionType,
         RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
@@ -1019,8 +1063,61 @@ mod tests {
 
     use super::{
         ConnectionEditorValidationError, build_saved_connection_from_editor,
-        connection_editor_from_saved,
+        connection_editor_from_saved, local_terminal_default_name, shell_preset_label,
     };
+
+    #[test]
+    fn local_terminal_default_name_uses_preset_labels() {
+        for (value, key) in [
+            ("powershell.exe", "dialog.shellPowerShell"),
+            ("cmd.exe", "dialog.shellCmd"),
+            ("bash", "dialog.shellBash"),
+            ("wsl.exe", "dialog.shellWsl"),
+            ("wt.exe", "dialog.shellWindowsTerminal"),
+        ] {
+            assert_eq!(shell_preset_label(value), Some(t!(key)));
+            assert_eq!(local_terminal_default_name(value), t!(key));
+            assert_eq!(
+                local_terminal_default_name(&format!("  {value}  ")),
+                t!(key)
+            );
+        }
+    }
+
+    #[test]
+    fn local_terminal_default_name_derives_from_custom_paths() {
+        // Windows and Unix separators both resolve, on any build platform.
+        assert_eq!(
+            local_terminal_default_name("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            "pwsh"
+        );
+        assert_eq!(
+            local_terminal_default_name("C:/tools/git-bash.exe"),
+            "git-bash"
+        );
+        assert_eq!(local_terminal_default_name("/bin/zsh"), "zsh");
+        assert_eq!(local_terminal_default_name("pwsh"), "pwsh");
+        assert_eq!(local_terminal_default_name("SHELL.EXE"), "SHELL");
+    }
+
+    #[test]
+    fn local_terminal_default_name_falls_back_when_underivable() {
+        assert_eq!(local_terminal_default_name(""), t!("dialog.localTerminal"));
+        assert_eq!(
+            local_terminal_default_name("   "),
+            t!("dialog.localTerminal")
+        );
+        assert_eq!(
+            local_terminal_default_name("C:\\tools\\.exe"),
+            t!("dialog.localTerminal")
+        );
+    }
+
+    #[test]
+    fn shell_preset_label_rejects_custom_paths() {
+        assert_eq!(shell_preset_label("pwsh"), None);
+        assert_eq!(shell_preset_label(""), None);
+    }
 
     #[test]
     fn connection_editor_round_trip_preserves_icon() {

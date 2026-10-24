@@ -40,6 +40,7 @@ use self::vnc::connection_editor_vnc_section;
 use super::super::list::{
     ConnectionEditorChoice, ConnectionEditorFields, EDITOR_CONTROL_HEIGHT_PX, editor_field,
 };
+use crate::features::connections::shell_preset_label;
 use crate::features::selects::{NO_SELECTION_VALUE, PENDING_CONNECTION_GROUP_VALUE};
 use crate::features::{
     ZzClawTermApp, icons::CONNECTION_ICON_OPTIONS, icons::DEFAULT_CONNECTION_ICON,
@@ -1002,14 +1003,8 @@ impl ZzClawTermApp {
             ),
         ];
         let ssh_agent_endpoint_options = Self::ssh_agent_endpoint_choices(&editor.agent_endpoint);
-        let shell_label = match editor.shell_path.as_str() {
-            "powershell.exe" => t!("dialog.shellPowerShell"),
-            "cmd.exe" => t!("dialog.shellCmd"),
-            "bash" => t!("dialog.shellBash"),
-            "wsl.exe" => t!("dialog.shellWsl"),
-            "wt.exe" => t!("dialog.shellWindowsTerminal"),
-            _ => t!("dialog.shellCustom"),
-        };
+        let shell_label = shell_preset_label(editor.shell_path.as_str())
+            .unwrap_or_else(|| t!("dialog.shellCustom"));
         let shell_options = [
             ("powershell.exe", t!("dialog.shellPowerShell")),
             ("cmd.exe", t!("dialog.shellCmd")),

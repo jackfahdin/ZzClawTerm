@@ -487,6 +487,22 @@ impl ZzClawTermApp {
         });
         self.connection_state
             .set_editor_select_value(select, value.map(ToOwned::to_owned));
+        if select == ConnectionEditorSelect::Shell {
+            // Picking a shell preset rewrites the draft's shell path; the
+            // input box entity does not follow the draft on its own, so push
+            // the value down like the browse button does.
+            let shell_path = self
+                .connection_state
+                .active_editor_draft()
+                .map(|editor| editor.shell_path.clone());
+            if let Some(shell_path) = shell_path {
+                self.connection_state.reset_editor_field(
+                    ConnectionEditorField::ShellPath,
+                    &shell_path,
+                    cx,
+                );
+            }
+        }
         if let Some((previous_id, previous_username)) = previous_account {
             let selected = value.and_then(|id| {
                 self.security
