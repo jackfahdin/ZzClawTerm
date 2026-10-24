@@ -247,17 +247,11 @@ fn telnet_compatibility(
             .flex()
             .flex_col()
             .gap_3()
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(palette.text_muted))
-                    .child(t!("dialog.telnetRawTcpCliDesc")),
-            )
             .child(telnet_switch_row(
                 palette,
                 "connection-telnet-raw-tcp",
                 t!("dialog.telnetRawTcpCli"),
-                t!("dialog.telnetRawTcpCliLongDesc"),
+                t!("dialog.telnetRawTcpCliDesc"),
                 editor.raw_tcp_cli,
                 true,
                 cx.listener(|this, _, _, cx| {

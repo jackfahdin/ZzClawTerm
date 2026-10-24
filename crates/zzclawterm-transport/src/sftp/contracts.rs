@@ -236,7 +236,8 @@ impl SftpTransferControl {
         Ok(())
     }
 
-    pub(crate) fn wait_if_paused_blocking(&self) -> anyhow::Result<()> {
+    /// Wait for a paused operation on a worker thread, honoring cancellation.
+    pub fn wait_if_paused_blocking(&self) -> anyhow::Result<()> {
         self.check_cancelled()?;
         while self.is_paused() {
             std::thread::sleep(Duration::from_millis(100));

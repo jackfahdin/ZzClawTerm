@@ -63,14 +63,17 @@ def write_portable(
     machine: int,
     *,
     helper_machine: int | None = None,
-    vcxsrv: bool = False,
+    missing_conpty: str | None = None,
+    wrong_conpty_machine: bool = False,
+    target: str = "x86_64-pc-windows-msvc",
+    application_resources: tuple[int, ...] = (3, 14, 16, 24),
 ) -> None:
     """Build a portable zip whose layout matches package_native's output."""
     root = "ZzClawTerm-portable"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
             f"{root}/ZzClawTerm.exe",
-            fake_pe(machine, subsystem=2, resource_ids=(3, 14, 24)),
+            fake_pe(machine, subsystem=2, resource_ids=application_resources),
         )
         if helper_machine is not None:
             for name in verify_native_package.helper_filenames(
@@ -81,13 +84,86 @@ def write_portable(
         archive.writestr(f"{root}/LICENSE", b"license")
         archive.writestr(f"{root}/VERSION", b"0.0.1\n")
         archive.writestr(f"{root}/data/.keep", b"")
-        if vcxsrv:
-            archive.writestr(f"{root}/vcxsrv/vcxsrv.exe", fake_pe(machine))
-            archive.writestr(f"{root}/vcxsrv/NOTICE.txt", b"notice")
-            archive.writestr(f"{root}/vcxsrv/fonts/fonts.dir", b"1\n")
+        archive.writestr(f"{root}/conpty/LICENSE.txt", b"license")
+        for relative in package_native.conpty_files(target):
+            if relative.as_posix() == missing_conpty:
+                continue
+            expected = 0xAA64 if "arm64" in relative.parts else 0x8664
+            archive.writestr(
+                f"{root}/conpty/{relative.as_posix()}",
+                fake_pe(0xAA64 if wrong_conpty_machine else expected),
+            )
+
+
+def verify_installer_fixture(
+    target: str,
+    *,
+    missing_conpty: str | None = None,
+    wrong_conpty_machine: bool = False,
+    application_resources: tuple[int, ...] = (3, 14, 16),
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        installer = root / "setup.exe"
+        installer.write_bytes(fake_pe(0x8664))
+        (root / "zzclawterm-installer.nsi").write_text("", encoding="utf-8")
+
+        def extract(command, **kwargs):
+            output = Path(command[3][2:])
+            entries = {
+                "ZzClawTerm.exe": fake_pe(0x8664, subsystem=2, resource_ids=application_resources),
+                "Uninstall.exe": fake_pe(0x8664),
+                "LICENSE": b"license",
+                "VERSION": b"2.0.0\n",
+                "conpty/LICENSE.txt": b"license",
+                **{name: fake_pe(0x8664)
+                   for name in verify_native_package.helper_filenames(target)},
+            }
+            for relative in package_native.conpty_files(target):
+                if relative.as_posix() == missing_conpty:
+                    continue
+                expected = 0xAA64 if "arm64" in relative.parts else 0x8664
+                machine = expected ^ 1 if wrong_conpty_machine else expected
+                entries[f"conpty/{relative.as_posix()}"] = fake_pe(machine)
+            for name, data in entries.items():
+                path = output / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+
+        # Isolate payload validation from NSIS compilation and Windows metadata.
+        # Keep the real temporary-directory lifecycle to catch reads after cleanup.
+        with (
+            mock.patch.object(package_native, "WORK_DIR", root),
+            mock.patch.object(verify_native_package.sys, "platform", "linux"),
+            mock.patch.object(verify_native_package, "verify_windows_installer_script"),
+            mock.patch.object(verify_native_package, "find_7zip", return_value="7z"),
+            mock.patch.object(verify_native_package.subprocess, "run", side_effect=extract),
+        ):
+            verify_native_package.verify_windows_installer(installer, target, "2.0.0")
 
 
 class VerifyNativePackageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Synthetic PE fixtures only contain directory headers. Test metadata
+        # comparisons separately; the Windows resource build test uses real PEs.
+        patcher = mock.patch.object(verify_native_package, "windows_version_info")
+        self.version_info = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.version_info.return_value = self.application_metadata("2.0.0")
+
+    @staticmethod
+    def application_metadata(version: str) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "FileDescription": "ZzClawTerm", "ProductName": "ZzClawTerm",
+            "FileVersion": package_native.windows_numeric_version(version),
+            "ProductVersion": version,
+        }
+        for prefix in ("File", "Product"):
+            for part, value in zip(("Major", "Minor", "Build", "Private"),
+                                   package_native.windows_numeric_version(version).split(".")):
+                metadata[f"{prefix}{part}Part"] = int(value)
+        return metadata
+
     def test_archive_paths_reject_parent_traversal_and_absolute_paths(self) -> None:
         for path in ("../secret", "dir/../../secret", "/absolute/file"):
             with self.subTest(path=path), self.assertRaises(RuntimeError):
@@ -99,7 +175,36 @@ class VerifyNativePackageTests(unittest.TestCase):
             path = Path(directory) / "portable.zip"
             write_portable(path, 0x8664, helper_machine=0x8664)
             verify_native_package.verify_windows_portable(
-                path, "x86_64-pc-windows-msvc", "0.0.1"
+                path, "x86_64-pc-windows-msvc", "2.0.0"
+            )
+
+    def test_windows_portable_rejects_application_without_version_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(path, 0x8664, helper_machine=0x8664, application_resources=(3, 14))
+            with self.assertRaisesRegex(RuntimeError, "version resource"):
+                verify_native_package.verify_windows_portable(path, "x86_64-pc-windows-msvc", "2.0.0")
+
+    def test_windows_portable_rejects_application_version_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(path, 0x8664, helper_machine=0x8664)
+            self.version_info.return_value = self.application_metadata("2.0.1")
+            with (
+                mock.patch.object(verify_native_package.sys, "platform", "win32"),
+                self.assertRaisesRegex(RuntimeError, "FileVersion"),
+            ):
+                verify_native_package.verify_windows_portable(path, "x86_64-pc-windows-msvc", "2.0.0")
+
+    def test_windows_arm64_portable_has_matching_conpty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(
+                path, 0xAA64, helper_machine=0xAA64,
+                target="aarch64-pc-windows-msvc",
+            )
+            verify_native_package.verify_windows_portable(
+                path, "aarch64-pc-windows-msvc", "2.0.0"
             )
 
     def test_windows_portable_rejects_wrong_architecture(self) -> None:
@@ -120,6 +225,49 @@ class VerifyNativePackageTests(unittest.TestCase):
                     path, "x86_64-pc-windows-msvc", "0.0.1"
                 )
 
+    def test_windows_portable_requires_conpty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(
+                path, 0x8664, helper_machine=0x8664,
+                missing_conpty="x64/arm64/OpenConsole.exe",
+            )
+            with self.assertRaisesRegex(RuntimeError, "x64/arm64/OpenConsole.exe"):
+                verify_native_package.verify_windows_portable(
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                )
+
+    def test_windows_portable_rejects_conpty_architecture_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            write_portable(
+                path, 0x8664, helper_machine=0x8664, wrong_conpty_machine=True,
+            )
+            with self.assertRaisesRegex(RuntimeError, "ConPTY PE machine"):
+                verify_native_package.verify_windows_portable(
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                )
+
+    def test_windows_installer_validates_conpty_before_temporary_directory_cleanup(self) -> None:
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            with self.subTest(target=target):
+                verify_installer_fixture(target)
+
+    def test_windows_installer_requires_conpty_files(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing ConPTY files: conpty/x64/conpty.dll"):
+            verify_installer_fixture(
+                "x86_64-pc-windows-msvc", missing_conpty="x64/conpty.dll",
+            )
+
+    def test_windows_installer_rejects_application_without_version_resource(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "version resource"):
+            verify_installer_fixture("x86_64-pc-windows-msvc", application_resources=(3, 14))
+
+    def test_windows_installer_rejects_conpty_architecture_mismatch(self) -> None:
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            with self.subTest(target=target), self.assertRaisesRegex(RuntimeError, "ConPTY PE machine"):
+                verify_installer_fixture(target, wrong_conpty_machine=True)
+
     def test_windows_portable_rejects_helper_architecture_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"
@@ -132,7 +280,7 @@ class VerifyNativePackageTests(unittest.TestCase):
                 )
 
     def test_windows_application_requires_gui_subsystem_and_icon_resources(self) -> None:
-        valid = fake_pe(0x8664, subsystem=2, resource_ids=(3, 14, 24))
+        valid = fake_pe(0x8664, subsystem=2, resource_ids=(3, 14, 16, 24))
         verify_native_package.verify_windows_application_binary(valid, "test.exe")
 
         with self.assertRaisesRegex(RuntimeError, "GUI subsystem"):
@@ -148,13 +296,49 @@ class VerifyNativePackageTests(unittest.TestCase):
                     "test.exe",
                 )
 
-    def test_windows_portable_accepts_a_complete_vcxsrv_tree(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "portable.zip"
-            write_portable(path, 0x8664, helper_machine=0x8664, vcxsrv=True)
-            verify_native_package.verify_windows_portable(
-                path, "x86_64-pc-windows-msvc", "0.0.1"
-            )
+    def test_windows_application_requires_version_resource_on_both_architectures(self) -> None:
+        for machine in (0x8664, 0xAA64):
+            with self.subTest(machine=machine), self.assertRaisesRegex(RuntimeError, "version resource"):
+                verify_native_package.verify_windows_application_binary(
+                    fake_pe(machine, subsystem=2, resource_ids=(3, 14)), "test.exe",
+                )
+
+    def test_windows_application_rejects_incorrect_version_strings_and_fixed_versions(self) -> None:
+        with mock.patch.object(verify_native_package.sys, "platform", "win32"):
+            for version in ("2.0.0", "2.0.0-preview.9"):
+                expected = self.application_metadata(version)
+                self.version_info.return_value = expected
+                verify_native_package.verify_windows_application_version(Path("test.exe"), version)
+                for key in expected:
+                    with self.subTest(version=version, field=key):
+                        self.version_info.return_value = {**expected, key: "wrong"}
+                        with self.assertRaisesRegex(RuntimeError, key):
+                            verify_native_package.verify_windows_application_version(Path("test.exe"), version)
+
+    def test_macos_archive_validates_both_identities_and_rejects_mismatch(self) -> None:
+        for version in ("2.0.0", "2.0.0-preview.1"):
+            identity = verify_native_package.package_native.release_identity(version)
+            bundle = identity.macos_bundle_name
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "ZzClawTerm.app.tar.gz"
+                plist = {
+                    "CFBundleIdentifier": identity.macos_identifier,
+                    "CFBundleDisplayName": identity.display_name,
+                    "CFBundleName": identity.display_name,
+                    "CFBundleExecutable": "ZzClawTerm",
+                    "CFBundleShortVersionString": version,
+                    "CFBundleVersion": version,
+                    "CFBundleURLTypes": [{"CFBundleURLSchemes": [identity.desktop_id]}],
+                }
+                entries = {
+                    f"{bundle}/Contents/MacOS/ZzClawTerm": fake_macho(0x0100000C),
+                    **{f"{bundle}/Contents/MacOS/{name}": fake_macho(0x0100000C)
+                       for name in verify_native_package.helper_filenames("aarch64-apple-darwin")},
+                    f"{bundle}/Contents/Info.plist": plistlib.dumps(plist),
+                    f"{bundle}/Contents/Resources/VERSION": f"{version}\n".encode(),
+                    f"{bundle}/Contents/Resources/LICENSE": b"license",
+                    f"{bundle}/Contents/Resources/icon.icns": b"icon",
+                }
 
     def test_windows_portable_rejects_a_vcxsrv_tree_without_executable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -5,7 +5,7 @@ use std::{
 
 use gpui::{
     App, ClickEvent, Global, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Styled as _, Window, WindowId, px,
+    SharedString, Styled as _, Window, WindowId, div, px,
 };
 use gpui_kit::component::{
     Disableable as _, WindowExt as _,
@@ -62,7 +62,12 @@ impl ZzClawDialog {
     }
 
     pub fn content(mut self, content: impl IntoElement) -> Self {
-        self.inner = self.inner.child(content);
+        // The component's scrollable body clips at its vertical edges. Its
+        // horizontal padding already protects focus rings; reserve the same
+        // 3px outside band above the first control and below the last one.
+        self.inner = self
+            .inner
+            .child(div().w_full().min_w_0().py(px(3.)).child(content));
         self
     }
 

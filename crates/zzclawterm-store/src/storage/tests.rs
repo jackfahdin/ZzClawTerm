@@ -3872,6 +3872,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
             id: "conn-1".to_string(),
         },
         path: "/var".to_string(),
+        raw_path_token: None,
     };
     let updated = store
         .save_file_explorer_favorite_dirs(&file_manager_update)
@@ -3886,6 +3887,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
                 id: "conn-1".to_string(),
             },
             path: "/var".to_string(),
+            raw_path_token: None,
         }
     );
     let stored = store.load_settings_value().expect("stored file manager");

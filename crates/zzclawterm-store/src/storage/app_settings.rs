@@ -334,8 +334,7 @@ impl ConnectionStore {
                 12,
             ),
             ui_file_manager: json_path(&value, &["ui", "file_manager"])
-                .cloned()
-                .and_then(|value| serde_json::from_value::<FileManagerUiSettings>(value).ok())
+                .map(FileManagerUiSettings::from_compat_value)
                 .unwrap_or_default(),
             ui_left_panel_width: json_u32(&value, &["ui", "left_width"], 256).clamp(160, 720),
             ui_right_panel_width: json_u32(&value, &["ui", "right_width"], 288).clamp(200, 720),
@@ -902,11 +901,14 @@ impl ConnectionStore {
                 12,
             ),
         );
-        set_nested_json_value(
-            &mut value,
-            &["ui", "file_manager"],
-            serde_json::to_value(&settings.ui_file_manager).unwrap_or(serde_json::Value::Null),
+        let mut file_manager = json_path(&value, &["ui", "file_manager"])
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        merge_file_manager_settings(
+            &mut file_manager,
+            serde_json::to_value(&settings.ui_file_manager)?,
         );
+        set_nested_json_value(&mut value, &["ui", "file_manager"], file_manager);
         self.save_settings_value(&value)?;
         self.load_app_settings_summary()
     }
@@ -2474,4 +2476,85 @@ fn u32_map_json_value(map: &HashMap<String, u32>) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(object)
+}
+
+/// Preserve extension fields, including records for newer source kinds, when an
+/// older client updates its own presentation settings. Explicit nulls still clear
+/// stale raw-path tokens when the corresponding display path changes.
+fn merge_file_manager_settings(current: &mut serde_json::Value, update: serde_json::Value) {
+    match (current, update) {
+        (serde_json::Value::Object(current), serde_json::Value::Object(update)) => {
+            for (key, value) in update {
+                if key == "directories"
+                    && let (
+                        Some(serde_json::Value::Array(previous)),
+                        serde_json::Value::Array(next),
+                    ) = (current.get_mut(&key), &value)
+                {
+                    let source_key = |value: &serde_json::Value| {
+                        let source = value.get("source")?;
+                        Some((
+                            source.get("kind")?.as_str()?.to_string(),
+                            source
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        ))
+                    };
+                    for entry in next {
+                        if let Some(previous) = previous.iter_mut().find(|old| {
+                            source_key(old).is_some() && source_key(old) == source_key(entry)
+                        }) {
+                            merge_file_manager_settings(previous, entry.clone());
+                        } else {
+                            previous.push(entry.clone());
+                        }
+                    }
+                } else {
+                    merge_file_manager_settings(
+                        current.entry(key).or_insert(serde_json::Value::Null),
+                        value,
+                    );
+                }
+            }
+        }
+        (current, update) => *current = update,
+    }
+}
+
+#[cfg(test)]
+mod file_manager_tests {
+    use super::merge_file_manager_settings;
+    use serde_json::json;
+    use zzclawterm_core::models::settings::FileManagerUiSettings;
+
+    #[test]
+    fn file_manager_merge_preserves_nested_extensions_and_unknown_sources() {
+        let mut stored = json!({
+            "future": {"enabled": true},
+            "left": {"source": {"kind": "local", "extension": 9}, "path": "/old", "plugin": 7},
+            "left_view": {"plugin": 8, "column_widths": {"future": 123}, "directories": [
+                {"source": {"kind": "connection", "id": "ssh", "extension": 2}, "path": "/old", "raw_path_token": "old", "future": 3},
+                {"source": {"kind": "future_backend", "id": "other"}, "path": "/untouched", "future": 4}
+            ]}
+        });
+        let mut settings = FileManagerUiSettings::from_compat_value(&stored);
+        settings.left.path = "/new".into();
+        settings.left_view.directories[0].path = "/new".into();
+        settings.left_view.directories[0].raw_path_token = None;
+        merge_file_manager_settings(&mut stored, serde_json::to_value(settings).unwrap());
+        assert_eq!(stored["future"]["enabled"], true);
+        assert_eq!(stored["left"]["plugin"], 7);
+        assert_eq!(stored["left"]["source"]["extension"], 9);
+        assert_eq!(stored["left_view"]["plugin"], 8);
+        assert_eq!(stored["left_view"]["column_widths"]["future"], 123);
+        let directories = stored["left_view"]["directories"].as_array().unwrap();
+        assert_eq!(directories.len(), 2);
+        assert_eq!(directories[0]["path"], "/new");
+        assert_eq!(directories[0]["future"], 3);
+        assert_eq!(directories[0]["source"]["extension"], 2);
+        assert!(directories[0]["raw_path_token"].is_null());
+        assert_eq!(directories[1]["path"], "/untouched");
+    }
 }

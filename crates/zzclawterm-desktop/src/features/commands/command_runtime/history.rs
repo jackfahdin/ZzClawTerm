@@ -252,6 +252,17 @@ impl ZzClawTermApp {
         if submitted.is_empty() {
             return;
         }
+        self.record_submitted_command_history(session_ids, submitted);
+    }
+
+    pub(in crate::features) fn record_submitted_command_history(
+        &mut self,
+        session_ids: &[&str],
+        submitted: Vec<String>,
+    ) {
+        if submitted.is_empty() {
+            return;
+        }
         for session_id in session_ids {
             for command in &submitted {
                 self.session.record_command_history(session_id, command);

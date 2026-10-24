@@ -1732,16 +1732,23 @@ impl SettingsFeatureState {
             })
             .unwrap_or(&summary.theme);
         let mut palette = zzclawterm_ui::resolve_theme_palette(id, &summary.custom_themes);
-        let ratio = match summary.minimum_contrast_ratio.trim() {
-            "3" => 3.,
-            "4.5" => 4.5,
-            "7" => 7.,
-            "21" => 21.,
-            _ => 1.,
-        };
-        palette.apply_minimum_contrast_ratio(ratio);
+        palette.apply_cursor_contrast_ratio(Self::terminal_contrast_ratio_for(summary));
         palette
     }
+    fn terminal_contrast_ratio_for(summary: &AppSettingsSummary) -> f32 {
+        match summary.minimum_contrast_ratio.trim() {
+            "3" => 3.0,
+            "4.5" => 4.5,
+            "7" => 7.0,
+            "21" => 21.0,
+            _ => 1.0,
+        }
+    }
+
+    pub(in crate::features) fn terminal_minimum_contrast_ratio(&self) -> f32 {
+        Self::terminal_contrast_ratio_for(&self.summary)
+    }
+
     fn refresh_theme_palettes(&mut self) {
         self.appearance.theme_diagnostics = self.summary.custom_themes.diagnostics().into();
         self.appearance.theme_options =
@@ -1820,6 +1827,27 @@ mod tests {
                 keybindings: focus(),
             },
         )
+    }
+
+    #[test]
+    fn minimum_contrast_updates_render_policy_without_recoloring_the_palette() {
+        let mut state = settings_state();
+        let original = state.terminal_palette();
+        for (setting, expected) in [
+            ("3", 3.0),
+            ("4.5", 4.5),
+            ("7", 7.0),
+            ("21", 21.0),
+            ("1", 1.0),
+        ] {
+            state.set_minimum_contrast_ratio(setting.into());
+            assert_eq!(state.terminal_minimum_contrast_ratio(), expected);
+            let palette = state.terminal_palette();
+            assert_eq!(palette.terminal_bg, original.terminal_bg);
+            assert_eq!(palette.terminal_fg, original.terminal_fg);
+            assert_eq!(palette.terminal_fg_intense, original.terminal_fg_intense);
+            assert_eq!(palette.terminal_ansi, original.terminal_ansi);
+        }
     }
 
     #[test]

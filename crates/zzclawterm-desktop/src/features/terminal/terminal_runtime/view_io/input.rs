@@ -7,6 +7,7 @@ use zzclawterm_core::{
 };
 
 use crate::features::ZzClawTermApp;
+use crate::models::recording::ExecutionRecordingEvent;
 use crate::terminal::{
     TerminalKeyMode, terminal_key_bytes_with_mode, terminal_key_release_bytes_with_mode,
 };
@@ -86,6 +87,16 @@ pub(super) fn terminal_should_track_command_suggestion_input(
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn active_terminal_input_blocked(&self) -> bool {
+        self.active_workspace_tab().is_some_and(|key| {
+            matches!(
+                crate::models::WorkspaceTabId::from_layout_key(&key),
+                crate::models::WorkspaceTabId::Editor(_)
+            )
+        }) || self.session.start_has_active_pending()
+            || self.session.start_has_active_failed()
+    }
+
     pub(in crate::features) fn send_terminal_input(
         &mut self,
         bytes: Vec<u8>,
@@ -109,13 +120,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let input_started_at = Instant::now();
-        if bytes.is_empty()
-            || self.active_workspace_tab().is_some_and(|key| {
-                !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
-            })
-            || self.session.start_has_active_pending()
-            || self.session.start_has_active_failed()
-        {
+        if bytes.is_empty() || self.active_terminal_input_blocked() {
             return false;
         }
         // Tauri/xterm custom key path: non-smart buffer selections stay painted while
@@ -263,6 +268,16 @@ impl ZzClawTermApp {
             return false;
         }
         let encode_started_at = Instant::now();
+        if event.is_held
+            && !self
+                .terminal
+                .view
+                .views
+                .get(&session_id)
+                .is_some_and(|view| view.pressed_keys.contains(&event.keystroke.key))
+        {
+            return false;
+        }
         let Some(primary_bytes) =
             self.terminal_key_bytes_for_event_for_session(Some(&session_id), event)
         else {
@@ -298,6 +313,16 @@ impl ZzClawTermApp {
         let mut synced = 0usize;
         let mut failed = 0usize;
         for peer_id in peers {
+            if event.is_held
+                && !self
+                    .terminal
+                    .view
+                    .views
+                    .get(&peer_id)
+                    .is_some_and(|view| view.pressed_keys.contains(&event.keystroke.key))
+            {
+                continue;
+            }
             let peer_encode_started_at = Instant::now();
             let Some(peer_bytes) =
                 self.terminal_key_bytes_for_event_for_session(Some(&peer_id), event)
@@ -321,6 +346,11 @@ impl ZzClawTermApp {
         }
         let write_duration = write_started_at.elapsed();
 
+        for id in &ok_sessions {
+            if let Some(view) = self.terminal.view.views.get_mut(id) {
+                view.pressed_keys.insert(event.keystroke.key.clone());
+            }
+        }
         let input_wake_started_at = Instant::now();
         if !ok_sessions.is_empty() {
             self.arm_terminal_input_wake(cx);
@@ -377,6 +407,29 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id_owned() else {
             return false;
         };
+        let peers = self.sync_peer_session_ids(&session_id);
+        // Consume ownership even if the connection is no longer writable. A
+        // reconnect key press and keys held by the previous TUI have no owner
+        // in the new connection, even if it has already enabled Kitty again.
+        let primary_pressed = self
+            .terminal
+            .view
+            .views
+            .get_mut(&session_id)
+            .is_some_and(|view| view.pressed_keys.remove(&event.keystroke.key));
+        let peers: Vec<String> = peers
+            .into_iter()
+            .filter(|id| {
+                self.terminal
+                    .view
+                    .views
+                    .get_mut(id)
+                    .is_some_and(|view| view.pressed_keys.remove(&event.keystroke.key))
+            })
+            .collect();
+        if !primary_pressed {
+            return false;
+        }
         if self.session.is_disconnected(&session_id) {
             return false;
         }
@@ -390,7 +443,6 @@ impl ZzClawTermApp {
         }
 
         let byte_count = primary_bytes.len();
-        let peers = self.sync_peer_session_ids(&session_id);
         let mut synced = 0usize;
         let mut failed = 0usize;
         match self.write_session_input_recorded(&session_id, &primary_bytes) {
@@ -833,6 +885,28 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.commands.cancel_staged_quick_command(session_id);
+        self.write_guarded_terminal_input(session_id, bytes)
+    }
+
+    /// Only the current script owner may bypass cancellation by competing input.
+    pub(in crate::features) fn write_staged_quick_command_input(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+        run_id: u64,
+    ) -> Result<(), String> {
+        if !self.commands.owns_staged_quick_command(session_id, run_id) {
+            return Err("quick command cancelled by newer input".into());
+        }
+        self.write_guarded_terminal_input(session_id, bytes)
+    }
+
+    fn write_guarded_terminal_input(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         if self
             .mcp
             .capabilities
@@ -841,13 +915,43 @@ impl ZzClawTermApp {
         {
             return Err("An automatic command is capturing this terminal".into());
         }
-        self.write_automated_terminal_input(session_id, bytes)
+        self.write_terminal_input_recorded_impl(session_id, bytes, None)
     }
 
     pub(in crate::features) fn write_automated_terminal_input(
         &mut self,
         session_id: &str,
         bytes: &[u8],
+        command: Option<&str>,
+    ) -> Result<(), String> {
+        self.commands.cancel_staged_quick_command(session_id);
+        self.write_terminal_input_recorded_impl(session_id, bytes, command)
+    }
+
+    pub(in crate::features) fn record_automated_terminal_command(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) {
+        let include = self
+            .recording
+            .writer()
+            .capture_policy(session_id)
+            .include_input
+            && !self.recording_input_is_sensitive(session_id);
+        self.terminal.submit_execution_recording(
+            session_id,
+            ExecutionRecordingEvent::Boundary {
+                command: include.then(|| command.to_string()),
+            },
+        );
+    }
+
+    fn write_terminal_input_recorded_impl(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+        command: Option<&str>,
     ) -> Result<(), String> {
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
@@ -876,6 +980,24 @@ impl ZzClawTermApp {
         {
             // Covers typed Enter, paste, and autofill through the shared write path.
             self.terminal.assist.credential_prompt_awaiting_output = true;
+        }
+        if let Some(command) = command {
+            if self.recording.writer().capture_policy(session_id).mode
+                == zzclawterm_transport::RecordingMode::Raw
+            {
+                if self
+                    .recording
+                    .writer()
+                    .capture_policy(session_id)
+                    .include_input
+                    && !self.recording_input_is_sensitive(session_id)
+                {
+                    self.recording.write_raw_input(session_id, encoded);
+                }
+            } else {
+                self.record_automated_terminal_command(session_id, command);
+            }
+            return Ok(());
         }
         if disposition.record_logical_input
             && self
@@ -907,6 +1029,7 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.commands.cancel_staged_quick_command(session_id);
         if self
             .mcp
             .capabilities
@@ -950,6 +1073,7 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.commands.cancel_staged_quick_command(session_id);
         if self
             .mcp
             .capabilities
@@ -1023,6 +1147,7 @@ impl ZzClawTermApp {
         wire_bytes: &[u8],
         recording_bytes: &[u8],
     ) -> Result<(), String> {
+        self.commands.cancel_staged_quick_command(session_id);
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
         }

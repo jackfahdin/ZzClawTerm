@@ -209,6 +209,78 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn dialog_body_preserves_focus_rings_at_both_vertical_edges(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| RootContentFixture);
+            zzclaw_root(content, window, cx)
+        });
+
+        for (kind, multi_line) in [
+            (crate::ZzClawInputKind::Text, false),
+            (crate::ZzClawInputKind::Password, false),
+            (crate::ZzClawInputKind::Text, true),
+        ] {
+            let (first, last) = cx.update(|window, cx| {
+                let first = cx.new(|cx| ZzClawInputState::new(cx, "First field"));
+                let last = cx.new(|cx| {
+                    let state = ZzClawInputState::new(cx, "Last field").kind(kind);
+                    if multi_line {
+                        state.multi_line(Some(3))
+                    } else {
+                        state
+                    }
+                });
+                let first_input = first.clone();
+                let last_input = last.clone();
+                window.open_nya_dialog(cx, move |dialog, _, _| {
+                    dialog
+                        .title("Form")
+                        .confirm(ZzClawDialogFooter::new("Cancel", "Save"))
+                        .content(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(ZzClawInputShell::new("first-field", &first_input))
+                                .child(ZzClawInputShell::new("last-field", &last_input)),
+                        )
+                });
+                (first, last)
+            });
+            draw(cx);
+            for field in [first, last] {
+                cx.update(|window, cx| {
+                    window.focus(&field.read(cx).component_focus_handle(cx), cx);
+                });
+                draw(cx);
+                cx.update(|window, cx| {
+                    let color = gpui_kit::component::Theme::global(cx).ring.alpha(0.5);
+                    let quads = window.painted_quads();
+                    let ring: Vec<_> = quads
+                        .iter()
+                        .filter(|quad| quad.border_color == color)
+                        .collect();
+                    let bounds = ring
+                        .first()
+                        .expect("focused field must paint a ring")
+                        .bounds;
+                    // GPUI splits border-only quads into strips. Their combined
+                    // paint masks must reach every edge of the outside ring.
+                    let visible = ring
+                        .iter()
+                        .map(|quad| quad.content_mask.bounds.intersect(&quad.bounds))
+                        .reduce(|left, right| left.union(&right))
+                        .unwrap();
+                    assert_eq!(visible, bounds, "dialog body clips the focus ring");
+                });
+            }
+            cx.update(|window, cx| window.close_nya_dialog(cx));
+        }
+    }
+
     struct PointerContentFixture {
         down: Arc<AtomicUsize>,
         movement: Arc<AtomicUsize>,

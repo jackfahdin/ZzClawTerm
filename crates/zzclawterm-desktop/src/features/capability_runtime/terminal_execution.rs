@@ -19,6 +19,7 @@ use crate::features::ZzClawTermApp;
 use crate::features::runtime_jobs::await_blocking_result;
 use crate::features::terminal::ai_execution::{TerminalExecutionEvent, TerminalExecutionStatus};
 use crate::models::SessionLaunchConfig;
+use crate::models::recording::ExecutionRecordingEvent;
 
 use super::{CapabilityCaller, CapabilityRequest};
 use crate::features::mcp::server::rpc_failure;
@@ -62,6 +63,8 @@ struct TerminalExecutionCompletion {
     event: Option<TerminalExecutionEvent>,
     reply: oneshot::Sender<Result<Value, RpcError>>,
     result: Result<Value, RpcError>,
+    recording_tail: String,
+    recording_boundary: bool,
 }
 
 /// Owns every automatic terminal execution, independently of the visible AI scope.
@@ -137,6 +140,7 @@ impl TerminalExecutionState {
             raw.feed(&text, Instant::now());
             return AgentCaptureProcessResult {
                 visible_text: text,
+                recording_text: String::new(),
                 completed: Vec::new(),
             };
         }
@@ -157,6 +161,7 @@ impl TerminalExecutionState {
         }
         AgentCaptureProcessResult {
             visible_text: text,
+            recording_text: String::new(),
             completed: Vec::new(),
         }
     }
@@ -223,6 +228,8 @@ impl TerminalExecutionState {
             return None;
         }
         let mut task = self.tasks.remove(session_id).expect("matched task");
+        let recording_boundary = task.request.policy.background || task.capture.is_some();
+        let mut recording_tail = String::new();
         let duration_ms = task
             .started
             .elapsed()
@@ -274,6 +281,7 @@ impl TerminalExecutionState {
                         .or_default()
                         .push(filter);
                     if let Some(partial) = capture.cancel(&task.capture_marker_id) {
+                        recording_tail = partial.recording_text;
                         partial_truncated = partial.source_truncated;
                         match &mut result {
                             Ok(value) => {
@@ -329,6 +337,8 @@ impl TerminalExecutionState {
         task.worker_cancellation.cancel();
         Some(TerminalExecutionCompletion {
             event,
+            recording_tail,
+            recording_boundary,
             reply: task.request.reply,
             result: result.and_then(|value| {
                 serde_json::to_value(value)
@@ -513,7 +523,10 @@ impl ZzClawTermApp {
             .flatten();
         let capture = wrapped.as_ref().map(|_| {
             let mut capture = AgentOutputCaptureProcessor::new();
-            capture.register(capture_marker_id.clone());
+            capture.register_with_end_newline(
+                capture_marker_id.clone(),
+                profile != AiExecutionProfile::Cmd,
+            );
             capture
         });
         let raw_capture = (profile == AiExecutionProfile::SendOnly).then(|| {
@@ -556,6 +569,7 @@ impl ZzClawTermApp {
         self.sync_session_event_bridge_session_policy(&session_id);
         self.ensure_terminal_execution_clock(cx);
         if let Some(target) = target {
+            self.record_automated_terminal_command(&session_id, &command);
             let task = self
                 .blocking_jobs
                 .submit_task("terminal-background-execute", move |_| {
@@ -620,9 +634,14 @@ impl ZzClawTermApp {
             })
             .detach();
         } else {
+            let recorded_command = wrapped.as_ref().map(|_| command.as_str());
             let input = wrapped.unwrap_or_else(|| format!("{command}\r"));
             // The automatic writer bypasses the user-input gate, never broadcast/history.
-            let result = self.write_automated_terminal_input(&session_id, input.as_bytes());
+            let result = self.write_automated_terminal_input(
+                &session_id,
+                input.as_bytes(),
+                recorded_command,
+            );
             if result.is_err() {
                 self.finish_terminal_execution(
                     &session_id,
@@ -654,6 +673,15 @@ impl ZzClawTermApp {
         status: TerminalExecutionStatus,
         cx: &mut Context<Self>,
     ) {
+        let background_output = self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .tasks
+            .get(session_id)
+            .filter(|task| task.capture_marker_id == id && task.request.policy.background)
+            .and_then(|_| result.as_ref().ok())
+            .map(|result| result.output.clone());
         let Some(completion) = self
             .mcp
             .capabilities
@@ -662,6 +690,22 @@ impl ZzClawTermApp {
         else {
             return;
         };
+        if let Some(output) = background_output {
+            self.terminal
+                .submit_execution_recording(session_id, ExecutionRecordingEvent::Output(output));
+        }
+        if !completion.recording_tail.is_empty() {
+            self.terminal.submit_execution_recording(
+                session_id,
+                ExecutionRecordingEvent::Output(completion.recording_tail),
+            );
+        }
+        if completion.recording_boundary {
+            self.terminal.submit_execution_recording(
+                session_id,
+                ExecutionRecordingEvent::Boundary { command: None },
+            );
+        }
         if let Some(event) = completion.event {
             self.present_terminal_execution(event);
         }

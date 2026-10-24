@@ -5,12 +5,19 @@ use zzclawterm_core::{
 use zzclawterm_store::StoreDomain;
 
 use crate::features::ZzClawTermApp;
+use crate::features::commands::staged::StagedCommandHistory;
 use crate::models::QuickCommandVariablePromptState;
 
+use super::escapes::{QuickCommandChunk, plan_quick_command, quick_command_needs_staging};
 use super::helpers::{
     ai_command_card_category_name, unique_quick_command_category_id, validated_quick_command_text,
 };
 use super::variables::parse_quick_command_variables;
+
+struct StagedQuickCommandTarget {
+    session_id: String,
+    history: StagedCommandHistory,
+}
 
 impl ZzClawTermApp {
     pub(in crate::features) fn save_ai_command_card_by_id(
@@ -241,16 +248,29 @@ impl ZzClawTermApp {
         &mut self,
         command_id: String,
         label: String,
-        mut command_text: String,
+        command_text: String,
         execute: bool,
         send_to_all: bool,
         cx: &mut Context<Self>,
     ) {
-        if execute && !command_text.ends_with('\r') && !command_text.ends_with('\n') {
-            command_text.push('\r');
-        }
-        let command_bytes = command_text.into_bytes();
+        // `\r \n \t \p \\` are interpreted here rather than at save time: the
+        // stored script keeps the escapes, so what the panel shows is what the
+        // user wrote.
+        let mut chunks = plan_quick_command(&command_text, execute);
         self.queue_quick_command_use_count(command_id);
+
+        if quick_command_needs_staging(&chunks) {
+            self.send_staged_quick_command(label, chunks, execute, send_to_all, cx);
+            return;
+        }
+
+        // The common case is one chunk, which goes through the ordinary input
+        // path exactly as before. The staging gate above already excluded any
+        // plan that carries a pause, so this chunk's delay is zero.
+        let Some(chunk) = chunks.pop() else {
+            return;
+        };
+        let command_bytes = chunk.bytes;
 
         if send_to_all {
             let sessions = self
@@ -298,6 +318,181 @@ impl ZzClawTermApp {
             cx.notify();
         }
     }
+
+    /// Send a script that `\p` split into several writes.
+    ///
+    /// The target sessions are pinned once, here, when the user runs the
+    /// command: the rest of the script must keep arriving at what was clicked
+    /// on rather than following the focus during the pauses.
+    fn send_staged_quick_command(
+        &mut self,
+        label: String,
+        chunks: Vec<QuickCommandChunk>,
+        execute: bool,
+        send_to_all: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !send_to_all && self.active_terminal_input_blocked() {
+            return;
+        }
+        let targets = if send_to_all {
+            self.session
+                .ordered_sessions()
+                .into_iter()
+                .filter(|session| !self.session.is_disconnected(&session.id))
+                .map(|session| session.id)
+                .collect::<Vec<_>>()
+        } else {
+            let primary = self
+                .session
+                .active_id_owned()
+                .filter(|session_id| !self.session.is_disconnected(session_id));
+            match primary {
+                Some(session_id) => {
+                    let peers = self.sync_peer_session_ids(&session_id);
+                    std::iter::once(session_id).chain(peers).collect()
+                }
+                None => Vec::new(),
+            }
+        };
+        if targets.is_empty() {
+            self.shell
+                .set_status("start a terminal session before using a quick command".to_string());
+            cx.notify();
+            return;
+        }
+
+        let run_id = self.commands.staged.begin(&targets);
+        let targets = targets
+            .into_iter()
+            .map(|session_id| StagedQuickCommandTarget {
+                session_id,
+                history: StagedCommandHistory::default(),
+            })
+            .collect::<Vec<_>>();
+        let steps = chunks.len();
+        self.shell
+            .set_status(format!("sending quick command '{label}' in {steps} steps"));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let mut live = targets;
+            let total = live.len();
+            let mut cancelled = false;
+            for chunk in chunks {
+                if !chunk.delay.is_zero() {
+                    cx.background_executor().timer(chunk.delay).await;
+                }
+                let Ok((survivors, interrupted)) = this.update(cx, |this, cx| {
+                    let survivors = this.write_quick_command_chunk(live, run_id, &chunk.bytes, cx);
+                    cx.notify();
+                    survivors
+                }) else {
+                    // The window went away, so there is no one left to report to.
+                    return;
+                };
+                cancelled |= interrupted;
+                live = survivors;
+                if live.is_empty() {
+                    break;
+                }
+            }
+            let failed = total - live.len();
+            let delivered = live.len();
+            let _ = this.update(cx, |this, cx| {
+                for target in &live {
+                    this.commands.staged.finish(&target.session_id, run_id);
+                }
+                // A superseded task must not replace the newer input's status.
+                if cancelled {
+                    return;
+                }
+                this.shell.set_status(quick_command_delivery_status(
+                    &label,
+                    execute,
+                    send_to_all,
+                    delivered,
+                    failed,
+                ));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Keep history and liveness per pinned target; the active editor may now
+    /// belong to an unrelated tab and must never supply this script's history.
+    fn write_quick_command_chunk(
+        &mut self,
+        targets: Vec<StagedQuickCommandTarget>,
+        run_id: u64,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) -> (Vec<StagedQuickCommandTarget>, bool) {
+        let mut survivors = Vec::with_capacity(targets.len());
+        let mut cancelled = false;
+        let mut submissions: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+        for mut target in targets {
+            let session_id = &target.session_id;
+            if !self.commands.staged.owns(session_id, run_id) {
+                cancelled = true;
+                continue;
+            }
+            let sensitive = self.recording_input_is_sensitive(session_id);
+            if self.session.is_disconnected(session_id)
+                || self
+                    .write_staged_quick_command_input(session_id, bytes, run_id)
+                    .is_err()
+            {
+                self.commands.staged.finish(session_id, run_id);
+                continue;
+            }
+            let submitted = target.history.push(bytes, sensitive);
+            if !submitted.is_empty() {
+                if let Some((_, sessions)) = submissions
+                    .iter_mut()
+                    .find(|(lines, _)| *lines == submitted)
+                {
+                    sessions.push(session_id.clone());
+                } else {
+                    submissions.push((submitted, vec![session_id.clone()]));
+                }
+            }
+            survivors.push(target);
+        }
+        for (submitted, sessions) in submissions {
+            let session_refs = sessions.iter().map(String::as_str).collect::<Vec<_>>();
+            self.record_submitted_command_history(&session_refs, submitted);
+        }
+        if !survivors.is_empty() {
+            self.arm_terminal_input_wake(cx);
+        }
+        (survivors, cancelled)
+    }
+}
+
+fn quick_command_delivery_status(
+    label: &str,
+    execute: bool,
+    send_to_all: bool,
+    delivered: usize,
+    failed: usize,
+) -> String {
+    if send_to_all {
+        return if failed == 0 {
+            format!("sent quick command '{label}' to {delivered} session(s)")
+        } else {
+            format!("sent quick command '{label}' to {delivered} session(s), {failed} failed")
+        };
+    }
+    if failed > 0 {
+        return format!("quick command '{label}' failed on {failed} session(s)");
+    }
+    if execute {
+        format!("ran quick command '{label}'")
+    } else {
+        format!("inserted quick command '{label}'")
+    }
 }
 
 fn quick_command_executes(command: &QuickCommand) -> bool {
@@ -305,43 +500,4 @@ fn quick_command_executes(command: &QuickCommand) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use zzclawterm_core::QuickCommand;
-
-    use super::quick_command_executes;
-
-    fn command_with_execution_mode(execution_mode: Option<&str>) -> QuickCommand {
-        QuickCommand {
-            id: "command-1".to_string(),
-            label: "Command".to_string(),
-            command: "pwd".to_string(),
-            category_id: None,
-            description: None,
-            color_tag: None,
-            icon_tag: None,
-            pinned: None,
-            execution_mode: execution_mode.map(ToOwned::to_owned),
-            source: None,
-            risk_level: None,
-            updated_at: None,
-            created_at: None,
-            use_count: None,
-            sort_order: None,
-        }
-    }
-
-    #[test]
-    fn append_mode_inserts_without_execution() {
-        assert!(!quick_command_executes(&command_with_execution_mode(Some(
-            "append"
-        ))));
-    }
-
-    #[test]
-    fn execute_and_legacy_modes_execute() {
-        assert!(quick_command_executes(&command_with_execution_mode(Some(
-            "execute"
-        ))));
-        assert!(quick_command_executes(&command_with_execution_mode(None)));
-    }
-}
+mod tests;

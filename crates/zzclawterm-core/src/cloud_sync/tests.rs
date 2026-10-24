@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 mod cancellation;
+mod concurrent_heads;
+mod regressions;
 
 use super::{
     CLOUD_SYNC_HISTORY_DOMAIN, CLOUD_SYNC_HISTORY_EVENT, CLOUD_SYNC_HISTORY_LIMIT,
@@ -27,6 +29,7 @@ use crate::{
 struct TestLocalData {
     sessions: SessionsConfig,
     cloud_sync_state: CloudSyncState,
+    entities: BTreeMap<String, String>,
 }
 
 fn test_local_data() -> &'static Mutex<HashMap<PathBuf, TestLocalData>> {
@@ -86,6 +89,7 @@ fn normalized_v2_hash_does_not_create_false_local_change() {
         payload_hash: "original-v2-hash".into(),
         device_id: "tauri".into(),
         app_version: "1.9.0".into(),
+        sync_clock: None,
     };
     assert_eq!(
         decide_cloud_remote_check(&state, "normalized-v3-hash", &pointer, true),
@@ -164,6 +168,11 @@ impl ConnectionStore {
         snapshot.entities.insert(
             "sessions".to_string(),
             serde_json::to_string(&self.load_sessions()?).map_err(std::io::Error::other)?,
+        );
+        snapshot.entities.extend(
+            test_local_data().lock().unwrap()[&self.config_dir]
+                .entities
+                .clone(),
         );
         Ok(snapshot)
     }
@@ -428,6 +437,7 @@ fn recover_current_snapshot_with_remote(
 #[derive(Default)]
 struct MemoryRemote {
     files: Mutex<HashMap<String, Vec<u8>>>,
+    hidden_listing_path: Option<String>,
     fail_writes_containing: Mutex<VecDeque<String>>,
     capacity_limit: Option<usize>,
     fail_delete: bool,
@@ -701,7 +711,9 @@ impl CloudSyncRemote for MemoryRemote {
         }
         drop(failures);
         let mut stored = bytes.to_vec();
-        if let Some(limit) = self.write_prefix_limit {
+        if let Some(limit) = self.write_prefix_limit
+            && path.contains("sync/snapshots/")
+        {
             stored.truncate(limit);
         }
         self.files
@@ -726,6 +738,7 @@ impl CloudSyncRemote for MemoryRemote {
             .expect("memory lock")
             .keys()
             .filter(|key| key.starts_with(path))
+            .filter(|key| self.hidden_listing_path.as_ref() != Some(*key))
             .cloned()
             .collect())
     }
@@ -1326,7 +1339,10 @@ fn pointer_commit_failure_keeps_previous_head_readable() {
             connections: vec![local_connection("second", "Second", "zsh")],
         })
         .expect("seed second");
-    remote.fail_next_write_containing(super::SYNC_LATEST_FILE);
+    remote.fail_next_write_containing(&super::heads::device_head_path(
+        &source_options.remote_root,
+        &source_options.device_id,
+    ));
 
     let error = push_snapshot_with_remote(&source_options, &remote, &first.state, false)
         .expect_err("pointer commit must fail");
@@ -1456,6 +1472,12 @@ fn pull_rejects_hash_revision_and_corrupted_snapshot_data() {
         push_snapshot_with_remote(&source_options, &remote, &CloudSyncState::default(), false)
             .expect("push");
     let pointer = pushed.pointer.expect("pointer");
+    remote
+        .delete(&super::heads::device_head_path(
+            &source_options.remote_root,
+            &source_options.device_id,
+        ))
+        .unwrap();
     let snapshot_path = remote_path(
         &source_options.remote_root,
         &super::legacy_sync_snapshot_file(&pointer.revision_id),
@@ -1654,7 +1676,7 @@ fn inconsistent_remote_requires_explicit_current_recovery() {
 
     let recovered =
         recover_current_snapshot_with_remote(&target_options, &remote).expect("recover current");
-    assert_eq!(
+    assert_ne!(
         recovered
             .pointer
             .as_ref()
@@ -2424,6 +2446,7 @@ fn remote_pointer(revision_id: &str, payload_hash: &str) -> RemoteSyncPointer {
         payload_hash: payload_hash.to_string(),
         device_id: "remote-device".to_string(),
         app_version: "test".to_string(),
+        sync_clock: None,
     }
 }
 
@@ -2602,7 +2625,7 @@ fn capacity_cleanup_protects_head_target_foreign_and_corrupted_snapshots() {
     let options = options(&dir, &dir, "device");
     let store = OptionsTestLocalStore(&options);
     let remote = MemoryRemote {
-        capacity_limit: Some(8),
+        capacity_limit: Some(10),
         ..Default::default()
     };
     let mut snapshots = Vec::new();
@@ -2673,7 +2696,7 @@ fn capacity_cleanup_rechecks_changed_or_unreadable_head_before_deleting() {
         let store = OptionsTestLocalStore(&options);
         let remote = ConcurrentUpdateRemote {
             inner: MemoryRemote {
-                capacity_limit: Some(5),
+                capacity_limit: Some(7),
                 ..Default::default()
             },
             ..Default::default()

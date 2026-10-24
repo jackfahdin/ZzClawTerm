@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use gpui::{ClipboardItem, Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+use gpui::{Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
 use zzclawterm_terminal::selection::{TerminalSelectionEndpoint, selected_row_text};
 use zzclawterm_terminal::{TerminalScreen, TerminalSnapshot};
 
 use crate::features::ZzClawTermApp;
 use crate::features::terminal::LostTerminalSelectionRecovery;
-use crate::features::terminal::state::TerminalSelectionAutoscroll;
+use crate::features::terminal::state::{TerminalSelectionAutoscroll, TerminalSelectionTextStatus};
 use crate::features::terminal::terminal_runtime::TerminalMouseReportRequest;
 use crate::features::terminal::terminal_surface::{
     terminal_absolute_line_for_snapshot_row, terminal_snapshot_absolute_range,
@@ -15,9 +15,7 @@ use crate::models::{
     TerminalBufferCellPos, TerminalFrameSearchKey, TerminalFrameSearchPurpose, TerminalSelection,
     TerminalViewState,
 };
-use crate::terminal::{
-    TerminalTextCell, terminal_is_zero_width_mark, terminal_text_cell_slice, terminal_text_cells,
-};
+use crate::terminal::{TerminalTextCell, terminal_is_zero_width_mark, terminal_text_cells};
 
 use super::metrics::{
     TerminalHitTestGeometry, terminal_cell_for_visual_geometry,
@@ -50,8 +48,8 @@ impl ZzClawTermApp {
         self.terminal.selection.selection = None;
         self.terminal.selection.click_anchor = None;
         self.terminal.selection.session_id = None;
-        self.terminal.selection.all_buffer_text = None;
-        self.terminal.selection.all_buffer_text_task = None;
+        self.terminal.selection.text.invalidate();
+        self.terminal.selection.source_history = None;
         self.terminal.selection.dragging = false;
         self.terminal.selection.drag_pointer_position = None;
         self.terminal.selection.scroll_rehit_armed = false;
@@ -86,8 +84,8 @@ impl ZzClawTermApp {
             self.terminal.selection.selection = None;
             self.terminal.selection.click_anchor = None;
             self.terminal.selection.session_id = None;
-            self.terminal.selection.all_buffer_text = None;
-            self.terminal.selection.all_buffer_text_task = None;
+            self.terminal.selection.text.invalidate();
+            self.terminal.selection.source_history = None;
             self.terminal.selection.dragging = false;
             self.terminal.selection.drag_pointer_position = None;
             self.terminal.selection.scroll_rehit_armed = false;
@@ -104,14 +102,8 @@ impl ZzClawTermApp {
     pub(in crate::features) fn select_all_terminal(&mut self, cx: &mut Context<Self>) {
         let (_, cols) = self.active_terminal_grid_size();
         self.terminal.selection.click_anchor = None;
-        self.terminal.selection.all_buffer_text = None;
-        self.terminal.selection.all_buffer_text_task = None;
-        self.terminal.selection.all_buffer_text_generation = self
-            .terminal
-            .selection
-            .all_buffer_text_generation
-            .wrapping_add(1);
-        let generation = self.terminal.selection.all_buffer_text_generation;
+        self.terminal.selection.text.invalidate();
+        self.terminal.selection.source_history = None;
         self.terminal.selection.dragging = false;
         self.terminal.selection.drag_pointer_position = None;
         self.terminal.selection.scroll_rehit_armed = false;
@@ -126,32 +118,7 @@ impl ZzClawTermApp {
         self.clear_terminal_selected_occurrence(cx);
         self.terminal.selection.selection = Some(TerminalSelection::all_buffer(cols));
         self.terminal.selection.session_id = self.session.active_id_owned();
-        if let Some(session_id) = self.terminal.selection.session_id.clone() {
-            let response = self
-                .terminal
-                .view
-                .frame_pipeline
-                .request_all_text(session_id.clone());
-            self.terminal.selection.all_buffer_text_task = Some(cx.spawn(async move |this, cx| {
-                let Ok(text) = response.await else {
-                    return;
-                };
-                let _ = this.update(cx, |this, cx| {
-                    // A reconnect can rename the session while this request is
-                    // pending. Match the selection request, not the old id.
-                    if this.terminal.selection.all_buffer_text_generation == generation
-                        && this
-                            .terminal
-                            .selection
-                            .selection
-                            .is_some_and(|selection| selection.all_buffer)
-                    {
-                        this.terminal.selection.all_buffer_text = Some(text.unwrap_or_default());
-                        cx.notify();
-                    }
-                });
-            }));
-        }
+        self.ensure_terminal_selection_text(cx);
         self.shell
             .set_status("selected all terminal text".to_string());
         self.notify_terminal_selection_owner_surface(cx);
@@ -169,13 +136,24 @@ impl ZzClawTermApp {
         if selection.is_empty() {
             return None;
         }
+        if self
+            .terminal
+            .selection
+            .text
+            .key
+            .as_ref()
+            .is_some_and(|(id, cached)| Some(id.as_str()) == session_id && cached == selection)
+        {
+            match &self.terminal.selection.text.status {
+                TerminalSelectionTextStatus::Ready(text) => return text.clone(),
+                TerminalSelectionTextStatus::Pending | TerminalSelectionTextStatus::Failed(_) => {
+                    return None;
+                }
+                TerminalSelectionTextStatus::Unrequested => {}
+            }
+        }
         if selection.all_buffer {
-            return self
-                .terminal
-                .selection
-                .all_buffer_text
-                .clone()
-                .filter(|text| !text.is_empty());
+            return None;
         }
         if let Some(view) =
             session_id.and_then(|session_id| self.terminal.view.views.get(session_id))
@@ -183,35 +161,6 @@ impl ZzClawTermApp {
             return terminal_selected_text_for_view(view, *selection);
         }
         terminal_selected_text_from_screen(*selection, &self.terminal.view.screen)
-    }
-
-    pub(in crate::features) fn copy_terminal_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(text) = self.selected_terminal_text() else {
-            return false;
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.shell
-            .set_status("copied terminal selection".to_string());
-        self.notify_terminal_selection_owner_surface(cx);
-        self.terminal.menus.actions_open = false;
-        cx.notify();
-        true
-    }
-
-    pub(in crate::features) fn copy_terminal_selection_or_visible(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.copy_terminal_selection(cx) {
-            self.notify_operation(
-                "copy-terminal-selection",
-                zzclawterm_ui::notification::ZzClawNotificationKind::Success,
-                rust_i18n::t!("common.copied").to_string(),
-                cx,
-            );
-            return;
-        }
-        self.copy_terminal_visible_text(cx);
     }
 
     pub(in crate::features) fn start_terminal_selection_for_session(
@@ -307,8 +256,10 @@ impl ZzClawTermApp {
             }
         }
         let cols = geometry.cols;
-        self.terminal.selection.all_buffer_text = None;
-        self.terminal.selection.all_buffer_text_task = None;
+        self.terminal.selection.text.invalidate();
+        if !event.modifiers.shift || self.terminal.selection.source_history.is_none() {
+            self.terminal.selection.source_history = Some(geometry.snapshot.history);
+        }
         self.begin_smart_input_selection();
         let click_anchor = self.terminal.selection.click_anchor.take();
         if event.modifiers.shift
@@ -324,6 +275,7 @@ impl ZzClawTermApp {
         {
             selection.all_buffer = false;
             selection.head = endpoint;
+            self.terminal.selection.text.invalidate();
             if self.terminal.selection.session_id.is_none() {
                 self.terminal.selection.session_id = selection_session_id;
             }
@@ -507,6 +459,7 @@ impl ZzClawTermApp {
             && selection.head != endpoint
         {
             selection.head = endpoint;
+            self.terminal.selection.text.invalidate();
             if self.terminal.selection.session_id.is_none() {
                 self.terminal.selection.session_id = selection_session_id;
             }
@@ -540,6 +493,7 @@ impl ZzClawTermApp {
                 .as_ref()
                 .is_some_and(|selection| !selection.is_empty())
             {
+                self.ensure_terminal_selection_text(cx);
                 if self.settings.summary().interaction_copy_on_select {
                     let _ = self.copy_terminal_selection(cx);
                 }
@@ -607,6 +561,7 @@ impl ZzClawTermApp {
             self.shell.set_status("selection ready".to_string());
             cx.notify();
         }
+        self.ensure_terminal_selection_text(cx);
         self.schedule_terminal_selected_occurrence_search(cx);
         self.notify_terminal_selection_owner_surface(cx);
     }
@@ -642,6 +597,7 @@ impl ZzClawTermApp {
                 }
             }
             LostTerminalSelectionRecovery::Committed => {
+                self.ensure_terminal_selection_text(cx);
                 if copy_on_select && self.settings.summary().interaction_copy_on_select {
                     let _ = self.copy_terminal_selection(cx);
                 } else {
@@ -654,7 +610,7 @@ impl ZzClawTermApp {
         }
     }
 
-    fn schedule_terminal_selected_occurrence_search(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_terminal_selected_occurrence_search(&mut self, cx: &mut Context<Self>) {
         let session_id = self
             .terminal
             .selection
@@ -883,6 +839,7 @@ impl ZzClawTermApp {
             && selection.head != endpoint
         {
             selection.head = endpoint;
+            self.terminal.selection.text.invalidate();
             self.queue_terminal_selection_drag_visual_notify(cx);
         }
         true
@@ -974,6 +931,7 @@ impl ZzClawTermApp {
         );
         if line != selection.head.position.line {
             selection.head.position.line = line;
+            self.terminal.selection.text.invalidate();
             self.queue_terminal_selection_drag_visual_notify(cx);
         }
     }
@@ -1097,6 +1055,12 @@ fn terminal_snapshot_covering_selection(
         .chain(view.scrollback_snapshots.values())
         .map(AsRef::as_ref)
         .filter(|snapshot| {
+            if !view
+                .history_state()
+                .preserves_coordinates_from(snapshot.history)
+            {
+                return false;
+            }
             let (snapshot_start, snapshot_end) = terminal_snapshot_absolute_range(snapshot);
             selection
                 .cell_range(snapshot.cols)
@@ -1131,6 +1095,9 @@ fn terminal_selected_text_for_view(
         }
         return (!text.is_empty()).then_some(text);
     }
+    if view.frame_snapshot.is_some() || !view.scrollback_snapshots.is_empty() {
+        return None;
+    }
     terminal_selected_text_from_screen(selection, &view.screen)
 }
 
@@ -1138,47 +1105,7 @@ fn terminal_selected_text_from_screen(
     selection: TerminalSelection,
     screen: &TerminalScreen,
 ) -> Option<String> {
-    if selection.all_buffer {
-        return screen.all_text();
-    }
-    let rows = screen.all_text_rows();
-    terminal_selected_text_from_line_source(selection, rows.len(), 0, screen.cols(), |index| {
-        rows.get(index)
-            .map(|(text, wrapped)| (text.as_str(), *wrapped))
-    })
-}
-
-fn terminal_selected_text_from_line_source<'a>(
-    selection: TerminalSelection,
-    line_count: usize,
-    absolute_start: usize,
-    cols: usize,
-    mut line_at: impl FnMut(usize) -> Option<(&'a str, bool)>,
-) -> Option<String> {
-    let (start, end) = selection.cell_range(cols)?;
-    let absolute_end = absolute_start.saturating_add(line_count);
-    if start.line < absolute_start || end.line >= absolute_end {
-        return None;
-    }
-    let mut text = String::new();
-    let mut first_line = true;
-    for line_index in start.line..=end.line {
-        let (line, wrapped) = line_at(line_index - absolute_start)?;
-        let cells = terminal_text_cells(line);
-        let (col_start, col_end_excl) = selection.cols_for_absolute_line(line_index)?;
-        let col_end = col_end_excl.min(cells.len().max(col_start));
-        let col_start = col_start.min(col_end);
-        let slice = terminal_text_cell_slice(&cells, col_start, col_end);
-        let slice = slice.trim_end();
-        let empty_endpoint_at_row_start =
-            line_index == end.line && end.col == 0 && slice.is_empty();
-        if !first_line && !wrapped && !empty_endpoint_at_row_start {
-            text.push('\n');
-        }
-        first_line = false;
-        text.push_str(slice);
-    }
-    if text.is_empty() { None } else { Some(text) }
+    screen.text_for_selection(selection).ok().flatten()
 }
 
 fn terminal_word_bounds_for_visual_geometry(
@@ -1269,8 +1196,9 @@ mod tests {
     };
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{TerminalBufferCellPos, TerminalSelection, TerminalViewState};
-    use crate::terminal::{TerminalTextCell, terminal_text_cell_slice, terminal_text_cells};
+    use crate::terminal::{TerminalTextCell, terminal_text_cells};
     use crate::test_support::TestConfigDir;
+    use zzclawterm_terminal::terminal_text_cell_slice;
 
     use super::{
         TERMINAL_SELECTED_OCCURRENCE_MAX_CHARS, TERMINAL_SELECTION_DRAG_NOTIFY_DELAY,

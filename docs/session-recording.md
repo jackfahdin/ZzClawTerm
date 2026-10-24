@@ -6,6 +6,21 @@ Existing path templates, extensions and settings keys retain their meanings.
 `recording.include_input` is an additive setting and defaults to `false` when
 loading older documents or backups. Unknown settings fields remain intact.
 
+## Desktop controls
+
+The recording panel and recording shortcut start directly with the effective
+recording profile: configured directory, template, default mode and connection
+overrides. An empty directory uses Downloads with the existing fallback. The
+Transcript/Raw menu actions override only the requested mode. Saving session text
+exports to the configured directory with a unique `session-...log` name.
+These actions do not open a path picker or insert application notices into the
+terminal; completion and errors are reported in the status bar.
+
+Recording rows reserve separate lines for the session, mode/size, path and error.
+Text stays on one line with ellipsis and a full-value tooltip. A fixed action area
+contains start/stop and a menu for mode selection, opening/revealing the current
+file and text export. Row height stays fixed across recording/error transitions.
+
 ## Capture
 
 By default only session output is recorded. Transcript removes terminal control
@@ -21,6 +36,18 @@ password/OTP prompts are tracked independently for every session, including sync
 peers. Dedicated sensitive-input adapters and terminal protocol replies are
 always excluded. Unknown hidden-input prompts cannot reliably be detected;
 this limitation is shown beside the input switch.
+
+Automatic terminal execution records the original command as INPUT, subject to
+the same input switch and sensitive-prompt checks. Internal shell wrappers and
+capture markers are excluded from Transcript. Captured output is recorded
+incrementally, independently of the bounded MCP result and AI card line limit;
+SendOnly output continues through the ordinary recording path once. Cancellation
+and timeout retain partial output, and late output keeps recording with internal
+markers removed. Background SSH/local execution records its submitted command
+and returned stdout/stderr without inserting the AI presentation into the log.
+Raw still records only session wire bytes, including shell wrappers, and excludes
+background execution that does not pass through that session. Prompt detection
+does not redact arbitrary secrets embedded in commands or command output.
 
 The binary-transfer switch selects either session bytes before transfer filters
 or terminal bytes after the existing X/Y/ZMODEM and trzsz filters. The Raw capture

@@ -1298,6 +1298,175 @@ fn paste_targets_use_their_own_charset_and_bracketed_mode() {
 }
 
 #[test]
+fn telnet_gpui_enter_submits_locally_edited_text_in_the_session_charset() {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    use zzclawterm_core::character_encoding::CharacterEncoding;
+    use zzclawterm_transport::{TelnetEnterMode, TelnetSessionConfig};
+
+    use crate::models::SessionLaunchConfig;
+
+    let root = TestConfigDir::new("zzclawterm-telnet-local-input");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let enter = terminal_key_bytes_for_mode_and_settings(
+        &key_event("enter", None, gpui::Modifiers::default()),
+        TerminalKeyMode::default(),
+        false,
+    )
+    .unwrap();
+    let backspace = terminal_key_bytes_for_mode_and_settings(
+        &key_event("backspace", None, gpui::Modifiers::default()),
+        TerminalKeyMode::default(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(enter, b"\r");
+
+    for raw_tcp in [false, true] {
+        for encoding in [CharacterEncoding::Utf8, CharacterEncoding::Gbk] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let config = TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port: listener.local_addr().unwrap().port(),
+                raw_tcp,
+                local_line_edit: true,
+                local_echo: true,
+                enter_mode: TelnetEnterMode::Crlf,
+                encoding: encoding.label().into(),
+                send_naws: false,
+                keep_alive_interval_secs: 0,
+                auto_login: zzclawterm_transport::TelnetAutoLoginConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (manager, id) = cx.update_entity(&app, |app, _| {
+                let manager = app.session.manager_handle();
+                let info = manager.create_telnet_session(config.clone()).unwrap();
+                let mut metadata = app.session.metadata("fixture").unwrap().clone();
+                metadata.launch_config = SessionLaunchConfig::Telnet(config);
+                app.session.register_session_metadata(&info.id, metadata);
+                app.terminal
+                    .seed_session_view(info.id.clone(), String::new(), encoding.label());
+                (manager, info.id)
+            });
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            cx.update_entity(&app, |app, _| {
+                app.write_session_input_recorded(&id, "中中".as_bytes())
+                    .unwrap();
+                app.write_session_input_recorded(&id, &backspace).unwrap();
+                app.write_session_input_recorded(&id, &enter).unwrap();
+            });
+            let mut expected = encoding.encode("中").unwrap();
+            expected.extend_from_slice(b"\r\n");
+            let mut actual = vec![0; expected.len()];
+            peer.read_exact(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+            manager.close(&id).unwrap();
+        }
+    }
+}
+
+#[test]
+fn reconnect_drops_old_enter_release_and_repeat_even_after_new_kitty_negotiation() {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    use gpui::KeyUpEvent;
+    use zzclawterm_transport::TelnetSessionConfig;
+
+    use crate::features::terminal::terminal_runtime::view_io::TerminalMouseReportRequest;
+    use crate::models::{SessionLaunchConfig, TerminalProtocolState};
+
+    let root = TestConfigDir::new("zzclawterm-reconnect-key-wire");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (manager, id) = cx.update_entity(&app, |app, _| {
+        let config = TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            raw_tcp: true,
+            ..TelnetSessionConfig::default()
+        };
+        let manager = app.session.manager_handle();
+        let info = manager.create_telnet_session(config.clone()).unwrap();
+        let mut metadata = app.session.metadata("fixture").unwrap().clone();
+        metadata.launch_config = SessionLaunchConfig::Telnet(config);
+        app.session.register_session_metadata(&info.id, metadata);
+        app.terminal
+            .seed_session_view("old".into(), "\x1b[>3u\x1b[?1003;1006hOLD".into(), "UTF-8");
+        app.terminal
+            .view
+            .views
+            .get_mut("old")
+            .unwrap()
+            .pressed_keys
+            .insert("enter".into());
+        app.terminal.rekey_session_view("old", &info.id, "UTF-8");
+        app.session.select_active_session(&info.id);
+        (manager, info.id)
+    });
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    cx.update_entity(&app, |app, cx| {
+        let press = key_event("enter", None, gpui::Modifiers::default());
+        let release = KeyUpEvent {
+            keystroke: press.keystroke.clone(),
+        };
+        assert_eq!(
+            app.terminal_key_bytes_for_event_for_session(Some(&id), &press),
+            Some(b"\r".to_vec())
+        );
+        assert!(!app.send_terminal_key_release_event(&release, cx));
+        for require_alt in [false, true] {
+            let mut settings = app.settings.summary().clone();
+            settings.interaction_mouse_events_require_alt = require_alt;
+            app.settings.replace_summary(settings);
+            for modifiers in [gpui::Modifiers::default(), gpui::Modifiers::alt()] {
+                assert!(!app.maybe_send_mouse_report_for_session(
+                    TerminalMouseReportRequest {
+                        session_id: &id,
+                        button: 3,
+                        col: 1,
+                        row: 1,
+                        press: true,
+                        motion: true,
+                        modifiers,
+                    },
+                    cx,
+                ));
+            }
+        }
+
+        // A fresh TUI can enable Kitty before the reconnecting Enter is released.
+        let view = app.terminal.view.views.get_mut(&id).unwrap();
+        view.screen.advance(b"\x1b[>3u");
+        view.protocol_state = TerminalProtocolState::from_screen(&view.screen);
+        let mut repeat = press.clone();
+        repeat.is_held = true;
+        assert!(!app.send_terminal_key_event(&repeat, false, cx));
+        assert!(!app.send_terminal_key_release_event(&release, cx));
+        assert!(app.send_terminal_key_event(&press, false, cx));
+        assert!(app.send_terminal_key_release_event(&release, cx));
+        // A duplicate or unrelated release must not be written either.
+        assert!(!app.send_terminal_key_release_event(&release, cx));
+        app.write_session_protocol_response(&id, b"END").unwrap();
+    });
+    let expected = b"\x1b[13;1:1u\x1b[13;1:3uEND";
+    let mut actual = vec![0; expected.len()];
+    peer.read_exact(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+    manager.close(&id).unwrap();
+}
+
+#[test]
 fn encoding_failures_write_nothing_and_mouse_and_protocol_bytes_bypass_charset() {
     use crate::features::terminal::terminal_runtime::view_io::TerminalMouseReportRequest;
     use std::io::Read;

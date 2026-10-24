@@ -181,6 +181,8 @@ pub enum StorageError {
     },
     #[error("invalid data: {0}")]
     InvalidData(String),
+    #[error("local configuration changed during cloud sync")]
+    CloudSyncLocalChanged,
 }
 
 #[derive(Debug)]

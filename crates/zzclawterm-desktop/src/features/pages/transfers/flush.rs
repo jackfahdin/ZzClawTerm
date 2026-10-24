@@ -195,9 +195,16 @@ impl ZzClawTermApp {
             .filter(|job| job.is_visible_for_session(active_session_id))
             .collect::<Vec<_>>();
 
-        let has_running = visible
-            .iter()
-            .any(|job| job.status == TransferJobStatus::Running && job.control.is_some());
+        let has_running = visible.iter().any(|job| {
+            matches!(
+                job.status,
+                TransferJobStatus::Queued | TransferJobStatus::Running
+            ) && job.control.is_some()
+                && self
+                    .transfer
+                    .file_operation(&job.id)
+                    .is_none_or(|context| context.can_pause())
+        });
         let has_paused = visible
             .iter()
             .any(|job| job.status == TransferJobStatus::Paused && job.control.is_some());
@@ -205,7 +212,9 @@ impl ZzClawTermApp {
             job.control.is_some()
                 && matches!(
                     job.status,
-                    TransferJobStatus::Running | TransferJobStatus::Paused
+                    TransferJobStatus::Queued
+                        | TransferJobStatus::Running
+                        | TransferJobStatus::Paused
                 )
         });
         let has_completed = visible
@@ -214,7 +223,8 @@ impl ZzClawTermApp {
         let has_stopped = visible.iter().any(|job| {
             !matches!(
                 job.status,
-                TransferJobStatus::Running
+                TransferJobStatus::Queued
+                    | TransferJobStatus::Running
                     | TransferJobStatus::Paused
                     | TransferJobStatus::Cancelling
             )
@@ -249,7 +259,7 @@ impl ZzClawTermApp {
 fn transfer_job_display_rank(status: TransferJobStatus) -> u8 {
     match status {
         TransferJobStatus::Running | TransferJobStatus::Cancelling => 0,
-        TransferJobStatus::Paused => 1,
+        TransferJobStatus::Queued | TransferJobStatus::Paused => 1,
         TransferJobStatus::Cancelled | TransferJobStatus::Completed | TransferJobStatus::Failed => {
             2
         }

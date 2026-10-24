@@ -7,6 +7,7 @@ use gpui::FontFeatures;
 mod types;
 
 mod ansi;
+mod contrast;
 mod element;
 mod glyphs;
 mod images;

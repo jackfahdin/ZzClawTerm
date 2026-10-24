@@ -189,6 +189,9 @@ fn permanent_auto_sync_error(error: &zzclawterm_core::CloudSyncError) -> bool {
         zzclawterm_core::CloudSyncError::Disabled
         | zzclawterm_core::CloudSyncError::PortableSnapshot(
             zzclawterm_core::PortableSnapshotError::MissingMasterPassword
+            | zzclawterm_core::PortableSnapshotError::UnsupportedEncryptionVersion(_)
+            | zzclawterm_core::PortableSnapshotError::InvalidEncryptionEnvelope
+            | zzclawterm_core::PortableSnapshotError::UnsupportedVersion(_)
             | zzclawterm_core::PortableSnapshotError::Decrypt { .. },
         ) => true,
         zzclawterm_core::CloudSyncError::Remote(message) => {

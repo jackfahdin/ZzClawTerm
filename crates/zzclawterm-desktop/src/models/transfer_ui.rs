@@ -84,6 +84,7 @@ pub(crate) struct TransferBrowserPendingRenameState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TransferUnknownFileState {
+    pub session_id: Option<String>,
     pub(crate) entry: SftpFileEntry,
 }
 

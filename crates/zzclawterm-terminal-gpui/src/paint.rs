@@ -378,6 +378,7 @@ struct TerminalSpanStyle {
     strikeout: bool,
     bold: bool,
     italic: bool,
+    hidden: bool,
     allow_keyword: bool,
 }
 
@@ -402,6 +403,7 @@ fn terminal_base_style_runs(
         strikeout: false,
         bold: false,
         italic: false,
+        hidden: false,
         allow_keyword: true,
     };
     let total_cols = terminal_cell_count(line);
@@ -446,6 +448,7 @@ fn terminal_base_style_runs(
             strikeout: span.style.strikeout,
             bold: span.style.bold,
             italic: span.style.italic,
+            hidden: span.style.hidden,
             allow_keyword: !span.style.hidden
                 && !span.style.reverse
                 && span.style.fg.is_none()
@@ -633,6 +636,7 @@ fn push_terminal_highlight_span(
         strikeout: style.strikeout,
         bold: style.bold,
         italic: style.italic,
+        hidden: style.hidden,
     });
 }
 
@@ -646,6 +650,7 @@ fn plain_terminal_span(text: &str) -> TerminalHighlightSpan {
         strikeout: false,
         bold: false,
         italic: false,
+        hidden: false,
     }
 }
 
@@ -658,6 +663,7 @@ fn terminal_span_style(span: &TerminalHighlightSpan) -> TerminalSpanStyle {
         strikeout: span.strikeout,
         bold: span.bold,
         italic: span.italic,
+        hidden: span.hidden,
         allow_keyword: false,
     }
 }
@@ -686,6 +692,7 @@ pub(super) struct FlatTerminalCell {
     pub(super) strikeout: bool,
     pub(super) bold: bool,
     pub(super) italic: bool,
+    pub(super) hidden: bool,
 }
 
 impl FlatTerminalCell {
@@ -699,6 +706,7 @@ impl FlatTerminalCell {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         }
     }
 
@@ -712,6 +720,7 @@ impl FlatTerminalCell {
             strikeout: span.strikeout,
             bold: span.bold,
             italic: span.italic,
+            hidden: span.hidden,
         }
     }
 }
@@ -756,6 +765,7 @@ pub(super) fn compress_flat_cells(flat: Vec<FlatTerminalCell>) -> Vec<TerminalHi
                 && next.strikeout == cell.strikeout
                 && next.bold == cell.bold
                 && next.italic == cell.italic
+                && next.hidden == cell.hidden
             {
                 text.push_str(&next.text);
                 j += 1;
@@ -772,6 +782,7 @@ pub(super) fn compress_flat_cells(flat: Vec<FlatTerminalCell>) -> Vec<TerminalHi
             strikeout: cell.strikeout,
             bold: cell.bold,
             italic: cell.italic,
+            hidden: cell.hidden,
         });
         i = j;
     }
@@ -837,6 +848,7 @@ mod tests {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         }
     }
 

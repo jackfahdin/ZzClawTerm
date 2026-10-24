@@ -44,7 +44,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         t!("settings.language"),
-                        Some(SharedString::from(t!("settings.languageDesc"))),
+                        None,
                         self.settings_select_control(
                             "settings.general.language",
                             crate::i18n::language_options(),

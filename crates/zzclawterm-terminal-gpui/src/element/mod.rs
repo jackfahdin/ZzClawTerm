@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -18,6 +19,10 @@ use zzclawterm_terminal::{
     terminal_char_cell_width, terminal_is_zero_width_mark,
 };
 
+use crate::contrast::{
+    TerminalContrastCache, TerminalContrastOverlays, apply_contrast, contrast_excluded,
+    normalize_ratio,
+};
 use crate::glyphs::{
     CellGlyph, CellGlyphPaintPlan, is_cell_glyph, push_cell_background, push_cell_glyphs,
 };
@@ -188,6 +193,7 @@ impl ZzClawTerminalLayoutCacheStats {
 
 #[derive(Debug, Default)]
 pub struct ZzClawTerminalLayoutCache {
+    contrast: TerminalContrastCache,
     image_residents: HashMap<u64, Arc<()>>,
     rows: HashMap<u64, Arc<CachedTerminalPaintRow>>,
     row_order: VecDeque<u64>,
@@ -218,6 +224,7 @@ impl ZzClawTerminalLayoutCache {
     }
 
     pub fn clear(&mut self) {
+        self.contrast = TerminalContrastCache::default();
         self.image_residents.clear();
         self.rows.clear();
         self.row_order.clear();
@@ -420,6 +427,7 @@ pub struct ZzClawTerminalElement {
     normal_weight: f32,
     bold_weight: f32,
     bold_default_foreground: bool,
+    minimum_contrast_ratio: f32,
     visual_y_offset: f32,
     layout_rows: Option<usize>,
     fill_height: bool,
@@ -517,6 +525,7 @@ impl ZzClawTerminalElement {
             normal_weight,
             bold_weight,
             bold_default_foreground: false,
+            minimum_contrast_ratio: 1.0,
             visual_y_offset: 0.0,
             layout_rows: None,
             fill_height: false,
@@ -552,6 +561,12 @@ impl ZzClawTerminalElement {
 
     pub fn with_bold_default_foreground(mut self, enabled: bool) -> Self {
         self.bold_default_foreground = enabled;
+        self
+    }
+
+    /// Minimum contrast for text against its effective terminal cell background.
+    pub fn with_minimum_contrast_ratio(mut self, ratio: f32) -> Self {
+        self.minimum_contrast_ratio = normalize_ratio(ratio);
         self
     }
 
@@ -684,14 +699,18 @@ impl ZzClawTerminalElement {
             keyword_state.result_known_empty,
         );
         let paint_style_key = self.paint_style_key(effective_keyword_rules_key);
-        terminal_row_layout_key(
-            self.snapshot.row(row).map(|row| row.revision),
-            display_line,
-            ansi_spans,
+        self.contrast_row_layout_key(
+            row,
             decorations,
-            &[],
-            keyword_state.spans_present,
-            paint_style_key,
+            terminal_row_layout_key(
+                self.snapshot.row(row).map(|row| row.revision),
+                display_line,
+                ansi_spans,
+                decorations,
+                &[],
+                keyword_state.spans_present,
+                paint_style_key,
+            ),
         )
     }
 
@@ -705,6 +724,7 @@ impl ZzClawTerminalElement {
         self.normal_weight.to_bits().hash(&mut hasher);
         self.bold_weight.to_bits().hash(&mut hasher);
         self.bold_default_foreground.hash(&mut hasher);
+        self.minimum_contrast_ratio.to_bits().hash(&mut hasher);
         self.cell_width.max(1.0).to_bits().hash(&mut hasher);
         #[cfg(feature = "renderer-bench")]
         self.cell_glyph_rendering.hash(&mut hasher);
@@ -727,6 +747,41 @@ impl ZzClawTerminalElement {
                 || terminal_keyword_rules_key(&self.keyword_rules),
                 |highlights| highlights.rules_key(),
             )
+    }
+
+    fn contrast_overlays<'a>(
+        &self,
+        row: usize,
+        decorations: &'a TerminalLineDecorations,
+    ) -> TerminalContrastOverlays<'a> {
+        TerminalContrastOverlays {
+            occurrences: &decorations.selected_occurrence_ranges,
+            search: &decorations.search_ranges,
+            active_search: &decorations.active_search_ranges,
+            selection: terminal_selection_cols_for_snapshot_row(
+                &self.snapshot,
+                row,
+                self.selection,
+            ),
+        }
+    }
+
+    fn contrast_row_layout_key(
+        &self,
+        row: usize,
+        decorations: &TerminalLineDecorations,
+        base: u64,
+    ) -> u64 {
+        if self.minimum_contrast_ratio <= 1.0 {
+            return base;
+        }
+        let overlays = self.contrast_overlays(row, decorations);
+        let mut hasher = DefaultHasher::new();
+        base.hash(&mut hasher);
+        overlays.occurrences.hash(&mut hasher);
+        overlays.search.hash(&mut hasher);
+        overlays.selection.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn row_layout_cache_keys(
@@ -772,14 +827,18 @@ impl ZzClawTerminalElement {
             } else {
                 &[]
             };
-            terminal_row_layout_key(
-                row_revision,
-                display_line,
-                ansi,
+            self.contrast_row_layout_key(
+                row,
                 decorations,
-                keyword_excluded_ranges,
-                keyword_spans_present,
-                paint_style_key,
+                terminal_row_layout_key(
+                    row_revision,
+                    display_line,
+                    ansi,
+                    decorations,
+                    keyword_excluded_ranges,
+                    keyword_spans_present,
+                    paint_style_key,
+                ),
             )
         };
         let row_key = row_layout_key(paint_style_key, keyword_spans_present);
@@ -1134,7 +1193,16 @@ fn terminal_underline_ranges_for_spans(
     spans: &[TerminalHighlightSpan],
     palette: zzclawterm_ui::ThemePalette,
 ) -> Vec<TerminalRowDecorationRange> {
-    terminal_text_decorations_for_row(spans, None, palette, false).underlines
+    terminal_text_decorations_for_row(
+        spans,
+        None,
+        palette,
+        false,
+        1.0,
+        &TerminalContrastOverlays::default(),
+        &mut TerminalContrastCache::default(),
+    )
+    .underlines
 }
 
 fn append_terminal_decoration_range(
@@ -1156,11 +1224,15 @@ fn append_terminal_decoration_range(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn terminal_text_decorations_for_row(
     spans: &[TerminalHighlightSpan],
     cells: Option<&[zzclawterm_terminal::RenderCell]>,
     palette: zzclawterm_ui::ThemePalette,
     bold_default_foreground: bool,
+    minimum_contrast_ratio: f32,
+    overlays: &TerminalContrastOverlays<'_>,
+    contrast_cache: &mut TerminalContrastCache,
 ) -> TerminalRowTextDecorations {
     let mut out = TerminalRowTextDecorations::default();
     let mut col = 0usize;
@@ -1187,11 +1259,29 @@ fn terminal_text_decorations_for_row(
     // Highlight/search colors apply within shaped text. Full cells remain the
     // authority for decorated blanks beyond that trimmed text boundary.
     for (col, cell) in cells.unwrap_or_default().iter().enumerate().skip(col) {
+        if !cell.style.underline && !cell.style.strikeout {
+            continue;
+        }
         let color = if cell.style.hidden {
             crate::resolve_cell_bg(palette, cell.style, bold_default_foreground)
                 .unwrap_or(palette.terminal_bg)
         } else {
             crate::resolve_cell_fg(palette, cell.style, bold_default_foreground)
+        };
+        let color = if minimum_contrast_ratio > 1.0 {
+            let bg = overlays.background(
+                col,
+                crate::resolve_cell_bg(palette, cell.style, bold_default_foreground)
+                    .unwrap_or(palette.terminal_bg),
+                palette,
+            );
+            if cell.style.hidden {
+                bg
+            } else {
+                contrast_cache.resolve(color, bg, minimum_contrast_ratio)
+            }
+        } else {
+            color
         };
         if cell.style.underline {
             append_terminal_decoration_range(&mut out.underlines, color, col, col + 1);
@@ -1548,6 +1638,13 @@ impl Element for ZzClawTerminalElement {
             self.paint_style_key(0)
         };
 
+        let contrast_cache = RefCell::new(
+            layout_cache
+                .as_deref_mut()
+                .map(|cache| std::mem::take(&mut cache.contrast))
+                .unwrap_or_default(),
+        );
+
         let visual_y_offset = self.visual_y_offset;
         let paint_geometry = TerminalPaintGeometry {
             bounds,
@@ -1695,14 +1792,18 @@ impl Element for ZzClawTerminalElement {
                 } else {
                     &[]
                 };
-                terminal_row_layout_key(
-                    row_revision,
-                    display_line,
-                    ansi,
+                self.contrast_row_layout_key(
+                    row,
                     decorations,
-                    keyword_excluded_ranges,
-                    keyword_spans_present,
-                    paint_style_key,
+                    terminal_row_layout_key(
+                        row_revision,
+                        display_line,
+                        ansi,
+                        decorations,
+                        keyword_excluded_ranges,
+                        keyword_spans_present,
+                        paint_style_key,
+                    ),
                 )
             };
             let row_key = row_layout_key(row_paint_style_key, keyword_spans_present);
@@ -1726,6 +1827,9 @@ impl Element for ZzClawTerminalElement {
                 if keyword_ranges.is_none()
                     && terminal_plain_row_fast_path(ansi, row_keyword_rules, decorations)
                     && !display_line.chars().any(is_cell_glyph)
+                    && (self.minimum_contrast_ratio <= 1.0
+                        || (self.contrast_overlays(row, decorations).is_empty()
+                            && !display_line.chars().any(contrast_excluded)))
                 {
                     let text = pad_wide_cells(display_line);
                     let text_runs = vec![TextRun {
@@ -1737,7 +1841,12 @@ impl Element for ZzClawTerminalElement {
                             self.normal_weight,
                             self.bold_weight,
                         ),
-                        color: rgb(self.palette.terminal_fg).into(),
+                        color: rgb(contrast_cache.borrow_mut().resolve(
+                            self.palette.terminal_fg,
+                            self.palette.terminal_bg,
+                            self.minimum_contrast_ratio,
+                        ))
+                        .into(),
                         background_color: None,
                         underline: None,
                         strikethrough: None,
@@ -1786,8 +1895,8 @@ impl Element for ZzClawTerminalElement {
                             self.bold_default_foreground,
                         )
                     });
-                // Glyph spans intentionally exclude search/selection/cursor state so
-                // dynamic overlays do not invalidate shaped base rows.
+                // Off mode keeps dynamic overlays out of shaped rows. Contrast mode
+                // resolves their backgrounds below and includes them in the row key.
                 let glyph_spans_storage;
                 let glyph_spans = if decorations.active_search_ranges.is_empty() {
                     background_spans.as_slice()
@@ -1799,6 +1908,19 @@ impl Element for ZzClawTerminalElement {
                         self.palette,
                     );
                     glyph_spans_storage.as_slice()
+                };
+                let contrast_spans;
+                let glyph_spans = if self.minimum_contrast_ratio > 1.0 {
+                    contrast_spans = apply_contrast(
+                        glyph_spans,
+                        self.palette,
+                        self.minimum_contrast_ratio,
+                        &self.contrast_overlays(row, decorations),
+                        &mut contrast_cache.borrow_mut(),
+                    );
+                    contrast_spans.as_slice()
+                } else {
+                    glyph_spans
                 };
                 let background_ranges = snapshot_row
                     .map(|row| {
@@ -1814,6 +1936,9 @@ impl Element for ZzClawTerminalElement {
                     snapshot_row.map(|row| row.cells.as_ref()),
                     self.palette,
                     self.bold_default_foreground,
+                    self.minimum_contrast_ratio,
+                    &self.contrast_overlays(row, decorations),
+                    &mut contrast_cache.borrow_mut(),
                 );
 
                 let mut text =
@@ -1978,6 +2103,9 @@ impl Element for ZzClawTerminalElement {
             image_residents.clone_from(&cache.image_residents);
         } else {
             image_residents.extend(visible_images.into_iter().map(|key| (key, Arc::new(()))));
+        }
+        if let Some(cache) = layout_cache.as_deref_mut() {
+            cache.contrast = contrast_cache.into_inner();
         }
         drop(layout_cache);
         if !image_residents.is_empty() {
@@ -2457,6 +2585,7 @@ mod tab_paint_tests {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         }
     }
 

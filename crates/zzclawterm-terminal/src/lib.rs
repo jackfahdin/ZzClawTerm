@@ -11,7 +11,7 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi;
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, Handler as _, NamedColor, NamedPrivateMode, Rgb};
 
 pub mod agent_capture;
 mod cells;
@@ -1159,6 +1159,40 @@ impl TerminalCore {
         self.graphics_ingress = GraphicsIngress::new();
         self.session_encoding.reset_decoder();
         self.sidecar.osc = None;
+    }
+
+    /// Reset connection-local input protocols without clearing either screen or history.
+    /// Byte discontinuities within a connection must only use `reset_stream_state`.
+    pub fn reset_session_input_protocols(&mut self) {
+        self.drain_alacritty_events();
+        for mode in [
+            NamedPrivateMode::CursorKeys,
+            NamedPrivateMode::ReportMouseClicks,
+            NamedPrivateMode::ReportCellMouseMotion,
+            NamedPrivateMode::ReportAllMouseMotion,
+            NamedPrivateMode::ReportFocusInOut,
+            NamedPrivateMode::BracketedPaste,
+            NamedPrivateMode::SgrMouse,
+            NamedPrivateMode::Utf8Mouse,
+        ] {
+            self.term.unset_private_mode(ansi::PrivateMode::Named(mode));
+        }
+        self.term.unset_keypad_application_mode();
+        self.term
+            .set_private_mode(ansi::PrivateMode::Named(NamedPrivateMode::AlternateScroll));
+
+        // The pinned Alacritty API clears both screens' Kitty mode stacks when
+        // this option changes. Restore the option so the next TUI can negotiate
+        // the protocol normally; clearing only the current flags leaves stacks
+        // that can reactivate the old connection's modes on pop or screen swap.
+        if self.term_config.kitty_keyboard {
+            let mut config = self.term_config.clone();
+            config.kitty_keyboard = false;
+            self.term.set_options(config);
+            self.term.set_options(self.term_config.clone());
+        }
+        // Config changes re-emit the old title; this is not new remote output.
+        let _ = self.proxy.drain();
     }
 
     pub fn total_rows(&self) -> usize {

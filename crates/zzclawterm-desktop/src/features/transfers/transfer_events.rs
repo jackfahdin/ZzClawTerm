@@ -245,6 +245,7 @@ impl ZzClawTermApp {
                             for event in batch {
                                 dirty |= this.apply_transfer_event(event, window, cx);
                             }
+                            this.reconcile_bulk_transfer_jobs();
                             if dirty {
                                 // Only the transfers panel. An app-wide notify here would
                                 // repaint the whole shell twenty times a second for a
@@ -321,6 +322,75 @@ impl ZzClawTermApp {
             // The job was cancelled or removed while its worker was still running.
             return false;
         };
+        if self.transfer.file_operation(&event.id).is_some() {
+            let cancelled_without_running = job.status == TransferJobStatus::Cancelling
+                && job.control.is_none()
+                && matches!(&event.event, TransferJobEvent::Finished(Err(error)) if error == SFTP_TRANSFER_CANCELLED);
+            let finished = matches!(event.event, TransferJobEvent::Finished(_));
+            match event.event {
+                TransferJobEvent::Started { detail } => job.detail = detail,
+                TransferJobEvent::Progress(progress) => {
+                    job.speed
+                        .record(progress.bytes_transferred, std::time::Instant::now());
+                    job.progress = Some(progress);
+                }
+                TransferJobEvent::Finished(result) => {
+                    job.control = None;
+                    match result {
+                        Ok(output) => {
+                            job.status = TransferJobStatus::Completed;
+                            job.detail = t!("fileTransfer.completed").to_string();
+                            if let TransferJobOutput::Summary(summary) = &output {
+                                if summary.skipped {
+                                    job.detail = t!("fileManager.skipped").to_string();
+                                }
+                                job.summary = Some(summary.clone());
+                            }
+                            if let TransferJobOutput::Sent {
+                                bytes, target_path, ..
+                            } = output
+                            {
+                                job.summary = Some(zzclawterm_transport::SftpTransferSummary {
+                                    remote_path: target_path,
+                                    local_path: Default::default(),
+                                    bytes,
+                                    skipped: false,
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            job.status = if error == SFTP_TRANSFER_CANCELLED {
+                                TransferJobStatus::Cancelled
+                            } else {
+                                TransferJobStatus::Failed
+                            };
+                            job.detail = error;
+                            if job.status == TransferJobStatus::Failed {
+                                self.notify_background_operation(
+                                    "file-operation-error",
+                                    zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                                    t!("common.operationFailed").to_string(),
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.transfer
+                .restore_transfer_job_after_event((job_index, job));
+            if finished {
+                if cancelled_without_running {
+                    // No filesystem or network operation ran, so there is no
+                    // directory change to refresh after a queued cancellation.
+                    self.release_unreferenced_hidden_sessions(cx);
+                } else {
+                    self.finish_file_operation(&event.id, cx);
+                }
+            }
+            return true;
+        }
         let editor_event = matches!(
             job.kind,
             TransferJobKind::LoadEditor { .. } | TransferJobKind::SaveEditor { .. }
@@ -447,9 +517,6 @@ impl ZzClawTermApp {
                     TransferJobEvent::Finished(Ok(TransferJobOutput::Sent { .. }))
                 ),
             );
-            if let TransferJobEvent::Finished(Ok(output)) = &event.event {
-                self.apply_file_manager_job_output(&event_id, output, cx);
-            }
         }
         let cleanup_internal_job = event_finished
             && !job.is_user_transfer()

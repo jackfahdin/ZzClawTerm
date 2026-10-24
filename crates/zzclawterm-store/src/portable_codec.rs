@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use zzclawterm_core::{
     PortableSnapshotError, PortableSnapshotMeta, RawPortableSnapshot, decrypt_snapshot_bytes,
     encrypt_snapshot_bytes,
 };
+
+mod memory;
+use memory::SnapshotMemory;
 
 const SNAPSHOT_META_KEY: &str = "meta";
 const SNAPSHOT_META_TABLE: TableDefinition<&str, &str> = TableDefinition::new("snapshot_meta");
@@ -55,9 +56,9 @@ pub fn decode_encrypted_raw_portable_snapshot(
 pub(crate) fn encode_sync_pointer(
     pointer: &zzclawterm_core::RemoteSyncPointer,
 ) -> Result<Vec<u8>, PortableSnapshotError> {
-    let temp = TempRedbFile::new("cloud-meta-encode");
+    let memory = SnapshotMemory::default();
     (|| -> Result<(), Box<dyn std::error::Error>> {
-        let db = Database::create(temp.path())?;
+        let db = Database::builder().create_with_backend(memory.clone())?;
         let txn = db.begin_write()?;
         {
             let mut docs = txn.open_table(SYNC_POINTER_TABLE)?;
@@ -68,17 +69,16 @@ pub(crate) fn encode_sync_pointer(
         Ok(())
     })()
     .map_err(|error| PortableSnapshotError::Codec(error.to_string()))?;
-    std::fs::read(temp.path()).map_err(PortableSnapshotError::from)
+    Ok(memory.bytes())
 }
 
 pub(crate) fn decode_sync_pointer(
     bytes: &[u8],
 ) -> Result<zzclawterm_core::RemoteSyncPointer, PortableSnapshotError> {
-    let temp = TempRedbFile::new("cloud-meta-decode");
-    std::fs::write(temp.path(), bytes)?;
+    let memory = SnapshotMemory::from_bytes(bytes)?;
     let result = catch_unwind(AssertUnwindSafe(
         || -> Result<zzclawterm_core::RemoteSyncPointer, Box<dyn std::error::Error>> {
-            let db = Database::open(temp.path())?;
+            let db = Database::builder().create_with_backend(memory)?;
             let txn = db.begin_read()?;
             let table = txn.open_table(SYNC_POINTER_TABLE)?;
             let value = table
@@ -97,9 +97,9 @@ pub(crate) fn decode_sync_pointer(
 fn encode_raw_snapshot_redb(
     snapshot: &RawPortableSnapshot,
 ) -> Result<Vec<u8>, PortableSnapshotError> {
-    let temp = TempRedbFile::new("portable-snapshot-encode");
+    let memory = SnapshotMemory::default();
     (|| -> Result<(), Box<dyn std::error::Error>> {
-        let db = Database::create(temp.path())?;
+        let db = Database::builder().create_with_backend(memory.clone())?;
         let txn = db.begin_write()?;
         {
             let mut meta = txn.open_table(SNAPSHOT_META_TABLE)?;
@@ -116,7 +116,7 @@ fn encode_raw_snapshot_redb(
         Ok(())
     })()
     .map_err(|error| PortableSnapshotError::Codec(error.to_string()))?;
-    std::fs::read(temp.path()).map_err(PortableSnapshotError::from)
+    Ok(memory.bytes())
 }
 
 fn decode_raw_snapshot_redb(bytes: &[u8]) -> Result<RawPortableSnapshot, PortableSnapshotError> {
@@ -127,10 +127,9 @@ fn decode_raw_snapshot_redb(bytes: &[u8]) -> Result<RawPortableSnapshot, Portabl
 fn decode_raw_snapshot_redb_inner(
     bytes: &[u8],
 ) -> Result<RawPortableSnapshot, PortableSnapshotError> {
-    let temp = TempRedbFile::new("portable-snapshot-decode");
-    std::fs::write(temp.path(), bytes)?;
+    let memory = SnapshotMemory::from_bytes(bytes)?;
     let result = (|| -> Result<RawPortableSnapshot, Box<dyn std::error::Error>> {
-        let db = Database::open(temp.path())?;
+        let db = Database::builder().create_with_backend(memory)?;
         let read = db.begin_read()?;
         let meta_table = read.open_table(SNAPSHOT_META_TABLE)?;
         let meta_raw = meta_table
@@ -173,34 +172,4 @@ fn read_snapshot_docs(
         docs.insert(key.value().to_string(), value.value().to_string());
     }
     Ok(docs)
-}
-
-struct TempRedbFile {
-    path: PathBuf,
-}
-
-impl TempRedbFile {
-    fn new(prefix: &str) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let path = std::env::temp_dir().join(format!(
-            "zzclawterm-{prefix}-{}-{now}-{}.redb",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let _ = std::fs::remove_file(&path);
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempRedbFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }

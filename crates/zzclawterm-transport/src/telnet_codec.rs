@@ -1,4 +1,4 @@
-use crate::{TelnetEnterMode, TelnetSessionConfig, telnet_prompts};
+use crate::TelnetSessionConfig;
 
 pub(super) const IAC: u8 = 255;
 pub(super) const NOP: [u8; 2] = [IAC, 241];
@@ -112,69 +112,6 @@ pub(super) fn strip_telnet_commands(data: &[u8], on_negotiate: &mut impl FnMut(u
         }
     }
     visible
-}
-
-pub(super) fn normalize_telnet_input(data: &[u8], config: &TelnetSessionConfig) -> Vec<u8> {
-    if config.raw_tcp {
-        return data.to_vec();
-    }
-    let newline = match config.enter_mode {
-        TelnetEnterMode::Crlf => b"\r\n".as_slice(),
-        TelnetEnterMode::Cr => b"\r".as_slice(),
-        TelnetEnterMode::Lf => b"\n".as_slice(),
-    };
-    let mut normalized = Vec::with_capacity(data.len());
-    for byte in data {
-        match *byte {
-            b'\n' | b'\r' => normalized.extend_from_slice(newline),
-            IAC => normalized.extend_from_slice(&[IAC, IAC]),
-            _ => normalized.push(*byte),
-        }
-    }
-    normalized
-}
-
-pub(super) fn edit_telnet_line_input(
-    data: &[u8],
-    line_buffer: &mut Vec<u8>,
-    config: &TelnetSessionConfig,
-) -> (Vec<u8>, Vec<u8>) {
-    let mut send = Vec::new();
-    let mut echo = Vec::new();
-    let mut index = 0;
-    while index < data.len() {
-        let byte = data[index];
-        match byte {
-            b'\r' | b'\n' => {
-                send.extend_from_slice(line_buffer);
-                send.push(byte);
-                line_buffer.clear();
-                if config.local_echo {
-                    echo.extend_from_slice(b"\r\n");
-                }
-                if byte == b'\r' && index + 1 < data.len() && data[index + 1] == b'\n' {
-                    index += 1;
-                }
-            }
-            b'\x08' | b'\x7f' => {
-                if line_buffer.pop().is_some() && config.local_echo {
-                    echo.extend_from_slice(b"\x08 \x08");
-                }
-            }
-            _ => {
-                line_buffer.push(byte);
-                if config.local_echo {
-                    echo.push(byte);
-                }
-            }
-        }
-        index += 1;
-    }
-    (send, echo)
-}
-
-pub(super) fn telnet_auto_login_line_bytes(value: &str, config: &TelnetSessionConfig) -> Vec<u8> {
-    telnet_prompts::telnet_auto_login_line_bytes(value, config, normalize_telnet_input)
 }
 
 /// Telnet protocol escaping without text-input normalization.

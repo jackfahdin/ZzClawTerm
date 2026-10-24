@@ -20,6 +20,7 @@ pub(super) struct TerminalHighlightSpan {
     pub(super) strikeout: bool,
     pub(super) bold: bool,
     pub(super) italic: bool,
+    pub(super) hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

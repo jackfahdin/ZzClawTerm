@@ -417,10 +417,13 @@ def archive_tar_gz(source: Path, destination: Path) -> None:
 
 
 def windows_numeric_version(version: str) -> str:
-    components = version.split("-", 1)[0].split(".")
-    if len(components) != 3 or any(not part.isdigit() for part in components):
-        raise ValueError(f"Windows package version is not SemVer: {version}")
-    numeric = [int(part) for part in components] + [0]
+    parsed = parse_version(version)
+    # Keep in step with zzclawterm-app/build.rs. Build metadata never contributes;
+    # a final numeric prerelease identifier distinguishes preview releases.
+    prerelease = parsed.group("pre")
+    revision = prerelease.rsplit(".", 1)[-1] if prerelease else ""
+    numeric = [int(parsed.group(key)) for key in ("major", "minor", "patch")]
+    numeric.append(int(revision) if revision.isascii() and revision.isdecimal() else 0)
     if any(part > 65535 for part in numeric):
         raise ValueError(f"Windows version component exceeds 65535: {version}")
     return ".".join(str(part) for part in numeric)
@@ -503,7 +506,8 @@ def create_macos_packages(
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     helper_binaries = copy_helpers(macos_dir, info.target)
-    shutil.copy2(ICON_DIR / "icon.icns", resources_dir / "icon.icns")
+    # The macOS artwork includes the transparent margins used in Dock and Launchpad.
+    shutil.copy2(RESOURCE_DIR / "icons-macos" / "icon.icns", resources_dir / "icon.icns")
     copy_release_documents(resources_dir, version)
 
     plist = {

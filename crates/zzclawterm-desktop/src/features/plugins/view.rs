@@ -466,7 +466,7 @@ impl Render for PluginPanel {
             .child(
                 div()
                     .text_color(rgb(palette.text_muted))
-                    .child(t!("plugins.retainedData")),
+                    .child(t!("plugins.permissions")),
             )
             .child(div().child(self.status.clone()));
         if let Some(error) = snapshot.startup_error {
@@ -589,7 +589,7 @@ impl Render for PluginPanel {
                             t!("plugins.uninstall"),
                         )
                         .full_width()
-                        .tooltip(t!("plugins.uninstall"))
+                        .tooltip(t!("plugins.retainedData"))
                         .variant(ZzClawButtonVariant::Danger)
                         .disabled(self.busy())
                         .on_click(cx.listener(move |this, _, _, cx| {

@@ -51,9 +51,21 @@ fn windows_app_decoder_helper_validates_snapshot_and_wrong_password() {
     );
 
     assert_eq!(decode_in_app_helper(&ciphertext, "wrong-password"), [1]);
-    let mut corrupted = ciphertext;
-    corrupted[20] ^= 0xff;
+    let mut corrupted = ciphertext.clone();
+    corrupted[50] ^= 0xff;
     assert_eq!(decode_in_app_helper(&corrupted, "correct-password"), [1]);
+    let mut unsupported = ciphertext.clone();
+    unsupported[8] = 255;
+    assert_eq!(
+        decode_in_app_helper(&unsupported, "correct-password"),
+        [4, 255]
+    );
+    let mut excessive_kdf = ciphertext;
+    excessive_kdf[10] ^= 0xff;
+    assert_eq!(
+        decode_in_app_helper(&excessive_kdf, "correct-password"),
+        [5]
+    );
 }
 
 #[test]

@@ -73,22 +73,41 @@ pub(crate) fn check_provider_snapshot(
     options: &LocalCloudSyncOptions,
     state: &CloudSyncState,
     control: &CloudSyncOperationControl,
-) -> Result<
-    (
-        zzclawterm_core::CloudRemoteCheckDecision,
-        Option<RemoteSyncPointer>,
-    ),
-    CloudSyncError,
-> {
+) -> Result<cloud_sync::CloudSyncCheck, CloudSyncError> {
     control.checkpoint()?;
     with_remote(settings, options, |remote| {
-        cloud_sync::check_snapshot_with_remote(
+        cloud_sync::check_snapshot_with_remote_state(
             &control.local_store(local_store),
             options,
             &control.remote(remote),
             state,
             settings.auto_pull_remote_changes,
         )
+    })
+}
+
+pub(crate) fn push_checked_provider_snapshot(
+    store: &dyn CloudLocalStore,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    checked: cloud_sync::CloudSyncCheck,
+    control: &CloudSyncOperationControl,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    with_remote(settings, options, |remote| {
+        checked.push(store, options, remote, control)
+    })
+}
+
+pub(crate) fn pull_checked_provider_snapshot(
+    store: &dyn CloudLocalStore,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    checked: cloud_sync::CloudSyncCheck,
+    before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+    control: &CloudSyncOperationControl,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    with_remote(settings, options, |remote| {
+        checked.pull(store, options, remote, before_apply, control)
     })
 }
 

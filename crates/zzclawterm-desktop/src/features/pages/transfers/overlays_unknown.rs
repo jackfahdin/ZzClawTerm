@@ -21,6 +21,7 @@ impl ZzClawTermApp {
                 .unknown_file_dialog()
                 .cloned()
                 .unwrap_or(TransferUnknownFileState {
+                    session_id: None,
                     entry: SftpFileEntry {
                         name: String::new(),
                         path: String::new(),

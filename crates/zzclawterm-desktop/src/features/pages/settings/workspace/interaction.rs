@@ -59,7 +59,7 @@ impl SettingsPanel {
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.interactionClipboardMouse")),
-                Some(t!("settings.interactionClipboardMouseDesc")),
+                None,
                 div()
                     .flex()
                     .flex_col()
@@ -67,7 +67,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         t!("settings.copyOnSelect"),
-                        Some(SharedString::from(t!("settings.copyOnSelectDesc"))),
+                        None,
                         settings_switch(
                             palette,
                             "interaction-copy-select",
@@ -139,7 +139,7 @@ impl SettingsPanel {
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.interactionTerminalPage")),
-                Some(t!("settings.interactionTerminalPageDesc")),
+                None,
                 settings_form_row(
                     palette,
                     t!("settings.terminalZoomEnabled"),
@@ -157,7 +157,7 @@ impl SettingsPanel {
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.interactionCommandInput")),
-                Some(t!("settings.interactionCommandInputDesc")),
+                None,
                 div()
                     .flex()
                     .flex_col()
@@ -251,7 +251,7 @@ impl SettingsPanel {
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.tabMouseActions")),
-                Some(t!("settings.tabMouseActionsDesc")),
+                None,
                 div()
                     .flex()
                     .flex_col()
@@ -259,7 +259,7 @@ impl SettingsPanel {
                     .child(self.tab_mouse_action_settings_field(
                         TabMouseActionPresentation {
                             label: t!("settings.tabDoubleClickAction"),
-                            description: t!("settings.tabDoubleClickActionDesc"),
+                            description: None,
                             id: "settings.interaction.tab-double",
                             current: &double_action,
                         },
@@ -268,7 +268,7 @@ impl SettingsPanel {
                     .child(self.tab_mouse_action_settings_field(
                         TabMouseActionPresentation {
                             label: t!("settings.tabMiddleClickAction"),
-                            description: t!("settings.tabMiddleClickActionDesc"),
+                            description: None,
                             id: "settings.interaction.tab-middle",
                             current: &middle_action,
                         },
@@ -277,7 +277,7 @@ impl SettingsPanel {
                     .child(self.tab_mouse_action_settings_field(
                         TabMouseActionPresentation {
                             label: t!("settings.tabRightClickAction"),
-                            description: t!("settings.tabRightClickActionDesc"),
+                            description: Some(t!("settings.tabRightClickActionDesc")),
                             id: "settings.interaction.tab-right",
                             current: &right_action,
                         },
@@ -306,7 +306,7 @@ impl SettingsPanel {
         self.settings_select_field(
             id,
             label,
-            Some(SharedString::from(description)),
+            description.map(SharedString::from),
             (options, selected, false),
             cx,
         )
@@ -315,7 +315,7 @@ impl SettingsPanel {
 
 struct TabMouseActionPresentation<'a> {
     label: Cow<'static, str>,
-    description: Cow<'static, str>,
+    description: Option<Cow<'static, str>>,
     id: &'static str,
     current: &'a str,
 }

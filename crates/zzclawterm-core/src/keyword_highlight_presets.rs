@@ -254,6 +254,9 @@ fn word_patterns(words: &[&str]) -> Vec<String> {
     words.iter().map(|word| (*word).to_string()).collect()
 }
 
+const DECIMAL_NUMBER: &str = r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?";
+const HORIZONTAL_SPACE: &str = r"[\t\p{Zs}]";
+
 fn builtin_patterns(id: &str) -> Vec<String> {
     match id {
         "builtin-url" => vec![r"(?i)\b(?:https?|ftp|wss?)://[-\w+&@#/%?=~_|!:,.;]*[-\w+&@#/%=~_|]".into()],
@@ -358,9 +361,9 @@ fn builtin_patterns(id: &str) -> Vec<String> {
         ]),
         "builtin-info" => word_patterns(&["info", "information", "notice"]),
         "builtin-debug" => word_patterns(&["debug", "trace", "verbose"]),
-        "builtin-duration" => vec![
-            r"(?i)\b[-+]?\d+(?:\.\d+)?\s*(?:ns|us|µs|ms|sec|mins?|minutes|hrs?|hours|days|weeks|months|years)\b".into(),
-        ],
+        "builtin-duration" => vec![format!(
+            r"(?i)[-+]?{DECIMAL_NUMBER}{HORIZONTAL_SPACE}*(?:ns|us|µs|ms|sec|mins?|minutes|hrs?|hours|days|weeks|months|years)\b"
+        )],
         "builtin-constant" => word_patterns(&[
             "true",
             "false",
@@ -382,8 +385,13 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "resume", "resumeed", "resumeing",
         ]),
         "builtin-number" => vec![
-            r"(?i)\b[-+]?0x[0-9a-f]+\b".into(),
-            r"(?i)\b[-+]?(?:\.\d+|\d+\.\d*|\d+[eE][-+]?\d+|\d{2,})(?:[eE][-+]?\d+)?(?:\s*%)?\b".into(),
+            r"(?i)[-+]?0x[0-9a-f]+".into(),
+            // Percentages may contain one digit; bare integers still need two.
+            // Context boundaries are validated by the semantic matcher so signs,
+            // leading/trailing decimal points and '%' stay inside the token.
+            format!(
+                r"[-+]?(?:{DECIMAL_NUMBER}{HORIZONTAL_SPACE}*%|(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+|\d{{2,}})"
+            ),
         ],
         "builtin-prompt" => Vec::new(),
         "builtin-operator" => vec![r"[-:;=+&*()$\[\]<>?|{}]+".into()],
@@ -465,6 +473,55 @@ mod tests {
                 .find(|r| r.id == "builtin-url")
                 .is_some_and(|r| !r.patterns.is_empty())
         );
+    }
+
+    #[test]
+    fn numeric_presets_cover_complete_literals_without_bare_single_digits() {
+        let rules = get_builtin_keyword_rules(true);
+        for (id, tokens) in [
+            (
+                "builtin-number",
+                &[
+                    "0%", "5 %", "-5%", "12.5 %", "-12", "+12", ".5", "-.5", "12.", "1e-3",
+                    "-1.2E+3", "-0xFF", "5\t%", "5\u{a0}%",
+                ][..],
+            ),
+            (
+                "builtin-duration",
+                &[
+                    "-12ms",
+                    ".5 ms",
+                    "-.5ms",
+                    "74.1 ms",
+                    "17018ms",
+                    "1e-3 ms",
+                    "12 minutes",
+                    "12\tµs",
+                    "12\u{a0}ms",
+                ][..],
+            ),
+        ] {
+            let rule = rules.iter().find(|rule| rule.id == id).unwrap();
+            let patterns: Vec<_> = rule
+                .patterns
+                .iter()
+                .map(|pattern| regex::Regex::new(pattern).unwrap())
+                .collect();
+            for token in tokens {
+                assert!(
+                    patterns.iter().any(|pattern| pattern
+                        .find(token)
+                        .is_some_and(|found| found.range() == (0..token.len()))),
+                    "{id}: {token:?}"
+                );
+            }
+            for token in ["0", "7", "-5", "+3", "5\n%", "5\r%", "5\u{2028}%", "5\nms"] {
+                assert!(
+                    patterns.iter().all(|pattern| !pattern.is_match(token)),
+                    "{id}: {token:?}"
+                );
+            }
+        }
     }
 
     #[test]

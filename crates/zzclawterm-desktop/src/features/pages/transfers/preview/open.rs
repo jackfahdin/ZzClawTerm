@@ -50,6 +50,17 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let session_id = self.session.active_id_owned();
+        self.open_transfer_preview_for_session(entry, session_id, window, cx);
+    }
+
+    pub(in crate::features) fn open_transfer_preview_for_session(
+        &mut self,
+        entry: SftpFileEntry,
+        session_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if entry.is_directory() {
             self.shell
                 .set_status(t!("filePreview.statusDirectory").to_string());
@@ -61,7 +72,6 @@ impl ZzClawTermApp {
         // unsupported message without fetching any bytes.
         let category = classify_preview(&entry.name);
 
-        let session_id = self.session.active_id_owned();
         let remote_file_path = entry.remote_path();
         let tab_id =
             TransferPreviewState::tab_id_for_remote_path(session_id.as_deref(), &remote_file_path);
@@ -88,8 +98,6 @@ impl ZzClawTermApp {
             return;
         }
 
-        self.transfer.select_browser_path(entry.path.clone());
-        self.transfer.set_remote_path(entry.path.clone());
         let generation = RemoteTextGeneration::next();
         // An unsupported file is terminal at open: no fetch, just the message.
         let initial_content = if category.is_fetchable() {

@@ -46,20 +46,13 @@ impl ThemePalette {
         self.terminal_ansi[usize::from(index.min(15))]
     }
 
-    /// Boost terminal fg/ANSI contrast against terminal background (Tauri minimum_contrast_ratio).
-    pub fn apply_minimum_contrast_ratio(&mut self, ratio: f32) {
+    /// Keep the cursor visible without changing terminal foreground/background colors.
+    pub fn apply_cursor_contrast_ratio(&mut self, ratio: f32) {
         if ratio <= 1.01 {
             return;
         }
-        let bg = self.terminal_bg;
-        self.terminal_fg = ensure_contrast(self.terminal_fg, bg, ratio);
-        self.terminal_fg_intense = self
-            .terminal_fg_intense
-            .map(|fg| ensure_contrast(fg, bg, ratio));
-        self.terminal_cursor = ensure_contrast(self.terminal_cursor, bg, ratio.min(4.5));
-        for color in &mut self.terminal_ansi {
-            *color = ensure_contrast(*color, bg, ratio);
-        }
+        self.terminal_cursor =
+            ensure_contrast(self.terminal_cursor, self.terminal_bg, ratio.min(4.5));
     }
 }
 

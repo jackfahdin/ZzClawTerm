@@ -91,6 +91,14 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.mark_title_drag_activity();
+        #[cfg(target_os = "macos")]
+        {
+            // 嵌套拖动区只处理一次双击，缩放和恢复遵循 macOS 系统偏好。
+            cx.stop_propagation();
+            if _event.click_count == 2 && !_window.is_fullscreen() {
+                _window.titlebar_double_click();
+            }
+        }
         #[cfg(target_os = "linux")]
         {
             // Linux 的拖动标记不会主动移动窗口；阻止嵌套拖动区重复处理同一次按下。

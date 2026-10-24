@@ -3,6 +3,7 @@
 mod command_runtime;
 mod quick_command_runtime;
 mod runtime_state;
+mod staged;
 mod state;
 
 pub(in crate::features) use quick_command_runtime::{

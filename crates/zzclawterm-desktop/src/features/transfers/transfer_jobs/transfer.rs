@@ -237,7 +237,7 @@ impl ZzClawTermApp {
 
         if !matches!(
             job.status,
-            TransferJobStatus::Running | TransferJobStatus::Paused
+            TransferJobStatus::Queued | TransferJobStatus::Running | TransferJobStatus::Paused
         ) {
             self.shell
                 .set_status(format!("transfer {} is not running", job.id));
@@ -308,17 +308,28 @@ impl ZzClawTermApp {
         job.detail = "Cancelling".to_string();
         self.shell
             .set_status(format!("remote transfer cancelling: {}", job.id));
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
     pub(in crate::features) fn pause_transfer_job(&mut self, job_id: &str, cx: &mut Context<Self>) {
+        if self
+            .transfer
+            .file_operation(job_id)
+            .is_some_and(|context| !context.can_pause())
+        {
+            return;
+        }
         let Some(job) = self.transfer.transfer_job_mut(job_id) else {
             self.shell.set_status("transfer job not found".to_string());
             cx.notify();
             return;
         };
 
-        if job.status != TransferJobStatus::Running {
+        if !matches!(
+            job.status,
+            TransferJobStatus::Queued | TransferJobStatus::Running
+        ) {
             self.shell
                 .set_status(format!("transfer {} is not running", job.id));
             cx.notify();
@@ -338,6 +349,7 @@ impl ZzClawTermApp {
         job.detail = "Paused".to_string();
         self.shell
             .set_status(format!("remote transfer paused: {}", job.id));
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
@@ -346,6 +358,7 @@ impl ZzClawTermApp {
         job_id: &str,
         cx: &mut Context<Self>,
     ) {
+        let managed = self.transfer.manages_bulk_job(job_id);
         let Some(job) = self.transfer.transfer_job_mut(job_id) else {
             self.shell.set_status("transfer job not found".to_string());
             cx.notify();
@@ -366,12 +379,17 @@ impl ZzClawTermApp {
             return;
         };
 
-        control.resume();
-        job.status = TransferJobStatus::Running;
+        if managed {
+            job.status = TransferJobStatus::Queued;
+        } else {
+            control.resume();
+            job.status = TransferJobStatus::Running;
+        }
         job.speed.reset();
         job.detail = "Resuming".to_string();
         self.shell
             .set_status(format!("remote transfer resumed: {}", job.id));
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
@@ -381,6 +399,9 @@ impl ZzClawTermApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.retry_file_operation(&job_id, cx) {
+            return;
+        }
         let promised_source = self.transfer.promised_download_source(&job_id);
         let service = if let Some(source) = &promised_source {
             let Some(source) = source.upgrade() else {
@@ -391,7 +412,23 @@ impl ZzClawTermApp {
             };
             (*source).clone()
         } else {
-            match self.active_remote_file_service() {
+            let session_id = self
+                .transfer
+                .transfer_job(&job_id)
+                .and_then(|job| job.session_id.clone());
+            let source = session_id.as_deref().and_then(|id| {
+                if self.session.is_disconnected(id) {
+                    return None;
+                }
+                self.session
+                    .metadata(id)
+                    .and_then(|metadata| metadata.ssh_config.clone())
+            });
+            let result = match (session_id, source) {
+                (Some(id), Some(config)) => self.remote_file_service_for_session(&id, config),
+                _ => Err(anyhow::anyhow!("source session is unavailable")),
+            };
+            match result {
                 Ok(service) => service,
                 Err(error) => {
                     self.shell.set_status(error.to_string());
@@ -599,6 +636,7 @@ impl ZzClawTermApp {
         } else {
             format!("paused {changed} transfer job(s)")
         });
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
@@ -612,6 +650,7 @@ impl ZzClawTermApp {
         } else {
             format!("resumed {changed} transfer job(s)")
         });
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
@@ -642,6 +681,7 @@ impl ZzClawTermApp {
         } else {
             format!("cancelling {changed} transfer job(s)")
         });
+        self.reconcile_bulk_transfer_jobs();
         cx.notify();
     }
 
@@ -719,7 +759,9 @@ fn visible_xymodem_job_ids(jobs: &[TransferJobState], session_id: Option<&str>) 
             job.is_visible_for_session(session_id)
                 && matches!(
                     job.status,
-                    TransferJobStatus::Running | TransferJobStatus::Paused
+                    TransferJobStatus::Queued
+                        | TransferJobStatus::Running
+                        | TransferJobStatus::Paused
                 )
                 && matches!(
                     job.kind,

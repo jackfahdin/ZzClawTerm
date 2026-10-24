@@ -53,7 +53,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         t!("settings.askSaveLocation"),
-                        Some(SharedString::from(t!("settings.askSaveLocationDesc"))),
+                        None,
                         settings_switch(
                             palette,
                             "transfer-ask-save",

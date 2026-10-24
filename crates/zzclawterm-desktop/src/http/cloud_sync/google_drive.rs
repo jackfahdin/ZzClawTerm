@@ -259,34 +259,7 @@ impl NativeGoogleDriveRemote {
                 body.trim()
             )));
         }
-        let value: serde_json::Value = serde_json::from_str(&body)?;
-        let files = value
-            .get("files")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                CloudSyncError::Remote(
-                    "Google Drive file lookup response is missing files".to_string(),
-                )
-            })?;
-        for file in files {
-            let id = file
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let mime_type = file
-                .get("mimeType")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            if id.is_empty() {
-                continue;
-            }
-            if folder_only || mime_type != GOOGLE_DRIVE_FOLDER_MIME {
-                return Ok(Some(GoogleDriveFile { id: id.to_string() }));
-            }
-        }
-        Ok(None)
+        unique_google_drive_child(&body, folder_only)
     }
 
     fn read_file_content(&self, file_id: &str) -> Result<Option<Vec<u8>>, CloudSyncError> {
@@ -398,6 +371,42 @@ impl NativeGoogleDriveRemote {
         }
         Ok(names)
     }
+}
+
+fn unique_google_drive_child(
+    body: &str,
+    folder_only: bool,
+) -> Result<Option<GoogleDriveFile>, CloudSyncError> {
+    let value: serde_json::Value = serde_json::from_str(body)?;
+    let files = value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CloudSyncError::Remote("Google Drive file lookup response is missing files".to_string())
+        })?;
+    let mut found = None;
+    for file in files {
+        let id = file
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let mime_type = file
+            .get("mimeType")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if id.is_empty() {
+            continue;
+        }
+        if folder_only || mime_type != GOOGLE_DRIVE_FOLDER_MIME {
+            if found.is_some() {
+                return Err(CloudSyncError::Remote("Google Drive has duplicate names in the sync path; resolve the duplicate files or folders before syncing".into()));
+            }
+            found = Some(GoogleDriveFile { id: id.to_string() });
+        }
+    }
+    Ok(found)
 }
 
 pub(super) struct GoogleDriveListPage {
@@ -556,5 +565,33 @@ fn map_google_drive_http_error(error: zed_reqwest::Error) -> CloudSyncError {
         ))
     } else {
         CloudSyncError::Remote(format!("Google Drive request failed: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::unique_google_drive_child;
+
+    #[test]
+    fn duplicate_files_or_folders_fail_instead_of_hiding_a_device_branch() {
+        let files = r#"{"files":[{"id":"one","mimeType":"application/octet-stream"},{"id":"two","mimeType":"application/octet-stream"}]}"#;
+        let folders = r#"{"files":[{"id":"one","mimeType":"application/vnd.google-apps.folder"},{"id":"two","mimeType":"application/vnd.google-apps.folder"}]}"#;
+        assert!(unique_google_drive_child(files, false).is_err());
+        assert!(unique_google_drive_child(folders, true).is_err());
+        assert_eq!(
+            unique_google_drive_child(
+                r#"{"files":[{"id":"one","mimeType":"application/octet-stream"}]}"#,
+                false
+            )
+            .unwrap()
+            .unwrap()
+            .id,
+            "one"
+        );
+        assert!(
+            unique_google_drive_child(r#"{"files":[]}"#, true)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -1,9 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rust_i18n::t;
-
 use super::operation::AutoSyncOperationControls;
 use gpui::Context;
+use rust_i18n::t;
 use zzclawterm_core::cloud_sync::control::CloudSyncOperationControl;
 use zzclawterm_core::{
     AppRuntime, CloudRemoteCheckDecision, CloudSyncError, CloudSyncResult, CloudSyncSettings,
@@ -14,8 +13,8 @@ use zzclawterm_store::{StoreBlockingClient, StoreDomain};
 use crate::features::ZzClawTermApp;
 
 use super::cloud_sync_provider::{
-    check_provider_snapshot, cleanup_provider_snapshots, pull_provider_snapshot_guarded,
-    push_provider_snapshot,
+    check_provider_snapshot, cleanup_provider_snapshots, pull_checked_provider_snapshot,
+    push_checked_provider_snapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +34,7 @@ pub(crate) enum AutoSyncResult {
     Debouncing(Duration),
     Busy,
     RemoteAvailable { retry_when_safe: bool },
-    UpToDate(CloudSyncState),
+    UpToDate(Box<CloudSyncState>),
     Synced(Box<CloudSyncResult>),
 }
 
@@ -100,22 +99,25 @@ pub(crate) fn run_auto_sync(
         master_password: password,
         enabled: true,
     };
-    let (decision, pointer) =
-        check_provider_snapshot(store, &settings, &options, &state, &controls.sync)?;
-    match decision {
+    let checked = check_provider_snapshot(store, &settings, &options, &state, &controls.sync)?;
+    match checked.decision {
         CloudRemoteCheckDecision::LocalChanged if settings.auto_push_on_change => {
-            let result =
-                push_provider_snapshot(store, &settings, &options, &state, false, &controls.sync)?;
+            let result = push_checked_provider_snapshot(
+                store,
+                &settings,
+                &options,
+                checked,
+                &controls.sync,
+            )?;
             cleanup_if_due(store, &settings, &options, &result, &controls.cleanup);
             Ok(AutoSyncResult::Synced(Box::new(result)))
         }
         CloudRemoteCheckDecision::AutoPull if pull_safe => {
-            let result = match pull_provider_snapshot_guarded(
+            let result = match pull_checked_provider_snapshot(
                 store,
                 &settings,
                 &options,
-                &state,
-                false,
+                checked,
                 before_apply,
                 &controls.sync,
             ) {
@@ -137,17 +139,7 @@ pub(crate) fn run_auto_sync(
         }),
         CloudRemoteCheckDecision::Conflict => unreachable!("conflict returned by remote check"),
         CloudRemoteCheckDecision::UpToDate | CloudRemoteCheckDecision::LocalChanged => {
-            let mut checked = state;
-            checked.last_checked_at_ms = Some(now_ms());
-            if decision == CloudRemoteCheckDecision::UpToDate
-                && let Some(pointer) = pointer
-            {
-                let mut local =
-                    zzclawterm_core::CloudLocalStore::build_sync_snapshot(store, &options)?;
-                local.recalculate_hash()?;
-                checked.last_synced_payload_hash = Some(local.meta.payload_hash);
-                checked.last_applied_remote_revision = Some(pointer.revision_id);
-            }
+            let checked = checked.state;
             let persisted = checked.clone();
             controls.sync.begin_commit()?;
             store
@@ -155,7 +147,7 @@ pub(crate) fn run_auto_sync(
                     database.save_cloud_sync_state(&persisted)
                 })
                 .map_err(|error| CloudSyncError::LocalStore(error.category().to_string()))?;
-            Ok(AutoSyncResult::UpToDate(checked))
+            Ok(AutoSyncResult::UpToDate(Box::new(checked)))
         }
     }
 }
@@ -216,8 +208,10 @@ impl ZzClawTermApp {
                     .set_status(t!("settings.syncRemoteAvailable"));
             }
             Ok(AutoSyncResult::UpToDate(state)) => {
-                self.cloud_sync
-                    .complete_job(state.clone(), t!("settings.syncUpToDate").to_string());
+                self.cloud_sync.complete_job(
+                    state.as_ref().clone(),
+                    t!("settings.syncUpToDate").to_string(),
+                );
             }
             Ok(AutoSyncResult::Synced(sync)) => {
                 let message = match sync.outcome {

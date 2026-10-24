@@ -23,12 +23,14 @@ use crate::models::{
 };
 
 use super::runtime_state::CommandRuntimeState;
+use super::staged::StagedQuickCommands;
 
 pub(in crate::features) struct CommandFeatureState {
     catalog: CommandCatalogState,
     quick: QuickCommandFeatureState,
     history: Arc<[CommandHistoryEntry]>,
     runtime: CommandRuntimeState,
+    pub(super) staged: StagedQuickCommands,
 }
 
 pub(in crate::features) struct CommandFeatureInit {
@@ -81,7 +83,16 @@ impl CommandFeatureState {
             ),
             history: Arc::from(init.history),
             runtime: CommandRuntimeState::new(init.store, init.scheduler),
+            staged: StagedQuickCommands::default(),
         }
+    }
+
+    pub(in crate::features) fn cancel_staged_quick_command(&mut self, session_id: &str) {
+        self.staged.cancel(session_id);
+    }
+
+    pub(in crate::features) fn owns_staged_quick_command(&self, session_id: &str, id: u64) -> bool {
+        self.staged.owns(session_id, id)
     }
 
     pub(in crate::features) fn replace_loaded(

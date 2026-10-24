@@ -25,6 +25,7 @@ use super::{
     terminal_underline_bounds, terminal_underline_ranges_for_spans,
     terminal_visible_rows_for_bounds, terminal_visible_rows_for_clipped_bounds,
 };
+use crate::contrast::{TerminalContrastCache, TerminalContrastOverlays, contrast_ratio};
 use crate::glyphs::CellGlyph;
 use crate::keywords::{
     TerminalKeywordHighlightLookup, compile_terminal_keyword_highlighter,
@@ -102,8 +103,15 @@ fn trimmed_row_decorations_retain_ansi_tail_and_highlight_colors() {
         palette,
     );
     spans[0].color = Some(0x123456);
-    let decorations =
-        super::terminal_text_decorations_for_row(&spans, Some(&row.cells), palette, false);
+    let decorations = super::terminal_text_decorations_for_row(
+        &spans,
+        Some(&row.cells),
+        palette,
+        false,
+        1.0,
+        &TerminalContrastOverlays::default(),
+        &mut TerminalContrastCache::default(),
+    );
     let expected = vec![(0x123456, 0, 4), (palette.terminal_ansi_color(1), 4, 12)];
     assert_eq!(
         underline_ranges_as_tuples(&decorations.underlines),
@@ -129,8 +137,15 @@ fn struck_cell_graphics_cache_decorations_outside_shaped_text() {
         &[],
         palette,
     );
-    let decorations =
-        super::terminal_text_decorations_for_row(&spans, Some(&row.cells), palette, false);
+    let decorations = super::terminal_text_decorations_for_row(
+        &spans,
+        Some(&row.cells),
+        palette,
+        false,
+        1.0,
+        &TerminalContrastOverlays::default(),
+        &mut TerminalContrastCache::default(),
+    );
     assert_eq!(
         underline_ranges_as_tuples(&decorations.strikethroughs),
         vec![(palette.terminal_fg, 0, 4)]
@@ -211,6 +226,7 @@ fn underline_ranges_match_flatten_reference_for_wide_and_combining_text() {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         },
         TerminalHighlightSpan {
             text: "e\u{301}".to_string(),
@@ -221,6 +237,7 @@ fn underline_ranges_match_flatten_reference_for_wide_and_combining_text() {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         },
         TerminalHighlightSpan {
             text: "x".to_string(),
@@ -231,6 +248,7 @@ fn underline_ranges_match_flatten_reference_for_wide_and_combining_text() {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         },
     ];
 
@@ -1060,6 +1078,7 @@ fn highlight_span(
         strikeout: false,
         bold: false,
         italic: false,
+        hidden: false,
     }
 }
 
@@ -1128,6 +1147,7 @@ fn underline_span(text: &str, color: Option<u32>) -> TerminalHighlightSpan {
         strikeout: false,
         bold: false,
         italic: false,
+        hidden: false,
     }
 }
 
@@ -1165,6 +1185,7 @@ fn underline_ranges_clamp_action_links_to_actual_text() {
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         }],
         &[(1, 99)],
         palette,
@@ -2230,4 +2251,121 @@ fn concealed_cursor_cell_suppresses_cursor_glyph() {
 
     edit_snapshot_row(&mut snapshot, 0, |row| row.cells[0].style.hidden = false);
     assert!(!terminal_cursor_cell_hidden(&snapshot));
+}
+
+#[test]
+fn contrast_selection_changes_only_the_affected_row_keys_and_off_mode_reuses_rows() {
+    let mut screen = TerminalScreen::new(30, 3);
+    screen.advance(b"first row\r\nsecond row");
+    let snapshot = Arc::new(screen.snapshot());
+    let make = |ratio| {
+        ZzClawTerminalElement::new(
+            snapshot.clone(),
+            Arc::new(Vec::new()),
+            Vec::new(),
+            false,
+            "block",
+            8.0,
+            16.0,
+            zzclawterm_ui::theme_palette("github-dark"),
+            "monospace".into(),
+            14.0,
+            400.0,
+            700.0,
+        )
+        .with_minimum_contrast_ratio(ratio)
+    };
+    let key = |element: &ZzClawTerminalElement, row| {
+        let snapshot_row = snapshot.row(row).unwrap();
+        element.row_layout_key(
+            row,
+            &snapshot_row.text,
+            Some(&snapshot_row.styled_spans),
+            &TerminalLineDecorations::default(),
+        )
+    };
+    let plain = make(7.0);
+    let selected = make(7.0).with_selection(Some(TerminalGridSelection::new(0, 0, 0, 3, false)));
+    assert_ne!(key(&plain, 0), key(&selected, 0));
+    assert_eq!(key(&plain, 1), key(&selected, 1));
+    let moved = make(7.0).with_selection(Some(TerminalGridSelection::new(1, 0, 1, 3, false)));
+    assert_eq!(key(&plain, 0), key(&moved, 0));
+    assert_ne!(key(&plain, 1), key(&moved, 1));
+    let disabled = make(1.0);
+    let disabled_selected = make(1.0).with_selection(selected.selection);
+    assert_eq!(key(&disabled, 0), key(&disabled_selected, 0));
+    assert_ne!(key(&disabled, 0), key(&plain, 0));
+    assert_ne!(key(&make(4.5), 0), key(&plain, 0));
+}
+
+#[test]
+fn contrast_search_and_occurrence_ranges_invalidate_only_enabled_row_layouts() {
+    let snapshot = Arc::new(TerminalScreen::new(30, 3).snapshot());
+    let make = |ratio| {
+        ZzClawTerminalElement::new(
+            snapshot.clone(),
+            Arc::new(Vec::new()),
+            Vec::new(),
+            false,
+            "block",
+            8.0,
+            16.0,
+            zzclawterm_ui::theme_palette("github-dark"),
+            "monospace".into(),
+            14.0,
+            400.0,
+            700.0,
+        )
+        .with_minimum_contrast_ratio(ratio)
+    };
+    let empty = TerminalLineDecorations::default();
+    for decorations in [
+        TerminalLineDecorations {
+            search_ranges: vec![(0, 3)],
+            ..empty.clone()
+        },
+        TerminalLineDecorations {
+            selected_occurrence_ranges: vec![(0, 3)],
+            ..empty.clone()
+        },
+    ] {
+        for ratio in [1.0, 7.0] {
+            let element = make(ratio);
+            let base = element.row_layout_key(0, "text", None, &empty);
+            let decorated = element.row_layout_key(0, "text", None, &decorations);
+            assert_eq!(base == decorated, ratio == 1.0);
+        }
+    }
+}
+
+#[test]
+fn contrast_corrects_trailing_decorations_and_conceals_hidden_trailing_cells() {
+    let mut screen = TerminalScreen::new(30, 3);
+    screen.advance(b"x\x1b[4;38;2;40;220;220;48;2;65;210;85m  \x1b[8m  ");
+    let snapshot = screen.snapshot();
+    let row = snapshot.row(0).unwrap();
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let overlays = TerminalContrastOverlays {
+        selection: Some((1, 5)),
+        ..TerminalContrastOverlays::default()
+    };
+    let decorations = super::terminal_text_decorations_for_row(
+        &[],
+        Some(&row.cells),
+        palette,
+        false,
+        7.0,
+        &overlays,
+        &mut TerminalContrastCache::default(),
+    );
+    assert!(
+        decorations.underlines.iter().any(|range| range.start == 1
+            && contrast_ratio(range.color, palette.terminal_selection) >= 7.0)
+    );
+    assert!(
+        decorations
+            .underlines
+            .iter()
+            .any(|range| range.start == 3 && range.color == palette.terminal_selection)
+    );
 }

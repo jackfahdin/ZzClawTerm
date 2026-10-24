@@ -163,7 +163,7 @@ impl ShortcutScope {
         match self {
             Self::Global => None,
             Self::Workspace => Some("ZzClawWorkspace && !Dialog && !ZzClawModal && !ScreenLocked"),
-            Self::Terminal => Some("Terminal"),
+            Self::Terminal => Some("Terminal && !Input"),
             Self::TextInput => Some("Input"),
             Self::FileExplorer => Some(FILE_EXPLORER_KEY_CONTEXT),
             Self::SavedConnections => Some(SAVED_CONNECTIONS_KEY_CONTEXT),
@@ -1016,7 +1016,9 @@ fn scope_allows(scope: ShortcutScope, context_stack: &[KeyContext]) -> bool {
     }
     match scope {
         ShortcutScope::Global | ShortcutScope::Workspace => true,
-        ShortcutScope::Terminal => has_context("Terminal"),
+        // Search fields inherit Terminal from their parent surface, but must
+        // keep their own editing shortcuts in both dispatch paths.
+        ShortcutScope::Terminal => has_context("Terminal") && !has_context("Input"),
         ShortcutScope::TextInput => has_context("Input"),
         ShortcutScope::FileExplorer => has_context(FILE_EXPLORER_KEY_CONTEXT),
         ShortcutScope::SavedConnections => has_context(SAVED_CONNECTIONS_KEY_CONTEXT),
@@ -1358,14 +1360,15 @@ fn format_hotkey_part(part: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{KeyContext, Keymap};
+    use gpui::{KeyBinding, KeyContext, Keymap};
+    use zzclawterm_ui::ZzClawPaste;
 
     use super::{
         FILE_EXPLORER_KEY_CONTEXT, MODAL_KEY_CONTEXT, OpenSettings, RenameFile, ResolvedKeymap,
         SCREEN_LOCKED_KEY_CONTEXT, SHORTCUT_REGISTRY, ShortcutBinding, ShortcutDiagnosticKind,
         ShortcutId, ShortcutInvocation, ShortcutPlatform, ShortcutScope, SwitchToTab, TerminalCopy,
-        WORKSPACE_KEY_CONTEXT, gpui_bindings, is_default_binding, reset_known_overrides,
-        resolve_invocation,
+        TerminalPaste, WORKSPACE_KEY_CONTEXT, gpui_bindings, is_default_binding,
+        reset_known_overrides, resolve_invocation,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1619,6 +1622,59 @@ mod tests {
         // complete replacement remains possible without appending stale entries.
         keymap.clear();
         assert_eq!(keymap.bindings().len(), 0);
+    }
+
+    #[test]
+    fn terminal_paste_override_yields_to_nested_search_input_in_interceptor() {
+        let resolved = ResolvedKeymap::resolve(&HashMap::from([(
+            "terminal.paste".to_string(),
+            "ctrl+v".to_string(),
+        )]));
+        let paste = ShortcutBinding::parse("ctrl+v").unwrap().chords()[0]
+            .keystroke()
+            .clone();
+        let mut contexts = vec![
+            KeyContext::parse(WORKSPACE_KEY_CONTEXT).unwrap(),
+            KeyContext::parse("Terminal").unwrap(),
+        ];
+        assert_eq!(
+            resolve_invocation(&resolved, &paste, &contexts),
+            Some(ShortcutInvocation {
+                id: ShortcutId::TerminalPaste,
+                tab_index: None,
+            })
+        );
+
+        contexts.push(KeyContext::parse("Input").unwrap());
+        assert_eq!(resolve_invocation(&resolved, &paste, &contexts), None);
+    }
+
+    #[test]
+    fn terminal_paste_override_preserves_nested_input_paste_in_keymap() {
+        let resolved = ResolvedKeymap::resolve(&HashMap::from([(
+            "terminal.paste".to_string(),
+            "ctrl+v".to_string(),
+        )]));
+        let mut bindings = vec![KeyBinding::new("ctrl-v", ZzClawPaste, Some("Input"))];
+        bindings.extend(gpui_bindings(&resolved));
+        let keymap = Keymap::new(bindings);
+        let paste = ShortcutBinding::parse("ctrl+v").unwrap().chords()[0]
+            .keystroke()
+            .clone();
+        let mut contexts = vec![
+            KeyContext::parse(WORKSPACE_KEY_CONTEXT).unwrap(),
+            KeyContext::parse("Terminal").unwrap(),
+        ];
+        let (actions, pending) = keymap.bindings_for_input(std::slice::from_ref(&paste), &contexts);
+        assert!(!pending);
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].action().partial_eq(&TerminalPaste));
+
+        contexts.push(KeyContext::parse("Input").unwrap());
+        let (actions, pending) = keymap.bindings_for_input(&[paste], &contexts);
+        assert!(!pending);
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].action().partial_eq(&ZzClawPaste));
     }
 
     #[test]

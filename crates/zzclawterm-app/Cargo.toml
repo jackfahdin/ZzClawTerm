@@ -29,7 +29,6 @@ zzclawterm-core = { workspace = true, features = ["test-support"] }
 usvg.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
 
 [lib]
 name = "zzclawterm_app"
@@ -43,3 +42,6 @@ path = "src/main.rs"
 [features]
 default = ["font-kit"]
 font-kit = ["gpui_platform/font-kit"]
+
+[build-dependencies]
+embed-resource = "3.0"

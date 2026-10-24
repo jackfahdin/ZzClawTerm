@@ -30,6 +30,7 @@ pub(super) fn ansi_to_highlight_spans_compiled(
                     strikeout: s.style.strikeout,
                     bold: s.style.bold,
                     italic: s.style.italic,
+                    hidden: s.style.hidden,
                 }
             })
             .collect();
@@ -112,6 +113,7 @@ pub(super) fn ansi_to_highlight_spans_compiled(
             strikeout: false,
             bold: false,
             italic: false,
+            hidden: false,
         });
     }
     out
@@ -137,6 +139,7 @@ fn push_ansi_segment(
         strikeout: style.strikeout,
         bold: style.bold,
         italic: style.italic,
+        hidden: style.hidden,
     });
 }
 

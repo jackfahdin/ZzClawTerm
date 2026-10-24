@@ -897,6 +897,7 @@ impl ZzClawTermApp {
                                 ),
                             ));
                     }
+                    self.ensure_terminal_selection_text(cx);
                     self.notify_terminal_surface_only(Some(&session_id), cx);
                 }
                 TerminalFrameApplyResult {

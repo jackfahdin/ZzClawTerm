@@ -61,6 +61,7 @@ pub(in crate::features::pages::transfers) fn transfer_queue_view(
         } else {
             list = list.gap(px(2.)).p_1();
             let row_labels = TransferJobRowLabels {
+                queued: rust_i18n::t!("fileTransfer.queued").to_string(),
                 transferring: t!("fileTransfer.transferring").to_string(),
                 paused: t!("fileTransfer.paused").to_string(),
                 cancelling: t!("fileTransfer.cancelling").to_string(),

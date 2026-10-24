@@ -489,17 +489,181 @@ fn telnet_local_line_edit_buffers_until_enter_and_echoes_locally() {
         local_line_edit: true,
         ..Default::default()
     };
-    let mut buffer = Vec::new();
+    let mut input = crate::telnet_input::TelnetInputState::default();
 
-    let (send, echo) = super::edit_telnet_line_input(b"hel", &mut buffer, &config);
+    let (send, echo) = input.prepare(b"hel", &config);
     assert!(send.is_empty());
     assert_eq!(echo, b"hel");
-    assert_eq!(buffer, b"hel");
 
-    let (send, echo) = super::edit_telnet_line_input(b"lo\x08p\r", &mut buffer, &config);
+    let (send, echo) = input.prepare(b"lo\x08p\r", &config);
     assert_eq!(send, b"hellp\r");
     assert_eq!(echo, b"lo\x08 \x08p\r\n");
-    assert!(buffer.is_empty());
+    assert_eq!(
+        input.prepare(b"\r", &config),
+        (b"\r".to_vec(), b"\r\n".to_vec())
+    );
+}
+
+fn telnet_input_loopback(
+    mut config: TelnetSessionConfig,
+) -> (SessionManager, super::SessionInfo, std::net::TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    config.host = "127.0.0.1".into();
+    config.port = listener.local_addr().unwrap().port();
+    config.send_naws = false;
+    config.send_sga = false;
+    config.keep_alive_interval_secs = 0;
+    config.auto_login.enabled = false;
+    let manager = SessionManager::new();
+    let info = manager.create_telnet_session(config).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    (manager, info, peer)
+}
+
+#[test]
+fn telnet_text_input_sends_configured_newlines_and_echoes_independently_in_both_transports() {
+    for raw_tcp in [false, true] {
+        for local_line_edit in [false, true] {
+            for local_echo in [false, true] {
+                for (enter_mode, newline) in [
+                    (crate::TelnetEnterMode::Cr, b"\r".as_slice()),
+                    (crate::TelnetEnterMode::Lf, b"\n".as_slice()),
+                    (crate::TelnetEnterMode::Crlf, b"\r\n".as_slice()),
+                ] {
+                    let (manager, info, mut peer) = telnet_input_loopback(TelnetSessionConfig {
+                        raw_tcp,
+                        local_line_edit,
+                        local_echo,
+                        enter_mode,
+                        ..Default::default()
+                    });
+                    for enter in [b"\r".as_slice(), b"\n".as_slice(), b"\r\n".as_slice()] {
+                        manager.write(&info.id, b"abc").unwrap();
+                        if local_line_edit {
+                            peer.set_read_timeout(Some(Duration::from_millis(20)))
+                                .unwrap();
+                            let error = peer.read(&mut [0; 1]).unwrap_err();
+                            assert!(matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ));
+                            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                        } else {
+                            let mut text = [0; 3];
+                            peer.read_exact(&mut text).unwrap();
+                            assert_eq!(&text, b"abc");
+                        }
+                        manager.write(&info.id, enter).unwrap();
+                        let mut expected = if local_line_edit {
+                            b"abc".to_vec()
+                        } else {
+                            vec![]
+                        };
+                        expected.extend_from_slice(newline);
+                        let mut received = vec![0; expected.len()];
+                        peer.read_exact(&mut received).unwrap();
+                        assert_eq!(
+                            received, expected,
+                            "raw={raw_tcp}, edit={local_line_edit}, mode={enter_mode:?}"
+                        );
+                    }
+                    peer.set_read_timeout(Some(Duration::from_millis(20)))
+                        .unwrap();
+                    assert!(
+                        peer.read(&mut [0; 1]).is_err(),
+                        "no duplicate newline or protocol bytes"
+                    );
+                    let echo: Vec<u8> = manager
+                        .event_queue
+                        .drain(100)
+                        .events
+                        .into_iter()
+                        .flat_map(|event| {
+                            if let SessionEvent::Output { data, .. } = event {
+                                data
+                            } else {
+                                vec![]
+                            }
+                        })
+                        .collect();
+                    assert_eq!(
+                        echo,
+                        if local_echo {
+                            b"abc\r\n".repeat(3)
+                        } else {
+                            vec![]
+                        }
+                    );
+                    manager.close(&info.id).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn telnet_rejected_submission_preserves_line_escape_state_and_echo_until_retry() {
+    let (manager, info, _peer) = telnet_input_loopback(TelnetSessionConfig {
+        local_echo: true,
+        local_line_edit: true,
+        enter_mode: crate::TelnetEnterMode::Crlf,
+        ..Default::default()
+    });
+    manager.write(&info.id, b"abc").unwrap();
+    manager.event_queue.drain(100);
+
+    // An unconsumed mailbox makes backpressure deterministic. Leave room for
+    // the original three bytes, but not for the edited and expanded payload.
+    let mailbox = crate::writer_mailbox::WriterMailbox::default();
+    mailbox
+        .send(crate::TransportWriterCommand::Write(vec![
+            0;
+            crate::writer_mailbox::BYTE_LIMIT
+                - 3
+        ]))
+        .unwrap();
+    let original_mailbox = {
+        let mut sessions = manager.sessions.lock().unwrap();
+        let Some(crate::ManagedSession::Tcp(session)) = sessions.get_mut(&info.id) else {
+            panic!("TCP session");
+        };
+        std::mem::replace(&mut session.writer.command_tx, mailbox.clone())
+    };
+    assert!(manager.write(&info.id, b"\r\x1b[").is_err());
+    assert!(manager.event_queue.drain(100).events.is_empty());
+    drop(mailbox.receive(None).unwrap().unwrap());
+
+    manager.write(&info.id, b"\r").unwrap();
+    let (command, permit) = mailbox.receive(None).unwrap().unwrap();
+    assert!(matches!(command, crate::TransportWriterCommand::Write(data) if data == b"abc\r\n"));
+    drop(permit);
+    manager.write(&info.id, b"z\r").unwrap();
+    let (command, permit) = mailbox.receive(None).unwrap().unwrap();
+    assert!(matches!(command, crate::TransportWriterCommand::Write(data) if data == b"z\r\n"));
+    drop(permit);
+    let echo: Vec<u8> = manager
+        .event_queue
+        .drain(100)
+        .events
+        .into_iter()
+        .flat_map(|event| {
+            if let SessionEvent::Output { data, .. } = event {
+                data
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+    assert_eq!(echo, b"\r\nz\r\n");
+    {
+        let mut sessions = manager.sessions.lock().unwrap();
+        let Some(crate::ManagedSession::Tcp(session)) = sessions.get_mut(&info.id) else {
+            panic!("TCP session");
+        };
+        session.writer.command_tx = original_mailbox;
+    }
+    manager.close(&info.id).unwrap();
 }
 
 #[test]

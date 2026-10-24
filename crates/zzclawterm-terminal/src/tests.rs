@@ -2148,6 +2148,81 @@ fn kitty_keyboard_disambiguate_mode_tracks_csi_u() {
 }
 
 #[test]
+fn session_input_reset_preserves_screens_and_history_and_allows_new_protocols() {
+    for alternate in [false, true] {
+        let mut screen = TerminalScreen::new(32, 3);
+        screen.advance(b"history\r\none\r\ntwo\r\nthree\r\n");
+        // Leave different Kitty stacks on both screens, including nested modes.
+        screen.advance(b"\x1b[>31u\x1b[>3u\x1b[?1049h\x1b[>31uALT");
+        if !alternate {
+            screen.advance(b"\x1b[?1049l");
+        }
+        screen.advance(b"\x1b[?1;1000;1002;1003;1004;1005;1006;2004h\x1b=\x1b[?1007l");
+        let before = screen.all_lines();
+        let history = screen.scrollback_len();
+        let cursor = screen.snapshot().cursor;
+
+        screen.reset_session_input_protocols();
+
+        assert_eq!(screen.all_lines(), before);
+        assert_eq!(screen.scrollback_len(), history);
+        assert_eq!(screen.snapshot().cursor, cursor);
+        assert_eq!(screen.alternate_screen(), alternate);
+        assert!(!screen.mouse_reporting());
+        assert!(!screen.mouse_sgr());
+        assert!(!screen.mouse_utf8());
+        assert!(!screen.focus_reporting());
+        assert!(!screen.bracketed_paste());
+        assert!(!screen.application_cursor_keys());
+        assert!(!screen.application_keypad());
+        assert!(screen.alternate_scroll());
+        assert!(
+            !screen
+                .term
+                .mode()
+                .intersects(alacritty_terminal::term::TermMode::KITTY_KEYBOARD_PROTOCOL)
+        );
+
+        // Popping or swapping must not revive either old keyboard stack.
+        screen.advance(b"\x1b[<1u\x1b[?1049h\x1b[<1u\x1b[?1049l\x1b[<1u");
+        assert!(
+            !screen
+                .term
+                .mode()
+                .intersects(alacritty_terminal::term::TermMode::KITTY_KEYBOARD_PROTOCOL)
+        );
+        assert!(
+            screen
+                .all_lines()
+                .iter()
+                .any(|line| line.contains("history"))
+        );
+
+        screen.advance(b"\x1b[>31u\x1b[?1003;1006;1004;2004h");
+        assert!(screen.kitty_keyboard_disambiguate());
+        assert!(screen.kitty_keyboard_report_event_types());
+        assert!(screen.kitty_keyboard_report_all_keys_as_esc());
+        assert!(screen.mouse_motion_reporting());
+        assert!(screen.mouse_sgr());
+        assert!(screen.focus_reporting());
+        assert!(screen.bracketed_paste());
+    }
+}
+
+#[test]
+fn stream_discontinuity_keeps_negotiated_input_protocols() {
+    let mut screen = TerminalScreen::new(32, 3);
+    screen.advance(b"\x1b[>31u\x1b[?1;1003;1004;1006;2004h\x1b=\x1b[");
+    let modes = *screen.term.mode();
+
+    screen.reset_stream_state();
+    screen.advance(b"31mTEXT");
+
+    assert_eq!(*screen.term.mode(), modes);
+    assert!(screen.lines().iter().any(|line| line.contains("31mTEXT")));
+}
+
+#[test]
 fn cursor_shape_and_visibility_follow_decscusr() {
     let mut screen = TerminalScreen::new(40, 3);
     screen.advance(b"hi");

@@ -12,6 +12,10 @@ pub struct SftpPathCodec {
 }
 
 impl SftpPathCodec {
+    pub(crate) fn same_encoding(&self, other: &Self) -> bool {
+        self.encoding == other.encoding
+    }
+
     pub(super) fn is_utf8(&self) -> bool {
         self.encoding == UTF_8
     }

@@ -1785,10 +1785,11 @@ fn terminal_frame_rekey_preserves_full_scrollback_and_search_after_new_output() 
 }
 
 #[test]
-fn terminal_frame_rekey_resets_partial_ansi_and_preserves_alternate_screen() {
+fn terminal_frame_rekey_resets_input_protocols_and_partial_ansi_preserving_alternate_screen() {
     let pipeline = TerminalFramePipeline::default();
     let mut old = TerminalFrameSession::new("UTF-8", 1_000);
-    old.screen.advance(b"\x1b[?1049hALT\r\n\x1b[");
+    old.screen
+        .advance(b"\x1b[>31u\x1b[?1049h\x1b[>31uALT\r\n\x1b[?1;1003;1004;1006;2004h\x1b=\x1b[");
     pipeline
         .insert_sessions_from_transfer(vec![("old".into(), old)])
         .unwrap();
@@ -1797,6 +1798,14 @@ fn terminal_frame_rekey_resets_partial_ansi_and_preserves_alternate_screen() {
 
     let moved = pipeline.take_session_for_transfer("new").unwrap().unwrap();
     assert!(moved.screen.alternate_screen());
+    assert_eq!(
+        TerminalProtocolState::from_screen(&moved.screen),
+        TerminalProtocolState {
+            alternate_screen: true,
+            alternate_scroll: true,
+            ..TerminalProtocolState::default()
+        }
+    );
     assert!(
         moved
             .screen
@@ -1804,6 +1813,36 @@ fn terminal_frame_rekey_resets_partial_ansi_and_preserves_alternate_screen() {
             .iter()
             .any(|line| line.contains("31mNEW"))
     );
+}
+
+#[test]
+fn reconnect_view_resets_worker_protocol_cache_before_any_new_frame() {
+    let mut view = TerminalViewState::new();
+    // Production UI screens mirror geometry rather than the worker's modes.
+    let mut worker_screen = TerminalScreen::default();
+    worker_screen.advance(b"\x1b[>31u\x1b[?1049h\x1b[>31u\x1b[?1;1003;1004;1006;2004h\x1b=");
+    view.protocol_state = TerminalProtocolState::from_screen(&worker_screen);
+    view.output = "retained output".into();
+    view.frame_snapshot = Some(Arc::new(worker_screen.snapshot()));
+    let snapshot = view.frame_snapshot.clone().unwrap();
+    view.pressed_keys.insert("enter".into());
+
+    view.reset_reconnect_stream("UTF-8");
+
+    assert_eq!(
+        view.protocol_state,
+        TerminalProtocolState {
+            alternate_screen: true,
+            alternate_scroll: true,
+            ..TerminalProtocolState::default()
+        }
+    );
+    assert!(view.pressed_keys.is_empty());
+    assert_eq!(view.output, "retained output");
+    assert!(Arc::ptr_eq(
+        view.frame_snapshot.as_ref().unwrap(),
+        &snapshot
+    ));
 }
 
 #[test]

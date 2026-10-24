@@ -57,7 +57,7 @@ impl SettingsPanel {
                     .child(appearance_settings_field(
                         palette,
                         t!("settings.theme"),
-                        Some(SharedString::from(t!("settings.themeDesc"))),
+                        None,
                         self.appearance_theme_select(false, cx),
                     ))
                     .child(appearance_settings_field(

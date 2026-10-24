@@ -267,7 +267,7 @@ fn concurrent_export_honors_options_and_compatibility_uses_one_read() {
         drop(stream);
         assert_eq!(finished(&events).unwrap(), content.len() as u64);
         let peer = files.lock().unwrap();
-        assert_eq!(peer.max_active_reads, if compatibility { 1 } else { 3 });
+        assert_eq!(peer.max_active_reads, if compatibility { 1 } else { 6 });
         assert!(peer.reads.iter().any(|(_, length)| *length > 64 * 1024));
     }
 }
@@ -286,7 +286,7 @@ fn small_reads_share_cache_and_prefetch_does_not_advance_delivery_progress() {
     std::thread::sleep(Duration::from_millis(50));
     let reads = files.lock().unwrap().reads.clone();
     assert_eq!(reads.iter().filter(|(offset, _)| *offset == 0).count(), 1);
-    assert!(reads.len() <= 6);
+    assert!(reads.len() <= 32);
     drop(stream);
     let mut completed = false;
     loop {
@@ -339,7 +339,7 @@ fn short_packets_are_filled_and_unknown_metadata_size_uses_demand_reads() {
 #[test]
 fn speculative_sftp_failure_is_reported_only_when_consumed() {
     let (service, file, files) = fixture_mode(&vec![3; 300_000], false);
-    files.lock().unwrap().fail_read_at = Some(64 * 1024);
+    files.lock().unwrap().fail_read_at = Some(2 * 63 * 1024);
     let (observe, events) = observer();
     let source = SftpReadSource::new(Arc::downgrade(&service), file, observe);
     let mut stream = source.open().unwrap();

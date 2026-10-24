@@ -1,16 +1,19 @@
 # Cloud Sync
 
-ZzClawTerm's **Cloud Sync** capability is not remote file transfer. It syncs portable application configuration through one encrypted current snapshot in remote storage.
+NyaTerm's **Cloud Sync** capability is not remote file transfer. It syncs portable application configuration through one encrypted current snapshot in remote storage.
 
-The remote side is intentionally current-state oriented:
+Remote storage uses immutable snapshots and independent device commits:
 
-- `sync/current.redb.enc` stores the encrypted current core snapshot
-- `sync/latest.redb` stores revision, device, timestamp, and hash metadata
-- legacy `sync/snapshots/` objects are only used for compatibility reads and cleanup
+- `sync/snapshots/<revision>.redb.enc` stores encrypted snapshots used by the current protocol
+- `sync/heads/` stores device commits and temporary upload markers, preserving concurrent branches
+- `sync/latest.redb` is a compatibility pointer with revision, device, timestamp, and hash metadata
+- `sync/current.redb.enc` is a best-effort compatibility/recovery copy, not the sole authority
 
-Local `.zz` export / import remains the backup and migration path. Cloud Sync no longer creates remote multi-version backups, and it does not automatically delete any old `backups/` objects that may already exist in user storage.
+Simultaneous device uploads preserve both commits. A subsequent check detects concurrent branches and asks you to choose local or cloud explicitly. Providers with delayed visibility may reveal the conflict on a later check. Causal records, rather than device wall clocks, determine which changes supersede others.
 
-ZzClawTerm currently supports these remote storage provider types:
+Local `.nya` export / import remains the backup and migration path. Maintenance retains referenced device snapshots, unresolved branches, and staged uploads while collecting eligible older snapshots. It does not delete existing `backups/` objects. Retained sync snapshots do not replace independent backups.
+
+NyaTerm currently supports these remote storage provider types:
 
 - **WebDAV**
 - **S3-compatible** storage
@@ -29,7 +32,11 @@ Without a master password:
 - Cloud Sync cannot be enabled
 - Manual actions such as test, push, and pull cannot be run
 
-That requirement exists because ZzClawTerm uploads encrypted portable snapshots, not plain-text config files.
+New encrypted snapshots use Argon2id with a random salt and AES-256-GCM. The version header, KDF parameters, salt, and nonce are authenticated along with the payload.
+
+Existing NyaTerm and Dragonfly ciphertext remains readable. The next actual upload or explicit overwrite writes the new envelope; an unchanged-content check does not rewrite old ciphertext. Upgrade every participating device before publishing new-format snapshots: older clients cannot decrypt them or participate in the new concurrency protocol. Keep a local `.nya` backup before upgrading.
+
+An old sync baseline cannot prove that all entities are unchanged. The first check after upgrade can therefore require explicit conflict resolution, protecting VNC trust records and extension data omitted by the historical change hash.
 
 ## Where to access it
 
@@ -70,7 +77,7 @@ No matter which provider you use, start by checking these fields:
 These have specific meanings:
 
 - **Device Name** is written into snapshot metadata so you can tell which device uploaded it
-- **Remote Namespace** is the top-level path prefix ZzClawTerm uses for the cloud sync snapshot inside the selected provider
+- **Remote Namespace** is the top-level path prefix NyaTerm uses for the cloud sync snapshot inside the selected provider
 
 ### WebDAV
 
@@ -81,7 +88,7 @@ When the provider is **WebDAV**, you will typically configure:
 - **Username**
 - **Password**
 
-WebDAV authentication supports both **Basic** and **Digest** auth. ZzClawTerm switches to Digest when the server requires it, improving compatibility with NAS / gateways that mandate Digest.
+WebDAV authentication supports both **Basic** and **Digest** auth. NyaTerm switches to Digest when the server requires it, improving compatibility with NAS / gateways that mandate Digest.
 
 ### S3-compatible storage
 
@@ -98,7 +105,9 @@ When the provider is **S3-compatible**, you will typically configure:
 
 ### Gitee Snippet
 
-When the provider is **Gitee Snippet**, ZzClawTerm stores encrypted cloud sync objects in a Gitee code snippet.
+When the provider is **Gitee Snippet**, NyaTerm stores encrypted cloud sync objects in a Gitee code snippet.
+
+Gitee's file-count limit includes snapshots, device commits, and pending markers. Many devices or unresolved branches may require a new snippet or another provider; synchronization never deletes unresolved branches to make room.
 
 You will typically configure:
 
@@ -107,7 +116,7 @@ You will typically configure:
 
 ### GitHub Gist
 
-When the provider is **GitHub Gist**, ZzClawTerm authorizes GitHub with device flow and stores encrypted cloud sync objects in a private Gist.
+When the provider is **GitHub Gist**, NyaTerm authorizes GitHub with device flow and stores encrypted cloud sync objects in a private Gist.
 
 You will typically:
 
@@ -115,11 +124,11 @@ You will typically:
 - enter the device code on the GitHub authorization page
 - grant the `gist` scope
 
-During the GitHub device-flow authorization, ZzClawTerm creates and fills in a private Gist when no Gist ID is configured. When a Gist ID already exists, it validates and reuses that Gist.
+During the GitHub device-flow authorization, NyaTerm creates and fills in a private Gist when no Gist ID is configured. When a Gist ID already exists, it validates and reuses that Gist.
 
 ### Google Drive / OneDrive / AliyunDrive
 
-When the provider is **Google Drive**, **OneDrive**, or **AliyunDrive**, ZzClawTerm uses native desktop HTTP adapters to access the selected drive service.
+When the provider is **Google Drive**, **OneDrive**, or **AliyunDrive**, NyaTerm uses native desktop HTTP adapters to access the selected drive service.
 
 The current implementation expects OAuth credentials to be entered manually:
 
@@ -147,7 +156,7 @@ A good habit is to run **Test Connection** before enabling any automatic strateg
 
 ### Check on startup
 
-When enabled, ZzClawTerm checks the remote provider during startup to see whether a newer sync snapshot already exists.
+When enabled, NyaTerm checks the remote provider during startup to see whether a newer sync snapshot already exists.
 
 Typical outcomes include:
 
@@ -160,13 +169,13 @@ This is not real-time remote watching. It is a startup check of the current stat
 
 ### Auto-pull remote changes
 
-When **Auto Pull Remote Changes** is enabled, if startup check or sync check finds that only the remote side changed, ZzClawTerm automatically pulls and applies the current remote snapshot.
+When **Auto Pull Remote Changes** is enabled, if startup check or sync check finds that only the remote side changed, NyaTerm automatically pulls and applies the current remote snapshot.
 
-This only handles cases with no unsynchronized local changes. If both local and remote changed, ZzClawTerm still enters conflict state instead of choosing one side automatically.
+This only handles cases with no unsynchronized local changes. If both local and remote changed, NyaTerm still enters conflict state instead of choosing one side automatically.
 
 ### Auto-push after local changes
 
-When enabled, ZzClawTerm automatically pushes a snapshot after supported local configuration changes are saved, using a debounce window.
+When enabled, NyaTerm automatically pushes a snapshot after supported local configuration changes are saved, using a debounce window.
 
 You can control:
 
@@ -208,7 +217,7 @@ A typical example looks like this:
 - Device B already pushed a newer sync snapshot to the cloud
 - Device A then tries to push or performs a startup check and discovers both sides changed
 
-When this happens, ZzClawTerm can show conflict details such as:
+When this happens, NyaTerm can show conflict details such as:
 
 - local snapshot hash
 - remote revision
@@ -244,11 +253,11 @@ The important boundary is:
 - this is not collaborative conflict resolution
 - it is effectively a choice between the local snapshot and the remote snapshot
 
-ZzClawTerm keeps metadata for the current remote snapshot to help you decide whether to download the remote version or upload the local version. Legacy `sync/snapshots/` objects are only used for compatibility reads and cleanup, not as the normal multi-version backup entry point.
+Device commits and causal records preserve concurrent branches. Explicitly choosing local or cloud publishes a new commit resolving the observed branches; cloud uses the remote branch read when the operation starts. Later concurrent edits can produce another conflict. Do not manually clear `sync/snapshots/`: it is the current data path.
 
 ## What gets synced?
 
-Cloud Sync is built on portable snapshots. These cover ZzClawTerm's portable configuration data, such as:
+Cloud Sync is built on portable snapshots. These cover NyaTerm's portable configuration data, such as:
 
 - saved connections and groups
 - key, password, and OTP configuration
@@ -257,7 +266,7 @@ Cloud Sync is built on portable snapshots. These cover ZzClawTerm's portable con
 - most application settings
 - known_hosts and the master-key token
 
-Command history is not included in the cloud sync core snapshot. Use local `.zz` export / import when you need an offline backup or migration package.
+Command history is not included in the cloud sync core snapshot. Use local `.nya` export / import when you need an offline backup or migration package.
 
 The current implementation deliberately preserves some device-local UI state, such as:
 
@@ -299,6 +308,6 @@ If your main question is "what happened recently?", start with the workspace **C
 
 :::tip Practical advice
 - When connecting a new provider for the first time, run **Test Connection** before enabling automatic strategies.
-- Before making large changes to connections, OTP, or quick commands, use local `.zz` export if you need a rollback point.
+- Before making large changes to connections, OTP, or quick commands, use local `.nya` export if you need a rollback point.
 - If you switch between devices often, keep a clear device-name convention and a predictable remote-namespace strategy.
 :::

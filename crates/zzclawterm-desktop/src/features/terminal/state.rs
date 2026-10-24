@@ -19,10 +19,11 @@ use super::editing_state::TerminalEditingState;
 use super::terminal_surface::TerminalScrollbarDragState;
 use super::terminal_surface_entity::TerminalSurface;
 use crate::features::{FontResolutionStatus, terminal::ResolvedAppearanceFont};
+use crate::models::recording::ExecutionRecordingEvent;
 use crate::models::{
     ActionLinkMenuState, ActionLinkTooltipState, RecordingHistorySearchEvent,
     RecordingHistorySearchKey, TerminalFrameEvent, TerminalFramePipeline, TerminalSearchMode,
-    TerminalSelection, TerminalViewState,
+    TerminalSelection, TerminalSelectionTextError, TerminalViewState,
 };
 use crate::terminal::terminal_keyword_rules_key;
 
@@ -100,10 +101,8 @@ pub(super) struct TerminalSelectionState {
     /// It shares `session_id` with selection and is never painted or copied.
     pub(super) click_anchor: Option<TerminalSelectionEndpoint>,
     pub(super) session_id: Option<String>,
-    /// Derived once from the worker's authoritative buffer for each Select All.
-    pub(super) all_buffer_text: Option<String>,
-    pub(super) all_buffer_text_task: Option<Task<()>>,
-    pub(super) all_buffer_text_generation: u64,
+    pub(super) text: TerminalSelectionText,
+    pub(super) source_history: Option<zzclawterm_terminal::TerminalHistoryState>,
     pub(super) selected_occurrence: TerminalSelectedOccurrenceState,
     pub(super) dragging: bool,
     pub(super) drag_pointer_position: Option<gpui::Point<gpui::Pixels>>,
@@ -114,6 +113,48 @@ pub(super) struct TerminalSelectionState {
     pub(super) mouse_report_session_id: Option<String>,
     pub(super) mouse_report_peer_session_ids: Vec<String>,
     pub(super) mouse_report_position: Option<(u16, u16)>,
+}
+
+#[derive(Default)]
+pub(super) enum TerminalSelectionTextStatus {
+    #[default]
+    Unrequested,
+    Pending,
+    Ready(Option<String>),
+    Failed(TerminalSelectionTextError),
+}
+
+impl std::fmt::Debug for TerminalSelectionTextStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unrequested => f.write_str("Unrequested"),
+            Self::Pending => f.write_str("Pending"),
+            Self::Ready(_) => f.write_str("Ready(<redacted>)"),
+            Self::Failed(error) => f.debug_tuple("Failed").field(error).finish(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct TerminalSelectionText {
+    pub(super) status: TerminalSelectionTextStatus,
+    pub(super) key: Option<(String, TerminalSelection)>,
+    pub(super) generation: u64,
+    pub(super) task: Option<Task<()>>,
+    /// Coalesce automatic and explicit copies; true requests success/error feedback.
+    pub(super) pending_copy: Option<bool>,
+    pub(super) deferred_copy_completed: bool,
+}
+
+impl TerminalSelectionText {
+    pub(super) fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.status = TerminalSelectionTextStatus::Unrequested;
+        self.task = None;
+        self.key = None;
+        self.pending_copy = None;
+        self.deferred_copy_completed = false;
+    }
 }
 
 #[derive(Clone)]
@@ -197,6 +238,16 @@ pub(in crate::features) struct TerminalOverlayVisibility {
 }
 
 impl TerminalFeatureState {
+    pub(in crate::features) fn submit_execution_recording(
+        &self,
+        session_id: &str,
+        event: ExecutionRecordingEvent,
+    ) {
+        self.view
+            .frame_pipeline
+            .submit_execution_recording(session_id, event);
+    }
+
     pub(in crate::features) fn recording_output_fence(
         &self,
     ) -> impl FnOnce() -> Result<(), String> + Send + 'static {
@@ -262,9 +313,8 @@ impl TerminalFeatureState {
                 selection: None,
                 click_anchor: None,
                 session_id: None,
-                all_buffer_text: None,
-                all_buffer_text_task: None,
-                all_buffer_text_generation: 0,
+                text: TerminalSelectionText::default(),
+                source_history: None,
                 selected_occurrence: TerminalSelectedOccurrenceState {
                     session_id: None,
                     query: None,
@@ -413,8 +463,8 @@ impl TerminalFeatureState {
             || self.selection.dragging
             || self.menus.action_link_menu.is_some()
             || self.menus.action_link_tooltip.is_some();
-        self.selection.all_buffer_text = None;
-        self.selection.all_buffer_text_task = None;
+        self.selection.text.invalidate();
+        self.selection.source_history = None;
         self.selection.dragging = false;
         self.selection.drag_pointer_position = None;
         self.selection.autoscroll = None;
@@ -441,6 +491,8 @@ impl TerminalFeatureState {
             .as_ref()
             .is_none_or(TerminalSelection::is_empty)
         {
+            self.selection.text.invalidate();
+            self.selection.source_history = None;
             self.selection.selection = None;
             self.selection.click_anchor = None;
             self.selection.session_id = None;

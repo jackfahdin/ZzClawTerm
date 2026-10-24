@@ -2,7 +2,7 @@ use super::{AutoSyncCoordinator, auto_sync_backoff, permanent_auto_sync_error};
 use crate::features::{AutoSyncResult, AutoSyncTrigger};
 use std::time::Duration;
 use std::time::Instant;
-use zzclawterm_core::{CloudSyncError, CloudSyncState};
+use zzclawterm_core::CloudSyncError;
 
 #[test]
 fn completion_observes_changes_before_their_notifications_arrive() {
@@ -12,7 +12,7 @@ fn completion_observes_changes_before_their_notifications_arrive() {
         .expect("startup sync");
     sync.complete(
         job.trigger,
-        &Ok(AutoSyncResult::UpToDate(CloudSyncState::default())),
+        &Ok(AutoSyncResult::UpToDate(Box::default())),
         Some(5),
     );
     assert_eq!(sync.pending, Some(AutoSyncTrigger::Change));
@@ -36,7 +36,7 @@ fn dispatch_captures_generation_and_keeps_changes_made_during_the_job() {
     sync.record_sync_mutation(6);
     sync.complete(
         job.trigger,
-        &Ok(AutoSyncResult::UpToDate(CloudSyncState::default())),
+        &Ok(AutoSyncResult::UpToDate(Box::default())),
         None,
     );
     assert_eq!(sync.pending, Some(AutoSyncTrigger::Change));
@@ -140,7 +140,7 @@ fn completing_an_older_sync_preserves_changes_received_while_running() {
 
     sync.complete(
         AutoSyncTrigger::Change,
-        &Ok(AutoSyncResult::UpToDate(CloudSyncState::default())),
+        &Ok(AutoSyncResult::UpToDate(Box::default())),
         None,
     );
 
@@ -153,7 +153,7 @@ fn completing_an_older_sync_preserves_changes_received_while_running() {
     sync.running = true;
     sync.complete(
         AutoSyncTrigger::Change,
-        &Ok(AutoSyncResult::UpToDate(CloudSyncState::default())),
+        &Ok(AutoSyncResult::UpToDate(Box::default())),
         None,
     );
     assert_eq!(sync.pending, None);

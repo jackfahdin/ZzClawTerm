@@ -149,6 +149,117 @@ impl std::fmt::Debug for RemoteFileService {
 }
 
 impl RemoteFileService {
+    /// Join using the destination's filename encoding, retaining an opaque parent.
+    pub fn child_path(
+        &self,
+        directory: &RemoteFilePath,
+        name: &str,
+    ) -> anyhow::Result<RemoteFilePath> {
+        anyhow::ensure!(
+            !name.is_empty()
+                && name != "."
+                && name != ".."
+                && !name.contains('/')
+                && !name.contains('\0'),
+            "invalid remote name"
+        );
+        let display = crate::file_browser::file_browser_join(
+            crate::file_browser::FileBrowserBackendKind::Remote,
+            &directory.display_path,
+            name,
+        );
+        if let Some(mut raw) = directory.raw_path()? {
+            if raw.last() != Some(&b'/') {
+                raw.push(b'/');
+            }
+            raw.extend(
+                crate::sftp::SftpPathCodec::from_ssh_config(&self.config)?.encode_path(name)?,
+            );
+            Ok(RemoteFilePath::from_raw(display, &raw))
+        } else {
+            Ok(RemoteFilePath::new(display))
+        }
+    }
+
+    pub fn copy_child_path(
+        &self,
+        directory: &RemoteFilePath,
+        source: &Self,
+        path: &RemoteFilePath,
+        name: &str,
+    ) -> anyhow::Result<RemoteFilePath> {
+        let codec = crate::sftp::SftpPathCodec::from_ssh_config(&self.config)?;
+        let source_codec = crate::sftp::SftpPathCodec::from_ssh_config(&source.config)?;
+        if codec.same_encoding(&source_codec)
+            && let Some(raw) = path.raw_path()?
+        {
+            let name = raw.rsplit(|byte| *byte == b'/').next().unwrap_or_default();
+            anyhow::ensure!(
+                !name.is_empty() && name != b"." && name != b".." && !name.contains(&0),
+                "invalid source filename"
+            );
+            let mut parent = match directory.raw_path()? {
+                Some(raw) => raw,
+                None => codec.encode_path(&directory.display_path)?,
+            };
+            if parent.last() != Some(&b'/') {
+                parent.push(b'/');
+            }
+            parent.extend(name);
+            let display = crate::file_browser::file_browser_join(
+                crate::file_browser::FileBrowserBackendKind::Remote,
+                &directory.display_path,
+                path.display_path.rsplit('/').next().unwrap_or_default(),
+            );
+            return Ok(RemoteFilePath::from_raw(display, &parent));
+        }
+        self.child_path(directory, name)
+    }
+
+    /// String-only fallback protocols cannot address an opaque filename safely.
+    pub fn require_display_path(&self, path: &RemoteFilePath) -> anyhow::Result<()> {
+        if let Some(raw) = path.raw_path()? {
+            anyhow::ensure!(
+                raw == crate::sftp::SftpPathCodec::from_ssh_config(&self.config)?
+                    .encode_path(&path.display_path)?,
+                "this backend cannot address an opaque path"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn create_dir_remote_path(
+        &self,
+        path: &RemoteFilePath,
+        mode: Option<u32>,
+    ) -> anyhow::Result<()> {
+        match self.backend()? {
+            RemoteFileBackendKind::Sftp => self.sftp()?.create_dir_remote_path(path, mode),
+            _ => {
+                self.require_display_path(path)?;
+                self.create_dir_path(&path.display_path, mode)
+            }
+        }
+    }
+
+    pub fn create_file_remote_path(
+        &self,
+        path: &RemoteFilePath,
+        mode: Option<u32>,
+    ) -> anyhow::Result<()> {
+        match self.backend()? {
+            RemoteFileBackendKind::Sftp => self.sftp()?.create_file_remote_path(path, mode),
+            kind => {
+                self.require_display_path(path)?;
+                let path = shell_quote_path(&path.display_path);
+                let mode = mode.map_or(String::new(), |mode| format!(" && chmod {mode:o} {path}"));
+                self.shell(kind)
+                    .exec_ok(format!("set -C; : > {path}{mode}"), None)?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn new(config: SshSessionConfig) -> Self {
         Self::from_parts(config, None, None)
     }
@@ -322,7 +433,10 @@ impl RemoteFileService {
     pub fn list_dir_path(&self, path: &RemoteFilePath) -> anyhow::Result<Vec<SftpFileEntry>> {
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self.sftp()?.list_dir_path(path),
-            kind => list_shell_dir(&self.shell(kind), path, kind),
+            kind => {
+                self.require_display_path(path)?;
+                list_shell_dir(&self.shell(kind), path, kind)
+            }
         }
     }
 
@@ -338,6 +452,7 @@ impl RemoteFileService {
             RemoteFileBackendKind::Sftp => self.sftp()?.remote_file_properties(path),
             kind => {
                 let shell = self.shell(kind);
+                self.require_display_path(path)?;
                 let mut properties = shell_properties(&shell, path)?;
                 if properties.file_type == SftpFileType::Symlink {
                     let output = shell.exec_ok(
@@ -410,7 +525,10 @@ impl RemoteFileService {
             RemoteFileBackendKind::Sftp => self.sftp()?.delete_remote_path(path),
             kind => {
                 self.shell(kind).exec_ok(
-                    format!("rm -rf -- {}", shell_quote(&path.display_path)),
+                    {
+                        self.require_display_path(path)?;
+                        format!("rm -rf -- {}", shell_quote(&path.display_path))
+                    },
                     None,
                 )?;
                 Ok(())
@@ -437,6 +555,8 @@ impl RemoteFileService {
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self.sftp()?.rename_remote_paths(old_path, new_path),
             kind => {
+                self.require_display_path(old_path)?;
+                self.require_display_path(new_path)?;
                 self.shell(kind).exec_ok(
                     format!(
                         "mv -- {} {}",
@@ -445,6 +565,26 @@ impl RemoteFileService {
                     ),
                     None,
                 )?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn rename_remote_paths_no_replace(
+        &self,
+        source: &RemoteFilePath,
+        destination: &RemoteFilePath,
+    ) -> anyhow::Result<()> {
+        match self.backend()? {
+            // SFTP v3 RENAME must fail when newpath exists. Do not use the
+            // posix-rename extension, which permits replacement.
+            RemoteFileBackendKind::Sftp => self.sftp()?.rename_remote_paths(source, destination),
+            kind => {
+                self.require_display_path(source)?;
+                self.require_display_path(destination)?;
+                let old = shell_quote(&source.display_path);
+                let new = shell_quote(&destination.display_path);
+                self.shell(kind).exec_ok(format!("if [ -e {new} ] || [ -L {new} ]; then exit 1; fi; mv -nT -- {old} {new} && [ ! -e {old} ] && [ ! -L {old} ]"), None)?;
                 Ok(())
             }
         }
@@ -664,7 +804,7 @@ impl RemoteFileService {
                 let bytes = self
                     .shell(kind)
                     .exec_ok(format!("cat -- {}", shell_quote(&remote_path)), None)?;
-                crate::download_path::staged_write_file(download_root, &local_path, &bytes)?;
+                crate::download_path::TransferDownload::write(download_root, &local_path, &bytes)?;
                 Ok(SftpTransferSummary {
                     remote_path,
                     local_path,
@@ -735,6 +875,7 @@ impl RemoteFileService {
                     &control,
                     progress,
                     download_root,
+                    &options,
                 )?;
                 Ok(SftpTransferSummary {
                     remote_path: remote_path.display_path,
@@ -815,6 +956,7 @@ impl RemoteFileService {
                     &control,
                     progress,
                     download_root,
+                    options.transfer_options(),
                 )?;
                 Ok(SftpTransferSummary {
                     remote_path: remote_path.display_path,
@@ -926,6 +1068,9 @@ impl RemoteFileService {
         F: FnMut(SftpTransferProgress) + Send + 'static,
     {
         let local_path = local_path.into();
+        if self.backend()? != RemoteFileBackendKind::Sftp {
+            self.require_display_path(remote_path)?;
+        }
         match self.backend()? {
             RemoteFileBackendKind::Sftp => self
                 .sftp()?
@@ -1126,6 +1271,27 @@ impl FileCopyRequest {
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
     {
+        let browser_endpoint = |endpoint: &FileTransferEndpoint| match endpoint {
+            FileTransferEndpoint::Local(path) => (
+                crate::FileBrowserService::local(),
+                RemoteFilePath::new(path.to_string_lossy()),
+            ),
+            FileTransferEndpoint::Remote { service, path } => (
+                crate::FileBrowserService::Remote(service.clone()),
+                path.clone(),
+            ),
+        };
+        let (source_service, source_path) = browser_endpoint(&self.source);
+        let (target_service, target_path) = browser_endpoint(&self.destination);
+        let directory = source_service
+            .remote_file_properties(&source_path)?
+            .is_directory();
+        source_service.validate_copy_destination(
+            &source_path,
+            &target_service,
+            &target_path,
+            directory,
+        )?;
         let staged = match (&self.source, &self.destination) {
             (
                 FileTransferEndpoint::Remote {
@@ -1208,35 +1374,31 @@ impl FileCopyRequest {
                         copied: false,
                     });
                 };
-                let summary = if source.is_dir() {
-                    service.upload_path_with_progress_and_path_options(
-                        source,
-                        &path.display_path,
-                        control,
-                        SftpPathTransferOptions::new(
-                            SftpDuplicatePolicy::Overwrite,
-                            None,
-                            options.transfer_options().clone(),
-                        ),
-                        {
-                            let progress = progress.clone();
-                            move |value| progress.update(value)
-                        },
+                let bytes = if source.is_dir() {
+                    upload_copy_directory(
+                        &service,
+                        &source,
+                        &path,
+                        &control,
+                        options.transfer_options(),
+                        &progress,
                     )?
                 } else {
-                    service.upload_remote_file_with_progress_and_control_options(
-                        source,
-                        &path,
-                        control,
-                        options.transfer_options().clone(),
-                        {
-                            let progress = progress.clone();
-                            move |value| progress.update(value)
-                        },
-                    )?
+                    service
+                        .upload_remote_file_with_progress_and_control_options(
+                            source,
+                            &path,
+                            control,
+                            options.transfer_options().clone(),
+                            {
+                                let progress = progress.clone();
+                                move |value| progress.update(value)
+                            },
+                        )?
+                        .bytes
                 };
                 Ok(FileCopySummary {
-                    bytes: summary.bytes,
+                    bytes,
                     used_local_staging: false,
                     destination_path: path.display_path,
                     copied: true,
@@ -1322,35 +1484,31 @@ impl FileCopyRequest {
                     },
                 )?;
                 progress.next_stage(downloaded.bytes);
-                let uploaded = if downloaded.local_path.is_dir() {
-                    destination.upload_path_with_progress_and_path_options(
-                        &downloaded.local_path,
-                        &destination_path.display_path,
-                        control.clone(),
-                        SftpPathTransferOptions::new(
-                            SftpDuplicatePolicy::Overwrite,
-                            None,
-                            options.transfer_options().clone(),
-                        ),
-                        {
-                            let progress = progress.clone();
-                            move |value| progress.update(value)
-                        },
-                    )?
-                } else {
-                    destination.upload_remote_file_with_progress_and_control_options(
+                let uploaded_bytes = if downloaded.local_path.is_dir() {
+                    upload_copy_directory(
+                        &destination,
                         &downloaded.local_path,
                         &destination_path,
-                        control,
-                        options.transfer_options().clone(),
-                        {
-                            let progress = progress.clone();
-                            move |value| progress.update(value)
-                        },
+                        &control,
+                        options.transfer_options(),
+                        &progress,
                     )?
+                } else {
+                    destination
+                        .upload_remote_file_with_progress_and_control_options(
+                            &downloaded.local_path,
+                            &destination_path,
+                            control,
+                            options.transfer_options().clone(),
+                            {
+                                let progress = progress.clone();
+                                move |value| progress.update(value)
+                            },
+                        )?
+                        .bytes
                 };
                 Ok(FileCopySummary {
-                    bytes: downloaded.bytes.min(uploaded.bytes),
+                    bytes: downloaded.bytes.min(uploaded_bytes),
                     used_local_staging: true,
                     destination_path: destination_path.display_path,
                     copied: true,
@@ -1358,6 +1516,60 @@ impl FileCopyRequest {
             }
         }
     }
+}
+
+/// A raw destination directory cannot be routed through the older string-only
+/// recursive upload API. Join every child with the destination codec instead.
+fn upload_copy_directory(
+    service: &RemoteFileService,
+    source: &Path,
+    destination: &RemoteFilePath,
+    control: &SftpTransferControl,
+    options: &SftpTransferOptions,
+    progress: &CopyProgress,
+) -> anyhow::Result<u64> {
+    let mut pending = vec![(source.to_path_buf(), destination.clone())];
+    let mut bytes = 0_u64;
+    while let Some((local, remote)) = pending.pop() {
+        control.wait_if_paused_blocking()?;
+        let metadata = fs::symlink_metadata(&local)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "copying symbolic links is not supported"
+        );
+        if metadata.is_dir() {
+            if let Err(error) = service.create_dir_remote_path(&remote, Some(0o755)) {
+                let properties = service.remote_file_properties(&remote)?;
+                if properties.file_type != SftpFileType::Directory {
+                    return Err(error);
+                }
+            }
+            for child in fs::read_dir(&local)? {
+                let child = child?;
+                let name = child.file_name().into_string().map_err(|_| {
+                    anyhow::anyhow!("local filename cannot be represented at destination")
+                })?;
+                pending.push((child.path(), service.child_path(&remote, &name)?));
+            }
+        } else {
+            anyhow::ensure!(metadata.is_file(), "copying special files is not supported");
+            let reporter = progress.clone();
+            let mut previous = 0;
+            let uploaded = service.upload_remote_file_with_progress_and_control_options(
+                local,
+                &remote,
+                control.clone(),
+                options.clone(),
+                move |value| {
+                    reporter.add_bytes(value.bytes_transferred.saturating_sub(previous));
+                    previous = value.bytes_transferred;
+                },
+            )?;
+            bytes = bytes.saturating_add(uploaded.bytes);
+        }
+        progress.finish_item();
+    }
+    Ok(bytes)
 }
 
 struct RemoteCopyStaging(PathBuf);
@@ -1482,7 +1694,20 @@ fn resolve_copy_remote_target(
     options: &SftpPathTransferOptions,
     direction: SftpTransferDirection,
 ) -> anyhow::Result<Option<RemoteFilePath>> {
-    if service.remote_file_properties(requested).is_err() {
+    let parent = requested.parent()?;
+    // A denied stat is not proof that a target is absent. Listing the parent
+    // also preserves opaque child identities and reports permission/disconnect errors.
+    let entries = service.list_dir_path(&parent)?;
+    let exists = |path: &RemoteFilePath| {
+        entries.iter().any(|entry| {
+            let other = entry.remote_path();
+            match (&other.raw_path_token, &path.raw_path_token) {
+                (Some(_), Some(_)) => other.identity_key() == path.identity_key(),
+                _ => other.display_path == path.display_path,
+            }
+        })
+    };
+    if !exists(requested) {
         return Ok(Some(requested.clone()));
     }
     match duplicate_decision(
@@ -1497,9 +1722,13 @@ fn resolve_copy_remote_target(
         SftpDuplicateDecision::Skip => Ok(None),
         SftpDuplicateDecision::Rename => {
             for index in 1.. {
-                let candidate =
-                    RemoteFilePath::new(format!("{} ({index})", requested.display_path));
-                if service.remote_file_properties(&candidate).is_err() {
+                let parent = requested.parent()?;
+                let name = crate::file_browser::file_browser_name(
+                    crate::file_browser::FileBrowserBackendKind::Remote,
+                    &requested.display_path,
+                );
+                let candidate = service.child_path(&parent, &format!("{name} ({index})"))?;
+                if !exists(&candidate) {
                     return Ok(Some(candidate));
                 }
             }
@@ -1508,6 +1737,7 @@ fn resolve_copy_remote_target(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 fn download_shell_path<F>(
     service: &RemoteFileService,
     kind: RemoteFileBackendKind,
@@ -1516,6 +1746,7 @@ fn download_shell_path<F>(
     control: &SftpTransferControl,
     progress: F,
     download_root: &Path,
+    options: &SftpTransferOptions,
 ) -> anyhow::Result<u64>
 where
     F: FnMut(SftpTransferProgress) + Send + 'static,
@@ -1556,6 +1787,11 @@ where
                 &local,
                 download_root,
                 properties.size,
+                if options.preserve_timestamps {
+                    properties.modified_at
+                } else {
+                    None
+                },
                 control.clone(),
                 move |current| {
                     report.lock().expect("shell progress lock")(SftpTransferProgress {

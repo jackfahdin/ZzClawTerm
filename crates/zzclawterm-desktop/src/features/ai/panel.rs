@@ -13,7 +13,7 @@ use zzclawterm_core::{
 use zzclawterm_ui::chat::{ZzClawMessageScroller, ZzClawMessageScrollerState};
 use zzclawterm_ui::{
     ZzClawDropdownMenu, ZzClawInputShell, ZzClawMenuAnchor, ZzClawMenuItem, ZzClawScrollable,
-    ZzClawSearchInput,
+    ZzClawSearchInput, ZzClawTooltip,
 };
 
 use crate::features::ZzClawTermApp;
@@ -1498,10 +1498,24 @@ impl AiPanel {
                     .gap_0()
                     .child(
                         div()
+                            .id("ai-background-execution-help")
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .text_size(px(12.))
                             .font_weight(FontWeight(600.))
                             .text_color(rgb(palette.text))
-                            .child(t!("ai.backgroundAgentExecution")),
+                            .child(t!("ai.backgroundAgentExecution"))
+                            .child(
+                                svg()
+                                    .size(px(12.))
+                                    .path("icons/menu/info.svg")
+                                    .text_color(rgb(palette.text_muted)),
+                            )
+                            .tooltip(|window, cx| {
+                                ZzClawTooltip::new(t!("ai.backgroundAgentExecutionHelp"))
+                                    .build(window, cx)
+                            }),
                     )
                     .child(
                         div()

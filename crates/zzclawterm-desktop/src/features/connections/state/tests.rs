@@ -1201,23 +1201,26 @@ fn commit_connection_editor_new_group_captures_parent_and_clears_draft() {
 }
 
 #[test]
-fn toggle_connection_editor_raw_tcp_forces_cr_enter_mode() {
-    let mut draft = Some(ConnectionEditorState {
-        raw_tcp_cli: false,
-        telnet_enter_mode: "lf".to_string(),
-        error: Some("stale validation".to_string()),
-        ..connection_editor_state_with_secret_draft()
-    });
+fn toggle_connection_editor_raw_tcp_preserves_enter_mode() {
+    for enter_mode in ["cr", "lf", "crlf"] {
+        let mut draft = Some(ConnectionEditorState {
+            raw_tcp_cli: false,
+            telnet_enter_mode: enter_mode.to_string(),
+            error: Some("stale validation".to_string()),
+            ..connection_editor_state_with_secret_draft()
+        });
 
-    assert!(toggle_connection_editor_flag(
-        &mut draft,
-        ConnectionEditorToggle::RawTcp
-    ));
-
-    let editor = draft.expect("editor remains open");
-    assert!(editor.raw_tcp_cli);
-    assert_eq!(editor.telnet_enter_mode, "cr");
-    assert_eq!(editor.error, None);
+        for expected_raw in [true, false] {
+            assert!(toggle_connection_editor_flag(
+                &mut draft,
+                ConnectionEditorToggle::RawTcp
+            ));
+            let editor = draft.as_ref().expect("editor remains open");
+            assert_eq!(editor.raw_tcp_cli, expected_raw);
+            assert_eq!(editor.telnet_enter_mode, enter_mode);
+            assert_eq!(editor.error, None);
+        }
+    }
 }
 
 #[test]

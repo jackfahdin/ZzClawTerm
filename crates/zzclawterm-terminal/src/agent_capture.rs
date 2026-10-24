@@ -75,6 +75,9 @@ pub struct AgentCapturedOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCaptureProcessResult {
     pub visible_text: String,
+    /// Command output before the bounded RPC result is truncated. Never includes
+    /// wrapper echoes, markers, or the post-command prompt.
+    pub recording_text: String,
     pub completed: Vec<AgentCapturedOutput>,
 }
 
@@ -85,6 +88,7 @@ pub struct AgentCaptureCancelResult {
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
     pub source_truncated: bool,
+    pub recording_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,9 @@ struct ActiveCapture {
     phase: CapturePhase,
     start_time: Instant,
     source_truncated: bool,
+    start_newline: bool,
+    recording_tail: String,
+    end_newline: bool,
 }
 
 /// Control strings are opaque to marker matching. CMD titles can contain copies
@@ -212,6 +219,11 @@ impl AgentOutputCaptureProcessor {
     }
 
     pub fn register(&mut self, marker_id: String) {
+        self.register_with_end_newline(marker_id, true);
+    }
+
+    /// POSIX and PowerShell insert a newline before END; CMD only echoes END.
+    pub fn register_with_end_newline(&mut self, marker_id: String, end_newline: bool) {
         self.active.insert(
             marker_id,
             ActiveCapture {
@@ -219,6 +231,9 @@ impl AgentOutputCaptureProcessor {
                 phase: CapturePhase::WaitingForStart,
                 start_time: Instant::now(),
                 source_truncated: false,
+                start_newline: true,
+                recording_tail: String::new(),
+                end_newline,
             },
         );
     }
@@ -255,6 +270,7 @@ impl AgentOutputCaptureProcessor {
             exit_code: None,
             duration_ms: capture.start_time.elapsed().as_millis() as u64,
             source_truncated: capture.source_truncated,
+            recording_text: capture.recording_tail,
         })
     }
 
@@ -262,6 +278,7 @@ impl AgentOutputCaptureProcessor {
         if !self.has_active() {
             return AgentCaptureProcessResult {
                 visible_text: text.to_string(),
+                recording_text: String::new(),
                 completed: self.drain_completed(),
             };
         }
@@ -270,6 +287,7 @@ impl AgentOutputCaptureProcessor {
         if self.active.is_empty() {
             return AgentCaptureProcessResult {
                 visible_text: filtered.text,
+                recording_text: String::new(),
                 completed: self.drain_completed(),
             };
         }
@@ -285,6 +303,7 @@ impl AgentOutputCaptureProcessor {
         };
         // Forward only terminal queries during capture so shell startup can finish.
         let mut visible_text = filtered.queries;
+        let mut recording_text = String::new();
 
         while !remaining.is_empty() {
             if let Some(result) = self.try_match_start(remaining) {
@@ -292,7 +311,7 @@ impl AgentOutputCaptureProcessor {
                 continue;
             }
 
-            if let Some(result) = self.try_match_end(remaining) {
+            if let Some(result) = self.try_match_end(remaining, &mut recording_text) {
                 visible_text.push_str(result.before);
                 remaining = result.after;
                 continue;
@@ -301,7 +320,7 @@ impl AgentOutputCaptureProcessor {
             if let Some(capture_id) = self.any_in_phase(CapturePhase::Capturing) {
                 if let Some(pos) = remaining.find(MARKER_PREFIX) {
                     if let Some(cap) = self.active.get_mut(&capture_id) {
-                        append_capture_output(cap, &remaining[..pos]);
+                        append_capture_output(cap, &remaining[..pos], &mut recording_text);
                     }
                     let candidate = &remaining[pos..];
                     if self.is_possible_marker_prefix(candidate) {
@@ -309,7 +328,7 @@ impl AgentOutputCaptureProcessor {
                         remaining = "";
                     } else if pos == 0 {
                         if let Some(cap) = self.active.get_mut(&capture_id) {
-                            append_capture_output(cap, MARKER_PREFIX);
+                            append_capture_output(cap, MARKER_PREFIX, &mut recording_text);
                         }
                         remaining = &remaining[MARKER_PREFIX.len()..];
                     } else {
@@ -320,7 +339,7 @@ impl AgentOutputCaptureProcessor {
                         .possible_marker_tail_start(remaining)
                         .unwrap_or(remaining.len());
                     if let Some(cap) = self.active.get_mut(&capture_id) {
-                        append_capture_output(cap, &remaining[..tail_start]);
+                        append_capture_output(cap, &remaining[..tail_start], &mut recording_text);
                     }
                     self.pending_marker_tail.push_str(&remaining[tail_start..]);
                     remaining = "";
@@ -352,6 +371,7 @@ impl AgentOutputCaptureProcessor {
 
         AgentCaptureProcessResult {
             visible_text,
+            recording_text,
             completed: self.drain_completed(),
         }
     }
@@ -379,15 +399,17 @@ impl AgentOutputCaptureProcessor {
             })
             .min_by_key(|(_, end)| *end)?;
         self.active.get_mut(&marker_id)?.phase = CapturePhase::Capturing;
-        let after_marker = &text[marker_end..];
-        let after = after_marker
-            .strip_prefix("\r\n")
-            .or_else(|| after_marker.strip_prefix('\n'))
-            .unwrap_or(after_marker);
-        Some(MatchResult { before: "", after })
+        Some(MatchResult {
+            before: "",
+            after: &text[marker_end..],
+        })
     }
 
-    fn try_match_end<'a>(&mut self, text: &'a str) -> Option<MatchResult<'a>> {
+    fn try_match_end<'a>(
+        &mut self,
+        text: &'a str,
+        recording_text: &mut String,
+    ) -> Option<MatchResult<'a>> {
         let (marker_id, start, marker_end, exit_code) = self
             .active
             .iter()
@@ -405,7 +427,13 @@ impl AgentOutputCaptureProcessor {
             })
             .min_by_key(|(_, start, _, _)| *start)?;
         let capture = self.active.get_mut(&marker_id)?;
-        append_capture_output(capture, &text[..start]);
+        append_capture_output(capture, &text[..start], recording_text);
+        // Delay at most one newline so the wrapper's separator is excluded,
+        // even when it and the END marker arrive in different chunks.
+        let tail = std::mem::take(&mut capture.recording_tail);
+        if !capture.end_newline {
+            recording_text.push_str(&tail);
+        }
         self.completed.push_back(AgentCapturedOutput {
             marker_id: marker_id.clone(),
             output: std::mem::take(&mut capture.buffer).trim().to_string(),
@@ -459,7 +487,29 @@ impl AgentOutputCaptureProcessor {
     }
 }
 
-fn append_capture_output(capture: &mut ActiveCapture, text: &str) {
+fn append_capture_output(capture: &mut ActiveCapture, text: &str, recording_text: &mut String) {
+    let text = if capture.start_newline {
+        let text = text.trim_start_matches('\r');
+        if text.is_empty() {
+            return;
+        }
+        capture.start_newline = false;
+        text.strip_prefix('\n').unwrap_or(text)
+    } else {
+        text
+    };
+    if !text.is_empty() {
+        recording_text.push_str(&std::mem::take(&mut capture.recording_tail));
+        recording_text.push_str(text);
+        let tail_len = if recording_text.ends_with("\r\n") {
+            2
+        } else if recording_text.ends_with(['\r', '\n']) {
+            1
+        } else {
+            0
+        };
+        capture.recording_tail = recording_text.split_off(recording_text.len() - tail_len);
+    }
     let available = MAX_CAPTURE_BYTES.saturating_sub(capture.buffer.len());
     let mut end = available.min(text.len());
     while !text.is_char_boundary(end) {
@@ -605,6 +655,45 @@ mod tests {
     }
 
     #[test]
+    fn recording_stream_preserves_whitespace_and_removes_split_wrapper_framing() {
+        let stream =
+            "wrapper\r\n__DF_CMD_START_log__\r\n  猫🐱  \r\n\r\n__DF_CMD_END_log_0__\r\nprompt>";
+        for split in stream.char_indices().map(|(i, _)| i) {
+            let mut processor = AgentOutputCaptureProcessor::new();
+            processor.register("log".into());
+            let first = processor.process(&stream[..split]);
+            let second = processor.process(&stream[split..]);
+            let recorded = first.recording_text + &second.recording_text;
+            assert_eq!(recorded, "  猫🐱  \r\n", "split {split}");
+        }
+    }
+
+    #[test]
+    fn cancellation_flushes_only_the_unrecorded_tail_and_late_markers_stay_hidden() {
+        let mut processor = AgentOutputCaptureProcessor::new();
+        processor.register("log".into());
+        let first = processor.process("__DF_CMD_START_log__\npartial\n__DF_CMD_EN");
+        let mut retired = processor.retire("log");
+        let cancelled = processor.cancel("log").unwrap();
+        assert_eq!(
+            first.recording_text + &cancelled.recording_text,
+            "partial\n"
+        );
+        let (late, done) = retired.process("D_log_0__\nlate output\n");
+        assert!(done);
+        assert_eq!(late, "\nlate output\n");
+    }
+
+    #[test]
+    fn cmd_recording_preserves_empty_output_lines_without_an_end_separator() {
+        let mut processor = AgentOutputCaptureProcessor::new();
+        processor.register_with_end_newline("cmd".into(), false);
+        let first = processor.process("__DF_CMD_START_cmd__\r\n\r");
+        let second = processor.process("\n__DF_CMD_END_cmd_0__\r\nC:\\>");
+        assert_eq!(first.recording_text + &second.recording_text, "\r\n");
+    }
+
+    #[test]
     fn unrelated_and_malformed_markers_do_not_finish_or_restart_capture() {
         let mut processor = AgentOutputCaptureProcessor::new();
         processor.register("live".into());
@@ -625,7 +714,9 @@ mod tests {
         let mut processor = AgentOutputCaptureProcessor::new();
         processor.register("limit".into());
         processor.process("__DF_CMD_START_limit__\n");
-        processor.process(&"猫".repeat(MAX_CAPTURE_BYTES / 3 + 5));
+        let body = "猫".repeat(MAX_CAPTURE_BYTES / 3 + 5);
+        let streamed = processor.process(&body);
+        assert_eq!(streamed.recording_text, body);
         let result = processor.process("\n__DF_CMD_END_limit_0__\nPS>");
         let output = &result.completed[0];
         assert!(output.source_truncated);

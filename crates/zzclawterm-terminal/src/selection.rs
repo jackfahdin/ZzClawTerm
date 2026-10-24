@@ -2,6 +2,13 @@
 
 use crate::{RenderCell, TerminalSnapshot};
 
+mod text;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionTextError {
+    OutOfBounds,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TerminalBufferCellPos {
     pub line: usize,

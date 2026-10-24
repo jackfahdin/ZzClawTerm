@@ -104,6 +104,7 @@ struct Probe {
     measurements: Rc<RefCell<Measurements>>,
     running: Rc<Cell<bool>>,
     cell_graphics: bool,
+    minimum_contrast_ratio: f32,
     cold: bool,
     scale: Option<f32>,
 }
@@ -134,6 +135,7 @@ impl Render for Probe {
             400.,
             700.,
         )
+        .with_minimum_contrast_ratio(self.minimum_contrast_ratio)
         .with_layout_cache(Arc::clone(&self.cache))
         .with_cell_glyph_rendering(self.cell_graphics);
         div()
@@ -160,6 +162,14 @@ fn fixture(kind: &str, cell_graphics: bool) -> Arc<TerminalSnapshot> {
             "mixed" => {
                 format!("│ row {row:02}  CPU ▓▓▓▓░░░░  █▀▄  ───────  user@zzclawterm  512 MiB │")
             }
+            "contrast" => match row % 6 {
+                0 => "ANSI16  \x1b[36;42m resources/ \x1b[0m",
+                1 => "ANSI256 \x1b[38;5;51;48;5;46m resources/ \x1b[0m",
+                2 => "RGB     \x1b[38;2;40;220;220;48;2;65;210;85m resources/ \x1b[0m",
+                3 => "REVERSE \x1b[7;36;42m resources/ \x1b[0m",
+                4 => "GRAPHIC \x1b[38;2;40;220;220;48;2;65;210;85m text ── █▀▄ ░▒▓ \u{e0b0} text \x1b[0m",
+                _ => "HIDDEN  \x1b[8;36;42m concealed \x1b[0m visible",
+            }.into(),
             "decorations" => match row % 4 {
                 0 => "TEXT\x1b[4;31m        \x1b[0m",
                 1 => "\x1b[9;31m█▀──\x1b[0m",
@@ -167,7 +177,7 @@ fn fixture(kind: &str, cell_graphics: bool) -> Arc<TerminalSnapshot> {
                 _ => "╔═╦═╗ ░▒▓ █▀▄",
             }
             .into(),
-            _ => panic!("fixture must be text, mixed, blocks, shade, or decorations"),
+            _ => panic!("fixture must be text, mixed, blocks, shade, decorations, or contrast"),
         };
         screen.advance(text.as_bytes());
     }
@@ -251,8 +261,8 @@ fn main() {
     // Separate processes avoid sharing the text/sprite atlas between A and B.
     let args: Vec<String> = std::env::args().skip(1).collect();
     assert!(
-        (2..=5).contains(&args.len()),
-        "usage: renderer_probe <cell|font> <fixture> [hot|cold] [native|scale] [screenshot.png]"
+        (2..=6).contains(&args.len()),
+        "usage: renderer_probe <cell|font> <fixture> [hot|cold] [native|scale] [screenshot.png] [minimum-contrast]"
     );
     assert!(matches!(args[0].as_str(), "cell" | "font"));
     let cell_graphics = args[0] == "cell";
@@ -267,7 +277,11 @@ fn main() {
         .filter(|scale| scale.as_str() != "native")
         .map(|scale| scale.parse().expect("numeric scale"));
     assert!(scale.is_none_or(|scale| scale.is_finite() && (1.0..=2.0).contains(&scale)));
-    let screenshot_path = args.get(4).cloned();
+    let screenshot_path = args.get(4).filter(|path| !path.is_empty()).cloned();
+    let minimum_contrast_ratio: f32 = args
+        .get(5)
+        .map_or(1.0, |ratio| ratio.parse().expect("numeric contrast"));
+    assert!(minimum_contrast_ratio.is_finite() && (1.0..=21.0).contains(&minimum_contrast_ratio));
     let snapshot = fixture(&kind, cell_graphics);
     let cache = Arc::new(Mutex::new(ZzClawTerminalLayoutCache::default()));
     let measurements = Rc::new(RefCell::new(Measurements::default()));
@@ -282,7 +296,7 @@ fn main() {
                 let ratio = scale / window.scale_factor();
                 window.resize(size(px(f32::from(COLS) * CELL_W * ratio), px(f32::from(ROWS) * CELL_H * ratio)));
             }
-            cx.new(|_| Probe { snapshot, cache: Arc::clone(&cache), measurements: Rc::clone(&measurements), running: Rc::clone(&running), cell_graphics, cold, scale })
+            cx.new(|_| Probe { snapshot, cache: Arc::clone(&cache), measurements: Rc::clone(&measurements), running: Rc::clone(&running), cell_graphics, minimum_contrast_ratio, cold, scale })
         }).expect("native GPU window");
         cx.spawn(async move |cx| {
             let mut collector = FrameTimingCollector::new();
@@ -337,6 +351,7 @@ fn main() {
             println!("{}", json!({
                 "mode": if cell_graphics { "cell" } else { "font-control" }, "fixture": kind,
                 "cache": if cold { "cold" } else { "hot" }, "cols": COLS, "rows": ROWS,
+                "minimum_contrast_ratio": minimum_contrast_ratio,
                 "font": "Consolas", "font_size": 12, "cell_width": CELL_W, "cell_height": CELL_H,
                 "scale": actual_scale, "forced_scale": scale, "gpu": gpu,
                 "prepaint": distribution(measurements.element.iter().take(SAMPLES).map(|sample| sample.0)),

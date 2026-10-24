@@ -1,27 +1,16 @@
-use gpui::{Context, Window, prelude::*};
-use rust_i18n::t;
-use zzclawterm_transport::{
-    FileBrowserService, RemoteFilePath, SftpDuplicatePolicy, SftpDuplicateResolver,
-    SftpPathTransferOptions, SftpTransferControl, file_browser_join, file_browser_name,
-    file_browser_parent, file_browser_path_is_root,
-};
-
-use super::operations::FileManagerCopyPlan;
+use super::operations::FileManagerSelection;
 use super::pane::{PaneEndpoint, PaneId};
-use super::state::FileManagerJobTarget;
 use super::view::FileManagerNameKind;
 use super::workspace::{FileManagerListResult, FileManagerWorkspace};
 use crate::features::ZzClawTermApp;
-use crate::features::pages::transfers::file_ops::clipboard::{
-    ClipboardCopyRequest, run_clipboard_copy,
-};
 use crate::features::runtime_jobs::await_blocking_job;
 use crate::features::text_inputs::TextInputSetup;
-use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
-use crate::models::{
-    TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
-    TransferJobStatus,
+use crate::features::transfers::file_operations::{
+    FileMutation, FileMutationIntent, FileTransferOperation,
 };
+use gpui::{Context, Window, prelude::*};
+use rust_i18n::t;
+use zzclawterm_transport::{FileBrowserService, RemoteFilePath};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn file_browser_service_for_endpoint(
@@ -31,6 +20,9 @@ impl ZzClawTermApp {
         match endpoint {
             PaneEndpoint::Local => Ok(FileBrowserService::local()),
             PaneEndpoint::Session(id) => self.file_browser_service_for_session(id),
+            PaneEndpoint::OfflineConnection(_) => {
+                anyhow::bail!("reconnect the source before browsing files")
+            }
         }
     }
 
@@ -44,21 +36,13 @@ impl ZzClawTermApp {
         let Some(workspace) = self.file_manager.workspace(&manager_id) else {
             return;
         };
-        let (endpoint, generation, snapshot) = workspace.update(cx, |workspace, _| {
+        let (endpoint, generation, snapshot) = workspace.update(cx, |workspace, cx| {
             let pane = workspace.pane_mut(pane_id);
             let snapshot = pane.capture_navigation();
             let generation = pane.begin_load(path.clone());
+            cx.notify();
             (pane.endpoint.clone(), generation, snapshot)
         });
-        if matches!(&endpoint, PaneEndpoint::Session(id) if self.session.is_disconnected(id)) {
-            workspace.update(cx, |workspace, cx| {
-                workspace.pane_mut(pane_id).disconnected = true;
-                workspace.pane_mut(pane_id).loading = false;
-                workspace.pane_mut(pane_id).status = t!("fileManager.disconnected").to_string();
-                cx.notify();
-            });
-            return;
-        }
         let service = match self.file_browser_service_for_endpoint(&endpoint) {
             Ok(service) => service,
             Err(error) => {
@@ -71,6 +55,8 @@ impl ZzClawTermApp {
                         snapshot,
                         result: Err(error.to_string()),
                     });
+                    let pane = workspace.pane_mut(pane_id);
+                    pane.disconnected = true;
                     cx.notify();
                 });
                 return;
@@ -79,29 +65,53 @@ impl ZzClawTermApp {
         let task = self.blocking_jobs.submit_task("file-manager-list", {
             let path = path.clone();
             move |_| {
-                service
-                    .list_dir_path(&path)
-                    .map_err(|error| error.to_string())
+                service.list_dir_path(&path).map_err(|error| {
+                    let missing = error.chain().any(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    }) || error.to_string().contains("No such file")
+                        || error.to_string().contains("no such file");
+                    (missing, error.to_string())
+                })
             }
         });
         cx.spawn(async move |this, cx| {
-            let result = await_blocking_job(task).await.and_then(|result| result);
-            let _ = this.update(cx, |_, cx| {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.apply_list_result(FileManagerListResult {
+            let result = match await_blocking_job(task).await {
+                Ok(result) => result,
+                Err(error) => Err((false, error)),
+            };
+            let missing = result.as_ref().err().is_some_and(|(missing, _)| *missing);
+            let success = result.is_ok();
+            let _ = this.update(cx, |app, cx| {
+                let changed = workspace.update(cx, |workspace, cx| {
+                    let changed = workspace.apply_list_result(FileManagerListResult {
                         pane: pane_id,
                         generation,
-                        endpoint,
-                        path,
+                        endpoint: endpoint.clone(),
+                        path: path.clone(),
                         snapshot,
-                        result,
+                        result: result.map_err(|(_, message)| message),
                     });
-                    cx.notify();
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
                 });
+                if changed && success {
+                    app.persist_file_manager_settings(cx);
+                }
+                if changed
+                    && missing
+                    && workspace.read(cx).pane(pane_id).home_dir != path.display_path
+                {
+                    app.shell
+                        .set_status(t!("fileManager.directoryMissing").to_string());
+                    app.navigate_file_manager_home(manager_id, pane_id, cx);
+                }
             });
         })
         .detach();
-        cx.notify();
     }
 
     pub(in crate::features) fn navigate_file_manager_home(
@@ -118,49 +128,60 @@ impl ZzClawTermApp {
             Ok(service) => service,
             Err(error) => {
                 workspace.update(cx, |workspace, cx| {
-                    workspace.pane_mut(pane_id).error = Some(error.to_string());
+                    let pane = workspace.pane_mut(pane_id);
+                    pane.disconnected = true;
+                    pane.loading = false;
+                    pane.error = Some(error.to_string());
                     cx.notify();
                 });
                 return;
             }
         };
-        match service.home_dir() {
-            Ok(home) => {
-                workspace.update(cx, |workspace, _| {
-                    let pane = workspace.pane_mut(pane_id);
-                    pane.home_dir = home.clone();
-                    pane.home_dir_pending = false;
-                });
-                self.navigate_file_manager_pane(manager_id, pane_id, RemoteFilePath::new(home), cx);
-            }
-            Err(error) => {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.pane_mut(pane_id).error = Some(error.to_string());
-                    cx.notify();
-                });
-            }
-        }
-    }
-
-    pub(in crate::features) fn navigate_file_manager_parent(
-        &mut self,
-        manager_id: String,
-        pane_id: PaneId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return;
-        };
-        let (endpoint, path) = workspace.read(cx).pane(pane_id).let_parent_nav();
-        let service = match self.file_browser_service_for_endpoint(&endpoint) {
-            Ok(service) => service,
-            Err(_) => return,
-        };
-        if file_browser_path_is_root(service.kind(), &path.display_path) {
-            return;
-        }
-        let parent = RemoteFilePath::new(file_browser_parent(service.kind(), &path.display_path));
-        self.navigate_file_manager_pane(manager_id, pane_id, parent, cx);
+        let generation = workspace.update(cx, |workspace, cx| {
+            let pane = workspace.pane_mut(pane_id);
+            pane.generation = pane.generation.wrapping_add(1);
+            pane.loading = true;
+            pane.error = None;
+            cx.notify();
+            pane.generation
+        });
+        let task = self
+            .blocking_jobs
+            .submit_task("file-manager-home", move |_| {
+                service.home_dir().map_err(|error| error.to_string())
+            });
+        cx.spawn(async move |this, cx| {
+            let result = await_blocking_job(task).await.and_then(|result| result);
+            let _ = this.update(cx, |app, cx| {
+                if workspace.read(cx).pane(pane_id).generation != generation
+                    || workspace.read(cx).pane(pane_id).endpoint != endpoint
+                {
+                    return;
+                }
+                match result {
+                    Ok(home) => {
+                        workspace.update(cx, |workspace, _| {
+                            let pane = workspace.pane_mut(pane_id);
+                            pane.home_dir = home.clone();
+                            pane.home_dir_pending = false;
+                        });
+                        app.navigate_file_manager_pane(
+                            manager_id,
+                            pane_id,
+                            RemoteFilePath::new(home),
+                            cx,
+                        );
+                    }
+                    Err(error) => workspace.update(cx, |workspace, cx| {
+                        let pane = workspace.pane_mut(pane_id);
+                        pane.loading = false;
+                        pane.error = Some(error);
+                        cx.notify();
+                    }),
+                }
+            });
+        })
+        .detach();
     }
 
     pub(in crate::features) fn refresh_file_manager_pane(
@@ -180,244 +201,76 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn start_file_manager_copy(
+    pub(in crate::features) fn refresh_file_manager_directory(
         &mut self,
-        manager_id: String,
-        cut: bool,
+        endpoint: &PaneEndpoint,
+        path: &RemoteFilePath,
         cx: &mut Context<Self>,
     ) {
-        if cut && self.file_manager_same_endpoint_move(&manager_id, cx) {
-            self.start_file_manager_same_endpoint_move(manager_id, cx);
-            return;
+        let targets: Vec<_> = self
+            .file_manager
+            .workspaces()
+            .flat_map(|(id, workspace)| {
+                [PaneId::Left, PaneId::Right]
+                    .into_iter()
+                    .filter_map(|pane_id| {
+                        let pane = workspace.read(cx).pane(pane_id);
+                        (pane.endpoint == *endpoint
+                            && (pane.path.raw_path_token.is_none()
+                                || path.raw_path_token.is_none()
+                                || pane.path.raw_path_token == path.raw_path_token)
+                            && zzclawterm_transport::file_browser_path_eq(
+                                endpoint.kind(),
+                                &pane.path.display_path,
+                                &path.display_path,
+                            ))
+                        .then(|| (id.clone(), pane_id))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, pane) in targets {
+            self.refresh_file_manager_pane(id, pane, cx);
         }
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return;
+        let sessions: Vec<_> = self
+            .session
+            .session_ids()
+            .filter(|session| match endpoint {
+                PaneEndpoint::Local => {
+                    self.session
+                        .file_browser_backend_support_for_session(session)
+                        == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+                }
+                PaneEndpoint::Session(id) => *session == id,
+                PaneEndpoint::OfflineConnection(_) => false,
+            })
+            .map(str::to_string)
+            .collect();
+        let active = self.session.active_id_owned();
+        for session in sessions {
+            self.transfer
+                .invalidate_file_operation_directory(&session, path);
+        }
+        let browser = self.transfer.browser_remote_file_path();
+        let matches_active = match endpoint {
+            PaneEndpoint::Local => {
+                self.session.active_file_browser_backend()
+                    == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            }
+            PaneEndpoint::Session(id) => active.as_ref() == Some(id),
+            PaneEndpoint::OfflineConnection(_) => false,
         };
-        let (source, target, entries, target_directory) = workspace.read(cx).copy_inputs();
-        if entries.is_empty() {
-            self.shell
-                .set_status(t!("fileManager.selectBeforeCopy").to_string());
-            cx.notify();
-            return;
-        }
-        if source
-            .session_id()
-            .is_some_and(|id| self.session.is_disconnected(id))
-            || target
-                .session_id()
-                .is_some_and(|id| self.session.is_disconnected(id))
+        if matches_active
+            && !self.transfer.browser_view().loading
+            && browser.display_path == path.display_path
+            && (browser.raw_path_token.is_none()
+                || path.raw_path_token.is_none()
+                || browser.raw_path_token == path.raw_path_token)
         {
-            self.shell
-                .set_status(t!("fileManager.disconnected").to_string());
-            cx.notify();
-            return;
-        }
-        let source_service = match self.file_browser_service_for_endpoint(&source) {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
-                cx.notify();
-                return;
+            if let Some(active) = active {
+                self.transfer.take_delete_refresh_pending(&active);
             }
-        };
-        let target_service = match self.file_browser_service_for_endpoint(&target) {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
-                cx.notify();
-                return;
-            }
-        };
-        let plan = FileManagerCopyPlan {
-            source: source.clone(),
-            source_service,
-            entries,
-            target: target.clone(),
-            target_service,
-            target_directory: target_directory.clone(),
-            cut,
-        };
-        let duplicate_policy = if cut {
-            SftpDuplicatePolicy::Skip
-        } else {
-            self.transfer.duplicate_policy()
-        };
-        let duplicate_resolver = (duplicate_policy == SftpDuplicatePolicy::Ask).then(|| {
-            self.session.prompt_duplicate_broker() as std::sync::Arc<dyn SftpDuplicateResolver>
-        });
-        let options = SftpPathTransferOptions::new(
-            duplicate_policy,
-            duplicate_resolver,
-            self.sftp_transfer_options(),
-        );
-        let mut started = 0;
-        for entry in plan.entries.clone() {
-            if plan.rejects(&entry) {
-                continue;
-            }
-            let target_path = plan.destination_for(&entry);
-            let id = self.transfer.next_transfer_job_id("file-manager-copy");
-            let control = SftpTransferControl::new();
-            self.transfer.enqueue_transfer_job(TransferJobState {
-                id: id.clone(),
-                session_id: plan.source.session_id().map(str::to_string),
-                kind: TransferJobKind::SendTo {
-                    source_path: entry.path.clone(),
-                    target_session_id: plan.target.session_id().unwrap_or("local").to_string(),
-                    target_path: target_path.clone(),
-                    target_parent_path: plan.target_directory.display_path.clone(),
-                },
-                status: TransferJobStatus::Running,
-                detail: format!("{} {}", if cut { "Moving" } else { "Copying" }, entry.path),
-                created_at_ms: TransferJobState::now_ms(),
-                display_name: String::new(),
-                entries: Vec::new(),
-                summary: None,
-                progress: None,
-                control: Some(control.clone()),
-                speed: Default::default(),
-            });
-            self.file_manager.track_job(
-                id.clone(),
-                FileManagerJobTarget {
-                    source: plan.source.clone(),
-                    source_parent: file_browser_parent(plan.source_service.kind(), &entry.path),
-                    target: plan.target.clone(),
-                    target_parent: plan.target_directory.display_path.clone(),
-                },
-            );
-            if plan.cut {
-                self.transfer
-                    .track_cut_job(id.clone(), 0, entry.path.clone());
-            }
-            let request = ClipboardCopyRequest {
-                source_service: plan.source_service.clone(),
-                target_service: plan.target_service.clone(),
-                source: entry.remote_path(),
-                target_path,
-                target_session_id: plan.target.session_id().unwrap_or("local").to_string(),
-                cut: plan.cut,
-                control,
-                options: options.clone(),
-            };
-            let tx = self.transfer.transfer_event_sender();
-            self.submit_bulk_transfer_job("file-manager-copy", id.clone(), tx.clone(), move || {
-                let mut progress = TransferProgressEventSender::new(id.clone(), tx.clone());
-                let result = run_clipboard_copy(request, move |value| progress.send(value));
-                let _ = tx.unbounded_send(TransferJobResult {
-                    id,
-                    event: TransferJobEvent::Finished(result),
-                });
-            });
-            started += 1;
-        }
-        self.shell
-            .set_status(t!("fileManager.copyJobsStarted", count = started).to_string());
-        cx.notify();
-    }
-
-    pub(in crate::features) fn start_file_manager_move(
-        &mut self,
-        manager_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let _ = window;
-        self.start_file_manager_copy(manager_id, true, cx);
-    }
-
-    pub(in crate::features) fn file_manager_same_endpoint_move(
-        &mut self,
-        manager_id: &str,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(workspace) = self.file_manager.workspace(manager_id) else {
-            return false;
-        };
-        let (source, target, _, _) = workspace.read(cx).copy_inputs();
-        source == target
-    }
-
-    fn start_file_manager_same_endpoint_move(
-        &mut self,
-        manager_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return;
-        };
-        let (source, _, entries, target_directory) = workspace.read(cx).copy_inputs();
-        let service = match self.file_browser_service_for_endpoint(&source) {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
-                cx.notify();
-                return;
-            }
-        };
-        let mut moved = 0;
-        for entry in entries {
-            let name = file_browser_name(service.kind(), &entry.path);
-            let destination =
-                file_browser_join(service.kind(), &target_directory.display_path, &name);
-            if destination == entry.path {
-                continue;
-            }
-            if let Err(error) =
-                service.rename_remote_paths(&entry.remote_path(), &RemoteFilePath::new(destination))
-            {
-                self.shell.set_status(error.to_string());
-            } else {
-                moved += 1;
-            }
-        }
-        self.shell
-            .set_status(t!("fileManager.movedItems", count = moved).to_string());
-        self.refresh_file_manager_pane(manager_id.clone(), PaneId::Left, cx);
-        self.refresh_file_manager_pane(manager_id, PaneId::Right, cx);
-    }
-
-    pub(in crate::features) fn apply_file_manager_job_output(
-        &mut self,
-        job_id: &str,
-        output: &TransferJobOutput,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(target) = self.file_manager.job_target(job_id).cloned() else {
-            return;
-        };
-        if let TransferJobOutput::Sent {
-            source_parent_path,
-            source_entries,
-            entries,
-            ..
-        } = output
-        {
-            let workspaces: Vec<_> = self
-                .file_manager
-                .workspaces()
-                .map(|(_, entity)| entity.clone())
-                .collect();
-            for workspace in workspaces {
-                workspace.update(cx, |workspace, cx| {
-                    let source_parent = source_parent_path
-                        .as_deref()
-                        .unwrap_or(target.source_parent.as_str());
-                    if let Some(source_entries) = source_entries.as_ref() {
-                        workspace.refresh_matching_directory(
-                            &target.source,
-                            source_parent,
-                            source_entries.clone(),
-                        );
-                    }
-                    workspace.refresh_matching_directory(
-                        &target.target,
-                        &target.target_parent,
-                        entries.clone(),
-                    );
-                    cx.notify();
-                });
-            }
+            self.open_transfer_browser_directory_path(browser, cx);
         }
     }
 
@@ -461,20 +314,17 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features) fn confirm_file_manager_delete(
+    pub(in crate::features) fn confirm_file_manager_delete_selection(
         &mut self,
-        manager_id: String,
+        origin: String,
+        selection: FileManagerSelection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return;
-        };
-        let entries = workspace.read(cx).active_pane().selected_entries();
-        if entries.is_empty() {
+        if selection.entries.is_empty() {
             return;
         }
-        let count = entries.len();
+        let count = selection.entries.len();
         self.open_confirm_dialog(
             (
                 t!("fileExplorer.delete").to_string(),
@@ -482,7 +332,17 @@ impl ZzClawTermApp {
                 t!("fileExplorer.delete").to_string(),
                 true,
                 move |app, _, cx| {
-                    app.run_file_manager_delete(manager_id.clone(), cx);
+                    for entry in &selection.entries {
+                        app.submit_file_mutation(
+                            origin.clone(),
+                            FileMutationIntent {
+                                endpoint: selection.endpoint.clone(),
+                                directory: selection.directory.clone(),
+                                mutation: FileMutation::Delete(entry.remote_path()),
+                            },
+                            cx,
+                        );
+                    }
                     true
                 },
             ),
@@ -491,56 +351,42 @@ impl ZzClawTermApp {
         );
     }
 
-    fn run_file_manager_delete(&mut self, manager_id: String, cx: &mut Context<Self>) {
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return;
-        };
-        let pane_id = workspace.read(cx).active;
-        let (endpoint, entries) = {
-            let workspace = workspace.read(cx);
-            (
-                workspace.pane(pane_id).endpoint.clone(),
-                workspace.pane(pane_id).selected_entries(),
-            )
-        };
-        let service = match self.file_browser_service_for_endpoint(&endpoint) {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
-                return;
-            }
-        };
-        for entry in entries {
-            if let Err(error) = service.delete_remote_path(&entry.remote_path()) {
-                self.shell.set_status(error.to_string());
-            }
-        }
-        self.refresh_file_manager_pane(manager_id, pane_id, cx);
-    }
-
-    pub(in crate::features) fn open_file_manager_name_dialog(
+    pub(in crate::features) fn open_file_manager_name_target(
         &mut self,
-        manager_id: String,
-        pane_id: PaneId,
+        origin: String,
+        selection: FileManagerSelection,
         kind: FileManagerNameKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(kind, FileManagerNameKind::Rename) && selection.entries.len() != 1 {
+            return;
+        }
         self.forget_text_inputs("file-manager.name");
-        let title = match kind {
-            FileManagerNameKind::Folder => t!("fileExplorer.newFolder").to_string(),
-            FileManagerNameKind::File => t!("fileExplorer.newFile").to_string(),
-            FileManagerNameKind::Rename => t!("fileExplorer.cmRename").to_string(),
+        let initial = if matches!(kind, FileManagerNameKind::Rename) {
+            selection
+                .entries
+                .first()
+                .map(|entry| entry.name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
         };
+        let title = match kind {
+            FileManagerNameKind::Folder => t!("fileExplorer.newFolder"),
+            FileManagerNameKind::File => t!("fileExplorer.newFile"),
+            FileManagerNameKind::Rename => t!("fileExplorer.cmRename"),
+        }
+        .to_string();
         self.open_form_dialog(
             (
                 title,
                 420.,
                 t!("common.confirm").to_string(),
-                |app, _, cx| {
+                move |app, _, cx| {
                     app.text_input_box(
                         "file-manager.name",
-                        "",
+                        &initial,
                         TextInputSetup::placeholder(t!("fileExplorer.name")),
                         cx,
                     )
@@ -551,7 +397,37 @@ impl ZzClawTermApp {
                         .existing_text_input("file-manager.name")
                         .map(|field| field.read(cx).value(cx))
                         .unwrap_or_default();
-                    app.submit_file_manager_name(manager_id.clone(), pane_id, kind, name, cx)
+                    if !zzclawterm_transport::valid_file_browser_child_name(
+                        selection.endpoint.kind(),
+                        &name,
+                    ) {
+                        app.shell
+                            .set_status(t!("fileManager.invalidName").to_string());
+                        return false;
+                    }
+                    let mutation = match kind {
+                        FileManagerNameKind::Folder => FileMutation::CreateDirectory(name),
+                        FileManagerNameKind::File => FileMutation::CreateFile(name),
+                        FileManagerNameKind::Rename => {
+                            let Some(entry) = selection.entries.first() else {
+                                return true;
+                            };
+                            FileMutation::Rename {
+                                source: entry.remote_path(),
+                                name,
+                            }
+                        }
+                    };
+                    app.submit_file_mutation(
+                        origin.clone(),
+                        FileMutationIntent {
+                            endpoint: selection.endpoint.clone(),
+                            directory: selection.directory.clone(),
+                            mutation,
+                        },
+                        cx,
+                    );
+                    true
                 },
                 |app, cx| {
                     app.forget_text_inputs("file-manager.name");
@@ -563,59 +439,6 @@ impl ZzClawTermApp {
         );
     }
 
-    fn submit_file_manager_name(
-        &mut self,
-        manager_id: String,
-        pane_id: PaneId,
-        kind: FileManagerNameKind,
-        name: String,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let name = name.trim().to_string();
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
-            self.shell
-                .set_status(t!("fileManager.invalidName").to_string());
-            return false;
-        }
-        let Some(workspace) = self.file_manager.workspace(&manager_id) else {
-            return true;
-        };
-        let (endpoint, directory, selected) = {
-            let workspace = workspace.read(cx);
-            let pane = workspace.pane(pane_id);
-            (
-                pane.endpoint.clone(),
-                pane.path.clone(),
-                pane.selected_entries().into_iter().next(),
-            )
-        };
-        let service = match self.file_browser_service_for_endpoint(&endpoint) {
-            Ok(service) => service,
-            Err(error) => {
-                self.shell.set_status(error.to_string());
-                return true;
-            }
-        };
-        let target = file_browser_join(service.kind(), &directory.display_path, &name);
-        let result = match kind {
-            FileManagerNameKind::Folder => service.create_dir_path(&target, Some(0o755)),
-            FileManagerNameKind::File => service.create_file_path(&target, Some(0o644)),
-            FileManagerNameKind::Rename => {
-                let Some(entry) = selected else {
-                    return true;
-                };
-                service.rename_remote_paths(&entry.remote_path(), &RemoteFilePath::new(target))
-            }
-        };
-        if let Err(error) = result {
-            self.shell.set_status(error.to_string());
-            return false;
-        }
-        self.forget_text_inputs("file-manager.name");
-        self.refresh_file_manager_pane(manager_id, pane_id, cx);
-        true
-    }
-
     pub(in crate::features) fn workspace_references_session(
         &self,
         session_id: &str,
@@ -623,31 +446,32 @@ impl ZzClawTermApp {
     ) -> bool {
         self.transfer.editor_references_session(session_id)
             || self.file_manager.references_session(session_id, cx)
+            || self.transfer.file_operation_references_session(session_id)
     }
 }
 
 impl FileManagerWorkspace {
-    pub(in crate::features) fn copy_inputs(
+    pub(in crate::features) fn transfer_intent(
         &self,
-    ) -> (
-        PaneEndpoint,
-        PaneEndpoint,
-        Vec<zzclawterm_transport::SftpFileEntry>,
-        RemoteFilePath,
-    ) {
-        let source = self.pane(self.active);
+        operation: FileTransferOperation,
+    ) -> crate::features::transfers::file_operations::FileTransferIntent {
+        let source = self.active_pane();
         let target = self.pane(self.active.other());
-        (
-            source.endpoint.clone(),
-            target.endpoint.clone(),
-            source.selected_entries(),
-            target.path.clone(),
-        )
+        crate::features::transfers::file_operations::FileTransferIntent {
+            source: source.endpoint.clone(),
+            entries: source.selected_entries(),
+            target: target.endpoint.clone(),
+            target_directory: target.path.clone(),
+            operation,
+        }
     }
-}
 
-impl super::pane::BrowserPaneState {
-    fn let_parent_nav(&self) -> (PaneEndpoint, RemoteFilePath) {
-        (self.endpoint.clone(), self.path.clone())
+    pub(in crate::features) fn selection(&self, pane: PaneId) -> FileManagerSelection {
+        let pane = self.pane(pane);
+        FileManagerSelection {
+            endpoint: pane.endpoint.clone(),
+            directory: pane.path.clone(),
+            entries: pane.selected_entries(),
+        }
     }
 }

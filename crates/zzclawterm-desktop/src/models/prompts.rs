@@ -446,20 +446,6 @@ pub(crate) enum TransferPathPromptResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordingPathPromptKind {
-    Start,
-    SaveTranscript,
-}
-
-#[derive(Debug)]
-pub(crate) enum RecordingPathPromptResult {
-    Selected(PathBuf),
-    Cancelled,
-    Failed(String),
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigPathPromptKind {
     EncryptedPortableExport,
     EncryptedPortableImport,

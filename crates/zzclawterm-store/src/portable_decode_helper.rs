@@ -63,6 +63,14 @@ fn decode_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(PortableSnapshotError::Decrypt { .. }) => stdout.write_all(&[1])?,
         Err(PortableSnapshotError::MissingMasterPassword) => stdout.write_all(&[2])?,
+        Err(PortableSnapshotError::UnsupportedEncryptionVersion(version)) => {
+            stdout.write_all(&[4, version])?
+        }
+        Err(PortableSnapshotError::InvalidEncryptionEnvelope) => stdout.write_all(&[5])?,
+        Err(PortableSnapshotError::UnsupportedVersion(version)) => {
+            stdout.write_all(&[6])?;
+            stdout.write_all(&version.to_le_bytes())?;
+        }
         Err(_) => stdout.write_all(&[3])?,
     }
     stdout.flush()?;
@@ -154,6 +162,13 @@ pub(crate) fn decode_remote_snapshot_in_helper(
             legacy_error: "payload did not authenticate with the master password".into(),
         }),
         Some(2) => Err(PortableSnapshotError::MissingMasterPassword),
+        Some(4) if bytes.len() == 2 => Err(PortableSnapshotError::UnsupportedEncryptionVersion(
+            bytes[1],
+        )),
+        Some(5) => Err(PortableSnapshotError::InvalidEncryptionEnvelope),
+        Some(6) if bytes.len() == 5 => Err(PortableSnapshotError::UnsupportedVersion(
+            u32::from_le_bytes(bytes[1..5].try_into().unwrap()),
+        )),
         _ => Err(PortableSnapshotError::CorruptPayload),
     }
 }

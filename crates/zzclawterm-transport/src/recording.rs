@@ -491,6 +491,7 @@ struct SessionCaptureState {
     suppress_next_newline: bool,
     next_line_id: u64,
     sanitizer: RecordingSanitizer,
+    execution_sanitizer: RecordingSanitizer,
     history_truncated: bool,
     history_include_input: bool,
     batch_timestamp: String,
@@ -519,6 +520,7 @@ impl SessionCaptureState {
             suppress_next_newline: false,
             next_line_id: 1,
             sanitizer: RecordingSanitizer::default(),
+            execution_sanitizer: RecordingSanitizer::default(),
             history_truncated: false,
             history_include_input: false,
             batch_timestamp: chrono_timestamp(),
@@ -594,6 +596,7 @@ impl SessionCaptureState {
         self.flush_output_lines(true);
         self.dropped_bytes = self.dropped_bytes.saturating_add(bytes as u64);
         self.sanitizer.reset();
+        self.execution_sanitizer.reset();
         self.pending_input_escape = None;
         self.live_echo_buffer.clear();
         self.submitted_line_echo = None;
@@ -793,11 +796,41 @@ impl SessionCaptureState {
             }
         }
 
-        for chunk in utf8_fragments(&sanitized, self.fragment_limit()) {
+        self.append_output(&sanitized);
+    }
+
+    fn append_output(&mut self, text: &str) {
+        for chunk in utf8_fragments(text, self.fragment_limit()) {
             self.output_buffer.push_str(chunk);
             self.flush_output_lines(false);
             self.trim_records();
         }
+    }
+
+    fn execution_boundary(&mut self, command: Option<&str>) {
+        self.flush_output_lines(true);
+        self.execution_sanitizer.reset();
+        if self.includes_input()
+            && !self
+                .recording
+                .as_ref()
+                .is_some_and(|file| file.profile.mode == RecordingMode::Raw)
+            && let Some(command) = command
+        {
+            self.batch_timestamp = chrono_timestamp();
+            let text = RecordingSanitizer::default().feed(command);
+            for line in text.lines() {
+                self.append_record("INPUT", line.to_string());
+            }
+        }
+    }
+
+    fn write_execution_output(&mut self, text: &str) {
+        self.batch_timestamp = chrono_timestamp();
+        let text = self.execution_sanitizer.feed(text);
+        // Background execution can overlap manual typing and output. Its output
+        // must neither consume keyboard echo nor share partial control strings.
+        self.append_output(&text);
     }
 
     fn finish(&mut self) {
@@ -1463,6 +1496,29 @@ impl RecordingManager {
         state.history_include_input = *lock_recover(&self.history_include_input);
         state.set_memory_limit(memory_limit_bytes);
         state.write_input(data);
+    }
+
+    /// Delimit automatic execution without treating its command as typed input.
+    /// `None` also finishes an execution and flushes an unterminated output line.
+    pub fn execution_boundary(&self, session_id: &str, command: Option<&str>) {
+        let budget = *lock_recover(&self.memory_limit_bytes);
+        let mut sessions = lock_recover(&self.sessions);
+        let state = sessions
+            .entry(session_id.into())
+            .or_insert_with(|| SessionCaptureState::new(budget));
+        state.history_include_input = *lock_recover(&self.history_include_input);
+        state.set_memory_limit(budget);
+        state.execution_boundary(command);
+    }
+
+    pub fn write_execution_output(&self, session_id: &str, text: &str) {
+        let budget = *lock_recover(&self.memory_limit_bytes);
+        let mut sessions = lock_recover(&self.sessions);
+        let state = sessions
+            .entry(session_id.into())
+            .or_insert_with(|| SessionCaptureState::new(budget));
+        state.set_memory_limit(budget);
+        state.write_execution_output(text);
     }
 
     pub fn resync_input_line(&self, session_id: &str, terminal_line: &str) {

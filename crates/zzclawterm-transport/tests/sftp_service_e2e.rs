@@ -174,3 +174,155 @@ fn sftp_service_round_trips_file_manager_operations() -> anyhow::Result<()> {
     local_cleanup?;
     Ok(())
 }
+#[test]
+#[ignore = "requires NYATERM_TEST_SFTP_* variables and a disposable SFTP directory"]
+fn shared_copy_engine_preserves_raw_targets_across_source_combinations() -> anyhow::Result<()> {
+    use zzclawterm_transport::{
+        FileBrowserService, FileCopyRequest, RemoteFilePath, RemoteFileService,
+    };
+    let config = test_config();
+    let origin = FileBrowserService::remote(RemoteFileService::new(config.clone()));
+    let other_session = FileBrowserService::remote(RemoteFileService::new(config));
+    let root = required_env("NYATERM_TEST_SFTP_ROOT")
+        .trim_end_matches('/')
+        .to_string();
+    let remote_root = RemoteFilePath::new(format!(
+        "{root}/zzclawterm-copy-matrix-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    let local = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-sftp-copy-matrix");
+    fs::create_dir_all(local.join("source/目录"))?;
+    fs::write(local.join("source/目录/文件.txt"), b"payload")?;
+    let local_service = FileBrowserService::local();
+    let source = RemoteFilePath::new(local.join("source").to_string_lossy());
+    origin.create_dir_remote_path(&remote_root, None)?;
+    let result = (|| -> anyhow::Result<()> {
+        let uploaded_display = format!("{}/uploaded", remote_root.display_path);
+        let uploaded = RemoteFilePath::from_raw(&uploaded_display, uploaded_display.as_bytes());
+        let same = origin.child_path(&remote_root, "same-session")?;
+        let different = origin.child_path(&remote_root, "other-session")?;
+        let local_copy = RemoteFilePath::new(local.join("local-copy").to_string_lossy());
+        let downloaded = RemoteFilePath::new(local.join("downloaded").to_string_lossy());
+        for (source_service, source, target_service, target) in [
+            (&local_service, &source, &local_service, &local_copy),
+            (&local_service, &source, &origin, &uploaded),
+            (&origin, &uploaded, &origin, &same),
+            (&origin, &same, &other_session, &different),
+            (&other_session, &different, &local_service, &downloaded),
+        ] {
+            let summary = FileCopyRequest {
+                source: source_service.transfer_endpoint(source),
+                destination: target_service.transfer_endpoint(target),
+                control: SftpTransferControl::new(),
+                options: SftpPathTransferOptions::new(
+                    SftpDuplicatePolicy::Skip,
+                    None,
+                    Default::default(),
+                ),
+            }
+            .execute()?;
+            anyhow::ensure!(summary.copied && summary.bytes == 7);
+        }
+        anyhow::ensure!(fs::read(local.join("downloaded/目录/文件.txt"))? == b"payload");
+        let skipped = FileCopyRequest {
+            source: local_service.transfer_endpoint(&source),
+            destination: origin.transfer_endpoint(&uploaded),
+            control: SftpTransferControl::new(),
+            options: SftpPathTransferOptions::new(
+                SftpDuplicatePolicy::Skip,
+                None,
+                Default::default(),
+            ),
+        }
+        .execute()?;
+        anyhow::ensure!(!skipped.copied);
+        anyhow::ensure!(
+            origin
+                .rename_remote_paths_no_replace(&same, &different)
+                .is_err()
+        );
+        anyhow::ensure!(origin.remote_file_properties(&same)?.is_directory());
+        let descendant = origin.child_path(&same, "recursive")?;
+        anyhow::ensure!(
+            FileCopyRequest {
+                source: origin.transfer_endpoint(&same),
+                destination: other_session.transfer_endpoint(&descendant),
+                control: SftpTransferControl::new(),
+                options: Default::default()
+            }
+            .execute()
+            .is_err()
+        );
+        Ok(())
+    })();
+    let cleanup = origin.delete_remote_path(&remote_root);
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+/// Read-only remote fixtures; every sample downloads into a fresh local directory.
+#[test]
+#[ignore = "requires SFTP credentials, NYATERM_BENCH_LOCAL_ROOT and three prepared remote fixtures"]
+fn sftp_download_release_benchmark_five_samples() -> anyhow::Result<()> {
+    use std::time::Instant;
+    let service = SftpService::new(test_config());
+    let local_root = required_env("NYATERM_BENCH_LOCAL_ROOT");
+    let fixtures = [
+        required_env("NYATERM_BENCH_FILE"),
+        required_env("NYATERM_BENCH_SMALL_DIR"),
+        required_env("NYATERM_BENCH_MIXED_DIR"),
+    ];
+    for (index, fixture) in fixtures.iter().enumerate() {
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let root = tempfile::tempdir_in(&local_root)?;
+            let target = root.path().join("download");
+            let started = Instant::now();
+            let summary = service.download_path_with_progress_and_path_options(
+                fixture,
+                &target,
+                SftpTransferControl::new(),
+                Default::default(),
+                |_| {},
+            )?;
+            let elapsed_us = started.elapsed().as_micros();
+            if index == 0 {
+                anyhow::ensure!(
+                    summary.bytes == 1024 * 1024 * 1024,
+                    "single-file fixture must be 1 GiB"
+                );
+            }
+            let mut pending = vec![target];
+            let mut files = 0;
+            while let Some(path) = pending.pop() {
+                if path.is_dir() {
+                    for entry in fs::read_dir(path)? {
+                        pending.push(entry?.path());
+                    }
+                } else {
+                    files += 1;
+                }
+            }
+            if index == 1 {
+                anyhow::ensure!(files == 5000, "small-file fixture must contain 5000 files");
+            }
+            if index == 2 {
+                anyhow::ensure!(files > 1, "mixed fixture must contain multiple files");
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({ "bytes": summary.bytes, "files": files, "total_us": elapsed_us })
+            );
+            samples.push(elapsed_us);
+            // Cleanup and verification are deliberately outside the measured interval.
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "{}",
+            serde_json::json!({ "samples": 5, "median_total_us": samples[2] })
+        );
+    }
+    Ok(())
+}

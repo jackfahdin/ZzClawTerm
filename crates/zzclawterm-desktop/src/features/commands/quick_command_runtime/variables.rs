@@ -23,10 +23,7 @@ impl ZzClawTermApp {
         let Some(prompt) = self.commands.take_quick_variable_prompt() else {
             return;
         };
-        let mut command_text = prompt.command.clone();
-        for variable in &prompt.variables {
-            command_text = command_text.replace(&variable.raw, &variable.value);
-        }
+        let command_text = substitute_quick_command_variables(&prompt.command, &prompt.variables);
         self.send_resolved_quick_command(
             prompt.command_id,
             prompt.label,
@@ -70,6 +67,23 @@ impl ZzClawTermApp {
             cx.notify();
         }
     }
+}
+
+/// Replace each `{{variable}}` token with the value the user filled in.
+///
+/// Values are data, not script: their backslashes are doubled so the escape
+/// planner sends them literally. A filled-in `C:\temp` must not become a tab,
+/// while the template's own `\p` still pauses.
+pub(super) fn substitute_quick_command_variables(
+    command_text: &str,
+    variables: &[QuickCommandVariableDef],
+) -> String {
+    let mut command_text = command_text.to_string();
+    for variable in variables {
+        let literal_value = variable.value.replace('\\', "\\\\");
+        command_text = command_text.replace(&variable.raw, &literal_value);
+    }
+    command_text
 }
 
 pub(super) fn parse_quick_command_variables(command: &str) -> Vec<QuickCommandVariableDef> {
@@ -132,7 +146,10 @@ pub(super) fn parse_quick_command_variables(command: &str) -> Vec<QuickCommandVa
 
 #[cfg(test)]
 mod tests {
-    use super::parse_quick_command_variables;
+    use std::time::Duration;
+
+    use super::super::escapes::{plan_quick_command, quick_command_needs_staging};
+    use super::{parse_quick_command_variables, substitute_quick_command_variables};
 
     #[test]
     fn parses_quick_command_variables_like_tauri_dialog() {
@@ -177,5 +194,40 @@ mod tests {
 
         assert_eq!(variables[0].value, "dev");
         assert_eq!(variables[1].value, "dev");
+    }
+
+    #[test]
+    fn variable_values_are_sent_literally_not_as_escapes() {
+        // A filled-in Windows path must not lose its `\t` to the escape
+        // planner: values are data, the template is the script.
+        let mut variables = parse_quick_command_variables("cd {{path}}");
+        variables[0].value = "C:\\temp".to_string();
+        let text = substitute_quick_command_variables("cd {{path}}", &variables);
+        let chunks = plan_quick_command(&text, true);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].bytes, b"cd C:\\temp\r".to_vec());
+    }
+
+    #[test]
+    fn script_escapes_around_variables_still_apply() {
+        let template = "\\p{{user}}\\p{{pass}}\\pshow version";
+        let mut variables = parse_quick_command_variables(template);
+        variables[0].value = "admin".to_string();
+        variables[1].value = "p@ss\\word".to_string();
+        let text = substitute_quick_command_variables(template, &variables);
+        let chunks = plan_quick_command(&text, true);
+        assert!(quick_command_needs_staging(&chunks));
+        let sent: Vec<(Duration, Vec<u8>)> = chunks
+            .iter()
+            .map(|chunk| (chunk.delay, chunk.bytes.clone()))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                (Duration::from_secs(1), b"admin".to_vec()),
+                (Duration::from_secs(1), b"p@ss\\word".to_vec()),
+                (Duration::from_secs(1), b"show version\r".to_vec()),
+            ]
+        );
     }
 }

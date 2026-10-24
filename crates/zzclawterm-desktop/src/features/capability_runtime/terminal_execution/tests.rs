@@ -50,6 +50,291 @@ fn result() -> TerminalExecuteResult {
     }
 }
 
+fn start_execution_recording(
+    app: &crate::features::ZzClawTermApp,
+    session_id: &str,
+    path: &std::path::Path,
+    mode: zzclawterm_transport::RecordingMode,
+    include_input: bool,
+) {
+    use zzclawterm_transport::{
+        ExistingFileBehavior, RecordingContext, RecordingProfile, RecordingRotationPolicy,
+    };
+    app.recording
+        .writer()
+        .start(
+            session_id.into(),
+            RecordingContext {
+                session_id: session_id.into(),
+                session_name: "fixture".into(),
+                connection_id: None,
+                connection_name: None,
+                group_path: None,
+                protocol: "local".into(),
+                host: None,
+                port: None,
+                username: None,
+                started_at: time::OffsetDateTime::now_utc(),
+            },
+            RecordingProfile {
+                mode,
+                base_path: path.parent().unwrap().into(),
+                path_template: "unused.log".into(),
+                include_timestamps: false,
+                include_io_labels: true,
+                include_session_metadata: false,
+                rotation: RecordingRotationPolicy::Session,
+                existing_file_behavior: ExistingFileBehavior::Overwrite,
+                include_binary_transfer_payloads: false,
+                include_input,
+            },
+            Some(path.into()),
+            1024 * 1024,
+        )
+        .unwrap();
+}
+
+#[gpui::test]
+fn automatic_execution_records_logical_commands_and_streamed_output_without_changing_raw(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::SessionLaunchConfig;
+    use crate::test_support::TestConfigDir;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use zzclawterm_core::agent_capture::build_agent_capture_command;
+    use zzclawterm_core::models::connection::AiExecutionProfile;
+    use zzclawterm_transport::{RecordingMode, SessionEvent, TelnetSessionConfig};
+    cx.executor().allow_parking();
+    let directory = TestConfigDir::new("zzclawterm-execution-recording");
+    let app = app_with_visible_local_session(cx, directory.path(), "fixture");
+    for (index, (profile, mode, include_input, sensitive, ending)) in [
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Powershell,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Cmd,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Transcript,
+            false,
+            false,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Transcript,
+            true,
+            true,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Raw,
+            true,
+            false,
+            "complete",
+        ),
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "cancel",
+        ),
+        (
+            AiExecutionProfile::Posix,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "timeout",
+        ),
+        (
+            AiExecutionProfile::SendOnly,
+            RecordingMode::Transcript,
+            true,
+            false,
+            "complete",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            raw_tcp: true,
+            ..Default::default()
+        };
+        let (manager, id) = cx.update_entity(&app, |app, _| {
+            let manager = app.session.manager_handle();
+            let info = manager.create_telnet_session(config.clone()).unwrap();
+            let mut metadata = app.session.metadata("fixture").unwrap().clone();
+            metadata.launch_config = SessionLaunchConfig::Telnet(config);
+            metadata.ai_execution_profile = profile;
+            app.session.register_session_metadata(&info.id, metadata);
+            app.terminal
+                .seed_session_view(info.id.clone(), String::new(), "UTF-8");
+            (manager, info.id)
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let path = directory.path().join(format!("{index}.log"));
+        let (mut receiver, marker, cancellation) = cx.update_entity(&app, |app, cx| {
+            start_execution_recording(app, &id, &path, mode, include_input);
+            if mode == RecordingMode::Transcript {
+                app.submit_terminal_decoded_output(&id, "before>".into());
+            }
+            app.observe_recording_prompt_output(&id, if sensitive { "Password: " } else { "$ " });
+            let (mut request, receiver) = execution_request("audit", "external", &id, false);
+            request.command = "echo fixture".into();
+            request.policy.max_lines = 0;
+            let cancellation = request.cancellation.clone();
+            app.start_terminal_execution(request, cx);
+            let marker = app.mcp.capabilities.terminal_executions.tasks[&id]
+                .capture_marker_id
+                .clone();
+            (receiver, marker, cancellation)
+        });
+        let input = build_agent_capture_command(profile, &marker, "echo fixture")
+            .unwrap_or_else(|| "echo fixture\r".into());
+        // The fixture uses CR Enter mode, including for Raw TCP text writes.
+        let wire = format!("{}\r", input.trim_end_matches(['\r', '\n']));
+        let mut sent = vec![0; wire.len()];
+        stream.read_exact(&mut sent).unwrap();
+        assert_eq!(sent, wire.as_bytes());
+        let output = if profile == AiExecutionProfile::SendOnly {
+            "echo fixture\r\nfixture\r\nRouter#".to_string()
+        } else if ending == "complete" {
+            format!(
+                "{input}\r\n__DF_CMD_START_{marker}__\r\necho fixture\r\n\r\n__DF_CMD_END_{marker}_0__\r\nprompt>"
+            )
+        } else {
+            format!("{input}\r\n__DF_CMD_START_{marker}__\r\npartial\r\n")
+        };
+        let completion = cx.update_entity(&app, |app, cx| {
+            app.session.extend_pending_events([
+                SessionEvent::OutputBoundary {
+                    session_id: id.clone(),
+                    token: marker.clone(),
+                },
+                SessionEvent::Output {
+                    session_id: id.clone(),
+                    data: output.as_bytes().to_vec(),
+                },
+            ]);
+            app.drain_session_events(cx);
+            if ending != "complete" {
+                if ending == "cancel" {
+                    cancellation.cancel();
+                } else {
+                    app.mcp
+                        .capabilities
+                        .terminal_executions
+                        .tasks
+                        .get_mut(&id)
+                        .unwrap()
+                        .started -= Duration::from_secs(31);
+                }
+                app.poll_terminal_executions(cx);
+                app.session.extend_pending_events([SessionEvent::Output {
+                    session_id: id.clone(),
+                    data: format!("late\r\n__DF_CMD_END_{marker}_0__\r\nprompt>").into_bytes(),
+                }]);
+                app.drain_session_events(cx);
+            } else if profile == AiExecutionProfile::SendOnly {
+                app.finish_terminal_execution(
+                    &id,
+                    &marker,
+                    Ok(result()),
+                    TerminalExecutionStatus::Completed,
+                    cx,
+                );
+            }
+            if mode == RecordingMode::Transcript {
+                app.submit_terminal_decoded_output(&id, "after>".into());
+            }
+            app.terminal.recording_output_fence()().unwrap();
+            app.recording.writer().stop_complete(id.clone()).unwrap()
+        });
+        let result = receiver.try_recv().unwrap();
+        if ending == "cancel" {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(
+                result.unwrap()["timedOut"],
+                ending == "timeout",
+                "case {index}"
+            );
+        }
+        if mode == RecordingMode::Raw {
+            assert_eq!(std::fs::read(&path).unwrap(), output.as_bytes());
+            // Raw input recording retains the encoded logical input, before
+            // transport newline conversion, just as it does for Telnet.
+            assert_eq!(
+                std::fs::read(completion.input_file_path.unwrap()).unwrap(),
+                input.as_bytes()
+            );
+        } else {
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(!text.contains("__DF_CMD_"), "case {index}");
+            assert!(!text.contains("┌ AI #"), "case {index}");
+            assert!(
+                text.find("before>").unwrap() < text.find("after>").unwrap(),
+                "case {index}"
+            );
+            if profile != AiExecutionProfile::SendOnly && ending == "complete" {
+                assert!(text.contains("[OUTPUT] after>\n"), "case {index}");
+            }
+            assert_eq!(
+                text.matches("[INPUT] echo fixture").count(),
+                usize::from(include_input && !sensitive),
+                "case {index}"
+            );
+            if ending == "complete" {
+                let expected = if profile == AiExecutionProfile::SendOnly {
+                    "fixture"
+                } else {
+                    "echo fixture"
+                };
+                assert_eq!(
+                    text.matches(&format!("[OUTPUT] {expected}\n")).count(),
+                    1,
+                    "case {index}: {text}"
+                );
+            } else {
+                assert_eq!(
+                    text.matches("[OUTPUT] partial\n").count(),
+                    1,
+                    "case {index}"
+                );
+                assert_eq!(text.matches("[OUTPUT] late\n").count(), 1, "case {index}");
+            }
+        }
+        manager.close(&id).unwrap();
+    }
+}
+
 #[cfg(windows)]
 #[gpui::test]
 fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_terminal(
@@ -79,6 +364,13 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
         let mut metadata = app.session.metadata("visible").unwrap().clone();
         metadata.ai_execution_profile = AiExecutionProfile::Cmd;
         app.session.register_session_metadata(&session.id, metadata);
+        start_execution_recording(
+            app,
+            &session.id,
+            &directory.path().join("execution.log"),
+            zzclawterm_transport::RecordingMode::Transcript,
+            true,
+        );
     });
     let mut credentials = Vec::new();
     for (source, background) in [
@@ -167,6 +459,28 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
             );
         });
     }
+    cx.update_entity(&app, |app, _| {
+        app.terminal.recording_output_fence()().unwrap();
+        app.recording
+            .writer()
+            .stop_complete(session.id.clone())
+            .unwrap();
+    });
+    let transcript = std::fs::read_to_string(directory.path().join("execution.log")).unwrap();
+    assert!(!transcript.contains("__DF_CMD_"));
+    assert!(!transcript.contains("┌ AI #"));
+    assert_eq!(
+        transcript
+            .matches("[INPUT] echo %NYATERM_CAPTURE_FIXTURE%")
+            .count(),
+        3
+    );
+    assert_eq!(transcript.matches("[OUTPUT] current-pty").count(), 3);
+    assert_eq!(
+        transcript.matches("[INPUT] echo background-value").count(),
+        1
+    );
+    assert_eq!(transcript.matches("[OUTPUT] background-value").count(), 1);
     let text = cx.update_entity(&app, |app, _| {
         app.terminal.request_frame_text_for_test(&session.id)
     });

@@ -8,6 +8,7 @@ use crate::{PortableSnapshotError, RawPortableSnapshot};
 
 pub mod control;
 mod gc;
+mod heads;
 mod history;
 mod protocol;
 mod remote;
@@ -47,7 +48,7 @@ pub use snippet::{
 pub const SYNC_CURRENT_FILE: &str = "sync/current.redb.enc";
 pub const SYNC_LATEST_FILE: &str = "sync/latest.redb";
 pub const SYNC_SNAPSHOTS_DIR: &str = "sync/snapshots/";
-pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 2;
+pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum CloudSyncError {
@@ -62,6 +63,12 @@ pub enum CloudSyncError {
     Disabled,
     #[error("automatic cloud pull was deferred because a session or settings editor is active")]
     AutoPullDeferred,
+    #[error("local configuration changed during cloud sync; retry with the current configuration")]
+    LocalChangedDuringSync,
+    #[error(
+        "cloud storage returned an older causal revision; retry after remote visibility catches up"
+    )]
+    StaleRemoteRevision,
     #[error("cloud sync conflict detected: {}", .0.message)]
     Conflict(Box<CloudConflictPreview>),
     #[error("remote snapshot is newer than local state; pull first")]
@@ -241,6 +248,8 @@ pub struct RemoteSyncPointer {
     pub payload_hash: String,
     pub device_id: String,
     pub app_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_clock: Option<crate::portable_snapshot::SnapshotSyncClock>,
 }
 
 fn default_remote_sync_pointer_schema_version() -> u32 {
@@ -253,6 +262,10 @@ pub struct CloudSyncState {
     pub device_id: String,
     #[serde(default)]
     pub last_synced_payload_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_clock: Option<crate::portable_snapshot::SnapshotSyncClock>,
     #[serde(default)]
     pub last_applied_remote_revision: Option<String>,
     #[serde(default)]
@@ -272,6 +285,8 @@ impl Default for CloudSyncState {
         Self {
             device_id: uuid_v4(),
             last_synced_payload_hash: None,
+            last_synced_content_hash: None,
+            last_synced_clock: None,
             last_applied_remote_revision: None,
             last_checked_at_ms: None,
             last_synced_at_ms: None,
@@ -379,6 +394,77 @@ pub fn decide_cloud_remote_check(
     }
 }
 
+fn local_content_changed(state: &CloudSyncState, content_hash: &str) -> bool {
+    // A legacy baseline cannot prove that entities omitted by its hash are
+    // unchanged. Equal snapshots migrate automatically; differing snapshots
+    // require a push or explicit conflict resolution instead of losing data.
+    state.last_synced_content_hash.as_deref() != Some(content_hash)
+}
+
+fn remote_precedes_baseline(state: &CloudSyncState, pointer: &RemoteSyncPointer) -> bool {
+    match (&state.last_synced_clock, &pointer.sync_clock) {
+        (Some(baseline), Some(remote)) => baseline.strictly_dominates(remote),
+        (Some(baseline), None) => baseline.legacy_revision.as_deref() == Some(&pointer.revision_id),
+        _ => false,
+    }
+}
+
+fn remote_concurrent_with_baseline(state: &CloudSyncState, pointer: &RemoteSyncPointer) -> bool {
+    if state.last_applied_remote_revision.as_deref() == Some(&pointer.revision_id) {
+        return false;
+    }
+    match (&state.last_synced_clock, &pointer.sync_clock) {
+        (Some(baseline), Some(remote)) => {
+            !baseline.strictly_dominates(remote) && !remote.strictly_dominates(baseline)
+        }
+        (Some(_), None) => !remote_precedes_baseline(state, pointer),
+        _ => false,
+    }
+}
+
+fn validate_remote_baseline(
+    state: &CloudSyncState,
+    pointer: &RemoteSyncPointer,
+    options: &LocalCloudSyncOptions,
+    provider: &str,
+    local_hash: &str,
+) -> Result<(), CloudSyncError> {
+    if remote_precedes_baseline(state, pointer) {
+        return Err(CloudSyncError::StaleRemoteRevision);
+    }
+    // A delayed listing can hide this device's published head. Its persisted
+    // baseline still proves concurrency, even with no subsequent local edits.
+    if remote_concurrent_with_baseline(state, pointer) {
+        return Err(CloudSyncError::Conflict(Box::new(conflict_preview(
+            options, provider, local_hash, pointer,
+        ))));
+    }
+    Ok(())
+}
+
+fn decide_snapshot_check(
+    state: &CloudSyncState,
+    local: &RawPortableSnapshot,
+    remote: &RawPortableSnapshot,
+    pointer: &RemoteSyncPointer,
+    allow_auto_pull: bool,
+) -> Result<CloudRemoteCheckDecision, CloudSyncError> {
+    let local_hash = local.sync_content_hash()?;
+    if local_hash == remote.sync_content_hash()? {
+        return Ok(CloudRemoteCheckDecision::UpToDate);
+    }
+    let local_changed = local_content_changed(state, &local_hash);
+    let remote_changed =
+        state.last_applied_remote_revision.as_deref() != Some(&pointer.revision_id);
+    Ok(match (remote_changed, local_changed, allow_auto_pull) {
+        (true, true, _) => CloudRemoteCheckDecision::Conflict,
+        (true, false, true) => CloudRemoteCheckDecision::AutoPull,
+        (true, false, false) => CloudRemoteCheckDecision::RemoteAvailable,
+        (false, true, _) => CloudRemoteCheckDecision::LocalChanged,
+        (false, false, _) => CloudRemoteCheckDecision::UpToDate,
+    })
+}
+
 fn required_secret(
     value: Option<&str>,
     message: &str,
@@ -460,6 +546,28 @@ pub trait CloudLocalStore: Send + Sync {
         snapshot: &RawPortableSnapshot,
     ) -> Result<CloudSyncBackupInfo, CloudSyncError>;
 
+    /// Concurrent stores must override this as one serialized operation:
+    /// compare the local content, apply, then persist the normalized baseline.
+    /// The default is for stores already serialized by their caller.
+    fn apply_sync_snapshot_checked(
+        &self,
+        options: &LocalCloudSyncOptions,
+        snapshot: &RawPortableSnapshot,
+        expected_content_hash: &str,
+        mut state: CloudSyncState,
+    ) -> Result<(CloudSyncBackupInfo, CloudSyncState), CloudSyncError> {
+        if self.build_sync_snapshot(options)?.sync_content_hash()? != expected_content_hash {
+            return Err(CloudSyncError::LocalChangedDuringSync);
+        }
+        let backup = self.apply_sync_snapshot(options, snapshot)?;
+        let mut applied = self.build_sync_snapshot(options)?;
+        applied.recalculate_hash()?;
+        state.last_synced_content_hash = Some(applied.sync_content_hash()?);
+        state.last_synced_payload_hash = Some(applied.meta.payload_hash);
+        self.persist_cloud_sync_state(&state)?;
+        Ok((backup, state))
+    }
+
     fn persist_cloud_sync_state(&self, state: &CloudSyncState) -> Result<(), CloudSyncError>;
 
     /// Best-effort check that `master_password` is the password this device
@@ -513,17 +621,50 @@ pub fn push_snapshot_with_remote_controlled(
     force: bool,
     control: &control::CloudSyncOperationControl,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    push_snapshot_prepared(local_store, options, remote, state, force, control, None)
+}
+
+fn push_snapshot_prepared(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    force: bool,
+    control: &control::CloudSyncOperationControl,
+    prepared: Option<PreparedSync>,
+) -> Result<CloudSyncResult, CloudSyncError> {
     control.checkpoint()?;
     let remote = &control.remote(remote);
     let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
     let mut next_state = normalized_state(state, &options.device_id);
-    let mut snapshot = local_store.build_sync_snapshot(options)?;
-    snapshot.recalculate_hash()?;
+    let PreparedSync {
+        mut local,
+        heads,
+        remote: cached_remote,
+    } = match prepared {
+        Some(prepared) => prepared,
+        None => PreparedSync {
+            local: local_store.build_sync_snapshot(options)?,
+            heads: heads::read(local_store, remote, &options.remote_root)?,
+            remote: None,
+        },
+    };
+    local.recalculate_hash()?;
+    let mut snapshot = local;
     let local_hash = snapshot.meta.payload_hash.clone();
-    let latest = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
-    let remote_snapshot = if let Some(remote_pointer) = &latest {
+    let content_hash = snapshot.sync_content_hash()?;
+    if !force {
+        heads.require_single(options, remote.provider(), &local_hash)?;
+    }
+    let latest = heads.selected.clone();
+    if !force && let Some(pointer) = &latest {
+        validate_remote_baseline(state, pointer, options, remote.provider(), &local_hash)?;
+    }
+    let remote_snapshot = if cached_remote.is_some() {
+        cached_remote
+    } else if let Some(remote_pointer) = &latest {
         match protocol::resolve_remote_snapshot(local_store, remote, options, remote_pointer)? {
             protocol::RemoteSnapshotResolution::Current(snapshot)
             | protocol::RemoteSnapshotResolution::LegacyMigrated(snapshot) => Some(snapshot),
@@ -553,12 +694,17 @@ pub fn push_snapshot_with_remote_controlled(
         None
     };
 
-    if let Some(remote_pointer) = &latest
+    if !force
+        && let Some(remote_pointer) = &latest
         && remote_snapshot
             .as_ref()
-            .is_some_and(|snapshot| snapshot.meta.payload_hash == local_hash)
+            .map(|snapshot| snapshot.sync_content_hash())
+            .transpose()?
+            .is_some_and(|hash| hash == content_hash)
     {
         next_state.last_synced_payload_hash = Some(local_hash);
+        next_state.last_synced_content_hash = Some(content_hash);
+        next_state.last_synced_clock = remote_pointer.sync_clock.clone();
         next_state.last_applied_remote_revision = Some(remote_pointer.revision_id.clone());
         next_state.last_checked_at_ms = Some(current_time_ms());
         next_state.last_validated_remote_revision = Some(remote_pointer.revision_id.clone());
@@ -581,12 +727,9 @@ pub fn push_snapshot_with_remote_controlled(
             .as_deref()
             .is_none_or(|revision| revision != remote.revision_id)
     });
-    let local_changed = next_state
-        .last_synced_payload_hash
-        .as_deref()
-        .is_none_or(|hash| hash != local_hash);
+    let local_changed = local_content_changed(&next_state, &content_hash);
 
-    if !remote_changed && !local_changed {
+    if latest.is_some() && !remote_changed && !local_changed && !force {
         next_state.last_checked_at_ms = Some(current_time_ms());
         let result = result(
             next_state,
@@ -610,9 +753,11 @@ pub fn push_snapshot_with_remote_controlled(
         return Err(CloudSyncError::RemoteNewer);
     }
 
-    protocol::upload_sync_snapshot(local_store, remote, options, &snapshot, latest.as_ref())?;
+    snapshot.meta.sync_clock =
+        Some(heads.next_clock(state.last_synced_clock.as_ref(), &options.device_id)?);
+    let uploaded =
+        protocol::upload_sync_snapshot(local_store, remote, options, &snapshot, latest.as_ref())?;
     let pointer = protocol::pointer_from_snapshot(&snapshot);
-    protocol::read_snapshot_for_pointer(local_store, remote, options, &pointer)?;
     next_state.last_validated_remote_revision = Some(pointer.revision_id.clone());
     next_state.last_full_validation_at_ms = Some(current_time_ms());
     if !force {
@@ -620,13 +765,21 @@ pub fn push_snapshot_with_remote_controlled(
             local_store,
             remote,
             &options.remote_root,
-            latest.as_ref(),
+            heads.compatibility.as_ref(),
         )?;
     }
     control.begin_commit()?;
-    write_sync_pointer(local_store, remote, &options.remote_root, &pointer)?;
-    let _ = protocol::write_current_sync_snapshot_compat(local_store, remote, options, &snapshot);
+    heads::publish(remote, &options.remote_root, &pointer)?;
+    // Device heads are authoritative. A shared compatibility pointer may race
+    // or fail without erasing the independently committed branch.
+    let _ = write_sync_pointer(local_store, remote, &options.remote_root, &pointer);
+    let _ = remote.write(
+        &remote_path(&options.remote_root, SYNC_CURRENT_FILE),
+        &uploaded,
+    );
     next_state.last_synced_payload_hash = Some(pointer.payload_hash.clone());
+    next_state.last_synced_content_hash = Some(content_hash);
+    next_state.last_synced_clock = pointer.sync_clock.clone();
     next_state.last_applied_remote_revision = Some(pointer.revision_id.clone());
     next_state.last_synced_at_ms = Some(current_time_ms());
     next_state.last_checked_at_ms = Some(current_time_ms());
@@ -690,17 +843,80 @@ pub fn pull_snapshot_with_remote_controlled(
     before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
     control: &control::CloudSyncOperationControl,
 ) -> Result<CloudSyncResult, CloudSyncError> {
+    pull_snapshot_prepared(
+        local_store,
+        options,
+        remote,
+        state,
+        force,
+        PullExecution {
+            before_apply,
+            control,
+        },
+        None,
+    )
+}
+
+struct PullExecution<'a> {
+    before_apply: &'a dyn Fn() -> Result<(), CloudSyncError>,
+    control: &'a control::CloudSyncOperationControl,
+}
+
+fn pull_snapshot_prepared(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    force: bool,
+    execution: PullExecution<'_>,
+    prepared: Option<PreparedSync>,
+) -> Result<CloudSyncResult, CloudSyncError> {
+    let PullExecution {
+        before_apply,
+        control,
+    } = execution;
     control.checkpoint()?;
     let remote = &control.remote(remote);
     let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
-    let latest = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?
+    let PreparedSync {
+        local: mut local_snapshot,
+        heads,
+        remote: cached_remote,
+    } = match prepared {
+        Some(prepared) => prepared,
+        None => PreparedSync {
+            local: local_store.build_sync_snapshot(options)?,
+            heads: heads::read(local_store, remote, &options.remote_root)?,
+            remote: None,
+        },
+    };
+    let mut latest = heads
+        .selected
+        .clone()
         .ok_or(CloudSyncError::NoRemoteSnapshot)?;
+    if !force {
+        validate_remote_baseline(
+            state,
+            &latest,
+            options,
+            remote.provider(),
+            &local_snapshot.meta.payload_hash,
+        )?;
+    }
     let mut next_state = normalized_state(state, &options.device_id);
-    let mut local_snapshot = local_store.build_sync_snapshot(options)?;
     local_snapshot.recalculate_hash()?;
-    let remote_snapshot =
+    if !force {
+        heads.require_single(
+            options,
+            remote.provider(),
+            &local_snapshot.meta.payload_hash,
+        )?;
+    }
+    let remote_snapshot = if let Some(snapshot) = cached_remote {
+        snapshot
+    } else {
         match protocol::resolve_remote_snapshot(local_store, remote, options, &latest)? {
             protocol::RemoteSnapshotResolution::Current(snapshot)
             | protocol::RemoteSnapshotResolution::LegacyMigrated(snapshot) => snapshot,
@@ -719,12 +935,19 @@ pub fn pull_snapshot_with_remote_controlled(
                     ),
                 )));
             }
-        };
+        }
+    };
     next_state.last_validated_remote_revision = Some(latest.revision_id.clone());
     next_state.last_full_validation_at_ms = Some(current_time_ms());
 
-    if remote_snapshot.meta.payload_hash == local_snapshot.meta.payload_hash {
+    let content_hash = local_snapshot.sync_content_hash()?;
+    let requires_resolution = heads.concurrent
+        || remote_precedes_baseline(state, &latest)
+        || remote_concurrent_with_baseline(state, &latest);
+    if !requires_resolution && remote_snapshot.sync_content_hash()? == content_hash {
         next_state.last_synced_payload_hash = Some(local_snapshot.meta.payload_hash.clone());
+        next_state.last_synced_content_hash = Some(content_hash);
+        next_state.last_synced_clock = latest.sync_clock.clone();
         next_state.last_applied_remote_revision = Some(latest.revision_id.clone());
         next_state.last_checked_at_ms = Some(current_time_ms());
         let result = result(
@@ -739,10 +962,7 @@ pub fn pull_snapshot_with_remote_controlled(
         return Ok(result);
     }
 
-    let local_changed = next_state
-        .last_synced_payload_hash
-        .as_deref()
-        .is_none_or(|hash| hash != local_snapshot.meta.payload_hash);
+    let local_changed = local_content_changed(&next_state, &content_hash);
     let remote_changed = next_state
         .last_applied_remote_revision
         .as_deref()
@@ -775,15 +995,32 @@ pub fn pull_snapshot_with_remote_controlled(
     }
 
     before_apply()?;
-    let snapshot = remote_snapshot;
-    let backup = local_store.apply_sync_snapshot(options, &snapshot)?;
-    let mut applied_snapshot = local_store.build_sync_snapshot(options)?;
-    applied_snapshot.recalculate_hash()?;
-    let _ = protocol::write_current_sync_snapshot_compat(local_store, remote, options, &snapshot);
-    next_state.last_synced_payload_hash = Some(applied_snapshot.meta.payload_hash);
+    let mut snapshot = remote_snapshot;
+    if requires_resolution {
+        snapshot.meta.revision_id = uuid_v4();
+        snapshot.meta.created_at_ms = current_time_ms();
+        snapshot.meta.device_id = options.device_id.clone();
+        snapshot.meta.sync_clock =
+            Some(heads.next_clock(state.last_synced_clock.as_ref(), &options.device_id)?);
+        snapshot.recalculate_hash()?;
+        let uploaded =
+            protocol::upload_sync_snapshot(local_store, remote, options, &snapshot, Some(&latest))?;
+        latest = protocol::pointer_from_snapshot(&snapshot);
+        control.begin_commit()?;
+        heads::publish(remote, &options.remote_root, &latest)?;
+        let _ = write_sync_pointer(local_store, remote, &options.remote_root, &latest);
+        let _ = remote.write(
+            &remote_path(&options.remote_root, SYNC_CURRENT_FILE),
+            &uploaded,
+        );
+    }
+    next_state.last_synced_clock = latest.sync_clock.clone();
+    next_state.last_validated_remote_revision = Some(latest.revision_id.clone());
     next_state.last_applied_remote_revision = Some(snapshot.meta.revision_id.clone());
     next_state.last_synced_at_ms = Some(current_time_ms());
     next_state.last_checked_at_ms = Some(current_time_ms());
+    let (backup, next_state) =
+        local_store.apply_sync_snapshot_checked(options, &snapshot, &content_hash, next_state)?;
     let result = result(
         next_state,
         remote.provider(),
@@ -792,7 +1029,6 @@ pub fn pull_snapshot_with_remote_controlled(
         Some(backup),
         CloudSyncOutcome::Downloaded,
     );
-    local_store.persist_cloud_sync_state(&result.state)?;
     Ok(result)
 }
 
@@ -828,16 +1064,18 @@ pub fn recover_current_snapshot_with_remote_controlled(
     let local_store = &control.local_store(local_store);
     ensure_enabled(options)?;
     ensure_remote_layout(remote, &options.remote_root)?;
+    let content_hash = local_store
+        .build_sync_snapshot(options)?
+        .sync_content_hash()?;
     let snapshot =
         protocol::recover_current_remote_snapshot(local_store, remote, options, control)?;
-    let backup = local_store.apply_sync_snapshot(options, &snapshot)?;
-    let mut applied_snapshot = local_store.build_sync_snapshot(options)?;
-    applied_snapshot.recalculate_hash()?;
     let pointer = protocol::pointer_from_snapshot(&snapshot);
     let now = current_time_ms();
     let state = CloudSyncState {
         device_id: options.device_id.clone(),
-        last_synced_payload_hash: Some(applied_snapshot.meta.payload_hash),
+        last_synced_content_hash: None,
+        last_synced_clock: pointer.sync_clock.clone(),
+        last_synced_payload_hash: None,
         last_applied_remote_revision: Some(pointer.revision_id.clone()),
         last_checked_at_ms: Some(now),
         last_synced_at_ms: Some(now),
@@ -845,6 +1083,8 @@ pub fn recover_current_snapshot_with_remote_controlled(
         last_full_validation_at_ms: Some(now),
         last_gc_attempt_at_ms: None,
     };
+    let (backup, state) =
+        local_store.apply_sync_snapshot_checked(options, &snapshot, &content_hash, state)?;
     let result = result(
         state,
         remote.provider(),
@@ -853,7 +1093,6 @@ pub fn recover_current_snapshot_with_remote_controlled(
         Some(backup),
         CloudSyncOutcome::Recovered,
     );
-    local_store.persist_cloud_sync_state(&result.state)?;
     Ok(result)
 }
 
@@ -882,13 +1121,102 @@ pub fn check_snapshot_with_remote(
     state: &CloudSyncState,
     allow_auto_pull: bool,
 ) -> Result<(CloudRemoteCheckDecision, Option<RemoteSyncPointer>), CloudSyncError> {
+    let checked =
+        check_snapshot_with_remote_state(local_store, options, remote, state, allow_auto_pull)?;
+    Ok((checked.decision, checked.pointer))
+}
+
+pub struct CloudSyncCheck {
+    pub decision: CloudRemoteCheckDecision,
+    pub pointer: Option<RemoteSyncPointer>,
+    /// Baseline of the exact local snapshot compared by this check. Never
+    /// rebuild it after network I/O: intervening local edits are not synced.
+    pub state: CloudSyncState,
+    prepared: PreparedSync,
+}
+
+struct PreparedSync {
+    local: RawPortableSnapshot,
+    heads: heads::RemoteHeads,
+    remote: Option<RawPortableSnapshot>,
+}
+
+impl CloudSyncCheck {
+    pub fn push(
+        self,
+        store: &dyn CloudLocalStore,
+        options: &LocalCloudSyncOptions,
+        remote: &dyn CloudSyncRemote,
+        control: &control::CloudSyncOperationControl,
+    ) -> Result<CloudSyncResult, CloudSyncError> {
+        push_snapshot_prepared(
+            store,
+            options,
+            remote,
+            &self.state,
+            false,
+            control,
+            Some(self.prepared),
+        )
+    }
+
+    pub fn pull(
+        self,
+        store: &dyn CloudLocalStore,
+        options: &LocalCloudSyncOptions,
+        remote: &dyn CloudSyncRemote,
+        before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
+        control: &control::CloudSyncOperationControl,
+    ) -> Result<CloudSyncResult, CloudSyncError> {
+        pull_snapshot_prepared(
+            store,
+            options,
+            remote,
+            &self.state,
+            false,
+            PullExecution {
+                before_apply,
+                control,
+            },
+            Some(self.prepared),
+        )
+    }
+}
+
+pub fn check_snapshot_with_remote_state(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    allow_auto_pull: bool,
+) -> Result<CloudSyncCheck, CloudSyncError> {
     ensure_enabled(options)?;
     let mut local = local_store.build_sync_snapshot(options)?;
     local.recalculate_hash()?;
-    let pointer = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
+    let mut checked_state = state.clone();
+    checked_state.last_checked_at_ms = Some(current_time_ms());
+    let heads = heads::read(local_store, remote, &options.remote_root)?;
+    heads.require_single(options, remote.provider(), &local.meta.payload_hash)?;
+    let pointer = heads.selected.clone();
     let Some(pointer) = pointer else {
-        return Ok((CloudRemoteCheckDecision::LocalChanged, None));
+        return Ok(CloudSyncCheck {
+            decision: CloudRemoteCheckDecision::LocalChanged,
+            pointer: None,
+            state: checked_state,
+            prepared: PreparedSync {
+                local,
+                heads,
+                remote: None,
+            },
+        });
     };
+    validate_remote_baseline(
+        state,
+        &pointer,
+        options,
+        remote.provider(),
+        &local.meta.payload_hash,
+    )?;
     let remote_snapshot =
         match protocol::resolve_remote_snapshot(local_store, remote, options, &pointer)? {
             protocol::RemoteSnapshotResolution::Current(snapshot)
@@ -909,11 +1237,8 @@ pub fn check_snapshot_with_remote(
                 )));
             }
         };
-    let decision = if remote_snapshot.meta.payload_hash == local.meta.payload_hash {
-        CloudRemoteCheckDecision::UpToDate
-    } else {
-        decide_cloud_remote_check(state, &local.meta.payload_hash, &pointer, allow_auto_pull)
-    };
+    let decision =
+        decide_snapshot_check(state, &local, &remote_snapshot, &pointer, allow_auto_pull)?;
     if decision == CloudRemoteCheckDecision::Conflict {
         return Err(CloudSyncError::Conflict(Box::new(conflict_preview(
             options,
@@ -922,7 +1247,24 @@ pub fn check_snapshot_with_remote(
             &pointer,
         ))));
     }
-    Ok((decision, Some(pointer)))
+    if decision == CloudRemoteCheckDecision::UpToDate {
+        checked_state.last_synced_content_hash = Some(local.sync_content_hash()?);
+        checked_state.last_synced_clock = pointer.sync_clock.clone();
+        checked_state.last_synced_payload_hash = Some(local.meta.payload_hash.clone());
+        checked_state.last_applied_remote_revision = Some(pointer.revision_id.clone());
+        checked_state.last_validated_remote_revision = Some(pointer.revision_id.clone());
+        checked_state.last_full_validation_at_ms = checked_state.last_checked_at_ms;
+    }
+    Ok(CloudSyncCheck {
+        decision,
+        pointer: Some(pointer),
+        state: checked_state,
+        prepared: PreparedSync {
+            local,
+            heads,
+            remote: Some(remote_snapshot),
+        },
+    })
 }
 
 pub fn load_sync_pointer_from_remote(
@@ -949,7 +1291,7 @@ fn ensure_remote_layout(
     remote: &dyn CloudSyncRemote,
     remote_root: &str,
 ) -> Result<(), CloudSyncError> {
-    for child in ["sync", SYNC_SNAPSHOTS_DIR] {
+    for child in ["sync", SYNC_SNAPSHOTS_DIR, heads::HEADS_DIR] {
         remote.create_dir(&remote_path(remote_root, child))?;
     }
     Ok(())

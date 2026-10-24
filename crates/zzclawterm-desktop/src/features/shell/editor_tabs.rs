@@ -1117,18 +1117,21 @@ mod tests {
             assert!(app.workspace_tab_session(&key).is_none());
             assert!(!WorkspaceTabId::from_layout_key(&key).is_terminal_session());
             assert_eq!(app.serialize_open_tabs().len(), serialized_before);
-            app.file_manager.track_job(
+            app.transfer.track_file_operation(
                 "fm-job".into(),
-                crate::features::file_manager::FileManagerJobTarget {
-                    source: crate::features::file_manager::PaneEndpoint::Local,
-                    source_parent: "/tmp".into(),
-                    target: crate::features::file_manager::PaneEndpoint::Local,
-                    target_parent: "/tmp/out".into(),
+                crate::features::transfers::file_operations::FileOperationContext {
+                    request: crate::features::transfers::file_operations::FileOperationRequest::Mutation(
+                        crate::features::transfers::file_operations::FileMutationIntent {
+                            endpoint: crate::features::file_manager::PaneEndpoint::Local,
+                            directory: zzclawterm_transport::RemoteFilePath::new("/tmp"),
+                            mutation: crate::features::transfers::file_operations::FileMutation::CreateDirectory("out".into()),
+                        }),
+                    source_label: "local".into(), target_label: "local".into(),
                 },
             );
             app.remove_workspace_file_manager_tab(&id, cx);
             assert!(!app.workspace_tab_ids().contains(&key));
-            assert!(app.file_manager.owns_job("fm-job"));
+            assert!(app.transfer.file_operation("fm-job").is_some());
         });
     }
 

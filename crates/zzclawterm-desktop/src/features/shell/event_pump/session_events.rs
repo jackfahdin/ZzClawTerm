@@ -11,6 +11,7 @@ use crate::features::shell::event_pump::helpers::{
     terminal_log_plain_text, terminal_output_dropped_marker,
 };
 use crate::features::{ZzClawTermApp, formatting::short_id};
+use crate::models::recording::ExecutionRecordingEvent;
 
 #[derive(Clone, Copy)]
 enum SessionOutputDrainStep {
@@ -659,6 +660,12 @@ impl ZzClawTermApp {
             let stage_duration = stage_started_at.elapsed();
             drain_timings.ai_capture += stage_duration;
             chunk_timings.ai_capture += stage_duration;
+            if !result.recording_text.is_empty() {
+                self.terminal.submit_execution_recording(
+                    session_id,
+                    ExecutionRecordingEvent::Output(result.recording_text),
+                );
+            }
             if !result.visible_text.is_empty() {
                 let stage_started_at = Instant::now();
                 self.submit_terminal_decoded_output(session_id, result.visible_text);

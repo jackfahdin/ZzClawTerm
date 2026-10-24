@@ -601,17 +601,18 @@ impl ZzClawTermApp {
                         if previous_state != Some(state) =>
                     {
                         self.shell.set_status(format!(
-                            "recording degraded: {}",
-                            last_error
-                                .unwrap_or_else(|| "some recording data was lost".to_string())
+                            "{}: {}",
+                            t!("recording.degraded"),
+                            last_error.unwrap_or_else(|| t!("recording.degraded").to_string())
                         ));
                     }
                     zzclawterm_transport::RecordingStatusState::Failed
                         if previous_state != Some(state) =>
                     {
                         self.shell.set_status(format!(
-                            "recording failed: {}",
-                            last_error.unwrap_or_else(|| "writer failed".to_string())
+                            "{}: {}",
+                            t!("recording.failed"),
+                            last_error.unwrap_or_else(|| t!("recording.failed").to_string())
                         ));
                     }
                     zzclawterm_transport::RecordingStatusState::Starting
@@ -625,7 +626,8 @@ impl ZzClawTermApp {
             RecordingWriteEvent::PendingStatus { .. }
             | RecordingWriteEvent::PendingHistorySearch { .. } => false,
             RecordingWriteEvent::ShutdownError(error) => {
-                self.shell.set_status(format!("recording failed: {error}"));
+                self.shell
+                    .set_status(format!("{}: {error}", t!("recording.failed")));
                 true
             }
             RecordingWriteEvent::StatusRemoved { session_id } => {

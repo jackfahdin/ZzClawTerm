@@ -1,24 +1,23 @@
 use rust_i18n::t;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gpui::{Context, Window};
 use zzclawterm_transport::{
-    FileBrowserBackendKind, FileBrowserService, FileCopyRequest, RemoteFilePath,
-    SftpDuplicatePolicy, SftpDuplicateResolver, SftpFileEntry, SftpFileType,
-    SftpPathTransferOptions, SftpTransferControl, file_browser_copy_destination_invalid,
-    file_browser_join, file_browser_name, file_browser_parent, file_browser_path_is_root,
+    FileBrowserBackendKind, FileBrowserService, RemoteFilePath, SftpDuplicatePolicy,
+    SftpDuplicateResolver, SftpFileEntry, SftpFileType, SftpPathTransferOptions,
+    SftpTransferControl, file_browser_copy_destination_invalid, file_browser_join,
+    file_browser_name, file_browser_path_is_root,
 };
 
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::TransferFileClipboard;
+#[cfg(test)]
+use crate::features::transfers::clipboard_copy::copied_tree_matches;
+use crate::features::transfers::clipboard_copy::{ClipboardCopyRequest, run_clipboard_copy};
 use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
-    TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
-    TransferJobStatus,
+    TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState, TransferJobStatus,
 };
-
-type FileInventory = BTreeMap<String, (SftpFileType, Option<u64>, Option<u32>)>;
 
 fn invalid_copy_destination(
     kind: FileBrowserBackendKind,
@@ -27,79 +26,6 @@ fn invalid_copy_destination(
     directory: bool,
 ) -> bool {
     file_browser_copy_destination_invalid(kind, source, target, directory)
-}
-
-fn inventory(
-    service: &FileBrowserService,
-    path: &RemoteFilePath,
-    control: &SftpTransferControl,
-) -> Result<FileInventory, String> {
-    let mut found = BTreeMap::new();
-    let mut pending = vec![(String::new(), path.clone())];
-    while let Some((relative, path)) = pending.pop() {
-        control
-            .check_cancelled()
-            .map_err(|error| error.to_string())?;
-        let props = service
-            .remote_file_properties(&path)
-            .map_err(|error| error.to_string())?;
-        if !matches!(
-            props.file_type,
-            SftpFileType::File | SftpFileType::Directory
-        ) {
-            return Err("cut does not support symbolic links or special files".into());
-        }
-        found.insert(
-            relative.clone(),
-            (props.file_type, props.size, props.modified_at),
-        );
-        if props.file_type == SftpFileType::Directory {
-            for entry in service
-                .list_dir_path(&path)
-                .map_err(|error| error.to_string())?
-            {
-                if entry.name == "." || entry.name == ".." {
-                    continue;
-                }
-                let child = file_browser_join(service.kind(), &path.display_path, &entry.name);
-                pending.push((
-                    format!("{relative}/{}", entry.name),
-                    RemoteFilePath::new(child),
-                ));
-            }
-        }
-    }
-    Ok(found)
-}
-
-fn check_no_symlink_ancestors(service: &FileBrowserService, path: &str) -> Result<(), String> {
-    let mut current = path.to_string();
-    loop {
-        let props = service
-            .remote_file_properties(&RemoteFilePath::new(&current))
-            .map_err(|error| error.to_string())?;
-        if props.file_type == SftpFileType::Symlink {
-            return Err("cut through a symbolic link is not supported".into());
-        }
-        if file_browser_path_is_root(service.kind(), &current) {
-            break;
-        }
-        let parent = file_browser_parent(service.kind(), &current);
-        if parent == current {
-            break;
-        }
-        current = parent;
-    }
-    Ok(())
-}
-
-fn copied_tree_matches(before: &FileInventory, after: &FileInventory) -> bool {
-    before.len() == after.len()
-        && before.iter().all(|(path, (kind, size, _))| {
-            after.get(path).is_some_and(|(other_kind, other_size, _)| {
-                kind == other_kind && (kind == &SftpFileType::Directory || size == other_size)
-            })
-        })
 }
 
 fn external_file_paths(cx: &gpui::App) -> Vec<PathBuf> {
@@ -393,7 +319,7 @@ impl ZzClawTermApp {
                 source_service: source_service.clone(),
                 target_service: target_service.clone(),
                 source: entry.remote_path(),
-                target_path,
+                target_path: RemoteFilePath::new(target_path),
                 target_session_id: target_session_id.clone(),
                 cut: clipboard.cut,
                 control,
@@ -414,102 +340,6 @@ impl ZzClawTermApp {
             .set_status(format!("started {started} file clipboard job(s)"));
         cx.notify();
     }
-}
-
-pub(in crate::features) struct ClipboardCopyRequest {
-    pub source_service: FileBrowserService,
-    pub target_service: FileBrowserService,
-    pub source: RemoteFilePath,
-    pub target_path: String,
-    pub target_session_id: String,
-    pub cut: bool,
-    pub control: SftpTransferControl,
-    pub options: SftpPathTransferOptions,
-}
-
-pub(in crate::features) fn run_clipboard_copy(
-    request: ClipboardCopyRequest,
-    progress: impl FnMut(zzclawterm_transport::SftpTransferProgress) + Send + 'static,
-) -> Result<TransferJobOutput, String> {
-    let ClipboardCopyRequest {
-        source_service,
-        target_service,
-        source,
-        target_path,
-        target_session_id,
-        cut,
-        control,
-        options,
-    } = request;
-    let before = if cut {
-        let parent = file_browser_parent(source_service.kind(), &source.display_path);
-        check_no_symlink_ancestors(&source_service, &parent)?;
-        let target_parent = file_browser_parent(target_service.kind(), &target_path);
-        check_no_symlink_ancestors(&target_service, &target_parent)?;
-        let target_name = file_browser_name(target_service.kind(), &target_path);
-        if target_service
-            .list_dir(&target_parent)
-            .map_err(|error| error.to_string())?
-            .iter()
-            .any(|entry| entry.name == target_name)
-        {
-            return Err("destination already exists; source was kept".into());
-        }
-        Some(inventory(&source_service, &source, &control)?)
-    } else {
-        None
-    };
-    let summary = FileCopyRequest {
-        source: source_service.transfer_endpoint(&source),
-        destination: target_service.transfer_endpoint(&RemoteFilePath::new(&target_path)),
-        control: control.clone(),
-        options,
-    }
-    .execute_with_progress(progress)
-    .map_err(|error| error.to_string())?;
-    if !summary.copied {
-        return Err("copy skipped; source was kept".into());
-    }
-    let mut source_parent_path = None;
-    let mut source_entries = None;
-    if let Some(before) = before {
-        control
-            .check_cancelled()
-            .map_err(|error| error.to_string())?;
-        let after_source = inventory(&source_service, &source, &control)?;
-        if after_source != before {
-            return Err("source changed during copy; source was kept".into());
-        }
-        let destination = RemoteFilePath::new(&summary.destination_path);
-        let after_target = inventory(&target_service, &destination, &control)?;
-        if !copied_tree_matches(&before, &after_target) {
-            return Err("copy verification failed; source was kept".into());
-        }
-        control
-            .check_cancelled()
-            .map_err(|error| error.to_string())?;
-        source_service
-            .delete_remote_path(&source)
-            .map_err(|error| error.to_string())?;
-        let parent = file_browser_parent(source_service.kind(), &source.display_path);
-        source_entries = source_service.list_dir(&parent).ok();
-        source_parent_path = Some(parent);
-    }
-    let target_parent_path = file_browser_parent(target_service.kind(), &summary.destination_path);
-    let entries = target_service
-        .list_dir(&target_parent_path)
-        .unwrap_or_default();
-    Ok(TransferJobOutput::Sent {
-        source_path: source.display_path,
-        source_parent_path,
-        source_entries,
-        target_session_id,
-        target_path: summary.destination_path,
-        target_parent_path,
-        bytes: summary.bytes,
-        used_local_staging: summary.used_local_staging,
-        entries,
-    })
 }
 
 #[cfg(test)]
@@ -544,7 +374,7 @@ mod tests {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
-                target_path: target.to_string_lossy().into_owned(),
+                target_path: RemoteFilePath::new(target.to_string_lossy()),
                 target_session_id: "target".into(),
                 cut: false,
                 control: SftpTransferControl::new(),
@@ -588,7 +418,7 @@ mod tests {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
-                target_path: target.to_string_lossy().into_owned(),
+                target_path: RemoteFilePath::new(target.to_string_lossy()),
                 target_session_id: "local".into(),
                 cut: true,
                 control: SftpTransferControl::new(),
@@ -623,7 +453,7 @@ mod tests {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
-                target_path: target.to_string_lossy().into_owned(),
+                target_path: RemoteFilePath::new(target.to_string_lossy()),
                 target_session_id: "local".into(),
                 cut: true,
                 control,

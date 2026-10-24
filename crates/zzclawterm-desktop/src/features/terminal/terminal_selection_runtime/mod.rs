@@ -14,3 +14,4 @@ pub(in crate::features) use metrics::{
 };
 mod selection;
 mod smart_input;
+mod text;

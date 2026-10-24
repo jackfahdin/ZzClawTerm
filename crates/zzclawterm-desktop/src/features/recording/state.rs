@@ -4,8 +4,7 @@ use zzclawterm_terminal::recording_sanitizer::RecordingSanitizer;
 use zzclawterm_transport::RecordingStatus;
 
 use crate::models::{
-    RecordingEventReceiver, RecordingHistorySearchKey, RecordingPathPromptKind,
-    RecordingWriteHandle, RecordingWritePipeline,
+    RecordingEventReceiver, RecordingHistorySearchKey, RecordingWriteHandle, RecordingWritePipeline,
 };
 
 pub(in crate::features) struct RecordingFeatureState {
@@ -15,7 +14,6 @@ pub(in crate::features) struct RecordingFeatureState {
     busy_actions: HashMap<String, String>,
     rekeyed_sessions: HashMap<String, String>,
     statuses: HashMap<String, RecordingStatus>,
-    path_prompt: Option<RecordingPathPromptKind>,
     prompts: HashMap<String, RecordingPrompt>,
 }
 
@@ -36,7 +34,6 @@ impl RecordingFeatureState {
             busy_actions: HashMap::new(),
             rekeyed_sessions: HashMap::new(),
             statuses: HashMap::new(),
-            path_prompt: None,
             prompts: HashMap::new(),
         }
     }
@@ -153,18 +150,6 @@ impl RecordingFeatureState {
         self.search_draft.clear();
     }
 
-    pub(in crate::features) fn begin_path_prompt(&mut self, kind: RecordingPathPromptKind) -> bool {
-        if self.path_prompt.is_some() {
-            return false;
-        }
-        self.path_prompt = Some(kind);
-        true
-    }
-
-    pub(in crate::features) fn finish_path_prompt(&mut self) {
-        self.path_prompt = None;
-    }
-
     pub(in crate::features) fn set_history_include_input(&self, enabled: bool) {
         self.pipeline.set_history_include_input(enabled);
     }
@@ -265,16 +250,12 @@ mod tests {
         let mut recording = RecordingFeatureState::new(1024);
         assert!(recording.begin_action("session-1", "record"));
         assert!(!recording.begin_action("session-1", "save"));
-        assert!(recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
-        assert!(!recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
 
         let _writer = recording.writer();
         recording.cleanup_session("session-1");
 
         assert_eq!(recording.active_count(), 0);
         assert!(recording.busy_action("session-1").is_none());
-        recording.finish_path_prompt();
-        assert!(recording.begin_path_prompt(crate::models::RecordingPathPromptKind::Start));
     }
 
     #[test]

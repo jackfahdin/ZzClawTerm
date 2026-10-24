@@ -52,6 +52,7 @@ pub(super) fn pointer_from_snapshot(snapshot: &RawPortableSnapshot) -> RemoteSyn
         payload_hash: snapshot.source_payload_hash().to_string(),
         device_id: snapshot.meta.device_id.clone(),
         app_version: snapshot.meta.app_version.clone(),
+        sync_clock: snapshot.meta.sync_clock.clone(),
     }
 }
 
@@ -61,7 +62,7 @@ pub(super) fn upload_sync_snapshot(
     options: &LocalCloudSyncOptions,
     snapshot: &RawPortableSnapshot,
     expected: Option<&RemoteSyncPointer>,
-) -> Result<(), CloudSyncError> {
+) -> Result<Vec<u8>, CloudSyncError> {
     let bytes =
         local_store.encode_sync_snapshot(snapshot, options.master_password.expose_secret())?;
     upload_verified_snapshot(
@@ -71,7 +72,9 @@ pub(super) fn upload_sync_snapshot(
         &pointer_from_snapshot(snapshot),
         expected,
         &bytes,
-    )
+        true,
+    )?;
+    Ok(bytes)
 }
 
 fn upload_verified_snapshot(
@@ -81,6 +84,7 @@ fn upload_verified_snapshot(
     pointer: &RemoteSyncPointer,
     expected: Option<&RemoteSyncPointer>,
     bytes: &[u8],
+    stage_device: bool,
 ) -> Result<(), CloudSyncError> {
     let path = remote_path(
         &options.remote_root,
@@ -105,6 +109,14 @@ fn upload_verified_snapshot(
                 expected,
                 &pointer.revision_id,
             )?;
+            if stage_device {
+                super::heads::stage(
+                    remote,
+                    &options.remote_root,
+                    &options.device_id,
+                    &pointer.revision_id,
+                )?;
+            }
         }
         let last_attempt = attempt + 1 == attempts;
         // Capacity-limited stores may retry the write after reserving slots.
@@ -228,45 +240,6 @@ fn decode_and_validate_remote_snapshot(
     Ok(snapshot)
 }
 
-pub(super) fn write_current_sync_snapshot_compat(
-    local_store: &dyn CloudLocalStore,
-    remote: &dyn CloudSyncRemote,
-    options: &LocalCloudSyncOptions,
-    snapshot: &RawPortableSnapshot,
-) -> Result<(), CloudSyncError> {
-    if snapshot.source_payload_hash.is_some() {
-        let pointer = pointer_from_snapshot(snapshot);
-        let path = remote_path(
-            &options.remote_root,
-            &legacy_sync_snapshot_file(&snapshot.meta.revision_id),
-        );
-        let bytes = remote
-            .read_if_exists(&path)?
-            .ok_or(CloudSyncError::SnapshotMissing {
-                revision: snapshot.meta.revision_id.clone(),
-            })?;
-        validate_remote_snapshot_size(&bytes, &path, &snapshot.meta.revision_id)?;
-        let decoded = decode_remote_snapshot(
-            local_store,
-            &bytes,
-            options.master_password.expose_secret(),
-            &path,
-            &snapshot.meta.revision_id,
-        )?;
-        validate_snapshot_against_pointer(&pointer, &decoded)?;
-        return remote.write(
-            &remote_path(&options.remote_root, SYNC_CURRENT_FILE),
-            &bytes,
-        );
-    }
-    let bytes =
-        local_store.encode_sync_snapshot(snapshot, options.master_password.expose_secret())?;
-    remote.write(
-        &remote_path(&options.remote_root, SYNC_CURRENT_FILE),
-        &bytes,
-    )
-}
-
 fn read_current_sync_snapshot_compat(
     local_store: &dyn CloudLocalStore,
     remote: &dyn CloudSyncRemote,
@@ -367,6 +340,7 @@ pub(super) fn resolve_remote_snapshot(
             pointer,
             Some(pointer),
             &current_bytes,
+            false,
         )?;
         read_snapshot_for_pointer(local_store, remote, options, pointer)?;
         return Ok(RemoteSnapshotResolution::LegacyMigrated(current));
@@ -415,25 +389,34 @@ pub(super) fn recover_current_remote_snapshot(
             revision: "current".to_string(),
         });
     };
-    let pointer = pointer_from_snapshot(&snapshot);
-    let current_bytes = remote
-        .read_if_exists(&remote_path(&options.remote_root, SYNC_CURRENT_FILE))?
-        .ok_or(CloudSyncError::SnapshotMissing {
-            revision: "current".to_string(),
-        })?;
-    let expected = load_sync_pointer_from_remote(local_store, remote, &options.remote_root)?;
-    upload_verified_snapshot(
+    let heads = super::heads::read(local_store, remote, &options.remote_root)?;
+    let mut snapshot = snapshot;
+    snapshot.meta.revision_id = uuid::Uuid::new_v4().to_string();
+    snapshot.meta.device_id = options.device_id.clone();
+    snapshot.meta.created_at_ms = super::current_time_ms();
+    snapshot.meta.sync_clock = Some(heads.next_clock(None, &options.device_id)?);
+    snapshot.recalculate_hash()?;
+    let bytes = upload_sync_snapshot(
         local_store,
         remote,
         options,
-        &pointer,
-        expected.as_ref(),
-        &current_bytes,
+        &snapshot,
+        heads.compatibility.as_ref(),
     )?;
-    ensure_remote_head_unchanged(local_store, remote, &options.remote_root, expected.as_ref())?;
-    read_snapshot_for_pointer(local_store, remote, options, &pointer)?;
+    let pointer = pointer_from_snapshot(&snapshot);
+    ensure_remote_head_unchanged(
+        local_store,
+        remote,
+        &options.remote_root,
+        heads.compatibility.as_ref(),
+    )?;
     control.begin_commit()?;
-    write_sync_pointer(local_store, remote, &options.remote_root, &pointer)?;
+    super::heads::publish(remote, &options.remote_root, &pointer)?;
+    let _ = write_sync_pointer(local_store, remote, &options.remote_root, &pointer);
+    let _ = remote.write(
+        &remote_path(&options.remote_root, SYNC_CURRENT_FILE),
+        &bytes,
+    );
     Ok(snapshot)
 }
 
@@ -446,6 +429,11 @@ pub(super) fn validate_snapshot_against_pointer(
             pointer_revision: pointer.revision_id.clone(),
             snapshot_revision: snapshot.meta.revision_id.clone(),
         });
+    }
+    if pointer.sync_clock != snapshot.meta.sync_clock {
+        return Err(CloudSyncError::Remote(
+            "snapshot causal clock does not match its head".into(),
+        ));
     }
     if snapshot.source_payload_hash() != pointer.payload_hash {
         return Err(CloudSyncError::HashMismatch {
@@ -479,7 +467,10 @@ fn decode_remote_snapshot(
             // A missing master password is a local misconfiguration, not a
             // property of the remote bytes.
             error @ CloudSyncError::PortableSnapshot(
-                PortableSnapshotError::MissingMasterPassword,
+                PortableSnapshotError::MissingMasterPassword
+                | PortableSnapshotError::UnsupportedEncryptionVersion(_)
+                | PortableSnapshotError::InvalidEncryptionEnvelope
+                | PortableSnapshotError::UnsupportedVersion(_),
             ) => error,
             error => CloudSyncError::CorruptedSnapshot {
                 revision: revision.to_string(),
@@ -531,7 +522,7 @@ fn describe_payload(path: &str, bytes: &[u8]) -> String {
     )
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
     hex::encode(Sha256::digest(bytes))

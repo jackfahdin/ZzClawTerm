@@ -397,6 +397,361 @@ fn listing_datetime_and_numbers_keep_windterm_colors_without_single_digit_noise(
 }
 
 #[test]
+fn ping_sequence_counters_highlight_single_digits_without_coloring_the_field_name() {
+    for dark in [true, false] {
+        let highlighter = SemanticHighlighter::compile(&get_builtin_keyword_rules(dark));
+        let color = parse_hex_rgb(builtin_keyword_rule_swatch("builtin-number", dark)).unwrap();
+        for sequence in 0..=10 {
+            let line = format!("64 bytes from 1.1.1.1: icmp_seq={sequence} ttl=51 time=74.1 ms");
+            let start = line.find("icmp_seq=").unwrap() + "icmp_seq=".len();
+            let end = start + sequence.to_string().len();
+            let ranges = highlighter.ranges(&line, &SemanticContext::default(), &[]);
+            assert!(ranges.contains(&(start, end, color)), "{line}, dark={dark}");
+            assert!(ranges.iter().all(|&(left, right, _)| {
+                right <= start - "icmp_seq=".len() || left >= start - 1
+            }));
+        }
+        assert!(
+            highlighter
+                .ranges("0 1 7 9", &SemanticContext::default(), &[])
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn ping_sequence_single_digit_exception_respects_boundaries_context_and_number_switch() {
+    let rules: Vec<_> = get_builtin_keyword_rules(true)
+        .into_iter()
+        .filter(|rule| rule.id == "builtin-number")
+        .collect();
+    let highlighter = SemanticHighlighter::compile(&rules);
+    for line in [
+        "prefixicmp_seq=1",
+        "prefix_icmp_seq=1",
+        "prefix-icmp_seq=1",
+        "icmp_seq=1x",
+        "icmp_seq=1_",
+        "icmp_seq=1-worker",
+        "icmp_seq=-1",
+        "icmp_seq=+1",
+        "icmp_seq=",
+        "icmp_seq=1\u{301}",
+        "icmp_seq=\n1",
+    ] {
+        assert!(
+            highlighter
+                .ranges(line, &SemanticContext::default(), &[])
+                .is_empty(),
+            "{line:?}"
+        );
+    }
+    let line = "icmp_seq=1";
+    for context in [
+        SemanticContext {
+            integrated: true,
+            input: std::iter::once(0..line.len()).collect(),
+            ..SemanticContext::default()
+        },
+        SemanticContext {
+            integrated: true,
+            prompt: std::iter::once(0..line.len()).collect(),
+            ..SemanticContext::default()
+        },
+    ] {
+        assert!(highlighter.ranges(line, &context, &[]).is_empty());
+    }
+    assert!(
+        highlighter
+            .ranges("$ echo icmp_seq=1", &SemanticContext::default(), &[])
+            .is_empty()
+    );
+    assert_eq!(
+        highlighter.ranges(line, &SemanticContext::default(), &[(9, 10, 0x123456)]),
+        vec![(9, 10, 0x123456)]
+    );
+
+    let mut disabled = rules;
+    disabled[0].enabled = false;
+    assert!(
+        SemanticHighlighter::compile(&disabled)
+            .ranges(line, &SemanticContext::default(), &[])
+            .is_empty()
+    );
+    for (token, id) in [
+        ("\"icmp_seq=1\"", "builtin-string"),
+        ("https://example.com/?icmp_seq=1", "builtin-url"),
+    ] {
+        assert_token(token, token, id, false);
+    }
+}
+
+#[test]
+fn ping_sequence_context_survives_soft_wraps_without_crossing_hard_newlines() {
+    let mut screen = TerminalScreen::new(8, 4);
+    screen.advance(b"icmp_seq=1");
+    let result = snapshot_colors(&screen.snapshot());
+    assert_eq!(result[9], Some(swatch("builtin-number")));
+
+    let mut screen = TerminalScreen::new(16, 4);
+    screen.advance(b"icmp_seq=\r\n1");
+    assert!(
+        snapshot_colors(&screen.snapshot())
+            .iter()
+            .all(|color| *color != Some(swatch("builtin-number")))
+    );
+}
+
+#[test]
+fn numeric_literals_and_durations_keep_their_complete_ranges_in_both_themes() {
+    for dark in [true, false] {
+        let highlighter = SemanticHighlighter::compile(&get_builtin_keyword_rules(dark));
+        for (id, tokens) in [
+            (
+                "builtin-number",
+                &[
+                    "0%", "5%", "-5%", "12.5 %", "-12", "+12", ".5", "-.5", "12.", "1e-3",
+                    "-1.2E+3", "-0xFF", "5\t%", "5\u{a0}%",
+                ][..],
+            ),
+            (
+                "builtin-duration",
+                &[
+                    "-12ms",
+                    ".5 ms",
+                    "-.5ms",
+                    "74.1 ms",
+                    "17018ms",
+                    "1e-3 ms",
+                    "12 minutes",
+                    "12\tµs",
+                    "12\u{a0}ms",
+                ][..],
+            ),
+        ] {
+            let color = parse_hex_rgb(builtin_keyword_rule_swatch(id, dark)).unwrap();
+            for token in tokens {
+                assert_eq!(
+                    highlighter.ranges(token, &SemanticContext::default(), &[]),
+                    vec![(0, token.len(), color)],
+                    "{token:?}, dark={dark}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn numeric_boundaries_reject_names_and_incomplete_literals_without_single_digit_noise() {
+    let rules: Vec<_> = get_builtin_keyword_rules(true)
+        .into_iter()
+        .filter(|rule| matches!(rule.id.as_str(), "builtin-number" | "builtin-duration"))
+        .collect();
+    let highlighter = SemanticHighlighter::compile(&rules);
+    for token in [
+        "0",
+        "7",
+        "-5",
+        "+3",
+        "worker-123",
+        "123-worker",
+        "foo123",
+        "id_123",
+        "123_id",
+        "file.123",
+        "0x12GG",
+        "0x",
+        "12e",
+        "12e+",
+        "12e--34",
+        "12e+34G",
+        "12.34.56",
+        "12e+34.5",
+        "x.5ms",
+        "123ms_extra",
+        "123ms-worker",
+        "界123",
+        "123\u{301}",
+        "5\n%",
+        "5\r%",
+        "5\u{2028}%",
+        "5\nms",
+    ] {
+        assert!(
+            highlighter
+                .matches(token, &SemanticContext::default())
+                .is_empty(),
+            "{token:?}"
+        );
+    }
+}
+
+#[test]
+fn operators_yield_to_signed_numeric_tokens_and_respect_category_switches() {
+    let highlighter = SemanticHighlighter::compile(&get_builtin_keyword_rules(true));
+    for (line, start, end, id) in [
+        ("value=-12", 6, 9, "builtin-number"),
+        ("(-12)", 1, 4, "builtin-number"),
+        ("value=+.5", 6, 9, "builtin-number"),
+        ("time=-.5ms", 5, 10, "builtin-duration"),
+    ] {
+        let ranges = highlighter.ranges(line, &SemanticContext::default(), &[]);
+        assert!(
+            ranges.contains(&(start, end, swatch(id))),
+            "{line}: {ranges:?}"
+        );
+        assert!(
+            ranges
+                .iter()
+                .filter(|range| range.2 == swatch("builtin-operator"))
+                .all(|&(left, right, _)| right <= start || left >= end),
+            "{line}"
+        );
+    }
+
+    for (number, duration) in [(false, true), (true, false), (false, false)] {
+        let mut rules = get_builtin_keyword_rules(true);
+        for rule in &mut rules {
+            match rule.id.as_str() {
+                "builtin-number" => rule.enabled = number,
+                "builtin-duration" => rule.enabled = duration,
+                _ => {}
+            }
+        }
+        let highlighter = SemanticHighlighter::compile(&rules);
+        for (token, enabled, id) in [
+            ("-12", number, "builtin-number"),
+            ("-.5ms", duration, "builtin-duration"),
+        ] {
+            let line = format!("value={token}");
+            let ranges = highlighter.ranges(&line, &SemanticContext::default(), &[]);
+            if enabled {
+                assert!(ranges.contains(&(6, line.len(), swatch(id))), "{line}");
+            } else {
+                assert_eq!(ranges, vec![(5, 7, swatch("builtin-operator"))], "{line}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ping_ps_and_ls_keep_specialized_tokens_and_existing_number_colors() {
+    let ping = [
+        "PING one.one.one.one (1.1.1.1) 56(84) bytes of data.",
+        "64 bytes from 1.1.1.1: icmp_seq=18 ttl=51 time=74.1 ms",
+        "--- one.one.one.one ping statistics ---",
+        "18 packets transmitted, 18 received, 0% packet loss, time 17018ms",
+        "rtt min/avg/max/mdev = 73.289/74.141/76.057/0.605 ms",
+    ];
+    assert_token(ping[0], "1.1.1.1", "builtin-address", false);
+    for (token, id) in [
+        ("64 bytes", "builtin-size"),
+        ("1.1.1.1", "builtin-address"),
+        ("18", "builtin-number"),
+        ("51", "builtin-number"),
+        ("74.1 ms", "builtin-duration"),
+    ] {
+        assert_token(ping[1], token, id, false);
+    }
+    for (token, id) in [
+        ("18", "builtin-number"),
+        ("0%", "builtin-number"),
+        ("17018ms", "builtin-duration"),
+    ] {
+        assert_token(ping[3], token, id, false);
+    }
+    // RTT remains individual numbers in P0; the final value owns its unit.
+    for token in ["73.289", "74.141", "76.057"] {
+        assert_token(ping[4], token, "builtin-number", false);
+    }
+    assert_token(ping[4], "0.605 ms", "builtin-duration", false);
+
+    let ps = "root 3509713 10721 0 Oct22 ? 00:00:00 /usr/bin/worker-123";
+    for token in ["3509713", "10721"] {
+        assert_token(ps, token, "builtin-number", false);
+    }
+    assert_token(ps, "00:00:00", "builtin-datetime", false);
+    let listing = "-rw-r--r-- 1 root root 12345 Oct 7 21:37 file-123";
+    assert_token(listing, "12345", "builtin-number", false);
+    assert_token(listing, "Oct", "builtin-datetime", false);
+    assert_token(listing, "21:37", "builtin-datetime", false);
+    assert!(
+        colors(listing, false)[listing.find("file-123").unwrap()..]
+            .iter()
+            .all(Option::is_none)
+    );
+
+    let mut screen = TerminalScreen::new(96, 8);
+    screen.advance(ping.join("\r\n").as_bytes());
+    let snapshot = screen.snapshot();
+    let highlighter = compile_terminal_keyword_highlighter(&get_builtin_keyword_rules(true));
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let previous = precompute_terminal_keyword_highlights(&snapshot, &highlighter, palette, None);
+    let (_, stats) = precompute_terminal_keyword_highlights_for_rows_with_stats(
+        &snapshot,
+        &highlighter,
+        palette,
+        Some(&previous),
+        0..snapshot.row_count(),
+    );
+    assert_eq!(stats.processed_bytes, 0);
+    assert_eq!(stats.reused_rows, snapshot.row_count());
+}
+
+#[test]
+fn signed_numbers_preserve_whole_token_conflicts_with_specialized_and_user_rules() {
+    for (token, id) in [
+        ("https://example.com/-12?a=5%25", "builtin-url"),
+        ("v12.34.56", "builtin-version"),
+        ("2026-10-22T12:34:56-05:00", "builtin-datetime"),
+        ("192.168.12.34", "builtin-address"),
+        ("550e8400-e29b-41d4-a716-446655440000", "builtin-uuid"),
+        ("\"value=-12.5%\"", "builtin-string"),
+    ] {
+        let highlighter = SemanticHighlighter::compile(&get_builtin_keyword_rules(true));
+        assert_eq!(
+            highlighter.ranges(token, &SemanticContext::default(), &[]),
+            vec![(0, token.len(), swatch(id))],
+            "{token}"
+        );
+    }
+    let highlighter = SemanticHighlighter::compile(&get_builtin_keyword_rules(true));
+    let context = SemanticContext::default();
+    assert_eq!(
+        highlighter.ranges("-12", &context, &[(0, 3, 0x123456)]),
+        vec![(0, 3, 0x123456)]
+    );
+    assert_eq!(
+        highlighter.ranges("-12", &context, &[(1, 3, 0x123456)]),
+        vec![(0, 3, swatch("builtin-number"))]
+    );
+    assert_eq!(
+        highlighter.ranges("value=-12", &context, &[(0, 9, 0x123456)]),
+        vec![(0, 9, 0x123456)]
+    );
+}
+
+#[test]
+fn signed_percentages_map_across_soft_wraps_without_matching_hard_newlines() {
+    let mut screen = TerminalScreen::new(4, 8);
+    screen.advance(b"value=-12.5%");
+    let result = snapshot_colors(&screen.snapshot());
+    assert!(
+        result[6..12]
+            .iter()
+            .all(|color| *color == Some(swatch("builtin-number")))
+    );
+
+    let mut screen = TerminalScreen::new(4, 8);
+    screen.advance(b"5\r\n%");
+    assert!(
+        snapshot_colors(&screen.snapshot())
+            .iter()
+            .all(|color| *color != Some(swatch("builtin-number")))
+    );
+}
+
+#[test]
 fn shell_commands_separators_assignments_paths_and_options_are_contextual() {
     let line = "LANG=C cd /tmp && ls -la | grep error; cat ./Cargo.toml || vim ~/.ssh/config";
     for command in ["cd", "ls", "grep", "cat", "vim"] {
@@ -743,28 +1098,30 @@ fn unchanged_text_semantic_changes_invalidate_reuse_and_stale_results() {
 #[test]
 fn semantic_foreground_respects_ansi_color_and_hidden_text() {
     for ansi in ["\x1b[34m", "\x1b[38;2;12;34;56m", "\x1b[8m"] {
-        let mut screen = TerminalScreen::new(20, 1);
-        screen.advance(format!("{ansi}ERROR").as_bytes());
-        let snapshot = screen.snapshot();
-        let row = snapshot.row(0).unwrap();
-        let spans = terminal_highlight_spans_with_keyword_ranges_and_options(
-            &row.text,
-            Some(&row.styled_spans),
-            Some(&[TerminalKeywordRange {
-                start_col: 0,
-                end_col: 5,
-                color: swatch("builtin-error"),
-            }]),
-            &[],
-            zzclawterm_ui::theme_palette("github-dark"),
-            false,
-        );
-        assert!(spans.iter().all(|span| !span.keyword));
-        assert!(
-            spans
-                .iter()
-                .all(|span| span.color != Some(swatch("builtin-error")))
-        );
+        for (token, id) in [
+            ("ERROR", "builtin-error"),
+            ("-12.5%", "builtin-number"),
+            ("-.5ms", "builtin-duration"),
+        ] {
+            let mut screen = TerminalScreen::new(20, 1);
+            screen.advance(format!("{ansi}{token}").as_bytes());
+            let snapshot = screen.snapshot();
+            let row = snapshot.row(0).unwrap();
+            let spans = terminal_highlight_spans_with_keyword_ranges_and_options(
+                &row.text,
+                Some(&row.styled_spans),
+                Some(&[TerminalKeywordRange {
+                    start_col: 0,
+                    end_col: token.len(),
+                    color: swatch(id),
+                }]),
+                &[],
+                zzclawterm_ui::theme_palette("github-dark"),
+                false,
+            );
+            assert!(spans.iter().all(|span| !span.keyword));
+            assert!(spans.iter().all(|span| span.color != Some(swatch(id))));
+        }
     }
 }
 

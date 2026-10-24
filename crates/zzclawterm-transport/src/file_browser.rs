@@ -54,6 +54,131 @@ impl std::fmt::Debug for FileBrowserService {
 }
 
 impl FileBrowserService {
+    pub fn parent_path(&self, path: &RemoteFilePath) -> anyhow::Result<RemoteFilePath> {
+        match self {
+            Self::Local(_) => Ok(RemoteFilePath::new(file_browser_parent(
+                self.kind(),
+                &path.display_path,
+            ))),
+            Self::Remote(_) => path.parent(),
+        }
+    }
+
+    pub fn child_path(
+        &self,
+        directory: &RemoteFilePath,
+        name: &str,
+    ) -> anyhow::Result<RemoteFilePath> {
+        anyhow::ensure!(
+            valid_file_browser_child_name(self.kind(), name),
+            "invalid file name"
+        );
+        match self {
+            Self::Local(_) => Ok(RemoteFilePath::new(file_browser_join(
+                self.kind(),
+                &directory.display_path,
+                name,
+            ))),
+            Self::Remote(service) => service.child_path(directory, name),
+        }
+    }
+
+    pub fn copy_child_path(
+        &self,
+        directory: &RemoteFilePath,
+        source_service: &Self,
+        source: &RemoteFilePath,
+        name: &str,
+    ) -> anyhow::Result<RemoteFilePath> {
+        match (self, source_service) {
+            (Self::Remote(target), Self::Remote(origin)) => {
+                target.copy_child_path(directory, origin, source, name)
+            }
+            _ => self.child_path(directory, name),
+        }
+    }
+
+    /// Blocking destination validation. Resolve local aliases and reject remote
+    /// symlink ancestors when two sessions address the same server directory.
+    pub fn validate_copy_destination(
+        &self,
+        source: &RemoteFilePath,
+        target: &Self,
+        destination: &RemoteFilePath,
+        directory: bool,
+    ) -> anyhow::Result<()> {
+        match (self, target) {
+            (Self::Local(_), Self::Local(_)) => {
+                let source = std::fs::canonicalize(resolve_local_path(&source.display_path))?;
+                let destination = canonical_target(&resolve_local_path(&destination.display_path))?;
+                anyhow::ensure!(
+                    source != destination && !(directory && destination.starts_with(&source)),
+                    "source and destination overlap"
+                );
+            }
+            (Self::Remote(origin), Self::Remote(destination_service))
+                if origin.endpoint_key() == destination_service.endpoint_key() =>
+            {
+                anyhow::ensure!(
+                    !file_browser_copy_destination_invalid(
+                        FileBrowserBackendKind::Remote,
+                        &source.display_path,
+                        &destination.display_path,
+                        directory
+                    ),
+                    "source and destination overlap"
+                );
+                if directory {
+                    for (service, path) in
+                        [(self, source.parent()?), (target, destination.parent()?)]
+                    {
+                        let mut current = path;
+                        loop {
+                            let props = service.remote_file_properties(&current)?;
+                            anyhow::ensure!(
+                                props.file_type != crate::SftpFileType::Symlink,
+                                "copying through symbolic link ancestors is not supported"
+                            );
+                            let parent = current.parent()?;
+                            if parent == current {
+                                break;
+                            }
+                            current = parent;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn create_dir_remote_path(
+        &self,
+        path: &RemoteFilePath,
+        mode: Option<u32>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Local(service) => {
+                service.create_dir(resolve_local_path(&path.display_path), mode)
+            }
+            Self::Remote(service) => service.create_dir_remote_path(path, mode),
+        }
+    }
+
+    pub fn create_file_remote_path(
+        &self,
+        path: &RemoteFilePath,
+        mode: Option<u32>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Local(service) => {
+                service.create_file(resolve_local_path(&path.display_path), mode)
+            }
+            Self::Remote(service) => service.create_file_remote_path(path, mode),
+        }
+    }
+
     pub fn local() -> Self {
         Self::Local(LocalFileService)
     }
@@ -140,6 +265,21 @@ impl FileBrowserService {
                 resolve_local_path(&new_path.display_path),
             ),
             Self::Remote(service) => service.rename_remote_paths(old_path, new_path),
+        }
+    }
+
+    /// Rename without replacing a concurrently-created destination.
+    pub fn rename_remote_paths_no_replace(
+        &self,
+        source: &RemoteFilePath,
+        destination: &RemoteFilePath,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Local(_) => rename_local_no_replace(
+                &resolve_local_path(&source.display_path),
+                &resolve_local_path(&destination.display_path),
+            ),
+            Self::Remote(service) => service.rename_remote_paths_no_replace(source, destination),
         }
     }
 
@@ -540,5 +680,178 @@ mod tests {
             r"C:\other\file",
             true
         ));
+    }
+}
+
+#[cfg(windows)]
+fn rename_local_no_replace(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    anyhow::ensure!(
+        !source[..source.len() - 1].contains(&0)
+            && !destination[..destination.len() - 1].contains(&0),
+        "invalid path"
+    );
+    // std::fs::rename enables REPLACE_EXISTING on Windows. Pass zero flags so
+    // another writer's destination is protected by the operating system.
+    let result = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            0,
+        )
+    };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_local_no_replace(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+    // Both C strings remain alive through the syscall. The exclusive flag is
+    // necessary: an existence preflight alone cannot protect another writer.
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn rename_local_no_replace(_: &Path, _: &Path) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "exclusive rename is unavailable on this platform",
+    )
+    .into())
+}
+
+#[cfg(test)]
+mod operation_path_tests {
+    use super::FileBrowserService;
+    use crate::{RemoteFilePath, RemoteFileService, SshSessionConfig};
+    use zzclawterm_core::test_support::TestTempDir;
+
+    #[test]
+    fn opaque_copy_target_keeps_both_raw_parent_and_raw_name() {
+        let service =
+            FileBrowserService::remote(RemoteFileService::new(SshSessionConfig::default()));
+        let parent = RemoteFilePath::from_raw("/target/�", b"/target/\xff");
+        let source = RemoteFilePath::from_raw("/source/�", b"/source/\xfe");
+        let target = service
+            .copy_child_path(&parent, &service, &source, "�")
+            .unwrap();
+        assert_eq!(target.raw_path().unwrap().unwrap(), b"/target/\xff/\xfe");
+        assert_eq!(
+            service
+                .parent_path(&target)
+                .unwrap()
+                .raw_path()
+                .unwrap()
+                .unwrap(),
+            b"/target/\xff"
+        );
+        let child = service.child_path(&parent, "新.txt").unwrap();
+        let mut expected = b"/target/\xff/".to_vec();
+        expected.extend("新.txt".as_bytes());
+        assert_eq!(child.raw_path().unwrap().unwrap(), expected);
+    }
+
+    #[test]
+    fn opaque_copy_does_not_encode_a_lossy_parent_display() {
+        let mut config = SshSessionConfig::default();
+        config.sftp.filename_encoding = "GBK".into();
+        let service = FileBrowserService::remote(RemoteFileService::new(config));
+        let parent = RemoteFilePath::from_raw("/target/�", b"/target/\xff");
+        let source = RemoteFilePath::from_raw("/source/�", b"/source/\xfe");
+        let target = service
+            .copy_child_path(&parent, &service, &source, "�")
+            .unwrap();
+        assert_eq!(target.raw_path().unwrap().unwrap(), b"/target/\xff/\xfe");
+    }
+
+    #[test]
+    fn exclusive_rename_preserves_existing_file_and_directory() {
+        let root = TestTempDir::new("zzclawterm-exclusive-rename");
+        std::fs::create_dir_all(root.path()).unwrap();
+        let service = FileBrowserService::local();
+        for directory in [false, true] {
+            let source = root.join(if directory { "source-dir" } else { "source" });
+            let target = root.join(if directory { "target-dir" } else { "target" });
+            if directory {
+                std::fs::create_dir(&source).unwrap();
+                std::fs::create_dir(&target).unwrap();
+            } else {
+                std::fs::write(&source, b"source").unwrap();
+                std::fs::write(&target, b"target").unwrap();
+            }
+            assert!(
+                service
+                    .rename_remote_paths_no_replace(
+                        &RemoteFilePath::new(source.to_string_lossy()),
+                        &RemoteFilePath::new(target.to_string_lossy())
+                    )
+                    .is_err()
+            );
+            assert!(source.exists());
+            assert!(target.exists());
+            if !directory {
+                assert_eq!(std::fs::read(&target).unwrap(), b"target");
+            }
+        }
+    }
+}
+
+fn canonical_target(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut current = absolute.as_path();
+    let mut names = Vec::new();
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut resolved) => {
+                for name in names.into_iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(error.into());
+                };
+                names.push(name.to_os_string());
+                let Some(parent) = current.parent() else {
+                    return Err(error.into());
+                };
+                current = parent;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }

@@ -1,5 +1,5 @@
 use super::{
-    close_sftp_session, compatibility_runtime, open_sftp_session,
+    close_sftp_session, compatibility_runtime, open_sftp_session_with_client_config,
     remote_metadata::remote_file_path_bytes,
 };
 use crate::drag_export::{ExportObserver, ExportReadEvent, ReadRequest, RemoteDragFile};
@@ -80,6 +80,7 @@ async fn serve(
     mut requests: mpsc::Receiver<ReadRequest>,
     observer: ExportObserver,
 ) -> anyhow::Result<u64> {
+    let parameters = super::TransferParameters::new(&options, &service.config.sftp);
     // Cancelled drags and metadata probes never open a connection or a file.
     let first = control.until_cancelled(requests.recv()).await?;
     let Some(first) = first else {
@@ -100,7 +101,11 @@ async fn serve(
         let session = control
             .until_cancelled(tokio::time::timeout(
                 Duration::from_secs(60),
-                open_sftp_session(&service.config, service.multiplex.as_ref()),
+                open_sftp_session_with_client_config(
+                    &service.config,
+                    service.multiplex.as_ref(),
+                    parameters.client_config(),
+                ),
             ))
             .await???;
         let result = async {
@@ -183,8 +188,8 @@ async fn serve(
                     }),
                     control_ref,
                     size,
-                    options.buffer_size_bytes(),
-                    options.download_threads(),
+                    parameters.payload,
+                    parameters.reads,
                 );
                 let mut coverage = Coverage::default();
                 let mut request = Some(first);

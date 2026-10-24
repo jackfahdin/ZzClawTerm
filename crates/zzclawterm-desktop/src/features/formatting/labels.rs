@@ -1,11 +1,6 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use gpui::rgb;
-use zzclawterm_core::{
-    AppSettingsSummary, CloudSyncError, CloudSyncHistoryEntry, CloudSyncSettings, TunnelConfig,
-};
-use zzclawterm_transport::{SessionKind, SshTunnelMode, TelnetEnterMode, safe_recording_name};
+use zzclawterm_core::{CloudSyncError, CloudSyncHistoryEntry, CloudSyncSettings, TunnelConfig};
+use zzclawterm_transport::{SessionKind, SshTunnelMode, TelnetEnterMode};
 
 use crate::theme::ThemePalette;
 
@@ -30,26 +25,6 @@ pub(in crate::features) fn format_uptime(seconds: u64) -> String {
     } else {
         format!("{minutes}m")
     }
-}
-
-pub(in crate::features) fn recording_file_path(
-    settings: &AppSettingsSummary,
-    config_dir: &std::path::Path,
-    session_name: &str,
-) -> PathBuf {
-    let base_dir = if settings.recording_path.trim().is_empty() {
-        config_dir.join("recordings")
-    } else {
-        PathBuf::from(settings.recording_path.trim())
-    };
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    base_dir.join(format!(
-        "recording-{}-{timestamp_ms}.log",
-        safe_recording_name(session_name)
-    ))
 }
 
 pub(in crate::features) fn docker_state_rank(state: &str) -> u8 {

@@ -53,6 +53,7 @@ impl TransferFeatureState {
     pub(in crate::features) fn browser_view(&self) -> TransferBrowserView<'_> {
         TransferBrowserView {
             path: &self.browser.path,
+            raw_path_token: &self.browser.raw_path_token,
             home_dir: &self.browser.home_dir,
             home_dir_pending: self.browser.home_dir_pending,
             path_draft: &self.browser.path_draft,
@@ -844,5 +845,25 @@ impl TransferBrowserState {
         }
         self.status = "file column width updated".to_string();
         true
+    }
+}
+
+impl TransferFeatureState {
+    pub(in crate::features) fn invalidate_file_operation_directory(
+        &mut self,
+        session: &str,
+        path: &zzclawterm_transport::RemoteFilePath,
+    ) {
+        if let Some(cache) = self.browser.session_cache.get(session)
+            && cache.current_path == path.display_path
+            && (cache.current_raw_path_token.is_none()
+                || path.raw_path_token.is_none()
+                || cache.current_raw_path_token == path.raw_path_token)
+        {
+            self.file_ops
+                .delete_refresh_pending
+                .insert(session.to_string());
+        }
+        self.invalidate_tree_path(session, path, false);
     }
 }

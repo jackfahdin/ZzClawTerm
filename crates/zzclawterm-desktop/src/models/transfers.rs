@@ -163,6 +163,7 @@ pub(crate) enum TransferJobKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferJobStatus {
+    Queued,
     Running,
     Paused,
     Cancelling,

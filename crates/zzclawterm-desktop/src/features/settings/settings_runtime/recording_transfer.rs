@@ -247,6 +247,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_transfer_download_threads(value);
+        self.reconcile_bulk_transfer_jobs();
         self.save_transfer_settings("transfer download concurrency saved", cx);
     }
 
@@ -256,6 +257,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_transfer_upload_threads(value);
+        self.reconcile_bulk_transfer_jobs();
         self.save_transfer_settings("transfer upload concurrency saved", cx);
     }
 

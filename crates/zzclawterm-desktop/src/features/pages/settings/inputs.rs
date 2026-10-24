@@ -1556,6 +1556,8 @@ mod tests {
             last_applied_remote_revision: Some("new-revision".to_string()),
             last_checked_at_ms: Some(11),
             last_synced_at_ms: Some(22),
+            last_synced_content_hash: Some("entities-v1:content".to_string()),
+            last_synced_clock: None,
             last_validated_remote_revision: Some("validated-revision".to_string()),
             last_full_validation_at_ms: Some(33),
             last_gc_attempt_at_ms: Some(44),

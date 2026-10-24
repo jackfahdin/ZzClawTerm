@@ -9,7 +9,7 @@ mod layout_state;
 mod navigation;
 mod network;
 mod prompts;
-mod recording;
+pub(crate) mod recording;
 mod remote;
 mod security;
 mod session;

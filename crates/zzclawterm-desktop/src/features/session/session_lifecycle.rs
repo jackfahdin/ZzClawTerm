@@ -286,8 +286,10 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        self.commands.cancel_staged_quick_command(session_id);
         self.terminal.invalidate_shell_editing_session(session_id);
         self.clear_terminal_mouse_report_for_session(session_id);
+        self.terminal.clear_session_pressed_keys(session_id);
         self.transfer.clear_file_clipboard_for_session(session_id);
         let rollback = self.transfer.invalidate_browser_navigation(session_id);
         if self.session.active_id() == Some(session_id) {
@@ -297,6 +299,8 @@ impl ZzClawTermApp {
             self.transfer.clear_pending_cwd_sync();
             self.defer_transfer_panel_snapshot_flush(cx);
         }
+        self.transfer.cancel_bulk_jobs_for_session(session_id);
+        self.reconcile_bulk_transfer_jobs();
         self.session.remove_remote_file_service(session_id);
         let Some(update) = self.session.mark_session_disconnected(session_id) else {
             return;
@@ -393,6 +397,7 @@ impl ZzClawTermApp {
         }
         self.disconnect_recording_for_session(&old_id);
         self.clear_terminal_mouse_report_for_session(&old_id);
+        self.terminal.clear_session_pressed_keys(&old_id);
         self.transfer.clear_file_clipboard_for_session(&old_id);
         let Some(metadata) = self.session.metadata(&old_id).cloned() else {
             self.session.finish_busy_action(&old_id);
@@ -401,6 +406,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
+        self.commands.cancel_staged_quick_command(&old_id);
         self.session.mark_session_disconnected(&old_id);
         self.close_terminal_executions_for_session(&old_id, cx);
         let launch_config = metadata.launch_config;

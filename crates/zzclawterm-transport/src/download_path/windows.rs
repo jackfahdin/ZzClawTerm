@@ -234,4 +234,22 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[test]
+    fn bulk_downloads_inherit_directory_acl_on_create_and_replace() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let reference = root.path().join("reference");
+        std::fs::write(&reference, b"normal")?;
+        let expected = dacl_sddl(&std::fs::File::open(&reference)?)?;
+        for existing in [false, true] {
+            let target = root.path().join(if existing { "existing" } else { "new" });
+            if existing {
+                let mut file = super::create_private_file(&target)?;
+                file.write_all(b"old")?;
+            }
+            crate::download_path::TransferDownload::write(root.path(), &target, b"bulk")?;
+            assert_eq!(dacl_sddl(&std::fs::File::open(&target)?)?, expected);
+            assert_eq!(std::fs::read(target)?, b"bulk");
+        }
+        Ok(())
+    }
 }

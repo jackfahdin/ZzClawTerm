@@ -1,3 +1,5 @@
+use rust_i18n::t;
+
 use std::collections::HashSet;
 #[cfg(test)]
 use std::path::Path;
@@ -15,151 +17,33 @@ use zzclawterm_transport::{
     RecordingProfile, RecordingRotationPolicy as TransportRecordingRotationPolicy,
 };
 
-use crate::features::formatting::recording_file_path;
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
-use crate::models::{RecordingPathPromptKind, RecordingPathPromptResult, SessionLaunchConfig};
+use crate::models::SessionLaunchConfig;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn toggle_active_session_recording(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session.active_id_owned() else {
             self.shell
-                .set_status("start a session before recording".to_string());
+                .set_status(t!("recording.sessionRequired").to_string());
             cx.notify();
             return;
         };
-        if self.recording.busy_action(&session_id).is_some() {
-            return;
-        }
-        if self.recording.is_recording(&session_id) {
-            self.stop_recording_for_session(&session_id, cx);
-            return;
-        }
-        let session_name = self
-            .session
-            .ordered_sessions()
-            .into_iter()
-            .find(|session| session.id == session_id)
-            .map(|session| session.name)
-            .unwrap_or_else(|| session_id.clone());
-        self.prompt_recording_path_for_session(
-            RecordingPathPromptKind::Start,
-            session_id,
-            session_name,
-            cx,
-        );
+        self.toggle_recording_for_session(&session_id, cx);
     }
 
-    pub(in crate::features) fn prompt_recording_path_for_session(
+    pub(in crate::features) fn toggle_recording_for_session(
         &mut self,
-        kind: RecordingPathPromptKind,
-        session_id: String,
-        session_name: String,
+        session_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_desktop.is_session(&session_id) {
-            self.shell
-                .set_status("recording is not supported for RDP sessions".to_string());
-            cx.notify();
+        if self.recording.busy_action(session_id).is_some() {
             return;
         }
-        if !self.recording.begin_path_prompt(kind) {
-            self.shell
-                .set_status("recording path picker is already open".to_string());
-            cx.notify();
-            return;
+        if self.recording.is_recording(session_id) {
+            self.stop_recording_for_session(session_id, cx);
+        } else {
+            self.start_recording_with_profile(session_id, None, cx);
         }
-        let exists = self
-            .session
-            .metadata(&session_id)
-            .is_some_and(|metadata| !metadata.disconnected);
-        if !exists {
-            self.recording.finish_path_prompt();
-            self.shell
-                .set_status("session no longer exists".to_string());
-            if !self.workspace_references_session(&session_id, cx) {
-                self.remove_session_state(&session_id, cx);
-            }
-            cx.notify();
-            return;
-        }
-        let target = recording_file_path(
-            self.settings.summary(),
-            self.runtime.config_dir(),
-            &session_name,
-        );
-        let directory = target
-            .parent()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.runtime.config_dir().to_path_buf());
-        let file_name = target
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("zzclawterm-recording.log");
-        let receiver = cx.prompt_for_new_path(&directory, Some(file_name));
-        self.shell.set_status(match kind {
-            RecordingPathPromptKind::Start => "selecting recording path".to_string(),
-            RecordingPathPromptKind::SaveTranscript => "selecting transcript path".to_string(),
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match receiver.await {
-                Ok(Ok(Some(path))) => RecordingPathPromptResult::Selected(path),
-                Ok(Ok(None)) => RecordingPathPromptResult::Cancelled,
-                Ok(Err(error)) => RecordingPathPromptResult::Failed(error.to_string()),
-                Err(_) => RecordingPathPromptResult::Closed,
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.apply_recording_path_prompt_result(kind, session_id, result, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn apply_recording_path_prompt_result(
-        &mut self,
-        kind: RecordingPathPromptKind,
-        session_id: String,
-        result: RecordingPathPromptResult,
-        cx: &mut Context<Self>,
-    ) {
-        self.recording.finish_path_prompt();
-        let session_id = self.recording.current_session_id(&session_id);
-        match result {
-            RecordingPathPromptResult::Selected(path) => match kind {
-                RecordingPathPromptKind::Start => {
-                    self.start_recording_to_path(&session_id, path.display().to_string(), cx);
-                }
-                RecordingPathPromptKind::SaveTranscript => {
-                    self.save_transcript_to_path(
-                        &session_id,
-                        path.display().to_string(),
-                        false,
-                        cx,
-                    );
-                }
-            },
-            RecordingPathPromptResult::Cancelled => {
-                self.shell.set_status(match kind {
-                    RecordingPathPromptKind::Start => "recording start cancelled".to_string(),
-                    RecordingPathPromptKind::SaveTranscript => {
-                        "transcript save cancelled".to_string()
-                    }
-                });
-            }
-            RecordingPathPromptResult::Failed(error) => {
-                self.shell
-                    .set_status(format!("recording path picker failed: {error}"));
-            }
-            RecordingPathPromptResult::Closed => {
-                self.shell
-                    .set_status("recording path picker closed before returning".to_string());
-            }
-        }
-    }
-
-    fn start_recording_to_path(&mut self, session_id: &str, path: String, cx: &mut Context<Self>) {
-        self.start_recording_with_profile(session_id, Some(PathBuf::from(path)), None, cx);
     }
 
     pub(in crate::features) fn start_recording_for_session(
@@ -168,44 +52,44 @@ impl ZzClawTermApp {
         mode: RecordingMode,
         cx: &mut Context<Self>,
     ) {
-        self.start_recording_with_profile(session_id, None, Some(mode), cx);
+        self.start_recording_with_profile(session_id, Some(mode), cx);
     }
 
     fn start_recording_with_profile(
         &mut self,
         session_id: &str,
-        explicit_path: Option<PathBuf>,
         requested_mode: Option<RecordingMode>,
         cx: &mut Context<Self>,
     ) {
-        if !self.recording.begin_action(session_id, "record") {
+        if self.remote_desktop.is_session(session_id) {
             self.shell
-                .set_status("recording operation already in progress".to_string());
+                .set_status(t!("recording.unsupported").to_string());
+            cx.notify();
+            return;
+        }
+        if !self.recording.begin_action(session_id, "record") {
+            self.shell.set_status(t!("recording.busy").to_string());
             cx.notify();
             return;
         }
         let Some((context, mut profile)) = self.recording_profile_for_session(session_id) else {
             self.recording.finish_action(session_id);
-            self.shell
-                .set_status("recording start failed: session no longer exists".to_string());
+            self.shell.set_status(format!(
+                "{} {}",
+                t!("recording.startFailed"),
+                t!("recording.sessionUnavailable")
+            ));
             cx.notify();
             return;
         };
         if let Some(mode) = requested_mode {
             profile.mode = mode;
         }
-        self.shell.set_status("starting recording".to_string());
+        self.shell.set_status(t!("recording.starting").to_string());
         let writer = self.recording.writer();
         let job_session_id = session_id.to_string();
         let memory_limit = self.settings.summary().recording_memory_limit_bytes as usize;
-        let task = writer.start_async(
-            job_session_id,
-            context,
-            profile,
-            explicit_path,
-            memory_limit,
-            false,
-        );
+        let task = writer.start_async(job_session_id, context, profile, None, memory_limit, false);
         let result_session_id = session_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = task
@@ -216,19 +100,23 @@ impl ZzClawTermApp {
                 let current_id = this.recording.current_session_id(&result_session_id);
                 this.recording.finish_action(&result_session_id);
                 match result {
-                    Ok(path) if this.session.metadata(&current_id).is_some() => {
-                        this.shell.set_status(format!("recording started: {path}"));
-                        this.append_terminal_log(format!("\n# recording started: {path}\n"));
+                    Ok(path)
+                        if this
+                            .session
+                            .metadata(&current_id)
+                            .is_some_and(|metadata| !metadata.disconnected) =>
+                    {
+                        this.shell
+                            .set_status(format!("{} {path}", t!("recording.started")));
                     }
                     Ok(_) => {
-                        this.recording.cleanup_writer_session(&result_session_id);
-                        this.shell.set_status(
-                            "recording start cancelled because session closed".to_string(),
-                        );
+                        this.recording.cleanup_writer_session(&current_id);
+                        this.shell
+                            .set_status(t!("recording.startCancelled").to_string());
                     }
                     Err(error) => {
                         this.shell
-                            .set_status(format!("recording start failed: {error}"));
+                            .set_status(format!("{} {error}", t!("recording.startFailed")));
                     }
                 }
                 cx.notify();
@@ -244,12 +132,11 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if !self.recording.begin_action(session_id, "record") {
-            self.shell
-                .set_status("recording operation already in progress".to_string());
+            self.shell.set_status(t!("recording.busy").to_string());
             cx.notify();
             return;
         }
-        self.shell.set_status("stopping recording".to_string());
+        self.shell.set_status(t!("recording.stopping").to_string());
         let writer = self.recording.writer();
         let job_session_id = session_id.to_string();
         let finish_output = self.terminal.recording_output_fence();
@@ -270,15 +157,17 @@ impl ZzClawTermApp {
                     Ok(completion) => {
                         let path = completion.file_path.display();
                         let message = match completion.error {
-                            Some(error) => format!("recording stopped at {path}: {error}"),
-                            None => format!("recording saved: {path}"),
+                            Some(error) => {
+                                t!("recording.stoppedWithError", path = path, error = error)
+                                    .to_string()
+                            }
+                            None => t!("recording.saved", path = path).to_string(),
                         };
-                        this.shell.set_status(message.clone());
-                        this.append_terminal_log(format!("\n# {message}\n"));
+                        this.shell.set_status(message);
                     }
                     Err(error) => {
                         this.shell
-                            .set_status(format!("recording stop failed: {error}"));
+                            .set_status(format!("{} {error}", t!("recording.stopFailed")));
                     }
                 }
                 cx.notify();
@@ -296,12 +185,11 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if !self.recording.begin_action(session_id, "save") {
-            self.shell
-                .set_status("recording operation already in progress".to_string());
+            self.shell.set_status(t!("recording.busy").to_string());
             cx.notify();
             return;
         }
-        self.shell.set_status("saving transcript".to_string());
+        self.shell.set_status(t!("recording.saving").to_string());
         let writer = self.recording.writer();
         let job_session_id = session_id.to_string();
         let memory_limit = self.settings.summary().recording_memory_limit_bytes as usize;
@@ -328,12 +216,12 @@ impl ZzClawTermApp {
                 this.recording.finish_action(&result_session_id);
                 match result {
                     Ok(path) => {
-                        this.shell.set_status(format!("transcript saved: {path}"));
-                        this.append_terminal_log(format!("\n# transcript saved: {path}\n"));
+                        this.shell
+                            .set_status(t!("recording.transcriptSaved", path = path).to_string());
                     }
                     Err(error) => {
                         this.shell
-                            .set_status(format!("transcript save failed: {error}"));
+                            .set_status(format!("{} {error}", t!("recording.saveFailed")));
                     }
                 }
                 cx.notify();
@@ -349,8 +237,11 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.session.session_info(session_id) else {
-            self.shell
-                .set_status("transcript save failed: session no longer exists".to_string());
+            self.shell.set_status(format!(
+                "{} {}",
+                t!("recording.saveFailed"),
+                t!("recording.sessionUnavailable")
+            ));
             cx.notify();
             return;
         };
@@ -362,7 +253,7 @@ impl ZzClawTermApp {
             Ok(path) => path,
             Err(error) => {
                 self.shell
-                    .set_status(format!("transcript save failed: {error}"));
+                    .set_status(format!("{} {error}", t!("recording.saveFailed")));
                 cx.notify();
                 return;
             }
@@ -825,3 +716,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod manual_tests;

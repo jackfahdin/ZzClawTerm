@@ -221,6 +221,7 @@ pub(in crate::features) struct TerminalSurfacePaintChrome {
     pub normal_weight: f32,
     pub bold_weight: f32,
     pub bold_default_foreground: bool,
+    pub minimum_contrast_ratio: f32,
     pub cell_width: f32,
     pub cell_height: f32,
     pub show_line_numbers: bool,
@@ -337,6 +338,7 @@ pub(in crate::features) struct TerminalSurface {
     normal_weight: f32,
     bold_weight: f32,
     bold_default_foreground: bool,
+    minimum_contrast_ratio: f32,
     cell_width: f32,
     cell_height: f32,
     show_cursor: bool,
@@ -413,6 +415,7 @@ impl TerminalSurface {
             normal_weight: 400.0,
             bold_weight: 700.0,
             bold_default_foreground: false,
+            minimum_contrast_ratio: 1.0,
             cell_width: 8.0,
             cell_height: 16.0,
             show_cursor: false,
@@ -1392,6 +1395,7 @@ impl TerminalSurface {
             normal_weight,
             bold_weight,
             bold_default_foreground,
+            minimum_contrast_ratio,
             cell_width,
             cell_height,
             show_line_numbers,
@@ -1409,6 +1413,7 @@ impl TerminalSurface {
             && (self.normal_weight - normal_weight).abs() < f32::EPSILON * 8.0
             && (self.bold_weight - bold_weight).abs() < f32::EPSILON * 8.0
             && self.bold_default_foreground == bold_default_foreground
+            && self.minimum_contrast_ratio == minimum_contrast_ratio
             && (self.cell_width - cell_width).abs() < f32::EPSILON * 8.0
             && (self.cell_height - cell_height).abs() < f32::EPSILON * 8.0
             && self.show_line_numbers == show_line_numbers
@@ -1426,6 +1431,7 @@ impl TerminalSurface {
         self.normal_weight = normal_weight;
         self.bold_weight = bold_weight;
         self.bold_default_foreground = bold_default_foreground;
+        self.minimum_contrast_ratio = minimum_contrast_ratio;
         self.cell_width = cell_width;
         self.cell_height = cell_height;
         self.show_line_numbers = show_line_numbers;
@@ -2737,6 +2743,7 @@ impl Render for TerminalSurface {
         );
         grid = grid
             .with_bold_default_foreground(self.bold_default_foreground)
+            .with_minimum_contrast_ratio(self.minimum_contrast_ratio)
             .with_selection(
                 self.selection_visual
                     .map(TerminalGridSelection::from_selection),

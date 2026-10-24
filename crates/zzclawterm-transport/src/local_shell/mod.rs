@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use portable_pty::CommandBuilder;
 
 use crate::environment::EnvironmentSnapshot;
@@ -5,6 +7,8 @@ use crate::session_config::LocalSessionConfig;
 
 #[cfg(windows)]
 mod windows_terminal;
+#[cfg(all(test, windows))]
+mod wsl_tests;
 
 /// One startup decision shared by command construction and environment matching.
 /// Arguments may contain secrets, so this type deliberately has no Debug impl.
@@ -60,10 +64,48 @@ impl ResolvedLocalShell {
         shell
     }
 
-    pub(crate) fn command(&self) -> CommandBuilder {
+    pub(crate) fn command(&self, working_dir: Option<&Path>) -> CommandBuilder {
         let mut command = CommandBuilder::new(&self.program);
+        #[cfg(windows)]
+        if self.is_wsl() {
+            // WSL paths belong to the Linux guest, not CreateProcess's cwd.
+            // An explicit --cd wins; otherwise start in Home rather than
+            // inheriting the application's Windows working directory.
+            if !self.has_wsl_cd_arg() {
+                command.arg("--cd");
+                command.arg(
+                    working_dir
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("~")),
+                );
+            }
+            command.args(self.args.iter().map(String::as_str));
+            return command;
+        }
         command.args(self.args.iter().map(String::as_str));
+        if let Some(working_dir) = working_dir {
+            command.cwd(working_dir);
+        }
         command
+    }
+
+    #[cfg(windows)]
+    fn is_wsl(&self) -> bool {
+        Path::new(&self.program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("wsl") || name.eq_ignore_ascii_case("wsl.exe")
+            })
+    }
+
+    #[cfg(windows)]
+    fn has_wsl_cd_arg(&self) -> bool {
+        self.args
+            .iter()
+            // Arguments after these delimiters belong to the Linux command.
+            .take_while(|arg| !matches!(arg.as_str(), "--" | "-e" | "--exec"))
+            .any(|arg| arg == "--cd" || arg.starts_with("--cd="))
     }
 
     pub(crate) fn matches_environment(&self, snapshot: &EnvironmentSnapshot) -> bool {
@@ -73,6 +115,8 @@ impl ResolvedLocalShell {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use crate::session_config::LocalSessionConfig;
 
     use super::ResolvedLocalShell;
@@ -91,7 +135,23 @@ mod tests {
             .into_iter()
             .map(Into::into)
             .collect();
-        assert_eq!(shell.command().get_argv(), &expected);
+        assert_eq!(shell.command(None).get_argv(), &expected);
+    }
+
+    #[test]
+    fn ordinary_shell_uses_local_cwd_only_when_configured() {
+        let shell = ResolvedLocalShell {
+            program: "custom-shell".to_string(),
+            args: vec!["--interactive".to_string()],
+        };
+        assert_eq!(shell.command(None).get_cwd(), None);
+        let dir = Path::new("directory with spaces");
+        let command = shell.command(Some(dir));
+        assert_eq!(
+            command.get_cwd().map(|cwd| cwd.as_os_str()),
+            Some(dir.as_os_str())
+        );
+        assert_eq!(command.get_argv(), shell.command(None).get_argv());
     }
 
     #[cfg(unix)]

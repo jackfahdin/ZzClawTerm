@@ -1,6 +1,6 @@
 pub(crate) use zzclawterm_terminal::{
     TerminalTextCell, terminal_byte_index_for_cell_col, terminal_is_zero_width_mark,
-    terminal_text_cell_slice, terminal_text_cells,
+    terminal_text_cells,
 };
 pub(crate) use zzclawterm_terminal_gpui::{
     TerminalBufferMatch, TerminalGridSelection, TerminalKeyMode, TerminalKeywordHighlightSnapshot,

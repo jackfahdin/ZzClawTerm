@@ -628,12 +628,32 @@ class PackageNativeTests(unittest.TestCase):
         )
 
     def test_platform_package_versions_are_normalized(self) -> None:
-        self.assertEqual(package_native.windows_numeric_version("2.4.6-beta.1"), "2.4.6.0")
+        self.assertEqual(package_native.windows_numeric_version("2.4.6-beta.1"), "2.4.6.1")
         self.assertEqual(package_native.linux_rpm_version("2.4.6"), ("2.4.6", "1"))
         self.assertEqual(
             package_native.linux_rpm_version("2.4.6-beta.1"),
             ("2.4.6", "0.beta.1"),
         )
+
+    def test_windows_numeric_version_preserves_prerelease_revision(self) -> None:
+        cases = {
+            "2.0.0": "2.0.0.0",
+            "2.0.0-preview.9": "2.0.0.9",
+            "2.0.0-preview.10+build.123": "2.0.0.10",
+            "2.0.0+build.123": "2.0.0.0",
+            "2.0.0-beta": "2.0.0.0",
+            "2.0.0-rc.4.extra": "2.0.0.0",
+            "2.0.0-9": "2.0.0.9",
+            "65535.65535.65535-preview.65535": "65535.65535.65535.65535",
+        }
+        for version, numeric in cases.items():
+            with self.subTest(version=version):
+                self.assertEqual(package_native.windows_numeric_version(version), numeric)
+
+    def test_windows_numeric_version_rejects_word_overflow(self) -> None:
+        for version in ("65536.0.0", "2.65536.0", "2.0.65536", "2.0.0-preview.65536"):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "65535"):
+                package_native.windows_numeric_version(version)
 
     def test_dpkg_dependency_output_is_parsed(self) -> None:
         output = "ignored=value\nshlibs:Depends=libc6 (>= 2.34), libx11-6\n"

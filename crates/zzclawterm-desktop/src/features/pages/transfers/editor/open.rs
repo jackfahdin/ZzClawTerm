@@ -211,19 +211,34 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !entry.is_directory() && self.focus_existing_transfer_editor(&entry, cx) {
+        let session_id = self.session.active_id_owned();
+        self.open_transfer_editor_for_session(entry, session_id, window, cx);
+    }
+
+    pub(in crate::features) fn open_transfer_editor_for_session(
+        &mut self,
+        entry: SftpFileEntry,
+        session_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !entry.is_directory()
+            && self.focus_existing_transfer_editor(&entry, session_id.as_deref(), cx)
+        {
             return;
         }
         match remote_file_text_kind(&entry.name) {
-            RemoteFileTextKind::Text => self.open_transfer_editor_direct(entry, window, cx),
+            RemoteFileTextKind::Text => {
+                self.open_transfer_editor_direct_for_session(entry, session_id, window, cx)
+            }
             RemoteFileTextKind::Binary => {
                 self.transfer
                     .set_browser_status("known binary file opened externally");
-                self.open_transfer_external(entry, window, cx);
+                self.open_transfer_external_for_session(entry, session_id, cx);
             }
             RemoteFileTextKind::Unknown => {
                 self.transfer
-                    .open_unknown_file_dialog(TransferUnknownFileState { entry });
+                    .open_unknown_file_dialog(TransferUnknownFileState { entry, session_id });
                 self.shell
                     .set_status("confirm how to open unknown remote file".to_string());
                 self.open_transfer_unknown_file_component_dialog(window, cx);
@@ -235,6 +250,7 @@ impl ZzClawTermApp {
     fn focus_existing_transfer_editor(
         &mut self,
         entry: &SftpFileEntry,
+        session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         if let Some(document) = self
@@ -242,7 +258,7 @@ impl ZzClawTermApp {
             .editor_documents()
             .iter()
             .find(|document| {
-                document.session_id.as_deref() == self.session.active_id()
+                document.session_id.as_deref() == session_id
                     && document.remote_file_path().identity_key()
                         == entry.remote_path().identity_key()
             })
@@ -267,9 +283,10 @@ impl ZzClawTermApp {
         false
     }
 
-    pub(in crate::features) fn open_transfer_editor_direct(
+    pub(in crate::features) fn open_transfer_editor_direct_for_session(
         &mut self,
         entry: SftpFileEntry,
+        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -279,15 +296,12 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let session_id = self.session.active_id_owned();
         let remote_file_path = entry.remote_path();
         let tab_id =
             TransferEditorState::tab_id_for_remote_path(session_id.as_deref(), &remote_file_path);
-        if self.focus_existing_transfer_editor(&entry, cx) {
+        if self.focus_existing_transfer_editor(&entry, session_id.as_deref(), cx) {
             return;
         }
-        self.transfer.select_browser_path(entry.path.clone());
-        self.transfer.set_remote_path(entry.path.clone());
         let tab = TransferEditorState {
             display: self.settings.summary().transfer_internal_editor_display,
             id: tab_id.clone(),
@@ -335,14 +349,14 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn open_unknown_transfer_file_external(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.transfer.take_unknown_file_dialog() else {
             cx.notify();
             return;
         };
-        self.open_transfer_external(state.entry, window, cx);
+        self.open_transfer_external_for_session(state.entry, state.session_id, cx);
     }
 
     pub(in crate::features) fn open_unknown_transfer_file_internal(
@@ -354,7 +368,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        self.open_transfer_editor_direct(state.entry, window, cx);
+        self.open_transfer_editor_direct_for_session(state.entry, state.session_id, window, cx);
     }
 
     pub(in crate::features) fn open_transfer_external(
@@ -401,7 +415,7 @@ impl ZzClawTermApp {
         self.open_transfer_external_for_session(entry, tab.session_id, cx);
     }
 
-    pub(in crate::features::pages::transfers) fn open_transfer_external_for_session(
+    pub(in crate::features) fn open_transfer_external_for_session(
         &mut self,
         entry: SftpFileEntry,
         session_id: Option<String>,

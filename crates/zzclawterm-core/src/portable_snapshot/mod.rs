@@ -2,9 +2,6 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, Key, KeyInit};
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
@@ -15,8 +12,11 @@ const PORTABLE_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 const SNAPSHOT_ZIP_MANIFEST_NAME: &str = "manifest.json";
 const SNAPSHOT_ZIP_PAYLOAD_NAME: &str = "snapshot.redb";
 const MAX_COMPRESSED_SNAPSHOT_PAYLOAD_BYTES: u64 = 50 * 1024 * 1024;
-const CLOUD_SNAPSHOT_KEY_PREFIX: &[u8] = b"zzclawterm-cloud-snapshot-v1:";
-const LEGACY_CLOUD_SNAPSHOT_KEY_PREFIX: &[u8] = b"dragonfly-cloud-snapshot-v1:";
+
+mod encryption;
+pub use encryption::{decrypt_snapshot_bytes, encrypt_snapshot_bytes};
+mod sync_clock;
+pub use sync_clock::SnapshotSyncClock;
 
 mod v2;
 pub use v2::convert_v2_snapshot;
@@ -27,6 +27,10 @@ pub enum PortableSnapshotError {
     MissingMasterPassword,
     #[error("cloud snapshot ciphertext is too short")]
     CiphertextTooShort,
+    #[error("unsupported snapshot encryption version {0}")]
+    UnsupportedEncryptionVersion(u8),
+    #[error("invalid or unsupported snapshot encryption parameters")]
+    InvalidEncryptionEnvelope,
     #[error("cloud snapshot encryption failed: {0}")]
     Encrypt(String),
     #[error(
@@ -75,6 +79,8 @@ pub struct PortableSnapshotMeta {
     pub payload_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entities_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_clock: Option<SnapshotSyncClock>,
     pub app_version: String,
 }
 
@@ -113,6 +119,7 @@ impl RawPortableSnapshot {
                 created_at_ms: current_time_ms(),
                 payload_hash: String::new(),
                 entities_hash: None,
+                sync_clock: None,
                 app_version,
             },
             entities: default_entities(),
@@ -131,6 +138,15 @@ impl RawPortableSnapshot {
         self.source_payload_hash
             .as_deref()
             .unwrap_or(&self.meta.payload_hash)
+    }
+
+    /// Versioned change detection over every entity, including opaque entities
+    /// from newer clients. The historical payload hash remains a wire contract.
+    pub fn sync_content_hash(&self) -> Result<String, PortableSnapshotError> {
+        Ok(format!(
+            "entities-v1:{}",
+            calculate_entities_hash(&self.entities)?
+        ))
     }
 }
 
@@ -220,53 +236,6 @@ pub fn preserve_device_local_sync_settings(
                 incoming[section][*field] = value.clone();
             }
         }
-    }
-}
-
-pub fn encrypt_snapshot_bytes(
-    master_password: &str,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, PortableSnapshotError> {
-    let password = master_password.trim();
-    if password.is_empty() {
-        return Err(PortableSnapshotError::MissingMasterPassword);
-    }
-    let key = derive_snapshot_key(CLOUD_SNAPSHOT_KEY_PREFIX, password);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce_bytes: [u8; 12] = rand::rng().random();
-    let nonce = aes_gcm::Nonce::from(nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|error| PortableSnapshotError::Encrypt(error.to_string()))?;
-
-    let mut combined = nonce.to_vec();
-    combined.extend_from_slice(&ciphertext);
-    Ok(combined)
-}
-
-pub fn decrypt_snapshot_bytes(
-    master_password: &str,
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, PortableSnapshotError> {
-    let password = master_password.trim();
-    if password.is_empty() {
-        return Err(PortableSnapshotError::MissingMasterPassword);
-    }
-    if ciphertext.len() < 13 {
-        return Err(PortableSnapshotError::CiphertextTooShort);
-    }
-
-    match decrypt_snapshot_bytes_with_prefix(CLOUD_SNAPSHOT_KEY_PREFIX, password, ciphertext) {
-        Ok(plaintext) => Ok(plaintext),
-        Err(new_error) => decrypt_snapshot_bytes_with_prefix(
-            LEGACY_CLOUD_SNAPSHOT_KEY_PREFIX,
-            password,
-            ciphertext,
-        )
-        .map_err(|legacy_error| PortableSnapshotError::Decrypt {
-            new_error,
-            legacy_error,
-        }),
     }
 }
 
@@ -502,29 +471,6 @@ fn default_portable_settings_json() -> String {
 #[doc(hidden)]
 pub fn is_zip_snapshot_payload(bytes: &[u8]) -> bool {
     bytes.starts_with(b"PK\x03\x04")
-}
-
-fn derive_snapshot_key(prefix: &[u8], master_password: &str) -> Key<Aes256Gcm> {
-    let mut hasher = Sha256::new();
-    hasher.update(prefix);
-    hasher.update(master_password.as_bytes());
-    let digest = hasher.finalize();
-    let mut key = Key::<Aes256Gcm>::default();
-    key.copy_from_slice(&digest);
-    key
-}
-
-fn decrypt_snapshot_bytes_with_prefix(
-    prefix: &[u8],
-    master_password: &str,
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, String> {
-    let cipher = Aes256Gcm::new(&derive_snapshot_key(prefix, master_password));
-    let (nonce_bytes, payload) = ciphertext.split_at(12);
-    let nonce = aes_gcm::Nonce::try_from(nonce_bytes).map_err(|error| error.to_string())?;
-    cipher
-        .decrypt(&nonce, payload)
-        .map_err(|error| error.to_string())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

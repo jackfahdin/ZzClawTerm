@@ -458,7 +458,7 @@ pub(in crate::features) fn dialog_action_button(
     label: impl Into<SharedString>,
     danger: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> ZzClawButton {
     let label: SharedString = label.into();
     let variant = if danger {
         ZzClawButtonVariant::Danger

@@ -51,6 +51,17 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn default_file_manager_seed(&self) -> FileManagerSeed {
         let restore = &self.settings.summary().ui_file_manager;
+        if !restore.remember_layout {
+            let (right, right_path) = self
+                .seed_from_browser()
+                .unwrap_or((PaneEndpoint::Local, None));
+            return FileManagerSeed {
+                left: PaneEndpoint::Local,
+                left_path: None,
+                right,
+                right_path,
+            };
+        }
         let (right, right_path) = self
             .seed_from_browser()
             .unwrap_or_else(|| self.resolve_pane_restore(&restore.right));
@@ -68,22 +79,37 @@ impl ZzClawTermApp {
         self.session
             .file_browser_backend_support_for_session(session_id)?;
         let path = self.transfer.browser_view().path.clone();
-        let path = (!path.is_empty()).then(|| RemoteFilePath::new(path));
-        Some((PaneEndpoint::Session(session_id.to_string()), path))
+        let path = (!path.is_empty()).then(|| RemoteFilePath {
+            display_path: path,
+            raw_path_token: self.transfer.browser_view().raw_path_token.clone(),
+        });
+        let endpoint = if self
+            .session
+            .file_browser_backend_support_for_session(session_id)
+            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+        {
+            PaneEndpoint::Local
+        } else {
+            PaneEndpoint::Session(session_id.to_string())
+        };
+        Some((endpoint, path))
     }
 
     fn resolve_pane_restore(
         &self,
         restore: &FileManagerPaneRestore,
     ) -> (PaneEndpoint, Option<RemoteFilePath>) {
-        let path = (!restore.path.is_empty()).then(|| RemoteFilePath::new(restore.path.clone()));
+        let path = (!restore.path.is_empty()).then(|| RemoteFilePath {
+            display_path: restore.path.clone(),
+            raw_path_token: restore.raw_path_token.clone(),
+        });
         match &restore.source {
             FileManagerSourceRestore::Local => (PaneEndpoint::Local, path),
             FileManagerSourceRestore::Connection { id } if !id.is_empty() => {
                 if let Some(session_id) = self.session_id_for_connection(id) {
                     (PaneEndpoint::Session(session_id), path)
                 } else {
-                    (PaneEndpoint::Local, None)
+                    (PaneEndpoint::OfflineConnection(id.clone()), path)
                 }
             }
             FileManagerSourceRestore::Connection { .. } => (PaneEndpoint::Local, None),
@@ -96,6 +122,7 @@ impl ZzClawTermApp {
     ) -> Option<String> {
         self.session
             .metadata_entries()
+            .filter(|(session_id, _)| !self.session.is_disconnected(session_id))
             .find_map(|(session_id, metadata)| {
                 (metadata.source_connection_id.as_deref() == Some(connection_id)
                     && self
@@ -163,43 +190,55 @@ impl ZzClawTermApp {
             .file_browser_backend_support_for_session(session_id)
             .is_none()
         {
-            self.shell
-                .set_status(t!("fileManager.sessionUnavailable").to_string());
-            cx.notify();
             return;
         }
+        let pane = pane.unwrap_or(PaneId::Right);
+        let endpoint = if self
+            .session
+            .file_browser_backend_support_for_session(session_id)
+            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+        {
+            PaneEndpoint::Local
+        } else {
+            PaneEndpoint::Session(session_id.into())
+        };
+        let browser = self.transfer.browser_view();
+        let path = if self.session.active_id() == Some(session_id) && !browser.path.is_empty() {
+            Some(RemoteFilePath {
+                display_path: browser.path.clone(),
+                raw_path_token: browser.raw_path_token.clone(),
+            })
+        } else {
+            None
+        };
         if let Some(id) = self.file_manager.active_id().map(str::to_string)
             && let Some(workspace) = self.file_manager.workspace(&id)
         {
-            let pane = pane.unwrap_or(PaneId::Right);
             workspace.update(cx, |workspace, _| {
-                workspace
-                    .pane_mut(pane)
-                    .set_endpoint(PaneEndpoint::Session(session_id.to_string()));
+                let state = workspace.pane_mut(pane);
+                state.set_endpoint(endpoint);
+                if let Some(path) = path {
+                    state.path = path;
+                }
+                state.clear_selection();
                 workspace.set_active(pane);
             });
-            let key = WorkspaceTabId::FileManager(id.clone()).layout_key();
-            if !self.workspace_tab_ids().contains(&key) {
-                self.open_file_manager_tab(None, cx);
-            } else {
-                self.activate_workspace_tab(&key, cx);
-            }
+            self.activate_workspace_tab(&WorkspaceTabId::FileManager(id.clone()).layout_key(), cx);
             self.refresh_file_manager_pane(id, pane, cx);
-            return;
-        }
-        let mut seed = self.default_file_manager_seed();
-        let endpoint = PaneEndpoint::Session(session_id.to_string());
-        match pane {
-            Some(PaneId::Left) | None => {
-                seed.left = endpoint;
-                seed.left_path = None;
+        } else {
+            let mut seed = self.default_file_manager_seed();
+            match pane {
+                PaneId::Left => {
+                    seed.left = endpoint;
+                    seed.left_path = path;
+                }
+                PaneId::Right => {
+                    seed.right = endpoint;
+                    seed.right_path = path;
+                }
             }
-            Some(PaneId::Right) => {
-                seed.right = endpoint;
-                seed.right_path = None;
-            }
+            self.open_file_manager_tab(Some(seed), cx);
         }
-        self.open_file_manager_tab(Some(seed), cx);
     }
 
     fn collapse_sidebars_for_file_manager(&mut self, cx: &mut Context<Self>) {
@@ -283,15 +322,19 @@ impl ZzClawTermApp {
             .map(|(_, workspace)| workspace.clone())
         {
             let snapshot = workspace.read(cx);
-            settings.split_percent = snapshot.split_percent;
-            settings.active_pane = match snapshot.active {
-                PaneId::Left => FileManagerPaneSide::Left,
-                PaneId::Right => FileManagerPaneSide::Right,
-            };
-            settings.queue_expanded = snapshot.queue_expanded;
-            settings.queue_height = snapshot.queue_height.max(80.) as u32;
-            settings.left = self.pane_restore_from(snapshot, PaneId::Left);
-            settings.right = self.pane_restore_from(snapshot, PaneId::Right);
+            if settings.remember_layout {
+                settings.split_percent = snapshot.split_percent;
+                settings.active_pane = match snapshot.active {
+                    PaneId::Left => FileManagerPaneSide::Left,
+                    PaneId::Right => FileManagerPaneSide::Right,
+                };
+                settings.queue_expanded = snapshot.queue_expanded;
+                settings.queue_height = snapshot.queue_height.max(80.) as u32;
+                settings.left = self.pane_restore_from(snapshot, PaneId::Left);
+                settings.right = self.pane_restore_from(snapshot, PaneId::Right);
+                settings.left_view = self.file_manager_view_settings(snapshot, PaneId::Left);
+                settings.right_view = self.file_manager_view_settings(snapshot, PaneId::Right);
+            }
         }
         self.settings.set_file_manager_ui(settings);
         self.queue_settings_save(
@@ -309,6 +352,9 @@ impl ZzClawTermApp {
         FileManagerPaneRestore {
             source: match &pane.endpoint {
                 PaneEndpoint::Local => FileManagerSourceRestore::Local,
+                PaneEndpoint::OfflineConnection(id) => {
+                    FileManagerSourceRestore::Connection { id: id.clone() }
+                }
                 PaneEndpoint::Session(session_id) => {
                     match self.connection_id_for_session(session_id) {
                         Some(id) => FileManagerSourceRestore::Connection { id },
@@ -316,7 +362,170 @@ impl ZzClawTermApp {
                     }
                 }
             },
-            path: pane.path.display_path.clone(),
+            path: if matches!(&pane.endpoint, PaneEndpoint::Session(id) if self.connection_id_for_session(id).is_none())
+            {
+                String::new()
+            } else {
+                pane.last_successful_path
+                    .as_ref()
+                    .unwrap_or(&pane.path)
+                    .display_path
+                    .clone()
+            },
+            raw_path_token: if matches!(&pane.endpoint, PaneEndpoint::Session(id) if self.connection_id_for_session(id).is_none())
+            {
+                None
+            } else {
+                pane.last_successful_path
+                    .as_ref()
+                    .unwrap_or(&pane.path)
+                    .raw_path_token
+                    .clone()
+            },
+        }
+    }
+
+    fn file_manager_view_settings(
+        &self,
+        workspace: &FileManagerWorkspace,
+        id: PaneId,
+    ) -> zzclawterm_core::models::settings::FileManagerPaneUiSettings {
+        let pane = workspace.pane(id);
+        let mut settings = pane.view_settings();
+        let mut remember = |endpoint: &PaneEndpoint, path: &RemoteFilePath| {
+            let source = match endpoint {
+                PaneEndpoint::Local => FileManagerSourceRestore::Local,
+                PaneEndpoint::OfflineConnection(id) => {
+                    FileManagerSourceRestore::Connection { id: id.clone() }
+                }
+                PaneEndpoint::Session(session) => {
+                    let Some(id) = self.connection_id_for_session(session) else {
+                        return;
+                    };
+                    FileManagerSourceRestore::Connection { id }
+                }
+            };
+            if path.display_path.is_empty() {
+                return;
+            }
+            let value = FileManagerPaneRestore {
+                source: source.clone(),
+                path: path.display_path.clone(),
+                raw_path_token: path.raw_path_token.clone(),
+            };
+            if let Some(existing) = settings
+                .directories
+                .iter_mut()
+                .find(|entry| entry.source == source)
+            {
+                *existing = value;
+            } else {
+                settings.directories.push(value);
+            }
+        };
+        for (endpoint, snapshot) in &pane.source_history {
+            remember(endpoint, &snapshot.path);
+        }
+        if let Some(path) = &pane.last_successful_path {
+            remember(&pane.endpoint, path);
+        }
+        settings
+    }
+
+    pub(in crate::features) fn switch_file_manager_source(
+        &mut self,
+        id: String,
+        pane: PaneId,
+        endpoint: PaneEndpoint,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.file_manager.workspace(&id) else {
+            return;
+        };
+        let source = match &endpoint {
+            PaneEndpoint::Local => Some(FileManagerSourceRestore::Local),
+            PaneEndpoint::OfflineConnection(id) => {
+                Some(FileManagerSourceRestore::Connection { id: id.clone() })
+            }
+            PaneEndpoint::Session(session) => self
+                .connection_id_for_session(session)
+                .map(|id| FileManagerSourceRestore::Connection { id }),
+        };
+        workspace.update(cx, |workspace, cx| {
+            let state = workspace.pane_mut(pane);
+            state.set_endpoint(endpoint);
+            state.clear_selection();
+            if state.path.display_path.is_empty()
+                && let Some(source) = &source
+                && let Some(restore) = state
+                    .remembered_directories
+                    .iter()
+                    .find(|entry| &entry.source == source)
+            {
+                state.path = RemoteFilePath {
+                    display_path: restore.path.clone(),
+                    raw_path_token: restore.raw_path_token.clone(),
+                };
+            }
+            workspace
+                .inputs(pane)
+                .search
+                .update(cx, |input, cx| input.set_content_silent("", cx));
+            cx.notify();
+        });
+        self.refresh_file_manager_pane(id, pane, cx);
+    }
+
+    pub(in crate::features) fn bind_file_manager_sources(&mut self, cx: &mut Context<Self>) {
+        let targets: Vec<_> = self
+            .file_manager
+            .workspaces()
+            .flat_map(|(id, workspace)| {
+                [PaneId::Left, PaneId::Right]
+                    .into_iter()
+                    .filter_map(|pane| {
+                        if let PaneEndpoint::OfflineConnection(connection) =
+                            &workspace.read(cx).pane(pane).endpoint
+                        {
+                            self.session_id_for_connection(connection)
+                                .filter(|session| !self.session.is_disconnected(session))
+                                .map(|session| (id.clone(), workspace.clone(), pane, session))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, workspace, pane, session) in targets {
+            workspace.update(cx, |workspace, cx| {
+                let state = workspace.pane_mut(pane);
+                state.endpoint = PaneEndpoint::Session(session);
+                state.generation = state.generation.wrapping_add(1);
+                state.disconnected = false;
+                cx.notify();
+            });
+            self.refresh_file_manager_pane(id, pane, cx);
+        }
+    }
+
+    pub(in crate::features) fn reconnect_file_manager_source(
+        &mut self,
+        endpoint: PaneEndpoint,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        match endpoint {
+            PaneEndpoint::Session(session) => self.reconnect_session(session, window, cx),
+            PaneEndpoint::OfflineConnection(connection) => {
+                if let Some(saved) = self.connection_state.connection_by_id(&connection).cloned() {
+                    self.start_saved_connection(saved, window, cx);
+                } else {
+                    self.shell
+                        .set_status(t!("fileManager.sourceUnavailable").to_string());
+                }
+            }
+            PaneEndpoint::Local => {}
         }
     }
 
@@ -350,6 +559,13 @@ impl ZzClawTermApp {
     pub(in crate::features) fn endpoint_label(&self, endpoint: &PaneEndpoint) -> String {
         match endpoint {
             PaneEndpoint::Local => t!("fileManager.local").to_string(),
+            PaneEndpoint::OfflineConnection(id) => self
+                .connection_state
+                .connection_by_id(id)
+                .map(|connection| {
+                    format!("{} · {}", connection.name, t!("fileManager.disconnected"))
+                })
+                .unwrap_or_else(|| t!("fileManager.sourceUnavailable").to_string()),
             PaneEndpoint::Session(id) => self
                 .session
                 .display_name(id)
@@ -367,7 +583,22 @@ impl ZzClawTermApp {
             {
                 continue;
             }
-            let label = self.endpoint_label(&PaneEndpoint::Session(session_id.to_string()));
+            if self
+                .session
+                .file_browser_backend_support_for_session(session_id)
+                == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            {
+                continue;
+            }
+            let mut label = self.endpoint_label(&PaneEndpoint::Session(session_id.to_string()));
+            label = format!(
+                "{label} · {}",
+                t!(if self.session.is_disconnected(session_id) {
+                    "fileManager.disconnected"
+                } else {
+                    "fileManager.connected"
+                })
+            );
             choices.push((PaneEndpoint::Session(session_id.to_string()), label));
         }
         choices
@@ -376,6 +607,7 @@ impl ZzClawTermApp {
 
 impl FileManagerWorkspace {
     pub(in crate::features) fn request_focus(&mut self, cx: &mut Context<Self>) {
+        self.focus_pending = true;
         cx.notify();
     }
 }

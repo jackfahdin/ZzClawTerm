@@ -216,11 +216,39 @@ mod tests {
         .expect("profile shell");
         assert_eq!(shell.program, r"C:\Program Files\Shell\shell.exe");
         assert_eq!(shell.args, ["-NoLogo", "", "-NoExit"]);
-        let command = shell.command();
+        let command = shell.command(None);
         assert_eq!(command.get_argv()[0], shell.program.as_str());
         assert!(!is_windows_terminal_alias(
             command.get_argv()[0].to_str().unwrap()
         ));
+    }
+
+    #[test]
+    fn wt_wsl_profile_applies_working_directory_after_resolving_the_alias() {
+        for (dir, expected) in [(None, "~"), (Some("/home/nya"), "/home/nya")] {
+            let config = LocalSessionConfig {
+                shell_path: Some("wt.exe".to_string()),
+                shell_args: vec!["-u".to_string(), "nya".to_string()],
+                working_dir: dir.map(Into::into),
+                ..Default::default()
+            };
+            let shell = ResolvedLocalShell::resolve_with_alias_resolver(&config, |args| {
+                shell_from_commandline("wsl.exe -d Ubuntu", args).unwrap()
+            });
+            let command = shell.command(config.working_dir.as_deref());
+            let expected: Vec<std::ffi::OsString> = ["--cd", expected, "-d", "Ubuntu", "-u", "nya"]
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            assert_eq!(command.get_argv()[1..], expected);
+            assert_eq!(command.get_cwd(), None);
+        }
+        let shell = shell_from_commandline("wsl.exe --cd /explicit -d Ubuntu", &[]).unwrap();
+        let command = shell.command(Some(Path::new("/configured")));
+        assert_eq!(command.get_argv()[1], "--cd");
+        assert_eq!(command.get_argv()[2], "/explicit");
+        assert_eq!(command.get_argv().len(), 5);
+        assert_eq!(command.get_cwd(), None);
     }
 
     #[test]

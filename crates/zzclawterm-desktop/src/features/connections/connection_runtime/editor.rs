@@ -3,9 +3,10 @@ use rust_i18n::t;
 use gpui::{Context, KeyDownEvent, PathPromptOptions, SharedString, Window};
 use zzclawterm_core::{
     Group, RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
-    VncClipboardSettings, VncDisplaySettings, VncReconnectSettings, VncSecuritySettings, uuid,
+    SavedConnection, SessionsConfig, VncClipboardSettings, VncDisplaySettings,
+    VncReconnectSettings, VncSecuritySettings, uuid,
 };
-use zzclawterm_store::StoreDomain;
+use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain};
 
 use super::helpers::{
     ConnectionEditorToggle, ConnectionEditorValidationError, build_saved_connection_from_editor,
@@ -17,6 +18,43 @@ use crate::models::{
     ConnectionEditorPasswordSource, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
     ConnectionEditorState, ConnectionKindTab,
 };
+
+fn save_editor_connection(
+    store: &ConnectionStore,
+    mut persisted: SavedConnection,
+    pending_group: Option<&Group>,
+) -> Result<SessionsConfig, StorageError> {
+    // Read metadata in the store job so edits cannot restore stale usage or
+    // ordering values captured when the editor was opened.
+    let previous = store.get_connection(&persisted.id)?;
+    persisted.sort_order = if let Some(previous) = previous.as_ref()
+        && previous.group_id == persisted.group_id
+    {
+        previous.sort_order
+    } else {
+        store
+            .list_connections()?
+            .iter()
+            .filter(|connection| connection.group_id == persisted.group_id)
+            .map(|connection| connection.sort_order)
+            .max()
+            .map_or(0, |order| order.saturating_add(1))
+    };
+    if let Some(previous) = previous {
+        persisted.last_used_at_ms = previous.last_used_at_ms;
+        persisted.extensions = previous.extensions;
+        persisted.asset = previous.asset;
+    }
+    if let Some(group) = pending_group {
+        store.save_group_and_connection(group, &persisted)?;
+    } else {
+        store.save_connection(&persisted)?;
+    }
+    store.load_sessions()
+}
+
+#[cfg(test)]
+mod tests;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn connection_editor_validation_error(
@@ -1184,7 +1222,6 @@ impl ZzClawTermApp {
         let submitted = self.submit_store_request(
             0,
             zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
-                let mut persisted = persisted;
                 if let Some(id) = account_id.as_deref() {
                     let Some(account) = store.load_password_by_id(id)? else {
                         return Ok(Err((ConnectionEditorField::Username, missing_account)));
@@ -1221,16 +1258,7 @@ impl ZzClawTermApp {
                         }
                     }
                 }
-                if let Some(previous) = store.get_connection(&persisted.id)? {
-                    persisted.extensions = previous.extensions;
-                    persisted.asset = previous.asset;
-                }
-                if let Some(group) = &pending_group {
-                    store.save_group_and_connection(group, &persisted)?;
-                } else {
-                    store.save_connection(&persisted)?;
-                }
-                store.load_sessions().map(Ok)
+                save_editor_connection(store, persisted, pending_group.as_ref()).map(Ok)
             }),
             move |this, event, cx| match event.outcome {
                 Ok(Err((_field, message))) => {

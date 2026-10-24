@@ -94,6 +94,7 @@ impl StoreOperationError {
 impl From<StorageError> for StoreOperationError {
     fn from(error: StorageError) -> Self {
         let category = match &error {
+            StorageError::CloudSyncLocalChanged => "sync_local_changed",
             StorageError::CreateDir { .. } => "create_dir",
             StorageError::Open { .. } => "open",
             StorageError::Crypto(_)
@@ -670,6 +671,59 @@ impl zzclawterm_core::CloudLocalStore for StoreBlockingClient {
         })
     }
 
+    fn apply_sync_snapshot_checked(
+        &self,
+        options: &zzclawterm_core::LocalCloudSyncOptions,
+        snapshot: &zzclawterm_core::RawPortableSnapshot,
+        expected_content_hash: &str,
+        mut state: CloudSyncState,
+    ) -> Result<
+        (zzclawterm_core::CloudSyncBackupInfo, CloudSyncState),
+        zzclawterm_core::CloudSyncError,
+    > {
+        let options = options.clone();
+        let snapshot = snapshot.clone();
+        let expected_content_hash = expected_content_hash.to_string();
+        // One store job prevents a save from slipping between the comparison,
+        // replacement and normalized baseline. On a persistence failure the old
+        // baseline remains conservative and the next sync reports a conflict.
+        cloud_store_response(self.request(
+            0,
+            store_mutation(StoreDomain::CloudSync, move |store| {
+                let current = store.build_raw_portable_snapshot(
+                    zzclawterm_core::PortableSnapshotKind::Sync,
+                    &options.device_id,
+                    &options.app_version,
+                )?;
+                if current.sync_content_hash()? != expected_content_hash {
+                    return Err(StorageError::CloudSyncLocalChanged);
+                }
+                let backup = store.apply_cloud_sync_snapshot(
+                    &options.config_dir,
+                    &snapshot,
+                    options.master_password.expose_secret(),
+                )?;
+                let mut applied = store.build_raw_portable_snapshot(
+                    zzclawterm_core::PortableSnapshotKind::Sync,
+                    &options.device_id,
+                    &options.app_version,
+                )?;
+                applied.recalculate_hash()?;
+                state.last_synced_content_hash = Some(applied.sync_content_hash()?);
+                state.last_synced_payload_hash = Some(applied.meta.payload_hash);
+                store.save_cloud_sync_state(&state)?;
+                LoadBootstrap.execute(store)?;
+                Ok((
+                    zzclawterm_core::CloudSyncBackupInfo {
+                        database_path: store.db_path().to_path_buf(),
+                        safety_backup_path: backup,
+                    },
+                    state,
+                ))
+            }),
+        ))
+    }
+
     fn persist_cloud_sync_state(
         &self,
         state: &zzclawterm_core::CloudSyncState,
@@ -706,6 +760,9 @@ fn cloud_store_response<T>(
     let event =
         response.map_err(|error| zzclawterm_core::CloudSyncError::LocalStore(error.to_string()))?;
     event.outcome.map_err(|error| {
+        if error.category() == "sync_local_changed" {
+            return zzclawterm_core::CloudSyncError::LocalChangedDuringSync;
+        }
         zzclawterm_core::CloudSyncError::LocalStore(format!(
             "{}: {}",
             error.category(),
@@ -1014,6 +1071,113 @@ mod tests {
             .expect("flush barrier");
         drop(runtime);
         std::fs::remove_dir_all(config_dir).ok();
+    }
+
+    #[test]
+    fn cloud_apply_checks_local_content_and_persists_the_applied_baseline_in_one_job() {
+        use zzclawterm_core::cloud_sync::{
+            CloudLocalStore, CloudSyncError, CloudSyncState, LocalCloudSyncOptions,
+        };
+
+        let dir = temp_dir("cloud-apply-guard");
+        let runtime = StoreRuntime::spawn(StoreConfig {
+            config_dir: dir.path().to_path_buf(),
+            portable_key_path: None,
+        })
+        .unwrap();
+        let client = runtime.blocking_client();
+        let options = LocalCloudSyncOptions {
+            config_dir: dir.path().to_path_buf(),
+            portable_key_path: None,
+            remote_dir: dir.join("remote"),
+            remote_root: "test".into(),
+            device_id: "device".into(),
+            app_version: "test".into(),
+            master_password: "test-password".into(),
+            enabled: true,
+        };
+        let mut incoming = client.build_sync_snapshot(&options).unwrap();
+        incoming.recalculate_hash().unwrap();
+        let initial_hash = incoming.sync_content_hash().unwrap();
+        client
+            .request_mutation_fn(StoreDomain::Settings, |store| {
+                let mut settings = store.load_translation_settings()?;
+                settings.target_language = "en".into();
+                store.save_translation_settings(settings)
+            })
+            .unwrap();
+        let result = client.apply_sync_snapshot_checked(
+            &options,
+            &incoming,
+            &initial_hash,
+            CloudSyncState::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(CloudSyncError::LocalChangedDuringSync)
+        ));
+        assert!(
+            client
+                .request_fn(StoreDomain::CloudSync, |store| store
+                    .load_cloud_sync_state())
+                .unwrap()
+                .last_synced_content_hash
+                .is_none()
+        );
+        let current_hash = client
+            .build_sync_snapshot(&options)
+            .unwrap()
+            .sync_content_hash()
+            .unwrap();
+        assert_ne!(initial_hash, current_hash);
+
+        let (backup, state) = client
+            .apply_sync_snapshot_checked(
+                &options,
+                &incoming,
+                &current_hash,
+                CloudSyncState::default(),
+            )
+            .unwrap();
+        assert!(backup.safety_backup_path.unwrap().is_file());
+        let applied_hash = client
+            .build_sync_snapshot(&options)
+            .unwrap()
+            .sync_content_hash()
+            .unwrap();
+        assert_eq!(
+            state.last_synced_content_hash.as_deref(),
+            Some(applied_hash.as_str())
+        );
+        assert_eq!(
+            client
+                .request_fn(StoreDomain::CloudSync, |store| store
+                    .load_cloud_sync_state())
+                .unwrap(),
+            state
+        );
+        client
+            .request_mutation_fn(StoreDomain::Settings, |store| {
+                let mut settings = store.load_translation_settings()?;
+                settings.target_language = "ja".into();
+                store.save_translation_settings(settings)
+            })
+            .unwrap();
+        assert_ne!(
+            client
+                .build_sync_snapshot(&options)
+                .unwrap()
+                .sync_content_hash()
+                .unwrap(),
+            applied_hash
+        );
+        assert_eq!(
+            client
+                .request_fn(StoreDomain::CloudSync, |store| store
+                    .load_cloud_sync_state())
+                .unwrap(),
+            state
+        );
     }
 
     #[test]

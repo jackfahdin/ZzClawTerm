@@ -221,6 +221,9 @@ impl CloudSyncRemote for NativeWebdavRemote {
             &[("Depth", "1"), ("Content-Type", "application/xml")],
         )?;
         let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
         let body = response.text().map_err(map_webdav_http_error)?;
         if !status.is_success() && status.as_u16() != 207 {
             return Err(CloudSyncError::Remote(format!(

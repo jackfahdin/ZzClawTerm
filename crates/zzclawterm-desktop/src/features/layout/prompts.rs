@@ -237,20 +237,23 @@ impl ZzClawTermApp {
                             );
                         }),
                     ))
-                    .child(dialog_action_button(
-                        palette,
-                        format!("host-key-accept-{accept_id}"),
-                        t!("settings.hostKeyVerifyAccept"),
-                        changed,
-                        cx.listener(move |this, _, window, cx| {
-                            this.resolve_host_key_prompt(
-                                accept_id.clone(),
-                                HostKeyPromptChoice::Accept,
-                                window,
-                                cx,
-                            );
-                        }),
-                    )),
+                    .child(
+                        dialog_action_button(
+                            palette,
+                            format!("host-key-accept-{accept_id}"),
+                            t!("settings.hostKeyVerifyAccept"),
+                            changed,
+                            cx.listener(move |this, _, window, cx| {
+                                this.resolve_host_key_prompt(
+                                    accept_id.clone(),
+                                    HostKeyPromptChoice::Accept,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .autofocus(),
+                    ),
             )
     }
 

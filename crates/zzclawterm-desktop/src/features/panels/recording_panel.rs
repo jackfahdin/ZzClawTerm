@@ -7,16 +7,14 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, SharedString,
     Window, div, prelude::*, px, rgb, rgba, svg, uniform_list,
 };
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::{RecordingMode, SessionInfo};
-use zzclawterm_ui::{ZzClawScrollable, ZzClawSearchInput};
+use zzclawterm_transport::{RecordingMode, RecordingStatusState, SessionInfo};
+use zzclawterm_ui::{ZzClawDropdownMenu, ZzClawMenuItem, ZzClawScrollable, ZzClawSearchInput};
 
 use crate::features::formatting::{session_kind_label, short_id};
 use crate::features::perf::record_gpui_perf_sample;
 use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
-use crate::models::RecordingPathPromptKind;
 
-const RECORDING_PANEL_LOGICAL_ROW_HEIGHT_PX: f32 = 52.;
+const RECORDING_PANEL_LOGICAL_ROW_HEIGHT_PX: f32 = 100.;
 
 #[derive(Clone)]
 struct RecordingSessionPanelRow {
@@ -177,7 +175,7 @@ impl ZzClawTermApp {
                                         this.recording.clear_search_draft();
                                         this.reset_text_input("recording.search", "", cx);
                                         this.shell
-                                            .set_status("recording search cleared".to_string());
+                                            .set_status(t!("recording.searchCleared").to_string());
                                         cx.notify();
                                     }
                                 })),
@@ -206,58 +204,77 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        let recording_label = t!("recording.recording").to_string();
-        let session_name = display_name;
         let session_id = session.id.clone();
         let start_session_id = session.id.clone();
-        let save_session_id = session.id.clone();
         let select_session_id = session.id.clone();
-        let start_session_name = session_name.clone();
-        let save_session_name = session_name.clone();
+        let menu_session_id = session.id.clone();
         let is_current = active_session_id == Some(session.id.as_str());
-        let session_is_recording = self.recording.is_recording(&session.id);
-        let busy_action = self.recording.busy_action(&session.id).map(str::to_string);
-        let is_busy = busy_action.is_some();
-        let kind = session_kind_label(session.kind).to_ascii_uppercase();
-        let short = short_id(&session.id).to_string();
-        let recording_status = self.recording.status(&session.id);
-        let recording_path = recording_status
-            .as_ref()
-            .and_then(|status| status.file_path.clone());
-        let recording_status_text = recording_status.as_ref().map(|status| {
-            let mode = match status.mode {
-                RecordingMode::Transcript => "transcript",
-                RecordingMode::Raw => "raw",
-            };
-            let path = status
-                .file_path
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("recording.log");
-            format!(
-                "{mode} · {} · {path}",
-                format_recording_bytes(status.written_bytes)
+        let status = self.recording.status(&session.id);
+        let is_recording = status.is_some();
+        let is_busy = self.recording.busy_action(&session.id).is_some();
+        let is_problem = status.as_ref().is_some_and(|status| {
+            matches!(
+                status.state,
+                RecordingStatusState::Degraded | RecordingStatusState::Failed
             )
         });
+        let status_label = match status.as_ref().map(|status| status.state) {
+            Some(RecordingStatusState::Failed) => t!("recording.failed"),
+            Some(RecordingStatusState::Degraded) => t!("recording.degraded"),
+            _ => t!("recording.recording"),
+        }
+        .to_string();
+        let summary = status.as_ref().map_or_else(
+            || short_id(&session.id).to_string(),
+            |status| {
+                format!(
+                    "{} · {}",
+                    match status.mode {
+                        RecordingMode::Transcript => "Transcript",
+                        RecordingMode::Raw => "Raw",
+                    },
+                    format_recording_bytes(status.written_bytes)
+                )
+            },
+        );
+        let path = status
+            .as_ref()
+            .and_then(|status| status.file_path.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let error = if is_problem {
+            status
+                .as_ref()
+                .and_then(|status| status.last_error.clone())
+                .unwrap_or_else(|| status_label.clone())
+        } else {
+            String::new()
+        };
+        let app = cx.entity().downgrade();
 
         div()
             .id(SharedString::from(format!(
                 "recording-session-row-{session_id}"
             )))
-            .h(px(48.))
+            .debug_selector({
+                let session_id = session_id.clone();
+                move || format!("recording-session-row-{session_id}")
+            })
+            .w_full()
+            .min_w_0()
+            .h(px(96.))
+            .overflow_hidden()
             .rounded_md()
-            .px_2()
+            .p_2()
             .border_1()
             .border_color(if is_current {
                 rgba((palette.primary << 8) | 0x73)
             } else {
                 rgba(0x00000000)
             })
-            .bg(rgba(0x00000000))
             .when(is_busy, |this| this.opacity(0.72))
             .flex()
-            .items_center()
+            .items_start()
             .gap_2()
             .cursor_pointer()
             .hover(|this| this.bg(rgb(palette.hover)))
@@ -266,13 +283,25 @@ impl ZzClawTermApp {
             }))
             .child(
                 div()
+                    .id(SharedString::from(format!(
+                        "recording-session-state-{session_id}"
+                    )))
+                    .mt(px(6.))
                     .size(px(8.))
                     .rounded_full()
                     .flex_none()
-                    .bg(if session_is_recording {
-                        rgb(0xef4444)
+                    .bg(rgb(if is_problem {
+                        palette.warning
+                    } else if is_recording {
+                        palette.danger
                     } else {
-                        rgb(0x22c55e)
+                        palette.success
+                    }))
+                    .when(is_recording, |this| {
+                        this.tooltip(move |window, cx| {
+                            zzclawterm_ui::ZzClawTooltip::new(status_label.clone())
+                                .build(window, cx)
+                        })
                     }),
             )
             .child(
@@ -281,151 +310,176 @@ impl ZzClawTermApp {
                     .flex_1()
                     .flex()
                     .flex_col()
+                    .gap(px(2.))
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
+                            .h(px(20.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap_2()
                             .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .text_xs()
-                                    .font_weight(FontWeight(600.))
-                                    .text_color(rgb(palette.text))
-                                    .overflow_hidden()
-                                    .child(truncate_preview(&session_name, 34)),
+                                recording_text_line(
+                                    format!("recording-session-name-{session_id}"),
+                                    display_name,
+                                    palette.text,
+                                )
+                                .flex_1()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight(600.)),
                             )
                             .child(
                                 div()
+                                    .flex_none()
                                     .px_1()
                                     .rounded_sm()
                                     .bg(rgb(palette.hover))
                                     .text_size(px(10.))
-                                    .font_weight(FontWeight(700.))
                                     .text_color(rgb(palette.text_muted))
-                                    .child(kind),
+                                    .child(session_kind_label(session.kind).to_ascii_uppercase()),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_family(crate::features::shell::gpui_code_font_family())
-                                    .text_size(px(10.))
-                                    .text_color(rgb(palette.text_dimmed))
-                                    .child(short),
-                            )
-                            .when(session_is_recording, |this| {
-                                this.child(
-                                    div()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .bg(rgba((palette.danger << 8) | 0x24))
-                                        .text_size(px(10.))
-                                        .text_color(rgb(palette.danger))
-                                        .child(format!("● {recording_label}")),
-                                )
-                            })
-                            .when_some(recording_status_text.clone(), |this, text| {
-                                this.child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(palette.text_dimmed))
-                                        .child(truncate_preview(&text, 44)),
-                                )
-                            }),
-                    ),
+                    .child(recording_text_line(
+                        format!("recording-session-summary-{session_id}"),
+                        summary,
+                        palette.text_dimmed,
+                    ))
+                    .child(recording_text_line(
+                        format!("recording-session-path-{session_id}"),
+                        path,
+                        palette.text_dimmed,
+                    ))
+                    .child(recording_text_line(
+                        format!("recording-session-error-{session_id}"),
+                        error,
+                        palette.warning,
+                    )),
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_0()
-                    .when_some(recording_path.clone(), |this, path| {
-                        this.child(recording_action_svg_button(
-                            palette,
-                            format!("recording-session-reveal-{session_id}"),
-                            "icons/conn/folder.svg",
-                            rgb(palette.text_muted),
-                            "Show recording in folder".to_string(),
-                            !is_busy,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.reveal_path(&path);
-                                this.shell
-                                    .set_status("recording folder revealed".to_string());
-                            }),
-                        ))
-                    })
                     .child(recording_action_svg_button(
                         palette,
                         format!("recording-session-toggle-{session_id}"),
-                        if session_is_recording {
+                        if is_recording {
                             "icons/session/stop.svg"
                         } else {
                             "icons/session/record.svg"
                         },
-                        if busy_action.as_deref() == Some("record") {
-                            rgb(palette.warning)
-                        } else if session_is_recording {
-                            rgb(palette.danger)
+                        rgb(if is_busy {
+                            palette.warning
+                        } else if is_recording {
+                            palette.danger
                         } else {
-                            rgb(palette.text_muted)
-                        },
-                        if session_is_recording {
-                            t!("recording.stop").to_string()
+                            palette.text_muted
+                        }),
+                        if is_recording {
+                            t!("recording.stop")
                         } else {
-                            t!("recording.start").to_string()
-                        },
+                            t!("recording.start")
+                        }
+                        .to_string(),
                         !is_busy,
                         cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            if this.recording.busy_action(&start_session_id).is_some() {
-                                return;
-                            }
-                            if this.recording.is_recording(&start_session_id) {
-                                this.stop_recording_for_session(&start_session_id, cx);
-                            } else {
-                                this.prompt_recording_path_for_session(
-                                    RecordingPathPromptKind::Start,
-                                    start_session_id.clone(),
-                                    start_session_name.clone(),
-                                    cx,
-                                );
-                            }
+                            this.toggle_recording_for_session(&start_session_id, cx);
                         }),
                     ))
-                    .child(recording_action_svg_button(
-                        palette,
-                        format!("recording-session-save-{session_id}"),
-                        "icons/session/save.svg",
-                        if busy_action.as_deref() == Some("save") {
-                            rgb(palette.warning)
-                        } else {
-                            rgb(palette.text_muted)
-                        },
-                        t!("recording.saveTranscript").to_string(),
-                        !is_busy,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if this.recording.busy_action(&save_session_id).is_some() {
-                                return;
-                            }
-                            this.prompt_recording_path_for_session(
-                                RecordingPathPromptKind::SaveTranscript,
-                                save_session_id.clone(),
-                                save_session_name.clone(),
-                                cx,
-                            );
-                        }),
-                    )),
+                    .child(
+                        ZzClawDropdownMenu::new(format!("recording-session-more-{session_id}"))
+                            .icon("icons/session/more.svg")
+                            .icon_size(px(16.))
+                            .disabled(is_busy)
+                            .on_trigger(|_, _, cx| cx.stop_propagation())
+                            .items_dynamic(move |_, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.recording_panel_menu_items(&menu_session_id, cx)
+                                })
+                                .unwrap_or_default()
+                            }),
+                    ),
             )
+    }
+
+    fn recording_panel_menu_items(
+        &self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<ZzClawMenuItem> {
+        let mut items = Vec::new();
+        if let Some(status) = self.recording.status(session_id) {
+            let open_path = status.file_path.clone();
+            let reveal_path = status.file_path;
+            items.push(
+                ZzClawMenuItem::action(t!("recording.openLog"))
+                    .icon("icons/file/description.svg")
+                    .disabled(open_path.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(path) = &open_path {
+                            cx.open_with_system(path);
+                            this.shell.set_status(t!("recording.opened").to_string());
+                        }
+                    })),
+            );
+            items.push(
+                ZzClawMenuItem::action(t!("recording.showInFolder"))
+                    .icon("icons/session/folder-open.svg")
+                    .disabled(reveal_path.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(path) = &reveal_path {
+                            cx.reveal_path(path);
+                            this.shell
+                                .set_status(t!("recording.folderRevealed").to_string());
+                        }
+                    })),
+            );
+        } else {
+            for (label, mode, icon) in [
+                (
+                    t!("recording.startTranscriptLog"),
+                    RecordingMode::Transcript,
+                    "icons/file/description.svg",
+                ),
+                (
+                    t!("recording.startRawLog"),
+                    RecordingMode::Raw,
+                    "icons/session/record.svg",
+                ),
+            ] {
+                let session_id = session_id.to_string();
+                items.push(
+                    ZzClawMenuItem::action(label)
+                        .icon(icon)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.start_recording_for_session(&session_id, mode, cx);
+                        })),
+                );
+            }
+        }
+        let save_session_id = session_id.to_string();
+        items.extend([
+            ZzClawMenuItem::separator(),
+            ZzClawMenuItem::action(t!("recording.saveTranscript"))
+                .icon("icons/session/save.svg")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.save_session_transcript_for_session(&save_session_id, cx);
+                })),
+        ]);
+        let is_busy = self.recording.busy_action(session_id).is_some();
+        if is_busy {
+            items.into_iter().map(|item| item.disabled(true)).collect()
+        } else {
+            items
+        }
     }
 
     fn recording_session_filter_query(&self) -> String {
@@ -464,6 +518,31 @@ fn format_recording_bytes(bytes: u64) -> String {
     }
 }
 
+// GPUI shapes explicit newlines even on a nowrap element; flatten only the display copy.
+fn recording_single_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn recording_text_line(id: String, text: String, color: u32) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
+        .w_full()
+        .min_w_0()
+        .h(px(16.))
+        .flex_none()
+        .line_height(px(16.))
+        .text_size(px(10.))
+        .text_color(rgb(color))
+        .truncate()
+        .child(recording_single_line(&text))
+        .when(!text.is_empty(), |this| {
+            this.tooltip(move |window, cx| {
+                zzclawterm_ui::ZzClawTooltip::new(text.clone()).build(window, cx)
+            })
+        })
+}
+
 fn recording_action_svg_button(
     palette: crate::theme::ThemePalette,
     id: impl Into<String>,
@@ -475,9 +554,12 @@ fn recording_action_svg_button(
 ) -> impl IntoElement {
     let color = color.into();
     let tooltip = tooltip.into();
+    let id = id.into();
     div()
-        .id(SharedString::from(id.into()))
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id.clone())
         .size(px(28.))
+        .flex_none()
         .flex()
         .items_center()
         .justify_center()
@@ -561,3 +643,6 @@ mod tests {
         assert_eq!(session_panel_count_label(100, 9, true), "9/100");
     }
 }
+
+#[cfg(test)]
+mod layout_tests;

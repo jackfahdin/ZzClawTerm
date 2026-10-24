@@ -685,9 +685,6 @@ pub(super) fn toggle_connection_editor_flag(
         }
         ConnectionEditorToggle::RawTcp => {
             editor.raw_tcp_cli = !editor.raw_tcp_cli;
-            if editor.raw_tcp_cli {
-                editor.telnet_enter_mode = "cr".to_string();
-            }
         }
         ConnectionEditorToggle::LocalEcho => editor.local_echo = !editor.local_echo,
         ConnectionEditorToggle::LocalLineEdit => {

@@ -25,6 +25,29 @@ const RECORDING_WRITE_QUEUE_COMMAND_LIMIT: u64 = 4096;
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+pub(crate) enum ExecutionRecordingEvent {
+    Boundary { command: Option<String> },
+    Output(String),
+}
+
+impl std::fmt::Debug for ExecutionRecordingEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Boundary { .. } => "ExecutionBoundary { .. }",
+            Self::Output(_) => "ExecutionOutput { .. }",
+        })
+    }
+}
+
+impl ExecutionRecordingEvent {
+    pub(crate) fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Boundary { command } => command.as_ref().map_or(0, String::len),
+            Self::Output(text) => text.len(),
+        }
+    }
+}
+
 type SearchMailbox = Arc<Mutex<HashMap<String, RecordingHistorySearchEvent>>>;
 
 type StatusMailbox = Arc<Mutex<HashMap<(String, u8), RecordingStatus>>>;
@@ -301,6 +324,29 @@ impl ReplySender {
 }
 
 impl RecordingWriteHandle {
+    pub(crate) fn write_execution_event(
+        &self,
+        session_id: &str,
+        mut event: ExecutionRecordingEvent,
+    ) {
+        let policy = self.capture_policy(session_id);
+        if policy.mode == RecordingMode::Raw {
+            return;
+        }
+        if !policy.include_input
+            && let ExecutionRecordingEvent::Boundary { command } = &mut event
+        {
+            *command = None;
+        }
+        self.enqueue_payload(
+            session_id,
+            event.payload_bytes(),
+            RecordingWriteCommand::Execution {
+                session_id: session_id.into(),
+                event,
+            },
+        );
+    }
     pub(crate) fn report_output_gap(&self, session_id: &str, bytes: usize) {
         self.report_dropped_payload(session_id, bytes);
     }
@@ -671,6 +717,10 @@ impl RecordingHistorySearchKey {
 }
 #[derive(Debug)]
 enum RecordingWriteCommand {
+    Execution {
+        session_id: String,
+        event: ExecutionRecordingEvent,
+    },
     Shutdown,
     Start {
         session_id: String,
@@ -860,6 +910,20 @@ fn run_recording_writer(
             Err(_) => break,
         };
         match command {
+            RecordingWriteCommand::Execution { session_id, event } => {
+                if let Some(id) = current_recording_id(&session_id, &rekeyed) {
+                    match &event {
+                        ExecutionRecordingEvent::Boundary { command } => {
+                            manager.execution_boundary(id, command.as_deref())
+                        }
+                        ExecutionRecordingEvent::Output(text) => {
+                            manager.write_execution_output(id, text)
+                        }
+                    }
+                    publisher.status(&manager, &handle, id, false);
+                }
+                handle.release_payload(&session_id, event.payload_bytes());
+            }
             RecordingWriteCommand::Shutdown => break,
             RecordingWriteCommand::Start {
                 session_id,

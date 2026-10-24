@@ -30,9 +30,14 @@ use crate::{
 };
 
 use super::RecordingWriteHandle;
+use crate::models::recording::ExecutionRecordingEvent;
 
 mod selection;
-pub(crate) use selection::{TerminalBufferCellPos, TerminalCellPos, TerminalSelection};
+#[cfg(test)]
+mod selection_text_tests;
+pub(crate) use selection::{
+    TerminalBufferCellPos, TerminalCellPos, TerminalSelection, TerminalSelectionTextError,
+};
 mod presentation;
 pub(crate) use presentation::{
     TERMINAL_OUTPUT_VISIBLE_BACKLOG_CAP, TERMINAL_OUTPUT_VISIBLE_BURST_OVERLOAD,
@@ -728,6 +733,8 @@ pub(crate) struct TerminalViewState {
     pub(crate) selected_occurrence_visible_result: Option<TerminalFrameSearchResult>,
     pub(crate) pending_selected_occurrence_visible_key: Option<TerminalFrameSearchKey>,
     pub(crate) protocol_state: TerminalProtocolState,
+    /// Physical keys routed to this connection; never carried across reconnect.
+    pub(crate) pressed_keys: HashSet<String>,
     pub(crate) output_decoder: TerminalOutputDecoder,
     pub(crate) recording_decoder: TerminalOutputDecoder,
     pub(crate) screen_revision: u64,
@@ -794,6 +801,7 @@ impl TerminalViewState {
             selected_occurrence_visible_result: None,
             pending_selected_occurrence_visible_key: None,
             protocol_state: TerminalProtocolState::default(),
+            pressed_keys: HashSet::new(),
             output_decoder: TerminalOutputDecoder::default(),
             recording_decoder: TerminalOutputDecoder::default(),
             screen_revision: 0,
@@ -847,6 +855,7 @@ impl TerminalViewState {
             selected_occurrence_visible_result: None,
             pending_selected_occurrence_visible_key: None,
             protocol_state,
+            pressed_keys: HashSet::new(),
             output_decoder: TerminalOutputDecoder::default(),
             recording_decoder: TerminalOutputDecoder::default(),
             screen_revision: 0,
@@ -967,6 +976,15 @@ impl TerminalViewState {
 
     pub(crate) fn reset_reconnect_stream(&mut self, encoding: &str) {
         self.screen.reset_stream_state();
+        self.screen.reset_session_input_protocols();
+        // The UI screen mirrors geometry; only the worker knows the active
+        // screen. Keep that presentation bit while resetting input protocols.
+        self.protocol_state = TerminalProtocolState {
+            alternate_screen: self.protocol_state.alternate_screen,
+            alternate_scroll: self.screen.alternate_scroll(),
+            ..TerminalProtocolState::default()
+        };
+        self.pressed_keys.clear();
         self.output_decoder.reset_decoder();
         self.recording_decoder.reset_decoder();
         self.set_encoding(encoding);
@@ -1646,6 +1664,38 @@ impl TerminalFramePipeline {
         });
     }
 
+    /// Recording-only events share the frame queue with ordinary decoded output,
+    /// so they cannot overtake output still being processed by this worker.
+    pub(crate) fn submit_execution_recording(
+        &self,
+        session_id: &str,
+        event: ExecutionRecordingEvent,
+    ) {
+        if let ExecutionRecordingEvent::Output(text) = event {
+            let mut remaining = text.as_str();
+            while !remaining.is_empty() {
+                let mut end = remaining.len().min(64 * 1024);
+                while !remaining.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let _ = self
+                    .command_tx
+                    .send(TerminalFrameCommand::ExecutionRecording {
+                        session_id: session_id.into(),
+                        event: ExecutionRecordingEvent::Output(remaining[..end].into()),
+                    });
+                remaining = &remaining[end..];
+            }
+        } else {
+            let _ = self
+                .command_tx
+                .send(TerminalFrameCommand::ExecutionRecording {
+                    session_id: session_id.into(),
+                    event,
+                });
+        }
+    }
+
     pub(crate) fn submit_synthetic_output(&self, session_id: String, text: String) {
         if !text.is_empty() {
             let _ = self
@@ -1785,6 +1835,23 @@ impl TerminalFramePipeline {
         response_rx
     }
 
+    pub(crate) fn request_selection_text(
+        &self,
+        session_id: String,
+        selection: TerminalSelection,
+        history: zzclawterm_terminal::TerminalHistoryState,
+    ) -> oneshot::Receiver<Result<Option<String>, TerminalSelectionTextError>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let _ = self
+            .command_tx
+            .send(TerminalFrameCommand::RequestSelectionText {
+                session_id,
+                request: Box::new(TerminalSelectionTextRequest { selection, history }),
+                response_tx,
+            });
+        response_rx
+    }
+
     pub(crate) fn request_search(
         &self,
         session_id: impl Into<String>,
@@ -1916,6 +1983,10 @@ impl Default for TerminalFramePipeline {
 
 #[derive(Debug)]
 enum TerminalFrameCommand {
+    ExecutionRecording {
+        session_id: String,
+        event: ExecutionRecordingEvent,
+    },
     SetKeywordRules {
         rules: Arc<Vec<ResolvedKeywordHighlightRule>>,
     },
@@ -1993,6 +2064,11 @@ enum TerminalFrameCommand {
         session_id: String,
         response_tx: oneshot::Sender<Option<String>>,
     },
+    RequestSelectionText {
+        session_id: String,
+        request: Box<TerminalSelectionTextRequest>,
+        response_tx: oneshot::Sender<Result<Option<String>, TerminalSelectionTextError>>,
+    },
     RequestSearch {
         session_id: String,
         purpose: TerminalFrameSearchPurpose,
@@ -2009,6 +2085,12 @@ enum TerminalFrameCommand {
     Fence {
         complete_tx: std::sync::mpsc::SyncSender<()>,
     },
+}
+
+#[derive(Debug)]
+struct TerminalSelectionTextRequest {
+    selection: TerminalSelection,
+    history: zzclawterm_terminal::TerminalHistoryState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2574,6 +2656,7 @@ impl TerminalFrameSession {
 
     fn reset_reconnect_stream(&mut self, encoding: &str, scrollback_limit: usize) {
         self.screen.reset_stream_state();
+        self.screen.reset_session_input_protocols();
         self.output_decoder.reset_decoder();
         self.recording_decoder.reset_decoder();
         self.set_encoding_and_limit(encoding, scrollback_limit);
@@ -3557,6 +3640,7 @@ fn terminal_frame_command_priority_snapshot_insert_before(command: &TerminalFram
 
 fn terminal_frame_command_output_bytes(command: &TerminalFrameCommand) -> usize {
     match command {
+        TerminalFrameCommand::ExecutionRecording { event, .. } => event.payload_bytes(),
         TerminalFrameCommand::Output { data, .. } => data.len(),
         TerminalFrameCommand::DecodedOutput { text, .. }
         | TerminalFrameCommand::SyntheticOutput { text, .. } => text.len(),
@@ -3715,6 +3799,9 @@ fn run_terminal_frame_processor(
                     let event = session.output_event_from_batch(session_id, batch, started_at);
                     push_event(&event_queue, TerminalFrameEvent::Output(event));
                 }
+            }
+            TerminalFrameCommand::ExecutionRecording { session_id, event } => {
+                recording_writer.write_execution_event(&session_id, event);
             }
             TerminalFrameCommand::SyntheticOutput { session_id, text } => {
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -3958,6 +4045,33 @@ fn run_terminal_frame_processor(
                         let event = session.search_event(session_id, purpose, key);
                         push_event(&event_queue, TerminalFrameEvent::Search(event));
                     }
+                }
+            }
+            TerminalFrameCommand::RequestSelectionText {
+                session_id,
+                request,
+                response_tx,
+            } => {
+                if !response_tx.is_canceled() {
+                    let TerminalSelectionTextRequest { selection, history } = *request;
+                    let text = sessions
+                        .get(&session_id)
+                        .ok_or(TerminalSelectionTextError::MissingSession)
+                        .and_then(|session| {
+                            if !selection.all_buffer
+                                && !session
+                                    .screen
+                                    .history_state()
+                                    .preserves_coordinates_from(history)
+                            {
+                                return Err(TerminalSelectionTextError::StaleHistory);
+                            }
+                            session
+                                .screen
+                                .text_for_selection(selection)
+                                .map_err(|_| TerminalSelectionTextError::InvalidRange)
+                        });
+                    let _ = response_tx.send(text);
                 }
             }
             TerminalFrameCommand::RequestAllText {

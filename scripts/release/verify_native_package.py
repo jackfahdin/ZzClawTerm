@@ -137,6 +137,42 @@ def verify_windows_application_binary(data: bytes, artifact: str) -> None:
             f"{artifact} application executable is missing Windows icon resources: "
             + ", ".join(str(value) for value in sorted(missing))
         )
+    if 16 not in resource_ids:
+        raise RuntimeError(f"{artifact} application executable is missing Windows version resource (16)")
+
+
+def windows_version_info(path: Path) -> dict[str, object]:
+    # Pass the filename separately, never interpolate it into PowerShell.
+    return json.loads(subprocess.check_output([
+        "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; "
+        "$v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:NYATERM_VERIFY_EXE); "
+        "$v | Select-Object ProductName,FileDescription,ProductVersion,FileVersion,"
+        "FileMajorPart,FileMinorPart,FileBuildPart,FilePrivatePart,"
+        "ProductMajorPart,ProductMinorPart,ProductBuildPart,ProductPrivatePart | ConvertTo-Json -Compress",
+    ], text=True, env={**os.environ, "NYATERM_VERIFY_EXE": str(path.resolve())}))
+
+
+def verify_windows_application_version(path: Path, version: str) -> None:
+    if sys.platform != "win32":
+        return
+    metadata = windows_version_info(path)
+    numeric = package_native.windows_numeric_version(version)
+    expected: dict[str, object] = {
+        "FileDescription": "ZzClawTerm",
+        "ProductName": "ZzClawTerm",
+        "FileVersion": numeric,
+        "ProductVersion": version,
+    }
+    for prefix in ("File", "Product"):
+        for part, value in zip(("Major", "Minor", "Build", "Private"), numeric.split(".")):
+            expected[f"{prefix}{part}Part"] = int(value)
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise RuntimeError(
+                f"{path.name} contains the wrong Windows application version metadata: "
+                f"{key}={metadata.get(key)!r}, expected {value!r}"
+            )
 
 
 def elf_machine(data: bytes) -> int:
@@ -268,7 +304,16 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             raise RuntimeError(f"{path.name} contains version {packaged_version}, expected {version}")
         binaries = {name: archive.read(f"{root}/{name}") for name in executables}
         machines = {name: pe_machine(data) for name, data in binaries.items()}
+        conpty_machines = {
+            relative: pe_machine(archive.read(f"{root}/conpty/{relative.as_posix()}"))
+            for relative in conpty_files
+        }
         verify_windows_application_binary(binaries["ZzClawTerm.exe"], path.name)
+        if sys.platform == "win32":
+            with tempfile.TemporaryDirectory() as directory:
+                application = Path(directory) / "ZzClawTerm.exe"
+                application.write_bytes(binaries["ZzClawTerm.exe"])
+                verify_windows_application_version(application, version)
     expected_machine = {
         "x86_64-pc-windows-msvc": 0x8664,
         "aarch64-pc-windows-msvc": 0xAA64,
@@ -281,7 +326,90 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             )
 
 
-def verify_windows_installer(path: Path, target: str) -> None:
+def verify_conpty_machines(machines: dict[Path, int], artifact: str) -> None:
+    for relative, actual in machines.items():
+        expected = 0xAA64 if "arm64" in relative.parts else 0x8664
+        if actual != expected:
+            raise RuntimeError(
+                f"{artifact} contains ConPTY PE machine 0x{actual:04x} for {relative}, "
+                f"expected 0x{expected:04x}"
+            )
+
+
+def find_7zip() -> str:
+    for name in ("7z", "7z.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError("7-Zip is required to verify the NSIS installer")
+
+
+def verify_windows_installer_script(content: str, version: str) -> None:
+    identity = package_native.release_identity(version)
+    required = [
+        f'Name "{identity.display_name}"',
+        rf'InstallDir "$LOCALAPPDATA\Programs\{identity.display_name}"',
+        f'InstallDirRegKey HKCU "{identity.windows_registry_key}" "InstallDir"',
+        f'VIProductVersion "{package_native.windows_numeric_version(version)}"',
+        f'VIFileVersion "{package_native.windows_numeric_version(version)}"',
+        f'VIAddVersionKey "ProductName" "{identity.display_name}"',
+        f'VIAddVersionKey "ProductVersion" "{version}"',
+        f'VIAddVersionKey "FileVersion" "{version}"',
+        f'VIAddVersionKey "FileDescription" "{identity.display_name} native GPUI terminal"',
+        r'!define MUI_FINISHPAGE_RUN "$INSTDIR\ZzClawTerm.exe"',
+        f'!define MUI_FINISHPAGE_RUN_TEXT "Launch {identity.display_name}"',
+        f'WriteRegStr HKCU "{identity.windows_registry_key}" "InstallDir" "$INSTDIR"',
+        f'WriteRegStr HKCU "{identity.windows_uninstall_key}" "DisplayName" "{identity.display_name}"',
+        rf'WriteRegStr HKCU "Software\Classes\{identity.desktop_id}" "URL Protocol" ""',
+        rf'CreateDirectory "$SMPROGRAMS\{identity.display_name}"',
+        rf'CreateShortcut "$SMPROGRAMS\{identity.display_name}\{identity.display_name}.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"',
+        rf'CreateShortcut "$DESKTOP\{identity.display_name}.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"',
+        f'DeleteRegKey HKCU "{identity.windows_registry_key}"',
+        f'DeleteRegKey HKCU "{identity.windows_uninstall_key}"',
+        rf'DeleteRegKey HKCU "Software\Classes\{identity.desktop_id}"',
+        rf'Delete "$DESKTOP\{identity.display_name}.lnk"',
+        rf'RMDir "$SMPROGRAMS\{identity.display_name}"',
+    ]
+    directives = {line.strip() for line in content.splitlines()}
+    for line in required:
+        if line not in directives:
+            raise RuntimeError(f"NSIS identity directive missing: {line}")
+    other = (package_native.STABLE_IDENTITY if identity == package_native.PREVIEW_IDENTITY
+             else package_native.PREVIEW_IDENTITY)
+    for forbidden in [
+        f'"{other.windows_registry_key}"', f'"{other.windows_uninstall_key}"',
+        rf'"Software\Classes\{other.desktop_id}"',
+        rf'"$LOCALAPPDATA\Programs\{other.display_name}"',
+        rf'"$SMPROGRAMS\{other.display_name}"',
+        rf'"$DESKTOP\{other.display_name}.lnk"',
+    ]:
+        if forbidden in content:
+            raise RuntimeError(f"NSIS script targets the other application: {forbidden}")
+
+
+def verify_windows_installer(path: Path, target: str, version: str) -> None:
+    identity = package_native.release_identity(version)
+    script = package_native.WORK_DIR / "zzclawterm-installer.nsi"
+    verify_windows_installer_script(script.read_text(encoding="utf-8"), version)
+    if sys.platform == "win32":
+        metadata = windows_version_info(path)
+        expected_strings = {
+            "ProductName": identity.display_name,
+            "FileDescription": f"{identity.display_name} native GPUI terminal",
+        }
+        for key, expected in expected_strings.items():
+            if metadata.get(key) != expected:
+                raise RuntimeError(
+                    f"{path.name} contains the wrong Windows version metadata: "
+                    f"{key}={metadata.get(key)!r}, expected {expected!r}"
+                )
+        numeric_version = package_native.windows_numeric_version(version)
+        for key in ("ProductVersion", "FileVersion"):
+            if metadata.get(key) not in {version, numeric_version}:
+                raise RuntimeError(
+                    f"{path.name} contains the wrong Windows version metadata: "
+                    f"{key}={metadata.get(key)!r}, expected {version!r} or {numeric_version!r}"
+                )
     with path.open("rb") as handle:
         header = handle.read(2)
     if header != b"MZ":
@@ -327,25 +455,22 @@ def verify_windows_installer(path: Path, target: str) -> None:
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
-        # The VcXsrv directory is optional; when present it must ship
-        # vcxsrv.exe and the GPLv3 NOTICE.txt next to it.
-        vcxsrv_entries = [
-            candidate
-            for candidate in installed
-            if package_native.VCXSRV_DIRNAME
-            in candidate.relative_to(installed_dir).parts
-        ]
-        if vcxsrv_entries:
-            vcxsrv_names = {candidate.name for candidate in vcxsrv_entries}
-            for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
-                if member not in vcxsrv_names:
-                    raise RuntimeError(
-                        f"{path.name} contains a vcxsrv directory without {member}"
-                    )
-        # Leave the machine as we found it.
-        subprocess.run(
-            [str(installed_dir / "unins000.exe"), "/VERYSILENT", "/NORESTART"],
-            check=True,
+        applications = [candidate for candidate in files.values() if candidate.name == "ZzClawTerm.exe"]
+        if len(applications) != 1:
+            raise RuntimeError(f"{path.name} must contain exactly one ZzClawTerm.exe")
+        verify_windows_application_binary(applications[0].read_bytes(), path.name)
+        verify_windows_application_version(applications[0], version)
+        conpty_required = [
+            f"conpty/{relative.as_posix()}" for relative in package_native.conpty_files(target)
+        ] + ["conpty/LICENSE.txt"]
+        missing_conpty = set(conpty_required) - files.keys()
+        if missing_conpty:
+            raise RuntimeError(f"{path.name} is missing ConPTY files: {', '.join(sorted(missing_conpty))}")
+        # Read extracted payloads while the temporary directory still exists.
+        verify_conpty_machines(
+            {relative: pe_machine(files[f"conpty/{relative.as_posix()}"].read_bytes())
+             for relative in package_native.conpty_files(target)},
+            path.name,
         )
 
 

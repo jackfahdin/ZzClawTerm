@@ -37,8 +37,26 @@ pub(super) struct ClipboardBridge {
 #[derive(Default)]
 struct ClipboardState {
     local_text: String,
-    input: Option<RdpInputSender>,
+    input: Option<ClipboardInput>,
     generation: u64,
+}
+
+#[derive(Clone)]
+enum ClipboardInput {
+    Rdp(RdpInputSender),
+    #[cfg(test)]
+    Test(mpsc::Sender<ClipboardMessage>),
+}
+
+impl ClipboardInput {
+    fn send_clipboard(&self, message: ClipboardMessage) -> anyhow::Result<()> {
+        match self {
+            Self::Rdp(sender) => sender.send_clipboard(message).map_err(|_| ()),
+            #[cfg(test)]
+            Self::Test(sender) => sender.send(message).map_err(|_| ()),
+        }
+        .map_err(|_| anyhow::anyhow!("IronRDP clipboard input channel closed"))
+    }
 }
 
 impl fmt::Debug for ClipboardBridge {
@@ -73,7 +91,7 @@ impl ClipboardBridge {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .input = Some(sender);
+            .input = Some(ClipboardInput::Rdp(sender));
     }
 
     pub(super) fn set_local_text(&self, text: String) -> anyhow::Result<()> {
@@ -94,11 +112,9 @@ impl ClipboardBridge {
             {
                 return Ok(());
             }
-            sender
-                .send_clipboard(ClipboardMessage::SendInitiateCopy(vec![
-                    ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT),
-                ]))
-                .map_err(|_| anyhow::anyhow!("IronRDP clipboard input channel closed"))?;
+            sender.send_clipboard(ClipboardMessage::SendInitiateCopy(vec![
+                ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT),
+            ]))?;
         }
         Ok(())
     }
@@ -581,6 +597,9 @@ impl CliprdrBackend for TextClipboardBackend {
         self.on_outgoing_locks_expired(ids);
     }
 }
+
+#[cfg(test)]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {

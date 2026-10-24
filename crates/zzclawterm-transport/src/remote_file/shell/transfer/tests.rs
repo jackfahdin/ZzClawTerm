@@ -299,6 +299,7 @@ async fn real_ssh_streams_report_partial_bytes_and_failed_download_keeps_existin
                     &target,
                     root.path(),
                     Some(payload.len() as u64),
+                    Some(1_700_000_000),
                     SftpTransferControl::new(),
                     move |n| record.lock().unwrap().push(n),
                 );
@@ -312,6 +313,10 @@ async fn real_ssh_streams_report_partial_bytes_and_failed_download_keeps_existin
                 );
                 if status == 0 {
                     assert_eq!(std::fs::read(&target).unwrap(), payload);
+                    assert_eq!(
+                        std::fs::metadata(&target).unwrap().modified().unwrap(),
+                        std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+                    );
                 } else {
                     assert_eq!(std::fs::read(&target).unwrap(), b"original");
                 }
@@ -324,6 +329,7 @@ async fn real_ssh_streams_report_partial_bytes_and_failed_download_keeps_existin
                         &target,
                         root.path(),
                         Some(payload.len() as u64),
+                        None,
                         cancel,
                         move |bytes| {
                             if bytes > 0 {
@@ -338,6 +344,7 @@ async fn real_ssh_streams_report_partial_bytes_and_failed_download_keeps_existin
                         &target,
                         root.path(),
                         Some(payload.len() as u64 + 1),
+                        None,
                         SftpTransferControl::new(),
                         |_| {},
                     );

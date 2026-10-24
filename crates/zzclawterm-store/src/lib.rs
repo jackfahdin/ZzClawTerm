@@ -139,6 +139,7 @@ mod tests {
 
     #[test]
     fn sync_pointer_round_trips_through_legacy_redb_document() {
+        use redb::ReadableDatabase;
         let pointer = zzclawterm_core::RemoteSyncPointer {
             schema_version: 2,
             revision_id: "revision-1".to_string(),
@@ -146,11 +147,47 @@ mod tests {
             payload_hash: "hash".to_string(),
             device_id: "device-1".to_string(),
             app_version: "2.0.0".to_string(),
+            sync_clock: None,
         };
 
         let encoded = crate::portable_codec::encode_sync_pointer(&pointer).expect("encode pointer");
         let decoded = crate::portable_codec::decode_sync_pointer(&encoded).expect("decode pointer");
 
         assert_eq!(decoded, pointer);
+
+        // Both directions must remain interoperable with the historical
+        // file-backed codec, not merely roundtrip through the new backend.
+        const POINTER: TableDefinition<&str, &str> = TableDefinition::new("sync_pointer");
+        let dir =
+            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-pointer-memory-compat");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let path = dir.join("pointer.redb");
+        std::fs::write(&path, &encoded).unwrap();
+        {
+            let database = Database::open(&path).unwrap();
+            let transaction = database.begin_read().unwrap();
+            let table = transaction.open_table(POINTER).unwrap();
+            let value = table.get("latest").unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<zzclawterm_core::RemoteSyncPointer>(value.value()).unwrap(),
+                pointer
+            );
+        }
+        let legacy_path = dir.join("legacy.redb");
+        {
+            let database = Database::create(&legacy_path).unwrap();
+            let transaction = database.begin_write().unwrap();
+            transaction
+                .open_table(POINTER)
+                .unwrap()
+                .insert("latest", serde_json::to_string(&pointer).unwrap().as_str())
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(
+            crate::portable_codec::decode_sync_pointer(&std::fs::read(legacy_path).unwrap())
+                .unwrap(),
+            pointer
+        );
     }
 }

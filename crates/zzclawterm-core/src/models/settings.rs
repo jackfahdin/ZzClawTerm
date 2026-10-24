@@ -53,6 +53,101 @@ pub struct FileManagerUiSettings {
     pub auto_collapse_sidebar: bool,
     #[serde(default = "default_true")]
     pub remember_layout: bool,
+    #[serde(default)]
+    pub left_view: FileManagerPaneUiSettings,
+    #[serde(default)]
+    pub right_view: FileManagerPaneUiSettings,
+}
+
+impl FileManagerUiSettings {
+    /// Read each preference independently so a damaged layout value cannot erase
+    /// valid source memories. The store retains the original extension fields.
+    pub fn from_compat_value(value: &serde_json::Value) -> Self {
+        let mut result = Self::default();
+        macro_rules! read {
+            ($($field:ident),* $(,)?) => { $(
+                if let Some(value) = value.get(stringify!($field))
+                    && let Ok(parsed) = serde_json::from_value(value.clone()) {
+                    result.$field = parsed;
+                }
+            )* };
+        }
+        read!(
+            open,
+            left,
+            right,
+            active_pane,
+            queue_expanded,
+            auto_collapse_sidebar,
+            remember_layout
+        );
+        if let Some(split) = value
+            .get("split_percent")
+            .and_then(serde_json::Value::as_i64)
+        {
+            result.split_percent = split.clamp(20, 80) as u8;
+        }
+        if let Some(height) = value
+            .get("queue_height")
+            .and_then(serde_json::Value::as_i64)
+        {
+            result.queue_height = height.clamp(80, 600) as u32;
+        }
+        for (key, target) in [
+            ("left_view", &mut result.left_view),
+            ("right_view", &mut result.right_view),
+        ] {
+            let Some(view) = value.get(key) else {
+                continue;
+            };
+            if let Some(widths) = view
+                .get("column_widths")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (key, width) in widths {
+                    if let Some(width) = width.as_i64() {
+                        target
+                            .column_widths
+                            .insert(key.clone(), width.clamp(72, 2000) as u32);
+                    }
+                }
+            }
+            if let Some(columns) = view
+                .get("visible_columns")
+                .and_then(serde_json::Value::as_array)
+            {
+                target.visible_columns = columns
+                    .iter()
+                    .filter_map(|column| column.as_str().map(str::to_owned))
+                    .collect();
+                if !target.visible_columns.iter().any(|key| key == "name") {
+                    target.visible_columns.insert(0, "name".into());
+                }
+            }
+            if let Some(sort) = view.get("sort_column").and_then(serde_json::Value::as_str) {
+                target.sort_column = sort.into();
+            }
+            if let Some(descending) = view.get("descending").and_then(serde_json::Value::as_bool) {
+                target.descending = descending;
+            }
+            target.row_height =
+                if view.get("row_height").and_then(serde_json::Value::as_u64) == Some(28) {
+                    28
+                } else {
+                    30
+                };
+            if let Some(directories) = view
+                .get("directories")
+                .and_then(serde_json::Value::as_array)
+            {
+                target.directories = directories
+                    .iter()
+                    .filter_map(|directory| serde_json::from_value(directory.clone()).ok())
+                    .collect();
+            }
+        }
+        result
+    }
 }
 
 impl Default for FileManagerUiSettings {
@@ -67,6 +162,8 @@ impl Default for FileManagerUiSettings {
             queue_height: default_file_manager_queue_height(),
             auto_collapse_sidebar: true,
             remember_layout: true,
+            left_view: FileManagerPaneUiSettings::default(),
+            right_view: FileManagerPaneUiSettings::default(),
         }
     }
 }
@@ -77,6 +174,36 @@ pub struct FileManagerPaneRestore {
     pub source: FileManagerSourceRestore,
     #[serde(default)]
     pub path: String,
+    #[serde(default)]
+    pub raw_path_token: Option<String>,
+}
+
+/// Presentation preferences and successful directories only; never live listings
+/// or credentials. String column keys allow newer versions to retain extra columns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FileManagerPaneUiSettings {
+    pub column_widths: HashMap<String, u32>,
+    pub visible_columns: Vec<String>,
+    pub sort_column: String,
+    pub descending: bool,
+    pub row_height: u32,
+    pub directories: Vec<FileManagerPaneRestore>,
+}
+
+impl Default for FileManagerPaneUiSettings {
+    fn default() -> Self {
+        Self {
+            column_widths: HashMap::new(),
+            visible_columns: ["name", "size", "modified", "permissions"]
+                .map(str::to_string)
+                .to_vec(),
+            sort_column: "name".into(),
+            descending: false,
+            row_height: 30,
+            directories: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1169,5 +1296,60 @@ mod tests {
             .remove("ui_quick_cmd_selected_category");
         let summary: AppSettingsSummary = serde_json::from_value(value).expect("legacy settings");
         assert_eq!(summary.ui_quick_cmd_selected_category, "all");
+    }
+}
+
+#[cfg(test)]
+mod file_manager_tests {
+    use super::{FileManagerPaneRestore, FileManagerSourceRestore, FileManagerUiSettings};
+    use serde_json::json;
+
+    #[test]
+    fn old_file_manager_settings_load_with_new_defaults() {
+        let settings: FileManagerUiSettings =
+            serde_json::from_value(json!({"left": {"path": "/tmp"}, "split_percent": 40})).unwrap();
+        assert_eq!(settings.left.path, "/tmp");
+        assert_eq!(settings.left.raw_path_token, None);
+        assert_eq!(settings.left_view.row_height, 30);
+        assert_eq!(
+            settings.left_view.visible_columns,
+            ["name", "size", "modified", "permissions"]
+        );
+        assert!(settings.right_view.directories.is_empty());
+    }
+
+    #[test]
+    fn file_manager_raw_directory_and_column_preferences_round_trip() {
+        let mut settings = FileManagerUiSettings::default();
+        settings.left_view.column_widths.insert("name".into(), 400);
+        settings.left_view.row_height = 28;
+        settings.left_view.directories.push(FileManagerPaneRestore {
+            source: FileManagerSourceRestore::Connection {
+                id: "saved-ssh".into(),
+            },
+            path: "/目录".into(),
+            raw_path_token: Some("opaque".into()),
+        });
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(FileManagerUiSettings::from_compat_value(&json), settings);
+    }
+
+    #[test]
+    fn damaged_file_manager_layout_keeps_valid_directory_memories() {
+        let value = json!({
+            "split_percent": -50, "queue_height": 999999,
+            "left_view": {"row_height": 600, "column_widths": {"size": -1, "modified": 50000, "permissions": "bad"},
+                "visible_columns": ["size"], "directories": [{"source": {"kind": "local"}, "path": "/kept"}]},
+            "right_view": {"directories": [{"source": {"kind": "future"}, "path": "/unknown"}, {"source": {"kind": "local"}, "path": "/valid"}]}
+        });
+        let settings = FileManagerUiSettings::from_compat_value(&value);
+        assert_eq!(settings.split_percent, 20);
+        assert_eq!(settings.queue_height, 600);
+        assert_eq!(settings.left_view.row_height, 30);
+        assert_eq!(settings.left_view.column_widths["size"], 72);
+        assert_eq!(settings.left_view.column_widths["modified"], 2000);
+        assert_eq!(settings.left_view.visible_columns, ["name", "size"]);
+        assert_eq!(settings.left_view.directories[0].path, "/kept");
+        assert_eq!(settings.right_view.directories[0].path, "/valid");
     }
 }

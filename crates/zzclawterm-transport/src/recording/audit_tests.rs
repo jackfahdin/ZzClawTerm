@@ -61,6 +61,60 @@ fn default_capture_never_stores_no_echo_user_input() {
 }
 
 #[test]
+fn execution_boundaries_preserve_identical_output_and_separate_unterminated_lines() {
+    let dir = TestTempDir::new("nyaterm-recording-execution");
+    for include_input in [false, true] {
+        let manager = RecordingManager::new();
+        let (context, mut settings) = profile(dir.path(), RecordingMode::Transcript);
+        settings.include_input = include_input;
+        settings.include_io_labels = true;
+        let path = dir.join(format!("{include_input}.log"));
+        manager
+            .start_with_profile("audit", context, settings, Some(path.clone()))
+            .unwrap();
+        manager.write_output("audit", "before>");
+        manager.execution_boundary("audit", Some("same\nsecond"));
+        manager.write_execution_output("audit", "same\nsecond");
+        manager.execution_boundary("audit", None);
+        manager.write_output("audit", "after>");
+        manager.stop("audit").unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        let expected = if include_input {
+            "[OUTPUT] before>\n[INPUT] same\n[INPUT] second\n[OUTPUT] same\n[OUTPUT] second\n[OUTPUT] after>\n"
+        } else {
+            "[OUTPUT] before>\n[OUTPUT] same\n[OUTPUT] second\n[OUTPUT] after>\n"
+        };
+        assert_eq!(text, expected);
+    }
+}
+
+#[test]
+fn background_execution_preserves_manual_input_echo_and_partial_control_strings() {
+    let dir = TestTempDir::new("nyaterm-recording-interleaved-execution");
+    let manager = RecordingManager::new();
+    let (context, mut settings) = profile(dir.path(), RecordingMode::Transcript);
+    settings.include_input = true;
+    settings.include_io_labels = true;
+    let path = dir.join("interleaved.log");
+    manager
+        .start_with_profile("audit", context, settings, Some(path.clone()))
+        .unwrap();
+    manager.write_input("audit", b"man");
+    manager.execution_boundary("audit", Some("background"));
+    manager.write_execution_output("audit", "man\n");
+    manager.write_output("audit", "man\x1b]hidden-title");
+    manager.execution_boundary("audit", None);
+    manager.write_output("audit", "\x07");
+    manager.write_input("audit", b"ual\r");
+    manager.write_output("audit", "manual\r\nmanual-result\n");
+    manager.stop("audit").unwrap();
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "[INPUT] background\n[OUTPUT] man\n[INPUT] manual\n[OUTPUT] manual-result\n"
+    );
+}
+
+#[test]
 fn split_escape_strings_are_removed_from_transcript() {
     let dir = TestTempDir::new("zzclawterm-recording-split-escape");
     let manager = RecordingManager::new();

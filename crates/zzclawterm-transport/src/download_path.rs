@@ -1,8 +1,13 @@
 //! Download target name validation and local path boundary checks.
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+
+mod transfer;
+pub(crate) use transfer::TransferDownload;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
@@ -332,6 +337,7 @@ impl DownloadTemporary {
         Self::prepare_with_access(root, target, resume_offset, access).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_with_access(
         root: &Path,
         target: &Path,
@@ -452,6 +458,7 @@ impl DownloadTemporary {
 
     /// Move the commit and guard into the blocking pool so dropping the outer future
     /// does not interrupt the file writeback.
+    #[cfg(test)]
     pub(crate) async fn commit_async(
         self,
         root: &Path,
@@ -471,6 +478,7 @@ impl Drop for DownloadTemporary {
 
 /// Stage contents in a temporary file in the destination directory, then commit while preserving
 /// existing inodes and the operating system's normal creation permissions for new targets.
+#[cfg(test)]
 pub(crate) fn staged_write_file(root: &Path, target: &Path, contents: &[u8]) -> anyhow::Result<()> {
     writable_file_permissions(root, target)?;
     let (temporary, mut file) = DownloadTemporary::create(root, target)?;

@@ -48,7 +48,10 @@ impl CloudSyncRemote for CancellingRemote<'_> {
                 CloudSyncCancellation::Stopping
             );
         }
-        if matches!(self.at, CancelAt::PointerWrite) && path.ends_with(SYNC_LATEST_FILE) {
+        if matches!(self.at, CancelAt::PointerWrite)
+            && path.contains("sync/heads/")
+            && !path.ends_with(".pending.json")
+        {
             assert_eq!(
                 self.control.request_cancel(),
                 CloudSyncCancellation::FinishingCommit

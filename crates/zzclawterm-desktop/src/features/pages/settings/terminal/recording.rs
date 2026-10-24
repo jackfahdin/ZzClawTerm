@@ -1,8 +1,8 @@
 use rust_i18n::t;
 
-use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
+use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb, svg};
 use zzclawterm_core::{ExistingFileBehavior, RecordingMode, RecordingRotationPolicy};
-use zzclawterm_ui::ZzClawSelectOption;
+use zzclawterm_ui::{ZzClawSelectOption, ZzClawTooltip};
 
 use crate::features::pages::settings::panel::SettingsPanel;
 
@@ -144,14 +144,32 @@ impl SettingsPanel {
                     palette,
                     t!("settings.recordingIncludeInput"),
                     Some(SharedString::from(t!("settings.recordingIncludeInputDesc"))),
-                    settings_switch(
-                        palette,
-                        "settings-recording-input",
-                        self.settings.summary().recording_include_input,
-                        cx.listener(|this, _, _, cx| {
-                            this.toggle_recording_input(cx);
-                        }),
-                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("settings-recording-input-help")
+                                .child(
+                                    svg()
+                                        .size(px(13.))
+                                        .path("icons/menu/info.svg")
+                                        .text_color(rgb(palette.text_dimmed)),
+                                )
+                                .tooltip(|window, cx| {
+                                    ZzClawTooltip::new(t!("settings.recordingIncludeInputHelp"))
+                                        .build(window, cx)
+                                }),
+                        )
+                        .child(settings_switch(
+                            palette,
+                            "settings-recording-input",
+                            self.settings.summary().recording_include_input,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_recording_input(cx);
+                            }),
+                        )),
                 ))
                 .child(settings_form_row(
                     palette,

@@ -33,6 +33,40 @@ gaps, changed widths, colors, and densities prevent merging.
 GPUI's 2× SVG rasterization produces 128×128 alpha masks (48 KiB of mask data
 per window, excluding atlas allocation overhead).
 
+## Minimum text contrast
+
+`appearance.minimum_contrast_ratio` is applied to resolved text foregrounds at
+render time, after ANSI, bold, reverse video, keyword colors and search/selection
+backgrounds. ANSI 16-color, 256-color and RGB output share the same final pass.
+Theme foregrounds and ANSI background colors remain unchanged; the cursor keeps
+its separate contrast adjustment. The default ratio of 1 disables text correction.
+
+The algorithm tries both darkening and lightening and selects the nearest passing
+RGB candidate. An unreachable target uses the better of black and white.
+U+2500–U+259F and U+E0A0–U+E0D7 retain their foreground colors; concealed text
+remains concealed against the effective background, including selection.
+Transparent windows and protocol/background images use the configured background
+RGB rather than sampled pixels.
+
+A per-terminal FIFO caches at most 4096 `(foreground, background, ratio)` results.
+The ratio participates in row layout keys. With correction enabled, the affected
+row's selection, occurrence and search ranges also participate; off mode retains
+the existing overlay-only cache behavior.
+
+The native probe's `contrast` fixture contains all three color modes, reverse
+video, graphics and concealed text. Its optional final argument selects the ratio:
+
+```sh
+cargo run -p nyaterm-terminal-gpui --example renderer_probe --features renderer-bench -- cell contrast hot native artifacts/contrast-1.png 1
+cargo run -p nyaterm-terminal-gpui --example renderer_probe --features renderer-bench -- cell contrast hot native artifacts/contrast-45.png 4.5
+cargo run -p nyaterm-terminal-gpui --example renderer_probe --features renderer-bench -- cell contrast hot native artifacts/contrast-7.png 7
+```
+
+Compare captures for unchanged background and graphic colors, darker readable
+text on green backgrounds, and concealed text remaining invisible. Use `cold`
+instead of `hot` to measure rebuilding colored rows; the hot fixture should keep
+reusing its shaped rows with correction enabled.
+
 ## CPU paint-plan benchmark
 
 ```sh

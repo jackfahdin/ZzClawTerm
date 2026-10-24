@@ -19,6 +19,7 @@ use crate::features::pages::transfers::panel::TransferPanel;
 
 #[derive(Clone)]
 pub(in crate::features::pages::transfers) struct TransferJobRowLabels {
+    pub(in crate::features::pages::transfers) queued: String,
     pub(in crate::features::pages::transfers) transferring: String,
     pub(in crate::features::pages::transfers) paused: String,
     pub(in crate::features::pages::transfers) cancelling: String,
@@ -38,6 +39,7 @@ pub(in crate::features::pages::transfers) fn transfer_job_row(
     cx: &mut Context<TransferPanel>,
 ) -> impl IntoElement {
     let status_color = match job.status {
+        TransferJobStatus::Queued => rgb(palette.text_muted),
         TransferJobStatus::Running => rgb(palette.warning),
         TransferJobStatus::Paused => rgb(palette.link),
         TransferJobStatus::Cancelling => rgb(palette.warning),
@@ -54,7 +56,7 @@ pub(in crate::features::pages::transfers) fn transfer_job_row(
     let progress_percent = transfer_job_progress_percent(&job);
     let indeterminate = matches!(
         job.status,
-        TransferJobStatus::Running | TransferJobStatus::Paused
+        TransferJobStatus::Queued | TransferJobStatus::Running | TransferJobStatus::Paused
     ) && job.progress.is_some()
         && progress_percent.is_none();
     let context_job_id = job.id.clone();
@@ -295,7 +297,7 @@ fn transfer_job_detail(
 fn transfer_job_progress_percent(job: &TransferJobRowSnapshot) -> Option<f32> {
     matches!(
         job.status,
-        TransferJobStatus::Running | TransferJobStatus::Paused
+        TransferJobStatus::Queued | TransferJobStatus::Running | TransferJobStatus::Paused
     )
     .then(|| {
         job.progress.as_ref().and_then(|progress| {
@@ -312,6 +314,7 @@ fn transfer_job_progress_percent(job: &TransferJobRowSnapshot) -> Option<f32> {
 
 fn transfer_job_status_label(status: TransferJobStatus, labels: &TransferJobRowLabels) -> &str {
     match status {
+        TransferJobStatus::Queued => &labels.queued,
         TransferJobStatus::Running => &labels.transferring,
         TransferJobStatus::Paused => &labels.paused,
         TransferJobStatus::Cancelling => &labels.cancelling,
@@ -398,6 +401,7 @@ mod tests {
 
     fn labels() -> TransferJobRowLabels {
         TransferJobRowLabels {
+            queued: rust_i18n::t!("fileTransfer.queued").to_string(),
             transferring: "transferring-i18n".to_string(),
             paused: "paused-i18n".to_string(),
             cancelling: "cancelling-i18n".to_string(),

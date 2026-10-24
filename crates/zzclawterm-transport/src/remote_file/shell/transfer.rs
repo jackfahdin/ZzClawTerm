@@ -8,7 +8,7 @@ use russh::{ChannelMsg, Disconnect};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::time::Instant;
 
-use crate::download_path::{DownloadTargetAccess, DownloadTemporary};
+use crate::download_path::{DownloadTargetAccess, TransferDownload};
 use crate::{SftpTransferControl, SftpTransferOptions, open_authenticated_ssh_handle};
 
 use super::{REMOTE_FILE_COMMAND_TIMEOUT, ShellRemote, shell_quote, shell_quote_path};
@@ -66,6 +66,7 @@ enum StreamFile {
         root: PathBuf,
         target: PathBuf,
         expected_size: Option<u64>,
+        modified_at: Option<u32>,
     },
 }
 
@@ -108,12 +109,14 @@ impl ShellRemote {
         result
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub(in crate::remote_file) fn download_stream<F>(
         &self,
         remote: &str,
         local: &Path,
         root: &Path,
         expected_size: Option<u64>,
+        modified_at: Option<u32>,
         control: SftpTransferControl,
         progress: F,
     ) -> anyhow::Result<u64>
@@ -126,6 +129,7 @@ impl ShellRemote {
                 root: root.to_path_buf(),
                 target: local.to_path_buf(),
                 expected_size,
+                modified_at,
             },
             control,
             crate::sftp_transfer_types::SFTP_TRANSFER_DEFAULT_BUFFER_SIZE,
@@ -211,10 +215,11 @@ impl ShellRemote {
                             root,
                             target,
                             expected_size,
+                            modified_at,
                         } => {
                             let access = DownloadTargetAccess::capture(&root, &target)?;
                             let (temporary, mut output) =
-                                DownloadTemporary::prepare_with_access(&root, &target, 0, access)
+                                TransferDownload::prepare_with_access(&root, &target, 0, access)
                                     .await?;
                             let result = async {
                                 activity.step(&control, writer.eof()).await??;
@@ -227,10 +232,18 @@ impl ShellRemote {
                                     &mut progress,
                                 )
                                 .await?;
-                                activity.step(&control, output.sync_all()).await??;
+                                activity.step(&control, output.flush()).await??;
                                 Ok::<_, anyhow::Error>(bytes)
                             }
                             .await;
+                            let output = output.into_std().await;
+                            if result.is_ok()
+                                && let Some(seconds) = modified_at
+                            {
+                                output.set_modified(
+                                    std::time::UNIX_EPOCH + Duration::from_secs(u64::from(seconds)),
+                                )?;
+                            }
                             drop(output);
                             let bytes = result?;
                             anyhow::ensure!(

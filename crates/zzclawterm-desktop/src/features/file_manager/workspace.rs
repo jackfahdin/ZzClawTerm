@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use gpui::{Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity};
 use zzclawterm_core::FileManagerPaneSide;
 use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
 
+use super::inputs::FileManagerPaneInputs;
 use super::pane::{BrowserPaneState, PaneEndpoint, PaneId, PaneNavigationSnapshot};
 use crate::features::ZzClawTermApp;
 
@@ -27,8 +26,20 @@ pub(in crate::features) struct FileManagerWorkspace {
     pub show_all_jobs: bool,
     pub single_pane: bool,
     pub dragging_split: bool,
+    pub(super) focus_pending: bool,
     pub(in crate::features) focus: FocusHandle,
     _app_observation: Subscription,
+    pub(super) pane_inputs: [FileManagerPaneInputs; 2],
+    pub(super) input_subscriptions: Vec<Subscription>,
+    pub(super) bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    pub(super) pane_bounds: [Option<gpui::Bounds<gpui::Pixels>>; 2],
+    pub(super) column_resize: Option<(
+        PaneId,
+        crate::models::TransferBrowserSortColumn,
+        f32,
+        gpui::Pixels,
+    )>,
+    pub(super) queue_resize: Option<(f32, f32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +66,24 @@ impl FileManagerWorkspace {
         seed: FileManagerSeed,
         cx: &mut Context<Self>,
     ) -> Self {
-        let observation = cx.observe(&app, |_, _, cx| cx.notify());
+        let observation = cx.observe(&app, |this, app, cx| {
+            let can_bind = [&this.left, &this.right].into_iter().any(|pane| {
+                if let PaneEndpoint::OfflineConnection(id) = &pane.endpoint {
+                    app.read(cx)
+                        .session_id_for_connection(id)
+                        .is_some_and(|session| !app.read(cx).session.is_disconnected(&session))
+                } else {
+                    false
+                }
+            });
+            if can_bind {
+                let app = app.downgrade();
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| app.bind_file_manager_sources(cx));
+                });
+            }
+            cx.notify();
+        });
         let mut workspace = Self {
             app: app.downgrade(),
             id,
@@ -69,8 +97,18 @@ impl FileManagerWorkspace {
             show_all_jobs: false,
             single_pane: false,
             dragging_split: false,
+            focus_pending: false,
             focus: cx.focus_handle(),
             _app_observation: observation,
+            pane_inputs: [
+                FileManagerPaneInputs::new(cx),
+                FileManagerPaneInputs::new(cx),
+            ],
+            input_subscriptions: Vec::new(),
+            bounds: None,
+            pane_bounds: [None, None],
+            column_resize: None,
+            queue_resize: None,
         };
         if let Some(path) = seed.left_path {
             workspace.left.path = path;
@@ -80,6 +118,7 @@ impl FileManagerWorkspace {
             workspace.right.path = path;
             workspace.right.home_dir_pending = false;
         }
+        workspace.install_input_subscriptions(cx);
         workspace
     }
 
@@ -106,7 +145,18 @@ impl FileManagerWorkspace {
     }
 
     pub(in crate::features) fn swap_panes(&mut self) {
+        let generation = self
+            .left
+            .generation
+            .max(self.right.generation)
+            .wrapping_add(1);
         std::mem::swap(&mut self.left, &mut self.right);
+        self.left.generation = generation;
+        self.right.generation = generation;
+        self.left.loading = false;
+        self.right.loading = false;
+        self.left.path_editing = false;
+        self.right.path_editing = false;
         self.active = self.active.other();
     }
 
@@ -140,7 +190,9 @@ impl FileManagerWorkspace {
             FileManagerPaneSide::Right => PaneId::Right,
         };
         self.queue_expanded = settings.queue_expanded;
-        self.queue_height = settings.queue_height.max(80) as f32;
+        self.queue_height = settings.queue_height.clamp(80, 600) as f32;
+        self.left.restore_view_settings(&settings.left_view);
+        self.right.restore_view_settings(&settings.right_view);
     }
 
     pub(in crate::features) fn apply_list_result(&mut self, result: FileManagerListResult) -> bool {
@@ -157,34 +209,6 @@ impl FileManagerWorkspace {
             Ok(entries) => pane.apply_listing(generation, &endpoint, &path, entries),
             Err(error) => pane.apply_error(generation, &endpoint, snapshot, error),
         }
-    }
-
-    pub(in crate::features) fn refresh_matching_directory(
-        &mut self,
-        endpoint: &PaneEndpoint,
-        parent: &str,
-        entries: Vec<SftpFileEntry>,
-    ) -> bool {
-        let mut changed = false;
-        for pane in [&mut self.left, &mut self.right] {
-            if &pane.endpoint == endpoint
-                && zzclawterm_transport::file_browser_path_eq(
-                    match pane.endpoint {
-                        PaneEndpoint::Local => zzclawterm_transport::FileBrowserBackendKind::Local,
-                        PaneEndpoint::Session(_) => {
-                            zzclawterm_transport::FileBrowserBackendKind::Remote
-                        }
-                    },
-                    &pane.path.display_path,
-                    parent,
-                )
-            {
-                pane.entries = Arc::new(entries.clone());
-                pane.status = format!("{} item(s)", pane.entries.len());
-                changed = true;
-            }
-        }
-        changed
     }
 
     pub(in crate::features) fn mark_disconnected(&mut self, session_id: &str, disconnected: bool) {
