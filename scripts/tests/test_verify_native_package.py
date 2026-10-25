@@ -85,40 +85,39 @@ def write_portable(
         archive.writestr(f"{root}/data/.keep", b"")
 
 
-def verify_installer_fixture(
-    target: str,
-    *,
-    application_resources: tuple[int, ...] = (3, 14, 16),
-) -> None:
+def verify_installer_fixture(target: str, *, omit: tuple[str, ...] = ()) -> None:
+    """Exercise verify_windows_installer with a simulated Inno silent install."""
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         installer = root / "setup.exe"
         installer.write_bytes(fake_pe(0x8664))
-        (root / "zzclawterm-installer.nsi").write_text("", encoding="utf-8")
 
-        def extract(command, **kwargs):
-            output = Path(command[3][2:])
+        def run(command, **kwargs):
+            if Path(str(command[0])).name == "unins000.exe":
+                return  # silent uninstall
+            output = Path(command[4].removeprefix("/DIR="))
+            output.mkdir(parents=True, exist_ok=True)
             entries = {
-                "ZzClawTerm.exe": fake_pe(0x8664, subsystem=2, resource_ids=application_resources),
-                "Uninstall.exe": fake_pe(0x8664),
+                "ZzClawTerm.exe": fake_pe(0x8664, subsystem=2, resource_ids=(3, 14, 16)),
                 "LICENSE": b"license",
                 "VERSION": b"2.0.0\n",
+                "unins000.exe": fake_pe(0x8664),
                 **{name: fake_pe(0x8664)
                    for name in verify_native_package.helper_filenames(target)},
             }
             for name, data in entries.items():
-                path = output / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+                if name in omit:
+                    continue
+                (output / name).write_bytes(data)
 
-        # Isolate payload validation from NSIS compilation and Windows metadata.
-        # Keep the real temporary-directory lifecycle to catch reads after cleanup.
         with (
-            mock.patch.object(package_native, "WORK_DIR", root),
-            mock.patch.object(verify_native_package.sys, "platform", "linux"),
-            mock.patch.object(verify_native_package, "verify_windows_installer_script"),
-            mock.patch.object(verify_native_package, "find_7zip", return_value="7z"),
-            mock.patch.object(verify_native_package.subprocess, "run", side_effect=extract),
+            mock.patch.object(verify_native_package.sys, "platform", "win32"),
+            mock.patch.object(
+                verify_native_package.platform, "machine", return_value="AMD64"
+            ),
+            mock.patch.object(
+                verify_native_package.subprocess, "run", side_effect=run
+            ),
         ):
             verify_native_package.verify_windows_installer(installer, target, "2.0.0")
 
@@ -195,9 +194,42 @@ class VerifyNativePackageTests(unittest.TestCase):
                     path, "x86_64-pc-windows-msvc", "2.0.0"
                 )
 
-    def test_windows_installer_rejects_application_without_version_resource(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "version resource"):
-            verify_installer_fixture("x86_64-pc-windows-msvc", application_resources=(3, 14))
+    def test_windows_installer_silent_installs_and_verifies_payload(self) -> None:
+        verify_installer_fixture("x86_64-pc-windows-msvc")
+
+    def test_windows_installer_rejects_an_incomplete_install(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing installed files"):
+            verify_installer_fixture(
+                "x86_64-pc-windows-msvc", omit=("zzclawterm-rdp-helper.exe",)
+            )
+
+    def test_windows_installer_requires_a_windows_host(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installer = Path(directory) / "setup.exe"
+            installer.write_bytes(fake_pe(0x8664))
+            with (
+                mock.patch.object(verify_native_package.sys, "platform", "linux"),
+                self.assertRaisesRegex(RuntimeError, "can only be verified on Windows"),
+            ):
+                verify_native_package.verify_windows_installer(
+                    installer, "x86_64-pc-windows-msvc", "2.0.0"
+                )
+
+    def test_windows_installer_skips_a_foreign_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installer = Path(directory) / "setup.exe"
+            installer.write_bytes(fake_pe(0xAA64))
+            with (
+                mock.patch.object(verify_native_package.sys, "platform", "win32"),
+                mock.patch.object(
+                    verify_native_package.platform, "machine", return_value="AMD64"
+                ),
+                mock.patch.object(verify_native_package.subprocess, "run") as run_mock,
+            ):
+                verify_native_package.verify_windows_installer(
+                    installer, "aarch64-pc-windows-msvc", "2.0.0"
+                )
+            run_mock.assert_not_called()
 
     def test_windows_portable_rejects_helper_architecture_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

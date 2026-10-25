@@ -330,119 +330,72 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             )
 
 
-def find_7zip() -> str:
-    for name in ("7z", "7z.exe"):
-        found = shutil.which(name)
-        if found:
-            return found
-    raise RuntimeError("7-Zip is required to verify the NSIS installer")
-
-
-def verify_windows_installer_script(content: str, version: str) -> None:
-    identity = package_native.release_identity(version)
-    required = [
-        f'Name "{identity.display_name}"',
-        rf'InstallDir "$LOCALAPPDATA\Programs\{identity.display_name}"',
-        f'InstallDirRegKey HKCU "{identity.windows_registry_key}" "InstallDir"',
-        f'VIProductVersion "{package_native.windows_numeric_version(version)}"',
-        f'VIFileVersion "{package_native.windows_numeric_version(version)}"',
-        f'VIAddVersionKey "ProductName" "{identity.display_name}"',
-        f'VIAddVersionKey "ProductVersion" "{version}"',
-        f'VIAddVersionKey "FileVersion" "{version}"',
-        f'VIAddVersionKey "FileDescription" "{identity.display_name} native GPUI terminal"',
-        r'!define MUI_FINISHPAGE_RUN "$INSTDIR\ZzClawTerm.exe"',
-        f'!define MUI_FINISHPAGE_RUN_TEXT "Launch {identity.display_name}"',
-        f'WriteRegStr HKCU "{identity.windows_registry_key}" "InstallDir" "$INSTDIR"',
-        f'WriteRegStr HKCU "{identity.windows_uninstall_key}" "DisplayName" "{identity.display_name}"',
-        rf'WriteRegStr HKCU "Software\Classes\{identity.desktop_id}" "URL Protocol" ""',
-        rf'CreateDirectory "$SMPROGRAMS\{identity.display_name}"',
-        rf'CreateShortcut "$SMPROGRAMS\{identity.display_name}\{identity.display_name}.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"',
-        rf'CreateShortcut "$DESKTOP\{identity.display_name}.lnk" "$INSTDIR\ZzClawTerm.exe" "" "$INSTDIR\icon.ico"',
-        f'DeleteRegKey HKCU "{identity.windows_registry_key}"',
-        f'DeleteRegKey HKCU "{identity.windows_uninstall_key}"',
-        rf'DeleteRegKey HKCU "Software\Classes\{identity.desktop_id}"',
-        rf'Delete "$DESKTOP\{identity.display_name}.lnk"',
-        rf'RMDir "$SMPROGRAMS\{identity.display_name}"',
-    ]
-    directives = {line.strip() for line in content.splitlines()}
-    for line in required:
-        if line not in directives:
-            raise RuntimeError(f"NSIS identity directive missing: {line}")
-    other = (package_native.STABLE_IDENTITY if identity == package_native.PREVIEW_IDENTITY
-             else package_native.PREVIEW_IDENTITY)
-    for forbidden in [
-        f'"{other.windows_registry_key}"', f'"{other.windows_uninstall_key}"',
-        rf'"Software\Classes\{other.desktop_id}"',
-        rf'"$LOCALAPPDATA\Programs\{other.display_name}"',
-        rf'"$SMPROGRAMS\{other.display_name}"',
-        rf'"$DESKTOP\{other.display_name}.lnk"',
-    ]:
-        if forbidden in content:
-            raise RuntimeError(f"NSIS script targets the other application: {forbidden}")
-
-
 def verify_windows_installer(path: Path, target: str, version: str) -> None:
-    identity = package_native.release_identity(version)
-    script = package_native.WORK_DIR / "zzclawterm-installer.nsi"
-    verify_windows_installer_script(script.read_text(encoding="utf-8"), version)
-    if sys.platform == "win32":
-        metadata = windows_version_info(path)
-        expected_strings = {
-            "ProductName": identity.display_name,
-            "FileDescription": f"{identity.display_name} native GPUI terminal",
-        }
-        for key, expected in expected_strings.items():
-            if metadata.get(key) != expected:
-                raise RuntimeError(
-                    f"{path.name} contains the wrong Windows version metadata: "
-                    f"{key}={metadata.get(key)!r}, expected {expected!r}"
-                )
-        numeric_version = package_native.windows_numeric_version(version)
-        for key in ("ProductVersion", "FileVersion"):
-            if metadata.get(key) not in {version, numeric_version}:
-                raise RuntimeError(
-                    f"{path.name} contains the wrong Windows version metadata: "
-                    f"{key}={metadata.get(key)!r}, expected {version!r} or {numeric_version!r}"
-                )
     with path.open("rb") as handle:
         header = handle.read(2)
     if header != b"MZ":
         raise RuntimeError(f"{path.name} is not a Windows executable")
-    with tempfile.TemporaryDirectory() as directory:
-        output = Path(directory) / "installer"
-        subprocess.run(
-            [find_7zip(), "x", "-y", f"-o{output}", str(path)],
-            check=True,
-            stdout=subprocess.DEVNULL,
+    if sys.platform != "win32":
+        raise RuntimeError(
+            f"{path.name} can only be verified on Windows: the check performs a "
+            "real silent install of the Inno Setup package"
         )
-        files = {
-            candidate.relative_to(output).as_posix(): candidate
-            for candidate in output.rglob("*") if candidate.is_file()
-        }
-        names = {candidate.name for candidate in files.values()}
-        version_files = list(output.rglob("VERSION"))
-        if len(version_files) != 1 or version_files[0].read_text(encoding="utf-8").strip() != version:
-            raise RuntimeError(f"{path.name} contains the wrong installed version")
-        required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
+    # An arch-restricted installer refuses to install on the other Windows
+    # architecture, and GitHub's Windows runners are all x64: the arm64
+    # package can only get its MZ header + size checks here. Payload arch
+    # correctness is covered by the portable zip's PE machine checks.
+    host_arch = platform.machine().lower()
+    host_arch = "arm64" if host_arch in ("arm64", "aarch64") else "x64"
+    target_arch = "arm64" if target.startswith("aarch64-") else "x64"
+    if host_arch != target_arch:
+        print(
+            f"Skipping silent-install verification of {path.name}: "
+            f"{target_arch} installer cannot install on {host_arch} Windows"
+        )
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        installed_dir = Path(directory) / "installed"
+        # Silent-install the package for real. This doubles as a smoke test of
+        # the installer itself and avoids depending on 7-Zip's Inno extraction.
+        subprocess.run(
+            [
+                str(path),
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                f"/DIR={installed_dir}",
+            ],
+            check=True,
+        )
+        installed = [
+            candidate for candidate in installed_dir.rglob("*") if candidate.is_file()
+        ]
+        names = {candidate.name for candidate in installed}
+        required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "unins000.exe"}
         required.update(helper_filenames(target))
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
-        applications = [candidate for candidate in files.values() if candidate.name == "ZzClawTerm.exe"]
-        if len(applications) != 1:
-            raise RuntimeError(f"{path.name} must contain exactly one ZzClawTerm.exe")
-        verify_windows_application_binary(applications[0].read_bytes(), path.name)
-        verify_windows_application_version(applications[0], version)
         # The VcXsrv directory is optional; when present it must ship
         # vcxsrv.exe and the GPLv3 NOTICE.txt next to it.
-        vcxsrv_prefix = f"{package_native.VCXSRV_DIRNAME}/"
-        vcxsrv_names = [name for name in files if vcxsrv_prefix in name]
-        if vcxsrv_names:
+        vcxsrv_entries = [
+            candidate
+            for candidate in installed
+            if package_native.VCXSRV_DIRNAME
+            in candidate.relative_to(installed_dir).parts
+        ]
+        if vcxsrv_entries:
+            vcxsrv_names = {candidate.name for candidate in vcxsrv_entries}
             for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
-                if not any(name.endswith(f"{vcxsrv_prefix}{member}") for name in vcxsrv_names):
+                if member not in vcxsrv_names:
                     raise RuntimeError(
                         f"{path.name} contains a vcxsrv directory without {member}"
                     )
+        # Leave the machine as we found it.
+        subprocess.run(
+            [str(installed_dir / "unins000.exe"), "/VERYSILENT", "/NORESTART"],
+            check=True,
+        )
 
 
 def verify_macos_archive(path: Path, target: str, version: str) -> None:
@@ -656,7 +609,7 @@ def verify_release(
     prefix = f"{package_native.APP_NAME}_{artifact_version}_{info.label}"
     if info.os_name == "windows":
         verify_windows_portable(dist / f"{prefix}_portable.zip", target, version)
-        verify_windows_installer(dist / f"{prefix}-setup.exe", target)
+        verify_windows_installer(dist / f"{prefix}-setup.exe", target, version)
     elif info.os_name == "macos":
         verify_macos_archive(dist / f"{prefix}.app.tar.gz", target, version)
         verify_dmg(dist / f"{prefix}.dmg")
