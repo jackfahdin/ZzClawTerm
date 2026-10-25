@@ -3261,10 +3261,8 @@ fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
             let gated = data == b"x";
             self.started.send(gated).unwrap();
-            if gated {
-                if let Some(release) = self.release.take() {
-                    release.recv().unwrap();
-                }
+            if gated && let Some(release) = self.release.take() {
+                release.recv().unwrap();
             }
             Ok(data.len())
         }
