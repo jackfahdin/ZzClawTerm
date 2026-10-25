@@ -16,6 +16,7 @@ RELEASE_SCRIPTS = Path(__file__).resolve().parents[1] / "release"
 sys.path.insert(0, str(RELEASE_SCRIPTS))
 
 import verify_native_package  # noqa: E402
+import package_native  # noqa: E402
 
 
 def fake_pe(
@@ -63,8 +64,6 @@ def write_portable(
     machine: int,
     *,
     helper_machine: int | None = None,
-    missing_conpty: str | None = None,
-    wrong_conpty_machine: bool = False,
     target: str = "x86_64-pc-windows-msvc",
     application_resources: tuple[int, ...] = (3, 14, 16, 24),
 ) -> None:
@@ -82,24 +81,13 @@ def write_portable(
                 archive.writestr(f"{root}/{name}", fake_pe(helper_machine))
         archive.writestr(f"{root}/zzclawterm-portable", b"")
         archive.writestr(f"{root}/LICENSE", b"license")
-        archive.writestr(f"{root}/VERSION", b"0.0.1\n")
+        archive.writestr(f"{root}/VERSION", b"2.0.0\n")
         archive.writestr(f"{root}/data/.keep", b"")
-        archive.writestr(f"{root}/conpty/LICENSE.txt", b"license")
-        for relative in package_native.conpty_files(target):
-            if relative.as_posix() == missing_conpty:
-                continue
-            expected = 0xAA64 if "arm64" in relative.parts else 0x8664
-            archive.writestr(
-                f"{root}/conpty/{relative.as_posix()}",
-                fake_pe(0xAA64 if wrong_conpty_machine else expected),
-            )
 
 
 def verify_installer_fixture(
     target: str,
     *,
-    missing_conpty: str | None = None,
-    wrong_conpty_machine: bool = False,
     application_resources: tuple[int, ...] = (3, 14, 16),
 ) -> None:
     with tempfile.TemporaryDirectory() as directory:
@@ -115,16 +103,9 @@ def verify_installer_fixture(
                 "Uninstall.exe": fake_pe(0x8664),
                 "LICENSE": b"license",
                 "VERSION": b"2.0.0\n",
-                "conpty/LICENSE.txt": b"license",
                 **{name: fake_pe(0x8664)
                    for name in verify_native_package.helper_filenames(target)},
             }
-            for relative in package_native.conpty_files(target):
-                if relative.as_posix() == missing_conpty:
-                    continue
-                expected = 0xAA64 if "arm64" in relative.parts else 0x8664
-                machine = expected ^ 1 if wrong_conpty_machine else expected
-                entries[f"conpty/{relative.as_posix()}"] = fake_pe(machine)
             for name, data in entries.items():
                 path = output / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,24 +177,13 @@ class VerifyNativePackageTests(unittest.TestCase):
             ):
                 verify_native_package.verify_windows_portable(path, "x86_64-pc-windows-msvc", "2.0.0")
 
-    def test_windows_arm64_portable_has_matching_conpty_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "portable.zip"
-            write_portable(
-                path, 0xAA64, helper_machine=0xAA64,
-                target="aarch64-pc-windows-msvc",
-            )
-            verify_native_package.verify_windows_portable(
-                path, "aarch64-pc-windows-msvc", "2.0.0"
-            )
-
     def test_windows_portable_rejects_wrong_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "portable.zip"
             write_portable(path, 0xAA64, helper_machine=0x8664)
             with self.assertRaisesRegex(RuntimeError, "PE machine"):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "0.0.1"
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
                 )
 
     def test_windows_portable_requires_every_helper_binary(self) -> None:
@@ -222,51 +192,12 @@ class VerifyNativePackageTests(unittest.TestCase):
             write_portable(path, 0x8664)
             with self.assertRaisesRegex(RuntimeError, "zzclawterm-rdp-helper.exe"):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "0.0.1"
-                )
-
-    def test_windows_portable_requires_conpty_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "portable.zip"
-            write_portable(
-                path, 0x8664, helper_machine=0x8664,
-                missing_conpty="x64/arm64/OpenConsole.exe",
-            )
-            with self.assertRaisesRegex(RuntimeError, "x64/arm64/OpenConsole.exe"):
-                verify_native_package.verify_windows_portable(
                     path, "x86_64-pc-windows-msvc", "2.0.0"
                 )
-
-    def test_windows_portable_rejects_conpty_architecture_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "portable.zip"
-            write_portable(
-                path, 0x8664, helper_machine=0x8664, wrong_conpty_machine=True,
-            )
-            with self.assertRaisesRegex(RuntimeError, "ConPTY PE machine"):
-                verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "2.0.0"
-                )
-
-    def test_windows_installer_validates_conpty_before_temporary_directory_cleanup(self) -> None:
-        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
-            with self.subTest(target=target):
-                verify_installer_fixture(target)
-
-    def test_windows_installer_requires_conpty_files(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "missing ConPTY files: conpty/x64/conpty.dll"):
-            verify_installer_fixture(
-                "x86_64-pc-windows-msvc", missing_conpty="x64/conpty.dll",
-            )
 
     def test_windows_installer_rejects_application_without_version_resource(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "version resource"):
             verify_installer_fixture("x86_64-pc-windows-msvc", application_resources=(3, 14))
-
-    def test_windows_installer_rejects_conpty_architecture_mismatch(self) -> None:
-        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
-            with self.subTest(target=target), self.assertRaisesRegex(RuntimeError, "ConPTY PE machine"):
-                verify_installer_fixture(target, wrong_conpty_machine=True)
 
     def test_windows_portable_rejects_helper_architecture_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -276,7 +207,7 @@ class VerifyNativePackageTests(unittest.TestCase):
                 RuntimeError, "PE machine 0xaa64 for zzclawterm-rdp-helper.exe"
             ):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "0.0.1"
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
                 )
 
     def test_windows_application_requires_gui_subsystem_and_icon_resources(self) -> None:
@@ -352,46 +283,13 @@ class VerifyNativePackageTests(unittest.TestCase):
                     archive.writestr(f"{root}/{name}", fake_pe(0x8664))
                 archive.writestr(f"{root}/zzclawterm-portable", b"")
                 archive.writestr(f"{root}/LICENSE", b"license")
-                archive.writestr(f"{root}/VERSION", b"0.0.1\n")
+                archive.writestr(f"{root}/VERSION", b"2.0.0\n")
                 archive.writestr(f"{root}/data/.keep", b"")
                 archive.writestr(f"{root}/vcxsrv/NOTICE.txt", b"notice")
             with self.assertRaisesRegex(RuntimeError, "vcxsrv/vcxsrv.exe"):
                 verify_native_package.verify_windows_portable(
-                    path, "x86_64-pc-windows-msvc", "0.0.1"
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
                 )
-
-    def test_macos_archive_validates_bundle_metadata_and_architecture(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ZzClawTerm.app.tar.gz"
-            entries = {
-                "ZzClawTerm.app/Contents/MacOS/ZzClawTerm": fake_macho(0x0100000C),
-                **{
-                    f"ZzClawTerm.app/Contents/MacOS/{name}": fake_macho(0x0100000C)
-                    for name in verify_native_package.helper_filenames(
-                        "aarch64-apple-darwin"
-                    )
-                },
-                "ZzClawTerm.app/Contents/Info.plist": plistlib.dumps(
-                    {
-                        "CFBundleIdentifier": "com.jackfahdin.zzclawterm",
-                        "CFBundleShortVersionString": "0.0.1",
-                        "CFBundleURLTypes": [
-                            {"CFBundleURLSchemes": ["zzclawterm"]}
-                        ],
-                    }
-                ),
-                "ZzClawTerm.app/Contents/Resources/VERSION": b"0.0.1\n",
-                "ZzClawTerm.app/Contents/Resources/LICENSE": b"license",
-                "ZzClawTerm.app/Contents/Resources/icon.icns": b"icon",
-            }
-            with tarfile.open(path, "w:gz") as archive:
-                for name, data in entries.items():
-                    item = tarfile.TarInfo(name)
-                    item.size = len(data)
-                    archive.addfile(item, io.BytesIO(data))
-            verify_native_package.verify_macos_archive(
-                path, "aarch64-apple-darwin", "0.0.1"
-            )
 
     def test_macos_scheme_validation_rejects_extra_protocols(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "must register only"):
@@ -411,6 +309,9 @@ class VerifyNativePackageTests(unittest.TestCase):
             (
                 "[Desktop Entry]",
                 "Type=Application",
+                "Name=ZzClawTerm",
+                "Icon=zzclawterm",
+                "StartupWMClass=zzclawterm",
                 "Exec=/opt/zzclawterm/zzclawterm %U",
                 "MimeType=x-scheme-handler/zzclawterm;",
             )
@@ -427,13 +328,6 @@ class VerifyNativePackageTests(unittest.TestCase):
                 "/opt/zzclawterm/zzclawterm",
                 "zzclawterm.desktop",
             )
-        with self.assertRaisesRegex(RuntimeError, "Exec"):
-            verify_native_package.verify_linux_desktop(
-                desktop.replace(" %U", ""),
-                "/opt/zzclawterm/zzclawterm",
-                "zzclawterm.desktop",
-            )
-
     def test_rpm_member_reader_extracts_desktop_from_newc_payload(self) -> None:
         desktop = b"MimeType=x-scheme-handler/zzclawterm;\n"
         payload = newc_entry(

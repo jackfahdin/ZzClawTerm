@@ -195,7 +195,10 @@ def macho_cpu_type(data: bytes) -> int:
     return int.from_bytes(data[4:8], byte_order)
 
 
-def verify_macos_url_scheme(plist: dict[str, object], artifact: str) -> None:
+def verify_macos_url_scheme(
+    plist: dict[str, object], artifact: str,
+    identity: package_native.PackageIdentity = package_native.STABLE_IDENTITY,
+) -> None:
     url_types = plist.get("CFBundleURLTypes")
     if not isinstance(url_types, list) or len(url_types) != 1:
         raise RuntimeError(f"{artifact} must register exactly one macOS URL type")
@@ -203,14 +206,15 @@ def verify_macos_url_scheme(plist: dict[str, object], artifact: str) -> None:
     if not isinstance(url_type, dict):
         raise RuntimeError(f"{artifact} contains an invalid macOS URL type")
     schemes = url_type.get("CFBundleURLSchemes")
-    if schemes != [package_native.URL_SCHEME]:
+    if schemes != [identity.desktop_id]:
         raise RuntimeError(
-            f"{artifact} must register only the {package_native.URL_SCHEME} URL scheme"
+            f"{artifact} must register only the {identity.desktop_id} URL scheme"
         )
 
 
 def verify_linux_desktop(
-    content: str, expected_executable: str, artifact: str
+    content: str, expected_executable: str, artifact: str,
+    identity: package_native.PackageIdentity = package_native.STABLE_IDENTITY,
 ) -> None:
     fields: dict[str, str] = {}
     for line in content.splitlines():
@@ -226,8 +230,11 @@ def verify_linux_desktop(
 
     expected = {
         "Type": "Application",
+        "Name": identity.display_name,
+        "Icon": identity.desktop_id,
+        "StartupWMClass": identity.desktop_id,
         "Exec": f"{expected_executable} %U",
-        "MimeType": f"x-scheme-handler/{package_native.URL_SCHEME};",
+        "MimeType": f"x-scheme-handler/{identity.desktop_id};",
     }
     for key, value in expected.items():
         if fields.get(key) != value:
@@ -304,10 +311,6 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             raise RuntimeError(f"{path.name} contains version {packaged_version}, expected {version}")
         binaries = {name: archive.read(f"{root}/{name}") for name in executables}
         machines = {name: pe_machine(data) for name, data in binaries.items()}
-        conpty_machines = {
-            relative: pe_machine(archive.read(f"{root}/conpty/{relative.as_posix()}"))
-            for relative in conpty_files
-        }
         verify_windows_application_binary(binaries["ZzClawTerm.exe"], path.name)
         if sys.platform == "win32":
             with tempfile.TemporaryDirectory() as directory:
@@ -323,16 +326,6 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             raise RuntimeError(
                 f"{path.name} contains PE machine 0x{machine:04x} for {name}, "
                 f"expected 0x{expected_machine:04x}"
-            )
-
-
-def verify_conpty_machines(machines: dict[Path, int], artifact: str) -> None:
-    for relative, actual in machines.items():
-        expected = 0xAA64 if "arm64" in relative.parts else 0x8664
-        if actual != expected:
-            raise RuntimeError(
-                f"{artifact} contains ConPTY PE machine 0x{actual:04x} for {relative}, "
-                f"expected 0x{expected:04x}"
             )
 
 
@@ -414,43 +407,22 @@ def verify_windows_installer(path: Path, target: str, version: str) -> None:
         header = handle.read(2)
     if header != b"MZ":
         raise RuntimeError(f"{path.name} is not a Windows executable")
-    if sys.platform != "win32":
-        raise RuntimeError(
-            f"{path.name} can only be verified on Windows: the check performs a "
-            "real silent install of the Inno Setup package"
-        )
-    # An arch-restricted installer refuses to install on the other Windows
-    # architecture, and GitHub's Windows runners are all x64: the arm64
-    # package can only get its MZ header + size checks here. Payload arch
-    # correctness is covered by the portable zip's PE machine checks.
-    host_arch = platform.machine().lower()
-    host_arch = "arm64" if host_arch in ("arm64", "aarch64") else "x64"
-    target_arch = "arm64" if target.startswith("aarch64-") else "x64"
-    if host_arch != target_arch:
-        print(
-            f"Skipping silent-install verification of {path.name}: "
-            f"{target_arch} installer cannot install on {host_arch} Windows"
-        )
-        return
     with tempfile.TemporaryDirectory() as directory:
-        installed_dir = Path(directory) / "installed"
-        # Silent-install the package for real. This doubles as a smoke test of
-        # the installer itself and avoids depending on 7-Zip's Inno extraction.
+        output = Path(directory) / "installer"
         subprocess.run(
-            [
-                str(path),
-                "/VERYSILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                f"/DIR={installed_dir}",
-            ],
+            [find_7zip(), "x", "-y", f"-o{output}", str(path)],
             check=True,
+            stdout=subprocess.DEVNULL,
         )
-        installed = [
-            candidate for candidate in installed_dir.rglob("*") if candidate.is_file()
-        ]
-        names = {candidate.name for candidate in installed}
-        required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "unins000.exe"}
+        files = {
+            candidate.relative_to(output).as_posix(): candidate
+            for candidate in output.rglob("*") if candidate.is_file()
+        }
+        names = {candidate.name for candidate in files.values()}
+        version_files = list(output.rglob("VERSION"))
+        if len(version_files) != 1 or version_files[0].read_text(encoding="utf-8").strip() != version:
+            raise RuntimeError(f"{path.name} contains the wrong installed version")
+        required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "Uninstall.exe"}
         required.update(helper_filenames(target))
         missing = required - names
         if missing:
@@ -460,32 +432,32 @@ def verify_windows_installer(path: Path, target: str, version: str) -> None:
             raise RuntimeError(f"{path.name} must contain exactly one ZzClawTerm.exe")
         verify_windows_application_binary(applications[0].read_bytes(), path.name)
         verify_windows_application_version(applications[0], version)
-        conpty_required = [
-            f"conpty/{relative.as_posix()}" for relative in package_native.conpty_files(target)
-        ] + ["conpty/LICENSE.txt"]
-        missing_conpty = set(conpty_required) - files.keys()
-        if missing_conpty:
-            raise RuntimeError(f"{path.name} is missing ConPTY files: {', '.join(sorted(missing_conpty))}")
-        # Read extracted payloads while the temporary directory still exists.
-        verify_conpty_machines(
-            {relative: pe_machine(files[f"conpty/{relative.as_posix()}"].read_bytes())
-             for relative in package_native.conpty_files(target)},
-            path.name,
-        )
+        # The VcXsrv directory is optional; when present it must ship
+        # vcxsrv.exe and the GPLv3 NOTICE.txt next to it.
+        vcxsrv_prefix = f"{package_native.VCXSRV_DIRNAME}/"
+        vcxsrv_names = [name for name in files if vcxsrv_prefix in name]
+        if vcxsrv_names:
+            for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
+                if not any(name.endswith(f"{vcxsrv_prefix}{member}") for name in vcxsrv_names):
+                    raise RuntimeError(
+                        f"{path.name} contains a vcxsrv directory without {member}"
+                    )
 
 
 def verify_macos_archive(path: Path, target: str, version: str) -> None:
-    executable = "ZzClawTerm.app/Contents/MacOS/ZzClawTerm"
-    helpers = [f"ZzClawTerm.app/Contents/MacOS/{name}" for name in helper_filenames(target)]
-    info_plist = "ZzClawTerm.app/Contents/Info.plist"
-    version_file = "ZzClawTerm.app/Contents/Resources/VERSION"
+    identity = package_native.release_identity(version)
+    bundle = identity.macos_bundle_name
+    executable = f"{bundle}/Contents/MacOS/ZzClawTerm"
+    helpers = [f"{bundle}/Contents/MacOS/{name}" for name in helper_filenames(target)]
+    info_plist = f"{bundle}/Contents/Info.plist"
+    version_file = f"{bundle}/Contents/Resources/VERSION"
     required = {
         executable,
         *helpers,
         info_plist,
         version_file,
-        "ZzClawTerm.app/Contents/Resources/LICENSE",
-        "ZzClawTerm.app/Contents/Resources/icon.icns",
+        f"{bundle}/Contents/Resources/LICENSE",
+        f"{bundle}/Contents/Resources/icon.icns",
     }
     with tarfile.open(path, "r:gz") as archive:
         names = verify_tar_paths(archive)
@@ -501,9 +473,14 @@ def verify_macos_archive(path: Path, target: str, version: str) -> None:
         }
     if packaged_version != version or plist.get("CFBundleShortVersionString") != version:
         raise RuntimeError(f"{path.name} contains inconsistent version metadata")
-    if plist.get("CFBundleIdentifier") != package_native.MACOS_IDENTIFIER:
+    if plist.get("CFBundleIdentifier") != identity.macos_identifier:
         raise RuntimeError(f"{path.name} contains the wrong bundle identifier")
-    verify_macos_url_scheme(plist, path.name)
+    for field in ("CFBundleDisplayName", "CFBundleName"):
+        if plist.get(field) != identity.display_name:
+            raise RuntimeError(f"{path.name} contains the wrong {field}")
+    if plist.get("CFBundleExecutable") != "ZzClawTerm" or plist.get("CFBundleVersion") != version:
+        raise RuntimeError(f"{path.name} contains inconsistent bundle metadata")
+    verify_macos_url_scheme(plist, path.name, identity)
     expected_cpu = {
         "x86_64-apple-darwin": 0x01000007,
         "aarch64-apple-darwin": 0x0100000C,

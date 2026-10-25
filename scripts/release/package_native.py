@@ -63,6 +63,41 @@ MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
 LINUX_PACKAGE = "zzclawterm"
 URL_SCHEME = "zzclawterm"
 PORTABLE_MARKER = "zzclawterm-portable"
+
+
+@dataclass(frozen=True)
+class PackageIdentity:
+    display_name: str
+    macos_identifier: str
+    windows_registry_name: str
+    desktop_id: str
+
+    @property
+    def macos_bundle_name(self) -> str:
+        return f"{self.display_name}.app"
+
+    @property
+    def windows_registry_key(self) -> str:
+        return rf"Software\{self.windows_registry_name}"
+
+    @property
+    def windows_uninstall_key(self) -> str:
+        return rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{self.display_name}"
+
+    @property
+    def linux_desktop_file(self) -> str:
+        return f"{self.desktop_id}.desktop"
+
+
+STABLE_IDENTITY = PackageIdentity(
+    "ZzClawTerm", MACOS_IDENTIFIER, "ZzClawTerm", URL_SCHEME
+)
+PREVIEW_IDENTITY = PackageIdentity(
+    "ZzClawTerm Preview",
+    f"{MACOS_IDENTIFIER}.preview",
+    "ZzClawTermPreview",
+    f"{URL_SCHEME}-preview",
+)
 # Archives must not record anything about the packaging host. Downloading a CI
 # artifact resets file mtimes, so a leaked timestamp makes a rerun of a failed
 # job produce different bytes for unchanged sources: the sha256 published in
@@ -126,6 +161,26 @@ def workspace_version() -> str:
 
 def normalize_version(raw: str) -> str:
     return raw.strip().removeprefix("v").removeprefix("V")
+
+
+# SemVer 2.0: prerelease numeric identifiers cannot have leading zeroes.
+SEMVER = re.compile(
+    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
+    r"(?:-(?P<pre>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+
+def parse_version(raw: str) -> re.Match[str]:
+    match = SEMVER.fullmatch(normalize_version(raw))
+    if match is None:
+        raise ValueError(f"invalid release version: {raw}")
+    return match
+
+
+def release_identity(version: str) -> PackageIdentity:
+    return PREVIEW_IDENTITY if parse_version(version).group("pre") else STABLE_IDENTITY
 
 
 def validate_version(raw: str, expected: str | None = None) -> str:

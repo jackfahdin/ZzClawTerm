@@ -62,7 +62,7 @@ fn default_capture_never_stores_no_echo_user_input() {
 
 #[test]
 fn execution_boundaries_preserve_identical_output_and_separate_unterminated_lines() {
-    let dir = TestTempDir::new("nyaterm-recording-execution");
+    let dir = TestTempDir::new("zzclawterm-recording-execution");
     for include_input in [false, true] {
         let manager = RecordingManager::new();
         let (context, mut settings) = profile(dir.path(), RecordingMode::Transcript);
@@ -90,7 +90,7 @@ fn execution_boundaries_preserve_identical_output_and_separate_unterminated_line
 
 #[test]
 fn background_execution_preserves_manual_input_echo_and_partial_control_strings() {
-    let dir = TestTempDir::new("nyaterm-recording-interleaved-execution");
+    let dir = TestTempDir::new("zzclawterm-recording-interleaved-execution");
     let manager = RecordingManager::new();
     let (context, mut settings) = profile(dir.path(), RecordingMode::Transcript);
     settings.include_input = true;
