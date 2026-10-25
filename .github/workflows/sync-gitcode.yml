@@ -52,4 +52,4 @@ jobs:
             exit 0
           fi
           remote="https://${GITCODE_OWNER}:${GITCODE_TOKEN}@gitcode.com/${GITCODE_OWNER}/${GITCODE_REPO}.git"
-          git push "${remote}" "${HEAD_SHA}:refs/heads/master"
+          git push --force-with-lease "${remote}" "${HEAD_SHA}:refs/heads/master"

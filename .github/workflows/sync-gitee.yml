@@ -55,4 +55,4 @@ jobs:
           fi
           remote="https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_OWNER}/${GITEE_REPO}.git"
           echo "pushing ${HEAD_SHA} to Gitee master"
-          git push --progress "${remote}" "${HEAD_SHA}:refs/heads/master"
+          git push --force-with-lease --progress "${remote}" "${HEAD_SHA}:refs/heads/master"
