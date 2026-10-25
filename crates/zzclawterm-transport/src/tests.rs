@@ -3250,15 +3250,21 @@ fn dropping_telnet_manager_interrupts_idle_writer() {
 
 #[test]
 fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
+    // On a loaded runner the writer's first idle deadline can fire before
+    // `write(b"x")` lands in the mailbox, so the gate reports each write's
+    // kind and only the gated payload blocks; leading NOPs are skipped.
     struct FirstWriteGate {
-        started: mpsc::Sender<()>,
+        started: mpsc::Sender<bool>,
         release: Option<mpsc::Receiver<()>>,
     }
     impl Write for FirstWriteGate {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.started.send(()).unwrap();
-            if let Some(release) = self.release.take() {
-                release.recv().unwrap();
+            let gated = data == b"x";
+            self.started.send(gated).unwrap();
+            if gated {
+                if let Some(release) = self.release.take() {
+                    release.recv().unwrap();
+                }
             }
             Ok(data.len())
         }
@@ -3279,7 +3285,7 @@ fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
         SessionEventQueue::new(),
     );
     writer.write(b"x".to_vec()).unwrap();
-    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    while !started_rx.recv_timeout(Duration::from_secs(3)).unwrap() {}
     assert!(matches!(
         started_rx.recv_timeout(interval * 2),
         Err(mpsc::RecvTimeoutError::Timeout)
@@ -3289,7 +3295,7 @@ fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
         started_rx.recv_timeout(Duration::from_millis(50)),
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
-    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(!started_rx.recv_timeout(Duration::from_secs(3)).unwrap());
     writer.close();
 }
 
