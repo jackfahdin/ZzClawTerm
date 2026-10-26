@@ -296,6 +296,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_interaction_word_separators(text);
+        self.save_interaction_settings(cx);
         cx.notify();
     }
 

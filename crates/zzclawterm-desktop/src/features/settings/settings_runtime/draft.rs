@@ -869,6 +869,41 @@ mod tests {
     }
 
     #[test]
+    fn editing_or_clearing_word_separators_refreshes_the_draft_and_persists() {
+        for next in [" /_", ""] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            let input = app.update(&mut cx, |app, cx| {
+                app.begin_settings_draft(cx);
+                app.ensure_settings_tab_inputs(crate::models::SettingsTab::Interaction, cx);
+                app.existing_text_input("settings.interaction.word-separators")
+                    .unwrap()
+            });
+            input.update(&mut cx, |_, cx| {
+                cx.emit(zzclawterm_ui::ZzClawInputEvent::Changed(next.to_string()));
+            });
+            cx.run_until_parked();
+            app.update(&mut cx, |app, cx| {
+                assert_eq!(app.settings.summary().interaction_word_separators, next);
+                assert!(app.settings_panel.read(cx).snapshot().unwrap().draft_dirty);
+                app.apply_settings_draft(false, cx);
+            });
+            cx.run_until_parked();
+            app.read_with(&cx, |app, _| {
+                let saved = app
+                    .store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap();
+                assert_eq!(saved.interaction_word_separators, next);
+                assert_eq!(app.settings.summary().interaction_word_separators, next);
+            });
+        }
+    }
+
+    #[test]
     fn editing_or_clearing_external_editor_refreshes_the_draft_and_persists() {
         for next in ["", r"D:\Softwares\Microsoft VS Code\Code.exe"] {
             let mut cx = TestAppContext::single();

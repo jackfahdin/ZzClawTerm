@@ -469,11 +469,11 @@ impl ConnectionStore {
                 64,
             )
             .clamp(1, 500),
-            interaction_word_separators: json_string(
-                &value,
-                &["interaction", "word_separators"],
-                " \t\r\n\"'`~!@#$%^&*()-=+[{]}\\|;:,<.>/?",
-            ),
+            // An empty string disables separators; only absent or non-string values default.
+            interaction_word_separators: json_path(&value, &["interaction", "word_separators"])
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(" \t\r\n\"'`~!@#$%^&*()-=+[{]}\\|;:,<.>/?")
+                .to_string(),
             interaction_duplicate_session_command_delay_ms: json_u32(
                 &value,
                 &["interaction", "duplicate_session_command_delay_ms"],

@@ -3325,6 +3325,47 @@ fn header_status_settings_roundtrip_and_preserve_unknown_ui_fields() {
 }
 
 #[test]
+fn word_separators_preserve_empty_and_whitespace_through_saves_and_reopen() {
+    for separators in [" /_", "", " \t"] {
+        let dir = unique_temp_dir("word-separators");
+        let store = ConnectionStore::open(&dir).unwrap();
+        let defaults = store.load_app_settings_summary().unwrap();
+        assert!(!defaults.interaction_word_separators.is_empty());
+        store
+            .save_settings_value(&serde_json::json!({
+                "interaction": {
+                    "word_separators": separators,
+                    "right_click_paste": true,
+                    "future_setting": {"keep": true}
+                }
+            }))
+            .unwrap();
+        let settings = store.load_app_settings_summary().unwrap();
+        assert_eq!(settings.interaction_word_separators, separators);
+        let saved = store.save_interaction_settings(&settings).unwrap();
+        assert_eq!(saved.interaction_word_separators, separators);
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["interaction"]["word_separators"], separators);
+        assert_eq!(raw["interaction"]["right_click_paste"], true);
+        assert_eq!(
+            raw["interaction"]["future_setting"],
+            serde_json::json!({"keep": true})
+        );
+        drop(store);
+        let reopened = ConnectionStore::open(&dir).unwrap();
+        assert_eq!(
+            reopened
+                .load_app_settings_summary()
+                .unwrap()
+                .interaction_word_separators,
+            separators
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+#[test]
 fn retired_ime_setting_survives_loading_and_saving_interaction_settings() {
     for legacy_enabled in [false, true] {
         let dir = unique_temp_dir("retired-ime-setting");
