@@ -208,12 +208,38 @@ pub(super) struct TerminalFontMetricsCache {
     pub(super) cell_width: f32,
 }
 
+#[derive(Default)]
+pub(super) struct TerminalActionLinkHoverState {
+    matched: bool,
+    modifier_active: bool,
+}
+
+impl TerminalActionLinkHoverState {
+    pub(super) fn set_matched(&mut self, matched: bool) -> bool {
+        let changed = self.matched != matched;
+        self.matched = matched;
+        changed
+    }
+
+    pub(super) fn set_modifiers(&mut self, modifiers: gpui::Modifiers) -> bool {
+        let active = modifiers.control || modifiers.platform || modifiers.alt;
+        let changed = self.modifier_active != active;
+        self.modifier_active = active;
+        changed
+    }
+
+    pub(in crate::features) fn cursor_pointer(&self, dragging: bool) -> bool {
+        self.matched && self.modifier_active && !dragging
+    }
+}
+
 /// Terminal actions overlay and context menu.
 pub(super) struct TerminalMenuState {
     pub(super) actions_open: bool,
     pub(super) actions_focus: FocusHandle,
     pub(super) action_link_menu: Option<ActionLinkMenuState>,
     pub(super) action_link_tooltip: Option<ActionLinkTooltipState>,
+    pub(super) action_link_hover: TerminalActionLinkHoverState,
     /// Pending action-link hover, with the generation of the timer that owns it. The
     /// timer is the delay; the generation is how a superseded one recognises itself.
     pub(super) action_link_hover_pending: Option<(String, u64, ActionLinkTooltipState)>,
@@ -346,6 +372,7 @@ impl TerminalFeatureState {
                 actions_focus: focus.actions,
                 action_link_menu: None,
                 action_link_tooltip: None,
+                action_link_hover: TerminalActionLinkHoverState::default(),
                 action_link_hover_pending: None,
                 action_link_hover_generation: 0,
             },
@@ -459,10 +486,12 @@ impl TerminalFeatureState {
 
     pub(in crate::features) fn clear_activation_interaction(&mut self) -> bool {
         self.selection.click_anchor = None;
+        let action_link_hover_changed = self.menus.action_link_hover.set_matched(false);
         let had_interaction = self.selection.selection.take().is_some()
             || self.selection.dragging
             || self.menus.action_link_menu.is_some()
-            || self.menus.action_link_tooltip.is_some();
+            || self.menus.action_link_tooltip.is_some()
+            || action_link_hover_changed;
         self.selection.text.invalidate();
         self.selection.source_history = None;
         self.selection.dragging = false;
@@ -630,10 +659,13 @@ impl TerminalPasteReviewState {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, TestAppContext, point, px, size};
+    use gpui::{Bounds, Modifiers, TestAppContext, point, px, size};
     use zzclawterm_terminal::{TerminalOutputDecoder, TerminalScreen};
 
-    use super::{LostTerminalSelectionRecovery, TerminalFeatureFocus, TerminalFeatureState};
+    use super::{
+        LostTerminalSelectionRecovery, TerminalActionLinkHoverState, TerminalFeatureFocus,
+        TerminalFeatureState,
+    };
     use crate::models::{TerminalFramePipeline, TerminalSearchMode};
 
     fn terminal_state() -> TerminalFeatureState {
@@ -652,6 +684,34 @@ mod tests {
                 },
             )
         })
+    }
+
+    #[test]
+    fn action_link_pointer_requires_match_and_modifier() {
+        let mut hover = TerminalActionLinkHoverState::default();
+        assert!(!hover.cursor_pointer(false));
+
+        hover.set_matched(true);
+        assert!(!hover.cursor_pointer(false));
+        for modifiers in [Modifiers::control(), Modifiers::command(), Modifiers::alt()] {
+            assert!(hover.set_modifiers(modifiers));
+            assert!(hover.cursor_pointer(false));
+            assert!(hover.set_modifiers(Modifiers::default()));
+            assert!(!hover.cursor_pointer(false));
+        }
+
+        hover.set_matched(false);
+        assert!(!hover.cursor_pointer(false));
+    }
+
+    #[test]
+    fn action_link_pointer_yields_to_selection_drag() {
+        let mut hover = TerminalActionLinkHoverState::default();
+        hover.set_matched(true);
+        hover.set_modifiers(Modifiers::control());
+
+        assert!(hover.cursor_pointer(false));
+        assert!(!hover.cursor_pointer(true));
     }
 
     #[test]
@@ -694,6 +754,11 @@ mod tests {
         let mut state = terminal_state();
         state.selection.click_anchor = Some(crate::models::TerminalBufferCellPos::new(4, 2).into());
         state.selection.dragging = true;
+        state.menus.action_link_hover.set_matched(true);
+        state
+            .menus
+            .action_link_hover
+            .set_modifiers(Modifiers::control());
         state.menus.action_link_hover_pending = Some((
             "https://example.com".to_string(),
             1,
@@ -714,6 +779,7 @@ mod tests {
         assert!(state.selection.click_anchor.is_none());
         assert!(!state.selection.dragging);
         assert!(!state.action_link_hover_is_pending());
+        assert!(!state.menus.action_link_hover.cursor_pointer(false));
         assert!(!state.clear_activation_interaction());
     }
 

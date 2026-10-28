@@ -2,9 +2,10 @@ use std::time::{Duration, Instant};
 
 use crate::models::{MainMode, NavItem, PanelResizeSide, PanelSide};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, IntoElement, KeyDownEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Render, SharedString, Stateful,
-    Window, canvas, deferred, div, img, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, ClickEvent, Context, Div, IntoElement, KeyDownEvent, KeyUpEvent,
+    ModifiersChangedEvent, MouseButton, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    ObjectFit, Render, SharedString, Stateful, Window, canvas, deferred, div, img, prelude::*, px,
+    rgb, rgba, svg,
 };
 use rust_i18n::t;
 
@@ -264,7 +265,14 @@ impl ZzClawTermApp {
             .text_size(px(self.settings.summary().ui_font_size.clamp(12, 24) as f32))
             .child(self.session_tab_drag_listener_layer(cx))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.update_action_link_modifiers(event.keystroke.modifiers, cx);
                 this.cancel_internal_drag_on_escape(event, window, cx);
+            }))
+            .capture_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+                this.update_action_link_modifiers(event.keystroke.modifiers, cx);
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                this.update_action_link_modifiers(event.modifiers, cx);
             }))
             .on_click(cx.listener(|this, _, _, _| {
                 this.mark_user_activity();

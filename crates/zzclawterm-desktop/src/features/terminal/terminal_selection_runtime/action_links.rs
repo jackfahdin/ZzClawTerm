@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use gpui::{App, Bounds, ClickEvent, Context, MouseMoveEvent, Pixels, Point};
+use gpui::{App, Bounds, ClickEvent, Context, Modifiers, MouseMoveEvent, Pixels, Point};
 
 use crate::action_links::{ActionLinkAction, ActionLinkMatch, actions_for_match, match_at_offset};
 use crate::features::ZzClawTermApp;
@@ -32,17 +32,33 @@ const ACTION_LINK_TOOLTIP_DELAY: Duration = Duration::from_millis(250);
 
 impl ZzClawTermApp {
     pub(in crate::features) fn clear_action_link_tooltip(&mut self, cx: &mut Context<Self>) {
-        let visible_changed = self.clear_action_link_tooltip_state();
-        if visible_changed {
+        if self.clear_action_link_tooltip_state() {
             cx.notify();
         }
     }
 
     fn clear_action_link_tooltip_state(&mut self) -> bool {
-        clear_action_link_tooltip_state(
-            &mut self.terminal.menus.action_link_tooltip,
-            &mut self.terminal.menus.action_link_hover_pending,
-        )
+        let hover_changed = self.terminal.menus.action_link_hover.set_matched(false);
+        hover_changed
+            | clear_action_link_tooltip_state(
+                &mut self.terminal.menus.action_link_tooltip,
+                &mut self.terminal.menus.action_link_hover_pending,
+            )
+    }
+
+    pub(in crate::features) fn update_action_link_modifiers(
+        &mut self,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .terminal
+            .menus
+            .action_link_hover
+            .set_modifiers(modifiers)
+        {
+            cx.notify();
+        }
     }
 
     /// Promote the hover this timer was armed for. Returns whether anything visible
@@ -98,6 +114,7 @@ impl ZzClawTermApp {
         event: &MouseMoveEvent,
         cx: &mut Context<Self>,
     ) {
+        self.update_action_link_modifiers(event.modifiers, cx);
         if !self.settings.summary().terminal_action_links_enabled
             || self.runtime_output_pressure_active()
         {
@@ -160,6 +177,9 @@ impl ZzClawTermApp {
             item.start,
             item.end
         );
+        if self.terminal.menus.action_link_hover.set_matched(true) {
+            cx.notify();
+        }
         let preview = default
             .command
             .clone()
@@ -517,11 +537,15 @@ fn terminal_bounds_contains(bounds: Bounds<Pixels>, position: Point<Pixels>) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use super::action_link_tooltip_timer_is_current;
 
-    use gpui::{AppContext as _, Bounds, TestAppContext, point, px, size};
+    use gpui::{
+        AppContext as _, Bounds, IntoElement, Modifiers, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, div, point, px, size,
+    };
     use zzclawterm_core::{InternalEditorDisplay, test_support::TestTempDir};
 
     use crate::features::file_manager::{FileManagerSeed, FileManagerWorkspace, PaneEndpoint};
@@ -536,6 +560,105 @@ mod tests {
         ActionLinkTooltipState, action_link_hover_should_yield_to_terminal_latency,
         clear_action_link_tooltip_state,
     };
+
+    struct ActionLinkRootFixture {
+        app: gpui::Entity<crate::features::ZzClawTermApp>,
+    }
+
+    impl Render for ActionLinkRootFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().size_full().child(self.app.clone())
+        }
+    }
+
+    fn action_link_root_window<'a>(
+        cx: &'a mut TestAppContext,
+        root: &Path,
+    ) -> (
+        gpui::Entity<crate::features::ZzClawTermApp>,
+        &'a mut VisualTestContext,
+    ) {
+        let app = app_with_visible_local_session(cx, root, "local");
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.terminal.menus.action_link_hover.set_matched(true);
+        });
+        let fixture_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| ActionLinkRootFixture { app: fixture_app });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let focus_handle = app.read(cx).terminal.input.focus.clone();
+            window.focus(&focus_handle, cx);
+            window.activate_window();
+            _ = window.draw(cx);
+        });
+        (app, vcx)
+    }
+
+    fn assert_action_link_pointer(
+        app: &gpui::Entity<crate::features::ZzClawTermApp>,
+        vcx: &mut VisualTestContext,
+        expected: bool,
+    ) {
+        assert_eq!(
+            app.read_with(vcx, |app, _| {
+                app.terminal.menus.action_link_hover.cursor_pointer(false)
+            }),
+            expected
+        );
+    }
+
+    #[test]
+    fn root_dispatches_modifiers_changed_to_action_link_cursor() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-action-link-modifiers-changed");
+        let (app, vcx) = action_link_root_window(&mut cx, root.path());
+
+        for modifiers in [Modifiers::control(), Modifiers::command(), Modifiers::alt()] {
+            vcx.simulate_modifiers_change(modifiers);
+            assert_action_link_pointer(&app, vcx, true);
+            vcx.simulate_modifiers_change(Modifiers::default());
+            assert_action_link_pointer(&app, vcx, false);
+        }
+    }
+
+    #[test]
+    fn root_dispatches_key_down_and_up_to_action_link_cursor() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-action-link-key-modifiers");
+        let (app, vcx) = action_link_root_window(&mut cx, root.path());
+
+        for (modifiers, key) in [
+            (Modifiers::control(), "control"),
+            (Modifiers::command(), "meta"),
+            (Modifiers::alt(), "alt"),
+        ] {
+            vcx.simulate_event(gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers,
+                    key: key.to_string(),
+                    key_char: None,
+                },
+                is_held: false,
+                prefer_character_input: false,
+            });
+            assert_action_link_pointer(&app, vcx, true);
+            vcx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers: Modifiers::default(),
+                    key: key.to_string(),
+                    key_char: None,
+                },
+            });
+            assert_action_link_pointer(&app, vcx, false);
+        }
+    }
 
     #[test]
     fn action_link_hover_yields_to_recent_input() {

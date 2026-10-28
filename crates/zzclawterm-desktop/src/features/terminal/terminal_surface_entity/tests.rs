@@ -183,6 +183,22 @@ impl Render for TerminalSurfaceLayoutTestView {
     }
 }
 
+fn terminal_surface_mouse_cursor(
+    vcx: &mut gpui::VisualTestContext,
+    surface: &Entity<TerminalSurface>,
+) -> Option<gpui::CursorStyle> {
+    vcx.update(|window, cx| {
+        let mut element = surface.update(cx, |surface, cx| {
+            surface.render(window, cx).into_any_element()
+        });
+        element
+            .downcast_mut::<gpui::Stateful<gpui::Div>>()
+            .expect("terminal surface root div")
+            .style()
+            .mouse_cursor
+    })
+}
+
 fn rendered_terminal_grid_bounds(show_line_numbers: bool) -> gpui::Bounds<gpui::Pixels> {
     let mut cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2549,6 +2565,89 @@ fn assert_return_to_live_paints_latest_last_row(
             );
         });
     }
+}
+
+#[test]
+fn surface_cursor_tracks_action_link_modifiers_and_selection() {
+    let root = crate::test_support::TestConfigDir::new("zzclawterm-action-link-surface-cursor");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = crate::features::test_support::app_with_visible_local_session(
+        &mut cx,
+        root.path(),
+        "session",
+    );
+    let surface = cx.update_entity(&app, |app, cx| {
+        app.terminal.menus.action_link_hover.set_matched(true);
+        app.terminal.menus.action_link_tooltip = Some(crate::models::ActionLinkTooltipState {
+            session_id: "session".to_string(),
+            x: px(10.),
+            y: px(20.),
+            kind_label: "URL".to_string(),
+            value: "https://example.com".to_string(),
+            default_action_label: "Open".to_string(),
+            default_action_preview: "https://example.com".to_string(),
+            has_more_actions: false,
+            match_key: "url|https://example.com|0|19".to_string(),
+        });
+        app.sync_terminal_surface_paint("session", cx);
+        app.ensure_terminal_surface("session", cx)
+    });
+    let view_surface = surface.clone();
+    let (_, vcx) = cx.add_window_view(move |_, _| TerminalSurfaceLayoutTestView {
+        surface: view_surface,
+        mounted: false,
+    });
+
+    assert_eq!(
+        terminal_surface_mouse_cursor(vcx, &surface),
+        Some(gpui::CursorStyle::IBeam),
+        "ordinary hover keeps the text cursor even with its preview visible"
+    );
+    for modifiers in [
+        gpui::Modifiers::control(),
+        gpui::Modifiers::command(),
+        gpui::Modifiers::alt(),
+    ] {
+        app.update(vcx, |app, cx| {
+            app.update_action_link_modifiers(modifiers, cx);
+        });
+        assert_eq!(
+            terminal_surface_mouse_cursor(vcx, &surface),
+            Some(gpui::CursorStyle::PointingHand)
+        );
+        app.update(vcx, |app, cx| {
+            app.update_action_link_modifiers(gpui::Modifiers::default(), cx);
+        });
+        assert_eq!(
+            terminal_surface_mouse_cursor(vcx, &surface),
+            Some(gpui::CursorStyle::IBeam)
+        );
+    }
+
+    app.update(vcx, |app, cx| {
+        app.update_action_link_modifiers(gpui::Modifiers::control(), cx);
+        app.terminal.selection.dragging = true;
+    });
+    assert_eq!(
+        terminal_surface_mouse_cursor(vcx, &surface),
+        Some(gpui::CursorStyle::IBeam)
+    );
+    app.update(vcx, |app, _| {
+        app.terminal.selection.dragging = false;
+    });
+    assert_eq!(
+        terminal_surface_mouse_cursor(vcx, &surface),
+        Some(gpui::CursorStyle::PointingHand)
+    );
+    app.update(vcx, |app, cx| {
+        app.clear_action_link_tooltip(cx);
+    });
+    assert_eq!(
+        terminal_surface_mouse_cursor(vcx, &surface),
+        Some(gpui::CursorStyle::IBeam),
+        "leaving the link clears the pointer even while Ctrl is held"
+    );
 }
 
 #[test]

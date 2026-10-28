@@ -2804,6 +2804,14 @@ impl Render for TerminalSurface {
         let surface = cx.entity();
         let session_id = self.session_id.clone();
         let is_active = self.is_active;
+        let action_link_cursor_pointer = is_active
+            && app.as_ref().is_some_and(|app| {
+                let app = app.read(cx);
+                app.terminal
+                    .menus
+                    .action_link_hover
+                    .cursor_pointer(app.terminal.selection.dragging)
+            });
         let zebra_stripes_visible = self.zebra_stripes_enabled
             && !self.protocol_state.alternate_screen
             && !self.protocol_state.mouse_reporting;
@@ -2982,9 +2990,11 @@ impl Render for TerminalSurface {
             .text_color(rgb(palette.terminal_fg))
             .font(surface_font)
             .text_size(px(self.font_size))
-            .when(!self.protocol_state.mouse_reporting, |this| {
-                this.cursor_text()
-            })
+            .when(action_link_cursor_pointer, |this| this.cursor_pointer())
+            .when(
+                !self.protocol_state.mouse_reporting && !action_link_cursor_pointer,
+                |this| this.cursor_text(),
+            )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 this.handle_scroll_wheel(event, cx);
             }))

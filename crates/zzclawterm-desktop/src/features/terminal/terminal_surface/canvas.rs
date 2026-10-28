@@ -836,7 +836,12 @@ impl ZzClawTermApp {
                                     |this| this.cursor_text(),
                                 )
                                 .when(
-                                    is_active && self.terminal.menus.action_link_tooltip.is_some(),
+                                    is_active
+                                        && self
+                                            .terminal
+                                            .menus
+                                            .action_link_hover
+                                            .cursor_pointer(self.terminal.selection.dragging),
                                     |this| this.cursor_pointer(),
                                 )
                                 .pl(px(self.terminal_content_insets().left))
