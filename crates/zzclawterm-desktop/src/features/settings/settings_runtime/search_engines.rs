@@ -180,13 +180,43 @@ impl ZzClawTermApp {
         command: String,
         cx: &mut Context<Self>,
     ) {
-        let mut bytes = command.into_bytes();
-        if !bytes.ends_with(b"\n") {
-            bytes.push(b'\n');
-        }
-        if self.send_terminal_input(bytes, cx) {
+        if self.active_terminal_uses_alternate_screen() {
             self.shell
-                .set_status("action link command sent".to_string());
+                .set_status("interactive program active; action link command not sent".to_string());
+            cx.notify();
+            return;
+        }
+        let blocked_status = match self.terminal.action_link_input() {
+            None => Some("terminal input state is unavailable; action link command not sent"),
+            Some((input, phase))
+                if phase != zzclawterm_core::terminal::editing::EditPhase::Ready
+                    || input.desynced
+                    || input.line_rewrite_required
+                    || input.multiline
+                    || input.paste_mode
+                    || input.cursor > input.value.len()
+                    || !input.value.is_char_boundary(input.cursor) =>
+            {
+                Some("terminal input state is unavailable; action link command not sent")
+            }
+            Some((input, _)) if !input.value.is_empty() => {
+                Some("terminal input is not empty; action link command not sent")
+            }
+            Some(_) => None,
+        };
+        if let Some(status) = blocked_status {
+            self.shell.set_status(status.to_string());
+            cx.notify();
+            return;
+        }
+        let bytes = command.into_bytes();
+        let Some(session_id) = self.session.active_id_owned() else {
+            return;
+        };
+        if self.send_terminal_input_to_session(session_id, bytes.clone(), cx) {
+            self.note_shell_editing_input(&bytes, cx);
+            self.shell
+                .set_status("action link command filled; press Enter to execute".to_string());
             cx.notify();
         }
     }

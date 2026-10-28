@@ -2346,7 +2346,7 @@
     "keywordHighlightLogicalLinesDesc": "Keywords match continuously across automatic line wraps, but never across explicit line breaks.",
     "shortcutConflictMessage": "Shortcut conflicts with %{shortcut}",
     "actionLinks": "Action Links",
-    "actionLinksDesc": "Recognize patterns (IP, archive, host:port, path) in terminal output. Ctrl/Cmd+Click to run the default command. Alt+Click to show all actions.",
+    "actionLinksDesc": "Recognize patterns (IP, archive, host:port, path) in terminal output. Ctrl/Cmd+Click fills the default command in the current session without executing it. Alt+Click shows all actions.",
     "actionLinksMatcherArchive": "Archive File",
     "actionLinksMatcherArchiveDesc": "extract, list contents",
     "actionLinksMatcherHostPort": "Host:Port",

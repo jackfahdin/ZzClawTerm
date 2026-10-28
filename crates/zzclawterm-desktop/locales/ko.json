@@ -2353,7 +2353,7 @@
     "keywordHighlightLogicalLinesDesc": "키워드는 자동 줄 바꿈에 걸쳐 일치하지만 명시적인 개행은 넘지 않습니다.",
     "shortcutConflictMessage": "단축키가 %{shortcut}와 충돌합니다",
     "actionLinks": "액션 링크",
-    "actionLinksDesc": "터미널 출력에서 패턴(IP, 압축 파일, 호스트:포트, 경로)을 인식합니다. Ctrl/Cmd+클릭으로 기본 명령을 삽입하고, Alt+클릭으로 모든 작업을 표시합니다.",
+    "actionLinksDesc": "터미널 출력에서 패턴(IP, 압축 파일, 호스트:포트, 경로)을 인식합니다. Ctrl/Cmd+클릭으로 현재 세션에 기본 명령을 실행하지 않고 입력하고, Alt+클릭으로 모든 작업을 표시합니다.",
     "actionLinksMatcherArchive": "압축 파일",
     "actionLinksMatcherArchiveDesc": "압축 해제, 내용 목록",
     "actionLinksMatcherHostPort": "호스트:포트",

@@ -1809,6 +1809,145 @@ fn sync_paste_encodes_each_live_target_and_stops_when_primary_cannot_encode() {
 }
 
 #[test]
+fn action_link_command_fills_without_executing_or_broadcasting() {
+    let root = TestConfigDir::new("zzclawterm-action-link-fill-only");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (manager, ids) = cx.update_entity(&app, |app, _| {
+        let manager = app.session.manager_handle();
+        let metadata = app.session.metadata("fixture").unwrap().clone();
+        let mut ids = Vec::new();
+        app.sync_input.create_group();
+        for _ in 0..2 {
+            let config = TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port,
+                raw_tcp: true,
+                ..TelnetSessionConfig::default()
+            };
+            let info = manager.create_telnet_session(config.clone()).unwrap();
+            let mut metadata = metadata.clone();
+            metadata.launch_config = SessionLaunchConfig::Telnet(config);
+            app.session.register_session_metadata(&info.id, metadata);
+            app.terminal
+                .seed_session_view(info.id.clone(), String::new(), "UTF-8");
+            app.sync_input.toggle_selected_session(info.id.clone());
+            ids.push(info.id);
+        }
+        app.session.select_active_session(&ids[0]);
+        app.terminal.editing.state_mut().model.phase =
+            zzclawterm_core::terminal::editing::EditPhase::Ready;
+        (manager, ids)
+    });
+    let mut streams = (0..2)
+        .map(|_| {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+        })
+        .collect::<Vec<_>>();
+    cx.update_entity(&app, |app, cx| {
+        assert_eq!(app.sync_peer_session_ids(&ids[0]), vec![ids[1].clone()]);
+        app.execute_action_link_command("echo action".into(), cx);
+        assert_eq!(app.terminal.editing.predicted_input().value, "echo action");
+        assert_eq!(app.session.command_history_for(&ids[0]), None);
+        app.execute_action_link_command("echo duplicate".into(), cx);
+        assert_eq!(app.terminal.editing.predicted_input().value, "echo action");
+        assert!(app.send_terminal_input(b"echo normal\n".to_vec(), cx));
+        for id in &ids {
+            app.write_session_protocol_response(id, b"END").unwrap();
+        }
+    });
+    for (stream, expected) in streams.iter_mut().zip([
+        b"echo actionecho normal\rEND".as_slice(),
+        b"echo normal\rEND".as_slice(),
+    ]) {
+        let mut actual = vec![0; expected.len()];
+        stream.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+    for id in ids {
+        manager.close(&id).unwrap();
+    }
+}
+
+#[test]
+fn action_link_command_preserves_existing_or_unreliable_input_and_blocks_alternate_screen() {
+    let root = TestConfigDir::new("zzclawterm-action-link-fill-guards");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "fixture");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (manager, id) = cx.update_entity(&app, |app, _| {
+        let manager = app.session.manager_handle();
+        let metadata = app.session.metadata("fixture").unwrap().clone();
+        let config = TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port,
+            raw_tcp: true,
+            ..TelnetSessionConfig::default()
+        };
+        let info = manager.create_telnet_session(config.clone()).unwrap();
+        let mut metadata = metadata.clone();
+        metadata.launch_config = SessionLaunchConfig::Telnet(config);
+        app.session.register_session_metadata(&info.id, metadata);
+        app.terminal
+            .seed_session_view(info.id.clone(), String::new(), "UTF-8");
+        app.session.select_active_session(&info.id);
+        (manager, info.id)
+    });
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    cx.update_entity(&app, |app, cx| {
+        let state = app.terminal.editing.state_mut();
+        state.model.input = zzclawterm_core::terminal::input_tracker::TerminalInputState {
+            value: "git status".into(),
+            cursor: 10,
+            ..Default::default()
+        };
+        state.model.phase = zzclawterm_core::terminal::editing::EditPhase::Ready;
+        app.execute_action_link_command("echo action".into(), cx);
+        assert_eq!(app.terminal.editing.predicted_input().value, "git status");
+        app.write_session_protocol_response(&id, b"END").unwrap();
+
+        let state = app.terminal.editing.state_mut();
+        state.model.clear_input();
+        state.model.input.desynced = true;
+        state.model.phase = zzclawterm_core::terminal::editing::EditPhase::Ready;
+        app.execute_action_link_command("echo action".into(), cx);
+        assert!(app.terminal.editing.predicted_input().value.is_empty());
+        app.write_session_protocol_response(&id, b"END").unwrap();
+
+        let state = app.terminal.editing.state_mut();
+        state.model.clear_input();
+        state.model.phase = zzclawterm_core::terminal::editing::EditPhase::Ready;
+        app.terminal
+            .view
+            .views
+            .get_mut(&id)
+            .unwrap()
+            .protocol_state
+            .alternate_screen = true;
+        app.execute_action_link_command("echo action".into(), cx);
+        assert!(app.shell.status().contains("interactive program"));
+        assert!(app.terminal.editing.predicted_input().value.is_empty());
+        app.write_session_protocol_response(&id, b"END").unwrap();
+    });
+    let mut actual = [0; 9];
+    stream.read_exact(&mut actual).unwrap();
+    assert_eq!(&actual, b"ENDENDEND");
+    manager.close(&id).unwrap();
+}
+
+#[test]
 fn recording_sensitive_prompts_are_session_local_for_sync_keyboard_paste_and_raw_input() {
     use zzclawterm_transport::{
         ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,

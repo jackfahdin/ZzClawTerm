@@ -2353,7 +2353,7 @@
     "keywordHighlightLogicalLinesDesc": "關鍵字會跨自動折行連續比對，但不會跨實際換行比對。",
     "shortcutConflictMessage": "快捷鍵與 %{shortcut} 衝突",
     "actionLinks": "快捷動作",
-    "actionLinksDesc": "識別終端輸出中的 IP、壓縮包、host:port 和路徑，並提供快捷操作。Ctrl/Cmd + 單擊填入預設命令，Alt + 單擊檢視所有動作。",
+    "actionLinksDesc": "識別終端輸出中的 IP、壓縮包、host:port 和路徑。Ctrl/Cmd + 單擊僅在目前工作階段填入預設命令，不立即執行；Alt + 單擊檢視所有動作。",
     "actionLinksMatcherArchive": "壓縮檔案",
     "actionLinksMatcherArchiveDesc": "解壓、檢視內容",
     "actionLinksMatcherHostPort": "Host:Port",

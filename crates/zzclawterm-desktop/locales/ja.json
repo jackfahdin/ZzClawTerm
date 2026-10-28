@@ -2353,7 +2353,7 @@
     "keywordHighlightLogicalLinesDesc": "キーワードは自動折り返しをまたいで一致しますが、明示的な改行はまたぎません。",
     "shortcutConflictMessage": "ショートカットが %{shortcut} と競合しています",
     "actionLinks": "アクションリンク",
-    "actionLinksDesc": "ターミナル出力内のパターン（IP、アーカイブ、host:port、パス）を認識します。Ctrl/Cmd+クリックで既定のコマンドを実行し、Alt+クリックですべてのアクションを表示します。",
+    "actionLinksDesc": "ターミナル出力内のパターン（IP、アーカイブ、host:port、パス）を認識します。Ctrl/Cmd+クリックで現在のセッションに既定のコマンドを実行せずに入力し、Alt+クリックですべてのアクションを表示します。",
     "actionLinksMatcherArchive": "アーカイブファイル",
     "actionLinksMatcherArchiveDesc": "展開、内容の一覧表示",
     "actionLinksMatcherHostPort": "Host:Port",

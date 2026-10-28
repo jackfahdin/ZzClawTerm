@@ -2353,7 +2353,7 @@
     "keywordHighlightLogicalLinesDesc": "Les mots-clés sont reconnus à travers les retours visuels automatiques, mais pas à travers les sauts de ligne explicites.",
     "shortcutConflictMessage": "Le raccourci entre en conflit avec %{shortcut}",
     "actionLinks": "Liens d'action",
-    "actionLinksDesc": "Reconnaître des motifs (IP, archive, hôte:port, chemin) dans la sortie du terminal. Ctrl/Cmd+clic pour exécuter la commande par défaut. Alt+clic pour afficher toutes les actions.",
+    "actionLinksDesc": "Reconnaître des motifs (IP, archive, hôte:port, chemin) dans la sortie du terminal. Ctrl/Cmd+clic insère la commande par défaut dans la session actuelle sans l'exécuter. Alt+clic affiche toutes les actions.",
     "actionLinksMatcherArchive": "Fichier d'archive",
     "actionLinksMatcherArchiveDesc": "extraire, lister le contenu",
     "actionLinksMatcherHostPort": "Hôte:Port",

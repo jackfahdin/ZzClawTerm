@@ -134,6 +134,17 @@ impl TerminalEditingState {
 }
 
 impl super::state::TerminalFeatureState {
+    pub(in crate::features) fn action_link_input(
+        &self,
+    ) -> Option<(
+        &TerminalInputState,
+        zzclawterm_core::terminal::editing::EditPhase,
+    )> {
+        self.editing
+            .state()
+            .map(|state| (&state.model.input, state.model.phase))
+    }
+
     pub(in crate::features) fn activate_shell_editing_session(&mut self, session_id: &str) {
         self.editing.activate(session_id);
     }

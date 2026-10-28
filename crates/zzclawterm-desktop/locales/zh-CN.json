@@ -2346,7 +2346,7 @@
     "keywordHighlightLogicalLinesDesc": "关键词会跨自动折行连续匹配，但不会跨真实换行匹配。",
     "shortcutConflictMessage": "快捷键与 %{shortcut} 冲突",
     "actionLinks": "快捷动作",
-    "actionLinksDesc": "识别终端输出中的 IP、压缩包、host:port 和路径，并提供快捷操作。Ctrl/Cmd + 单击执行默认动作，Alt + 单击查看所有动作。",
+    "actionLinksDesc": "识别终端输出中的 IP、压缩包、host:port 和路径。Ctrl/Cmd + 单击仅在当前会话填入默认命令，不立即执行；Alt + 单击查看所有动作。",
     "actionLinksMatcherArchive": "压缩文件",
     "actionLinksMatcherArchiveDesc": "解压、查看内容",
     "actionLinksMatcherHostPort": "Host:Port",
