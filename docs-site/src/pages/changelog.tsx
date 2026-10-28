@@ -35,6 +35,19 @@ function renderItem(item: string) {
   );
 }
 
+function sectionVisual(title: string) {
+  if (title === '新增' || title === 'Added') {
+    return {icon: '✨', className: 'sectionCard--added'};
+  }
+  if (title === '变更' || title === 'Changed') {
+    return {icon: '🛠️', className: 'sectionCard--changed'};
+  }
+  if (title === '修复' || title === 'Fixed') {
+    return {icon: '🐛', className: 'sectionCard--fixed'};
+  }
+  return {icon: '•', className: 'sectionCard--other'};
+}
+
 export default function ChangelogPage(): React.ReactElement {
   const {
     i18n: {currentLocale},
@@ -67,7 +80,7 @@ export default function ChangelogPage(): React.ReactElement {
         <section className={styles.timelineSection}>
           <div className="container">
             <div className={styles.timeline}>
-              {changelogReleases.map((release) => {
+              {changelogReleases.map((release, releaseIndex) => {
                 const {tag, date} = formatVersionLabel(release.version);
 
                 return (
@@ -79,23 +92,36 @@ export default function ChangelogPage(): React.ReactElement {
                         </Heading>
                         {date ? <p className={styles.releaseDate}>{date}</p> : null}
                       </div>
+                      {releaseIndex === 0 ? (
+                        <span className={styles.latestBadge}>
+                          {currentLocale === 'zh-CN' ? '最新版本' : 'Latest'}
+                        </span>
+                      ) : null}
                     </div>
 
                     <div className={styles.sectionList}>
-                      {release.sections.map((section) => (
-                        <section key={`${release.version}-${section.title}`} className={styles.sectionCard}>
-                          <Heading as="h3" className={styles.sectionTitle}>
-                            {section.title}
-                          </Heading>
-                          <ul className={styles.itemList}>
-                            {section.items.map((item) => (
-                              <li key={item} className={styles.item}>
-                                {renderItem(item)}
-                              </li>
-                            ))}
-                          </ul>
-                        </section>
-                      ))}
+                      {release.sections.map((section) => {
+                        const visual = sectionVisual(section.title);
+                        return (
+                          <section
+                            key={`${release.version}-${section.title}`}
+                            className={`${styles.sectionCard} ${styles[visual.className]}`}>
+                            <Heading as="h3" className={styles.sectionTitle}>
+                              <span className={styles.sectionIcon} aria-hidden="true">
+                                {visual.icon}
+                              </span>
+                              {section.title}
+                            </Heading>
+                            <ul className={styles.itemList}>
+                              {section.items.map((item) => (
+                                <li key={item} className={styles.item}>
+                                  {renderItem(item)}
+                                </li>
+                              ))}
+                            </ul>
+                          </section>
+                        );
+                      })}
                     </div>
                   </article>
                 );
