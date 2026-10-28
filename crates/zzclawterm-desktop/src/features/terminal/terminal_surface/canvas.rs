@@ -712,14 +712,7 @@ impl ZzClawTermApp {
             .unwrap_or("Local");
         let (drop_title, drop_hint) =
             zzclawterm_core::terminal_drop_overlay_copy(drop_session_kind);
-        let context_menu_enabled = !session_id.is_empty()
-            && self
-                .settings
-                .summary()
-                .interaction_terminal_right_click_action
-                == zzclawterm_core::TerminalRightClickAction::Menu
-            && (!terminal_mouse_reporting
-                || self.settings.summary().interaction_mouse_events_require_alt);
+        let context_menu_enabled = !session_id.is_empty();
         let context_menu_app = cx.entity().downgrade();
         let context_menu_session_id = session_id.clone();
 
@@ -914,6 +907,10 @@ impl ZzClawTermApp {
                                         move |this, event: &gpui::MouseDownEvent, window, cx| {
                                             this.activate_workspace_pane(session_id.clone(), cx);
                                             window.focus(&this.terminal.input.focus, cx);
+                                            if event.modifiers.control || event.modifiers.platform {
+                                                this.prepare_terminal_context_menu(cx);
+                                                return;
+                                            }
                                             if let Some(cell) = this
                                                 .point_to_terminal_cell_for_session(
                                                     Some(session_id.as_str()),
@@ -944,13 +941,15 @@ impl ZzClawTermApp {
                                                 zzclawterm_core::TerminalRightClickAction::Paste => {
                                                     this.paste_from_clipboard(window, cx);
                                                     this.clear_terminal_selection(cx);
+                                                    cx.stop_propagation();
                                                 }
                                                 zzclawterm_core::TerminalRightClickAction::Menu => {
                                                     this.prepare_terminal_context_menu(cx);
                                                 }
-                                                zzclawterm_core::TerminalRightClickAction::None => {}
+                                                zzclawterm_core::TerminalRightClickAction::None => {
+                                                    cx.stop_propagation();
+                                                }
                                             }
-                                            cx.stop_propagation();
                                         },
                                     )
                                 })
@@ -1286,7 +1285,8 @@ impl ZzClawTermApp {
                             },
                         )
                         .min_width(px(200.))
-                        .enabled(context_menu_enabled),
+                        .enabled(context_menu_enabled)
+                        .bubble_right_click(),
                     )
                     .when(is_active && self.terminal.search.open, |this| {
                         this.child(self.terminal_search_bar(cx))
@@ -1512,5 +1512,247 @@ mod tests {
         assert!(!terminal_line_decorations_needed(
             false, false, false, false
         ));
+    }
+
+    use std::path::Path;
+
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        Render, TestAppContext, VisualTestContext, Window, div, prelude::*, px,
+    };
+    use zzclawterm_core::TerminalRightClickAction;
+    use zzclawterm_ui::zzclaw_root;
+
+    use crate::features::ZzClawTermApp;
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::TerminalProtocolState;
+    use crate::test_support::{TestAppCleanup, TestConfigDir};
+
+    struct TerminalCanvasFixture {
+        app: Entity<ZzClawTermApp>,
+    }
+
+    impl Render for TerminalCanvasFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let canvas = self.app.update(cx, |app, cx| {
+                app.terminal_canvas_for("session".to_string(), cx)
+                    .into_any_element()
+            });
+            div().w(px(800.)).h(px(600.)).child(canvas)
+        }
+    }
+
+    fn terminal_canvas_test_window<'a>(
+        cx: &'a mut TestAppContext,
+        root: &Path,
+        action: TerminalRightClickAction,
+        mouse_reporting: bool,
+    ) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
+        let app = app_with_visible_local_session(cx, root, "session");
+        app.update(cx, |app, cx| {
+            app.sync_component_theme(cx);
+            let mut settings = app.settings.summary().clone();
+            settings.interaction_terminal_right_click_action = action;
+            settings.interaction_mouse_events_require_alt = false;
+            app.settings.replace_summary(settings);
+            app.terminal
+                .view
+                .views
+                .get_mut("session")
+                .expect("terminal fixture view")
+                .protocol_state = TerminalProtocolState {
+                mouse_reporting,
+                ..TerminalProtocolState::default()
+            };
+        });
+        let fixture_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+            let fixture = cx.new(|_| TerminalCanvasFixture { app: fixture_app });
+            zzclaw_root(fixture, window, cx)
+        });
+        draw_terminal_canvas(vcx);
+        (app, vcx)
+    }
+
+    fn draw_terminal_canvas(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    fn terminal_right_click(cx: &mut VisualTestContext, modifiers: Modifiers) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: gpui::point(px(100.), px(100.)),
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        });
+        draw_terminal_canvas(cx);
+    }
+
+    fn write_multiline_clipboard(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("first\nsecond".into()));
+        });
+    }
+
+    fn open_find_using_context_menu(app: &Entity<ZzClawTermApp>, cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("down down enter");
+        draw_terminal_canvas(cx);
+        assert!(app.read_with(cx, |app, _| app.terminal.search.open));
+    }
+
+    #[test]
+    fn paste_setting_plain_right_click_still_pastes_without_opening_menu() {
+        let root = TestConfigDir::new("zzclawterm-terminal-plain-right-paste");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let (app, vcx) = terminal_canvas_test_window(
+            &mut cx,
+            root.path(),
+            TerminalRightClickAction::Paste,
+            false,
+        );
+        write_multiline_clipboard(vcx);
+
+        terminal_right_click(vcx, Modifiers::default());
+
+        assert_eq!(
+            app.read_with(vcx, |app, _| app.shell.status().to_string()),
+            "multi-line paste confirmation opened"
+        );
+        vcx.simulate_keystrokes("down down enter");
+        draw_terminal_canvas(vcx);
+        assert!(!app.read_with(vcx, |app, _| app.terminal.search.open));
+    }
+
+    #[test]
+    fn paste_setting_ctrl_or_cmd_right_click_opens_menu_instead_of_pasting() {
+        for (name, modifiers) in [
+            ("ctrl", Modifiers::control()),
+            ("cmd", Modifiers::command()),
+        ] {
+            let root = TestConfigDir::new(&format!("zzclawterm-terminal-{name}-right-menu"));
+            let mut cx = TestAppContext::single();
+            let _cleanup = TestAppCleanup::new(&cx);
+            let (app, vcx) = terminal_canvas_test_window(
+                &mut cx,
+                root.path(),
+                TerminalRightClickAction::Paste,
+                false,
+            );
+            write_multiline_clipboard(vcx);
+
+            terminal_right_click(vcx, modifiers);
+
+            assert_eq!(
+                app.read_with(vcx, |app, _| app.shell.status().to_string()),
+                "terminal context menu opened",
+                "{name}"
+            );
+            open_find_using_context_menu(&app, vcx);
+        }
+    }
+
+    #[test]
+    fn none_setting_plain_right_click_does_nothing() {
+        let root = TestConfigDir::new("zzclawterm-terminal-plain-right-none");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let (app, vcx) = terminal_canvas_test_window(
+            &mut cx,
+            root.path(),
+            TerminalRightClickAction::None,
+            false,
+        );
+        write_multiline_clipboard(vcx);
+        let initial_status = app.read_with(vcx, |app, _| app.shell.status().to_string());
+
+        terminal_right_click(vcx, Modifiers::default());
+
+        assert_eq!(
+            app.read_with(vcx, |app, _| app.shell.status().to_string()),
+            initial_status
+        );
+        vcx.simulate_keystrokes("down down enter");
+        draw_terminal_canvas(vcx);
+        assert!(!app.read_with(vcx, |app, _| app.terminal.search.open));
+    }
+
+    #[test]
+    fn none_setting_ctrl_or_cmd_right_click_opens_menu() {
+        for (name, modifiers) in [
+            ("ctrl", Modifiers::control()),
+            ("cmd", Modifiers::command()),
+        ] {
+            let root = TestConfigDir::new(&format!("zzclawterm-terminal-none-{name}-right-menu"));
+            let mut cx = TestAppContext::single();
+            let _cleanup = TestAppCleanup::new(&cx);
+            let (app, vcx) = terminal_canvas_test_window(
+                &mut cx,
+                root.path(),
+                TerminalRightClickAction::None,
+                false,
+            );
+            write_multiline_clipboard(vcx);
+
+            terminal_right_click(vcx, modifiers);
+
+            assert_eq!(
+                app.read_with(vcx, |app, _| app.shell.status().to_string()),
+                "terminal context menu opened",
+                "{name}"
+            );
+            open_find_using_context_menu(&app, vcx);
+        }
+    }
+
+    #[test]
+    fn menu_setting_plain_right_click_still_opens_menu() {
+        let root = TestConfigDir::new("zzclawterm-terminal-plain-right-menu");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let (app, vcx) = terminal_canvas_test_window(
+            &mut cx,
+            root.path(),
+            TerminalRightClickAction::Menu,
+            false,
+        );
+
+        terminal_right_click(vcx, Modifiers::default());
+
+        assert_eq!(
+            app.read_with(vcx, |app, _| app.shell.status().to_string()),
+            "terminal context menu opened"
+        );
+        open_find_using_context_menu(&app, vcx);
+    }
+
+    #[test]
+    fn ctrl_right_click_opens_menu_without_sending_mouse_report() {
+        let root = TestConfigDir::new("zzclawterm-terminal-ctrl-right-protocol");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let (app, vcx) = terminal_canvas_test_window(
+            &mut cx,
+            root.path(),
+            TerminalRightClickAction::Paste,
+            true,
+        );
+        write_multiline_clipboard(vcx);
+
+        terminal_right_click(vcx, Modifiers::control());
+
+        assert_eq!(
+            app.read_with(vcx, |app, _| app.shell.status().to_string()),
+            "terminal context menu opened"
+        );
+        assert!(app.read_with(vcx, |app, _| {
+            app.terminal.selection.mouse_report_button.is_none()
+        }));
+        open_find_using_context_menu(&app, vcx);
     }
 }

@@ -2868,7 +2868,7 @@
     "rightClickPaste": "右鍵貼上",
     "rightClickPasteDesc": "在終端中右鍵點選時從剪貼簿貼上文字。",
     "terminalRightClickAction": "終端右鍵操作",
-    "terminalRightClickActionDesc": "選擇在終端中按右鍵時執行的操作。",
+    "terminalRightClickActionDesc": "選擇在終端中按右鍵時執行的操作。Ctrl/Cmd+右鍵始終開啟選單。",
     "terminalRightClickNone": "無操作",
     "terminalRightClickMenu": "選單",
     "terminalRightClickPaste": "貼上",

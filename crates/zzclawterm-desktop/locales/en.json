@@ -2861,7 +2861,7 @@
     "rightClickPaste": "Right-click Paste",
     "rightClickPasteDesc": "Paste clipboard text on terminal right-click.",
     "terminalRightClickAction": "Terminal right-click",
-    "terminalRightClickActionDesc": "Choose what right-click does in a terminal.",
+    "terminalRightClickActionDesc": "Choose what right-click does in a terminal. Ctrl/Cmd+right-click always opens the menu.",
     "terminalRightClickNone": "None",
     "terminalRightClickMenu": "Menu",
     "terminalRightClickPaste": "Paste",

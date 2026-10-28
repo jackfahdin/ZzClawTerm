@@ -2861,7 +2861,7 @@
     "rightClickPaste": "右键粘贴",
     "rightClickPasteDesc": "在终端中右键点击时从剪贴板粘贴文本。",
     "terminalRightClickAction": "终端右键操作",
-    "terminalRightClickActionDesc": "选择在终端中右键点击时执行的操作。",
+    "terminalRightClickActionDesc": "选择在终端中右键点击时执行的操作。Ctrl/Cmd+右键始终打开菜单。",
     "terminalRightClickNone": "无操作",
     "terminalRightClickMenu": "菜单",
     "terminalRightClickPaste": "粘贴",

@@ -2868,7 +2868,7 @@
     "rightClickPaste": "Coller par clic droit",
     "rightClickPasteDesc": "Coller le texte du presse-papiers par un clic droit dans le terminal.",
     "terminalRightClickAction": "Clic droit du terminal",
-    "terminalRightClickActionDesc": "Choisir l'action du clic droit dans le terminal.",
+    "terminalRightClickActionDesc": "Choisir l'action du clic droit dans le terminal. Ctrl/Cmd+clic droit ouvre toujours le menu.",
     "terminalRightClickNone": "Aucune action",
     "terminalRightClickMenu": "Menu",
     "terminalRightClickPaste": "Coller",

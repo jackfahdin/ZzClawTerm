@@ -2868,7 +2868,7 @@
     "rightClickPaste": "右クリックで貼り付け",
     "rightClickPasteDesc": "ターミナルの右クリックでクリップボードのテキストを貼り付けます。",
     "terminalRightClickAction": "ターミナルの右クリック",
-    "terminalRightClickActionDesc": "ターミナルでの右クリック動作を選択します。",
+    "terminalRightClickActionDesc": "ターミナルでの右クリック動作を選択します。Ctrl/Cmd+右クリックでは常にメニューを開きます。",
     "terminalRightClickNone": "何もしない",
     "terminalRightClickMenu": "メニュー",
     "terminalRightClickPaste": "貼り付け",

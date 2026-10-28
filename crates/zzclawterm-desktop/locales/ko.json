@@ -2868,7 +2868,7 @@
     "rightClickPaste": "우클릭 붙여넣기",
     "rightClickPasteDesc": "터미널을 우클릭하면 클립보드 텍스트를 붙여넣습니다.",
     "terminalRightClickAction": "터미널 우클릭",
-    "terminalRightClickActionDesc": "터미널에서 우클릭할 때 수행할 작업을 선택합니다.",
+    "terminalRightClickActionDesc": "터미널에서 우클릭할 때 수행할 작업을 선택합니다. Ctrl/Cmd+우클릭은 항상 메뉴를 엽니다.",
     "terminalRightClickNone": "동작 없음",
     "terminalRightClickMenu": "메뉴",
     "terminalRightClickPaste": "붙여넣기",

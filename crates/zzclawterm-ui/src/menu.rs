@@ -750,8 +750,8 @@ where
         self
     }
 
-    /// Let an input take focus before the menu records its dismissal target.
-    pub(crate) fn bubble_right_click(mut self) -> Self {
+    /// Let the trigger handle right-click before the menu records its dismissal target.
+    pub fn bubble_right_click(mut self) -> Self {
         self.capture_right_click = false;
         self
     }
