@@ -10,6 +10,25 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.2.0] - 2026-10-28',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream main (v2.0.0 and follow-up fixes): GPUI is now the upstream mainline, with custom AI request headers, WSL UNC working-directory browsing, cloud-sync caching and conflict handling, RDP clipboard improvements, window decoration preferences, sync history formatting, and more.',
+          '**terminal:** Action-link interactions: Ctrl/Cmd or Alt now shows a pointing hand over actionable links; Ctrl/Cmd+right-click always opens the terminal menu, even when right-click is set to paste.',
+        ],
+      },
+      {
+        title: 'Changed',
+        items: [
+          '**terminal:** Action-link commands now only fill the current session input line: they no longer execute automatically or fan out through synchronized input, and they are blocked by uncommitted input or interactive programs.',
+          '**docs:** The changelog page gains section icons, type-specific colors, a latest-release badge, and a highlighted latest card.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.1.6] - 2026-10-25',
     sections: [
       {
@@ -137,6 +156,25 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.2.0] - 2026-10-28',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 main（v2.0.0 及后续修复）：GPUI 主线正式化、AI 自定义请求头、WSL UNC 工作目录浏览、云同步缓存与冲突处理、RDP 剪贴板增强、窗口装饰设置、同步历史格式化等。',
+          '**terminal:** 快捷动作交互升级：Ctrl/Cmd 或 Alt 悬停显示手型光标；Ctrl/Cmd+右键始终打开终端菜单，即使普通右键设为粘贴。',
+        ],
+      },
+      {
+        title: '变更',
+        items: [
+          '**terminal:** 快捷动作命令默认仅填入当前会话命令行，不自动执行、不跟随同步输入广播；已有未提交输入或交互程序中不会误发。',
+          '**docs:** 更新日志页增加章节图标、类型配色、最新版本标识与卡片高亮。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.1.6] - 2026-10-25',
     sections: [
