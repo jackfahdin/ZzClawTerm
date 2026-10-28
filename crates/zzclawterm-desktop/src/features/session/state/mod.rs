@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::time::Instant;
 
-use gpui::{FocusHandle, UniformListScrollHandle};
+use gpui::{FocusHandle, ScrollHandle, UniformListScrollHandle, point, px};
 use zzclawterm_core::{AiExecutionProfile, SavedConnection};
 use zzclawterm_transport::{
     FileBrowserBackendKind, RemoteFileBackendPreferenceStore, RemoteFileService, SessionEvent,
@@ -176,6 +176,10 @@ pub(super) struct SessionDialogState {
     color_picker_focus: FocusHandle,
     session_info_open: bool,
     session_info_focus: FocusHandle,
+    session_info_offset: (f32, f32),
+    session_info_drag: Option<SessionInfoDrag>,
+    session_info_scroll: ScrollHandle,
+    session_info_dialog_height: f32,
     startup_command_open: bool,
     startup_command_action: StartupCommandAction,
     startup_command_draft: String,
@@ -192,6 +196,13 @@ pub(in crate::features) enum RenameSessionSubmission {
     Inactive,
     Empty,
     Ready { session_id: String, name: String },
+}
+
+/// Pointer and offset at the moment the session-info header was grabbed, so
+/// the dialog follows the pointer instead of jumping to it.
+struct SessionInfoDrag {
+    pointer: (f32, f32),
+    offset: (f32, f32),
 }
 
 pub(in crate::features) struct SessionDisconnectUpdate {
@@ -449,6 +460,10 @@ impl SessionFeatureState {
                 color_picker_focus: focus.color_picker,
                 session_info_open: false,
                 session_info_focus: focus.info,
+                session_info_offset: (0., 0.),
+                session_info_drag: None,
+                session_info_scroll: ScrollHandle::new(),
+                session_info_dialog_height: 0.,
                 startup_command_open: false,
                 startup_command_action: StartupCommandAction::Duplicate,
                 startup_command_draft: String::new(),
@@ -775,6 +790,54 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn dialog_session_info_focus(&self) -> &FocusHandle {
         self.dialogs.session_info_focus()
+    }
+
+    pub(in crate::features) fn dialog_session_info_offset(&self) -> (f32, f32) {
+        self.dialogs.session_info_offset()
+    }
+
+    pub(in crate::features) fn dialog_session_info_drag_active(&self) -> bool {
+        self.dialogs.session_info_drag_active()
+    }
+
+    pub(in crate::features) fn dialog_session_info_scroll(&self) -> ScrollHandle {
+        self.dialogs.session_info_scroll().clone()
+    }
+
+    pub(in crate::features) fn dialog_session_info_dialog_height(&self) -> f32 {
+        self.dialogs.session_info_dialog_height()
+    }
+
+    pub(in crate::features) fn dialog_set_session_info_dialog_height(&mut self, height: f32) {
+        self.dialogs.set_session_info_dialog_height(height);
+    }
+
+    pub(in crate::features) fn dialog_begin_session_info_drag(&mut self, pointer: (f32, f32)) {
+        self.dialogs.begin_session_info_drag(pointer);
+    }
+
+    pub(in crate::features) fn dialog_drag_session_info(
+        &mut self,
+        pointer: (f32, f32),
+        limits: (f32, f32),
+    ) -> bool {
+        self.dialogs.drag_session_info(pointer, limits)
+    }
+
+    pub(in crate::features) fn dialog_constrain_session_info(&mut self, limits: (f32, f32)) {
+        let offset = &mut self.dialogs.session_info_offset;
+        let next = (
+            offset.0.clamp(-limits.0, limits.0),
+            offset.1.clamp(-limits.1, limits.1),
+        );
+        if *offset != next {
+            *offset = next;
+            self.dialogs.session_info_drag = None;
+        }
+    }
+
+    pub(in crate::features) fn dialog_end_session_info_drag(&mut self) {
+        self.dialogs.end_session_info_drag();
     }
 
     pub(in crate::features) fn dialog_startup_command_draft(&self) -> &str {
@@ -2679,12 +2742,71 @@ impl SessionDialogState {
         &self.session_info_focus
     }
 
+    pub(in crate::features) fn session_info_offset(&self) -> (f32, f32) {
+        self.session_info_offset
+    }
+
+    pub(in crate::features) fn session_info_drag_active(&self) -> bool {
+        self.session_info_drag.is_some()
+    }
+
+    pub(in crate::features) fn session_info_scroll(&self) -> &ScrollHandle {
+        &self.session_info_scroll
+    }
+
+    pub(in crate::features) fn session_info_dialog_height(&self) -> f32 {
+        self.session_info_dialog_height
+    }
+
+    /// Measured during prepaint. Never notifies: drag limits are read at event
+    /// time, so a new measurement only needs to be stored, not painted.
+    pub(in crate::features) fn set_session_info_dialog_height(&mut self, height: f32) {
+        self.session_info_dialog_height = height.max(0.);
+    }
+
+    pub(in crate::features) fn begin_session_info_drag(&mut self, pointer: (f32, f32)) {
+        self.session_info_drag = Some(SessionInfoDrag {
+            pointer,
+            offset: self.session_info_offset,
+        });
+    }
+
+    pub(in crate::features) fn drag_session_info(
+        &mut self,
+        pointer: (f32, f32),
+        limits: (f32, f32),
+    ) -> bool {
+        let Some(drag) = &self.session_info_drag else {
+            return false;
+        };
+        let next = (
+            (drag.offset.0 + pointer.0 - drag.pointer.0).clamp(-limits.0, limits.0),
+            (drag.offset.1 + pointer.1 - drag.pointer.1).clamp(-limits.1, limits.1),
+        );
+        if next == self.session_info_offset {
+            return false;
+        }
+        self.session_info_offset = next;
+        true
+    }
+
+    pub(in crate::features) fn end_session_info_drag(&mut self) {
+        self.session_info_drag = None;
+    }
+
     pub(in crate::features) fn open_session_info(&mut self) {
         self.session_info_open = true;
+        self.session_info_offset = (0., 0.);
+        self.session_info_drag = None;
+        self.session_info_dialog_height = 0.;
+        self.session_info_scroll.set_offset(point(px(0.), px(0.)));
     }
 
     pub(in crate::features) fn close_session_info(&mut self) {
         self.session_info_open = false;
+        self.session_info_offset = (0., 0.);
+        self.session_info_drag = None;
+        self.session_info_dialog_height = 0.;
     }
 
     pub(in crate::features) fn startup_command_draft(&self) -> &str {

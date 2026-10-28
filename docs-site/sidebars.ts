@@ -9,6 +9,7 @@ const sidebars: SidebarsConfig = {
       label: '快速开始',
       items: [
         'getting-started/installation',
+        'getting-started/migration-v2',
         'getting-started/quick-start',
       ],
     },

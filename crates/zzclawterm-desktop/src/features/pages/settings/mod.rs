@@ -20,6 +20,10 @@ mod transfer;
 mod translation;
 mod workspace;
 
+// Row controls share one width regardless of their component type. Stacked
+// fields and toolbar controls take their width from their own containers.
+const SETTINGS_ROW_CONTROL_WIDTH_PX: f32 = 260.;
+
 impl ZzClawTermApp {
     pub(in crate::features) fn settings_view(
         &mut self,
@@ -116,9 +120,9 @@ pub(super) fn settings_form_row(
         )
         .child(
             div()
-                .flex_1()
+                .w(px(SETTINGS_ROW_CONTROL_WIDTH_PX))
+                .flex_shrink_0()
                 .min_w_0()
-                .min_w(px(220.))
                 .max_w_full()
                 .flex()
                 .items_center()
@@ -129,9 +133,9 @@ pub(super) fn settings_form_row(
 }
 
 /// Gives an input a definite width inside a content-sized settings row control slot.
-pub(super) fn settings_input_control(width: f32, input: impl IntoElement) -> impl IntoElement {
+pub(super) fn settings_input_control(input: impl IntoElement) -> gpui::Div {
     div()
-        .w(px(width))
+        .w(px(SETTINGS_ROW_CONTROL_WIDTH_PX))
         .max_w_full()
         .min_w_0()
         .flex()

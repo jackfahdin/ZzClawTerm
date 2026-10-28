@@ -97,6 +97,7 @@ impl Render for SettingsWindow {
                 Some("icons/settings.svg"),
                 self.chrome,
                 window,
+                cx,
                 move |_, window, cx| header_close(window, cx),
             ))
             .child(div().flex_1().min_h_0().overflow_hidden().child(content))
@@ -249,8 +250,8 @@ fn open_settings_window_now_from_app(app: Entity<ZzClawTermApp>, cx: &mut App) {
                 .as_ref()
                 .and_then(|controller| controller.upgrade())
             {
-                controller.update(cx, |controller, _| {
-                    controller.release_settings_owner(app.workspace_id)
+                controller.update(cx, |controller, cx| {
+                    controller.release_settings_owner(app.workspace_id, cx)
                 });
             }
             app.shell

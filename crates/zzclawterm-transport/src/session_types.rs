@@ -70,6 +70,7 @@ pub enum CleanupOperation {
     Wait,
     ReaderJoin,
     WriterJoin,
+    StartupFiles,
 }
 
 pub trait TerminalTransport: Send {

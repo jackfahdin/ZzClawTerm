@@ -467,13 +467,187 @@ pub fn file_browser_identity(kind: FileBrowserBackendKind, path: &str) -> String
             Some(parts) => format!("/{}", parts.join("/")),
             None => path.to_string(),
         },
-        FileBrowserBackendKind::Local if cfg!(windows) => path.replace('/', "\\").to_lowercase(),
+        FileBrowserBackendKind::Local if cfg!(windows) => {
+            let path = path.replace('/', "\\");
+            wsl_unc_identity(&path).unwrap_or_else(|| path.to_lowercase())
+        }
         FileBrowserBackendKind::Local => path.to_string(),
     }
 }
 
+// Host/share names use Windows semantics, but the guest path belongs to Linux.
+// Canonicalize both WSL aliases and the verbatim form returned by canonicalize.
+fn wsl_unc_identity(path: &str) -> Option<String> {
+    let unc = if path
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
+        &path[8..]
+    } else {
+        path.strip_prefix(r"\\")?
+    };
+    let (host, rest) = unc.split_once('\\')?;
+    if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
+        return None;
+    }
+    let (distro, guest) = rest.split_once('\\').unwrap_or((rest, ""));
+    if distro.is_empty() {
+        return None;
+    }
+    let mut identity = format!(r"\\wsl.localhost\{}", distro.to_lowercase());
+    // A share root with and without its final separator denotes the same root.
+    if !guest.is_empty() {
+        identity.push('\\');
+        identity.push_str(guest);
+    }
+    Some(identity)
+}
+
 pub fn file_browser_path_eq(kind: FileBrowserBackendKind, left: &str, right: &str) -> bool {
     file_browser_identity(kind, left) == file_browser_identity(kind, right)
+}
+
+/// The path namespace of the actual local launcher, not the host platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LocalShellPathStyle {
+    #[default]
+    Native,
+    Wsl,
+    Msys,
+}
+
+impl LocalShellPathStyle {
+    pub fn from_program(program: &str) -> Self {
+        let program = program.replace('\\', "/").to_ascii_lowercase();
+        let name = program.rsplit('/').next().unwrap_or(&program);
+        if matches!(name, "wsl" | "wsl.exe") {
+            Self::Wsl
+        } else if program
+            .split('/')
+            .any(|part| matches!(part, "git" | "msys64" | "msys32" | "msys2"))
+        {
+            Self::Msys
+        } else {
+            Self::Native
+        }
+    }
+}
+
+/// Map only paths belonging to the launcher's namespace. Call on Windows hosts
+/// at the file-browser boundary; retain the original cwd in session state.
+pub fn local_shell_cwd_to_browser_path(style: LocalShellPathStyle, path: &str) -> Option<String> {
+    match style {
+        LocalShellPathStyle::Wsl => {
+            valid_wsl_browser_cwd(path).then_some(())?;
+            let drive_path = path.strip_prefix("/mnt/")?;
+            if drive_path.as_bytes().get(1) == Some(&b':') {
+                return None;
+            }
+            windows_path_for_drive(drive_path)
+        }
+        LocalShellPathStyle::Msys => windows_path_for_drive(path.strip_prefix('/')?),
+        LocalShellPathStyle::Native => {
+            let rest = path.strip_prefix('/')?;
+            (rest.as_bytes().get(1) == Some(&b':')).then_some(())?;
+            windows_path_for_drive(rest)
+        }
+    }
+}
+
+fn windows_path_for_drive(path: &str) -> Option<String> {
+    let mut chars = path.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut remainder = chars.as_str();
+    if let Some(tail) = remainder.strip_prefix(':') {
+        remainder = tail;
+        if !remainder.is_empty() && !remainder.starts_with('/') {
+            return None;
+        }
+    } else if !remainder.is_empty() && !remainder.starts_with('/') {
+        return None;
+    }
+    let mut mapped = String::with_capacity(path.len() + 2);
+    mapped.push(drive.to_ascii_uppercase());
+    mapped.push_str(":\\");
+    mapped.push_str(
+        remainder
+            .strip_prefix('/')
+            .unwrap_or(remainder)
+            .replace('/', "\\")
+            .as_str(),
+    );
+    Some(mapped)
+}
+
+/// Map a WSL cwd that has no drive-letter form (`/mnt`, `/home`, ...) onto the
+/// `\\wsl.localhost\<distro>` namespace the Windows host can actually list.
+/// Validate before mapping so Windows cannot reshape a guest path into another
+/// directory. The drive-letter entry point applies the same validation.
+fn wsl_unc_browser_path(distro: &str, path: &str) -> Option<String> {
+    if !valid_windows_browser_component(distro) || !valid_wsl_browser_cwd(path) {
+        return None;
+    }
+    let rest = path.strip_prefix('/')?;
+    let mut mapped = String::with_capacity(distro.len() + path.len() + 16);
+    mapped.push_str(r"\\wsl.localhost\");
+    mapped.push_str(distro);
+    if !rest.is_empty() {
+        mapped.push('\\');
+        mapped.push_str(&rest.replace('/', "\\"));
+    }
+    Some(mapped)
+}
+
+fn valid_wsl_browser_cwd(path: &str) -> bool {
+    path.starts_with('/')
+        && path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .all(valid_windows_browser_component)
+}
+
+fn valid_windows_browser_component(component: &str) -> bool {
+    if component.is_empty()
+        || component.ends_with([' ', '.'])
+        || component
+            .chars()
+            .any(|ch| ch.is_control() || "<>:\"/\\|?*".contains(ch))
+    {
+        return false;
+    }
+    // Win32 also reserves device names when followed by an extension, and
+    // recognizes superscript digits in COM/LPT device names.
+    let stem = component.split('.').next().unwrap_or_default();
+    let stem = stem.trim_end_matches(' ').to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) && !["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
+}
+
+/// Drive-letter translation first, then the WSL UNC namespace for paths the
+/// drive mapping cannot represent. Callers on non-Windows hosts must keep the
+/// original cwd (`/mnt` and `/home` are ordinary directories there).
+pub fn local_shell_cwd_to_browser_path_with_distro(
+    style: LocalShellPathStyle,
+    path: &str,
+    wsl_distro: Option<&str>,
+) -> Option<String> {
+    match style {
+        LocalShellPathStyle::Wsl => local_shell_cwd_to_browser_path(style, path)
+            .or_else(|| wsl_unc_browser_path(wsl_distro.unwrap_or_default(), path)),
+        _ => local_shell_cwd_to_browser_path(style, path),
+    }
 }
 
 pub fn file_browser_path_is_root(kind: FileBrowserBackendKind, path: &str) -> bool {
@@ -491,9 +665,10 @@ pub fn valid_file_browser_child_name(kind: FileBrowserBackendKind, name: &str) -
 /// True when copying `source` onto `destination` would overwrite the source, nest a
 /// directory inside itself, or operate on a filesystem root.
 ///
-/// Identity is backend-aware: remote paths stay POSIX, local Windows paths are
-/// case-insensitive and accept both separators. Callers still have to compare
-/// endpoints separately — equal strings on different sessions are not the same file.
+/// Identity is backend-aware: remote and WSL guest paths preserve case; other
+/// local Windows paths are case-insensitive and accept both separators. Callers
+/// still have to compare endpoints separately — equal strings on different
+/// sessions are not the same file.
 pub fn file_browser_copy_destination_invalid(
     kind: FileBrowserBackendKind,
     source: &str,
@@ -552,13 +727,52 @@ fn posix_path_parts(path: &str) -> Option<Vec<&str>> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
-    use super::file_browser_identity;
     use super::{
-        FileBrowserBackendKind, file_browser_copy_destination_invalid, file_browser_join,
-        file_browser_name, file_browser_parent, file_browser_path_is_root, file_browser_root,
-        valid_file_browser_child_name,
+        FileBrowserBackendKind, LocalShellPathStyle, file_browser_copy_destination_invalid,
+        file_browser_join, file_browser_name, file_browser_parent, file_browser_path_is_root,
+        file_browser_root, local_shell_cwd_to_browser_path,
+        local_shell_cwd_to_browser_path_with_distro, valid_file_browser_child_name,
     };
+    #[cfg(windows)]
+    use super::{file_browser_identity, file_browser_path_eq};
+
+    #[test]
+    fn local_shell_namespaces_do_not_alias_linux_directories_to_windows_drives() {
+        for path in ["/d", "/d/Projects", "/d:/Projects", "/mnt/d:/Projects"] {
+            assert_eq!(
+                local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, path),
+                None
+            );
+        }
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/mnt/d/Projects"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Native, "/d/Projects"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/d:relative"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/d"),
+            Some(r"D:\".into())
+        );
+        assert_eq!(
+            LocalShellPathStyle::from_program(r"C:\Windows\System32\wsl.exe"),
+            LocalShellPathStyle::Wsl
+        );
+        assert_eq!(
+            LocalShellPathStyle::from_program(r"C:\Program Files\Git\bin\bash.exe"),
+            LocalShellPathStyle::Msys
+        );
+        assert_eq!(
+            LocalShellPathStyle::from_program(r"C:\cygwin64\bin\bash.exe"),
+            LocalShellPathStyle::Native
+        );
+    }
 
     #[test]
     fn remote_paths_keep_posix_semantics() {
@@ -680,6 +894,334 @@ mod tests {
             r"C:\other\file",
             true
         ));
+    }
+
+    #[test]
+    fn local_shell_cwd_translation_covers_wsl_drive_and_msys_forms() {
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/d/Codes/RustProjects"),
+            Some(r"D:\Codes\RustProjects".to_string())
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/c"),
+            Some(r"C:\".to_string())
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/d/"),
+            Some(r"D:\".to_string())
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/d:/Projects"),
+            Some(r"D:\Projects".to_string())
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/d/Projects"),
+            Some(r"D:\Projects".to_string())
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/D/Codes"),
+            Some(r"D:\Codes".to_string())
+        );
+    }
+
+    #[test]
+    fn local_shell_cwd_translation_leaves_unrelated_paths_untouched() {
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/backup/data"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, "/mnt/1/x"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/home/debian"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "/Debian/mnt/d/x"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, r"D:\Codes"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(LocalShellPathStyle::Msys, "relative/path"),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path(
+                LocalShellPathStyle::Msys,
+                "//wsl.localhost/Debian/home"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn wsl_cwd_translation_falls_back_to_the_wsl_localhost_namespace() {
+        fn mapped(path: &str, distro: Option<&str>) -> Option<String> {
+            local_shell_cwd_to_browser_path_with_distro(LocalShellPathStyle::Wsl, path, distro)
+        }
+
+        // Drive-letter forms keep their native Windows mapping.
+        assert_eq!(
+            mapped("/mnt/d/Projects", Some("Debian")),
+            Some(r"D:\Projects".to_string())
+        );
+        assert_eq!(mapped("/mnt/c", Some("Debian")), Some(r"C:\".to_string()));
+
+        // WSL-internal directories land on the 9P namespace the host can list.
+        assert_eq!(
+            mapped("/mnt", Some("Debian")),
+            Some(r"\\wsl.localhost\Debian\mnt".to_string())
+        );
+        assert_eq!(
+            mapped("/home/user/notes", Some("Debian")),
+            Some(r"\\wsl.localhost\Debian\home\user\notes".to_string())
+        );
+        assert_eq!(
+            mapped("/mnt/c/Projects", Some("Debian")),
+            Some(r"C:\Projects".to_string())
+        );
+        assert_eq!(
+            mapped("/etc", Some("Debian")),
+            Some(r"\\wsl.localhost\Debian\etc".to_string())
+        );
+        assert_eq!(
+            mapped("/", Some("Debian")),
+            Some(r"\\wsl.localhost\Debian".to_string())
+        );
+        // A user-mounted non-drive directory under /mnt stays browsable.
+        assert_eq!(
+            mapped("/mnt/backup/data", Some("Arch")),
+            Some(r"\\wsl.localhost\Arch\mnt\backup\data".to_string())
+        );
+
+        // Without a distribution name there is nothing to map onto.
+        assert_eq!(mapped("/mnt", None), None);
+        assert_eq!(mapped("/home/user", Some("")), None);
+
+        // Paths that are not absolute POSIX paths, or that carry characters
+        // illegal in a Windows path component, stay unmapped.
+        assert_eq!(mapped("relative/path", Some("Debian")), None);
+        assert_eq!(mapped(r"D:\Projects", Some("Debian")), None);
+        assert_eq!(mapped("/mnt/d:/x", Some("Debian")), None);
+        // A literal backslash would turn into a separator and point at a
+        // different directory, so it stays unmapped too.
+        assert_eq!(mapped(r"/home/user/a\b", Some("Debian")), None);
+
+        // Only the WSL style may fall back: MSYS and native `/` roots are not
+        // the WSL filesystem.
+        assert_eq!(
+            local_shell_cwd_to_browser_path_with_distro(
+                LocalShellPathStyle::Msys,
+                "/home/user",
+                Some("Debian")
+            ),
+            None
+        );
+        assert_eq!(
+            local_shell_cwd_to_browser_path_with_distro(
+                LocalShellPathStyle::Native,
+                "/home/user",
+                Some("Debian")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn wsl_mapping_rejects_ambiguous_components_before_drive_or_unc_translation() {
+        for component in [
+            "a:b",
+            "a\\b",
+            "a\0b",
+            "a\nb",
+            "a\tb",
+            "a\u{7f}b",
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "trailing ",
+            "trailing.",
+            ".",
+            "..",
+            "CON",
+            "con.txt",
+            "NUL",
+            "AUX.log",
+            "PRN",
+            "COM1",
+            "com9.txt",
+            "LPT1",
+            "LPT9.log",
+            "COM¹",
+            "LPT².txt",
+            "COM³",
+            "CONIN$",
+            "CONOUT$",
+            "NUL .txt",
+        ] {
+            for prefix in ["/home/user", "/mnt/c"] {
+                for path in [
+                    format!("{prefix}/{component}"),
+                    format!("{prefix}/{component}/child"),
+                ] {
+                    for distro in [None, Some("Ubuntu")] {
+                        assert_eq!(
+                            local_shell_cwd_to_browser_path_with_distro(
+                                LocalShellPathStyle::Wsl,
+                                &path,
+                                distro
+                            ),
+                            None,
+                            "unexpected mapping: {path:?}"
+                        );
+                    }
+                    assert_eq!(
+                        local_shell_cwd_to_browser_path(LocalShellPathStyle::Wsl, &path),
+                        None
+                    );
+                }
+            }
+        }
+        for distro in [
+            "",
+            ".",
+            "..",
+            "Ubuntu/other",
+            "Ubuntu\\other",
+            "Ubuntu:",
+            "Ubuntu ",
+            "Ubuntu.",
+            "NUL",
+            "bad\0name",
+        ] {
+            assert_eq!(
+                local_shell_cwd_to_browser_path_with_distro(
+                    LocalShellPathStyle::Wsl,
+                    "/home/user",
+                    Some(distro)
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn wsl_mapping_preserves_representable_names() {
+        for component in [
+            ".config",
+            "中文",
+            "my notes",
+            " leading",
+            "console",
+            "COM10",
+            "LPT0",
+            "auxiliary.txt",
+        ] {
+            for (prefix, expected) in [
+                ("/home/user", r"\\wsl.localhost\Ubuntu\home\user"),
+                ("/mnt/d", "D:"),
+            ] {
+                let mapped = local_shell_cwd_to_browser_path_with_distro(
+                    LocalShellPathStyle::Wsl,
+                    &format!("{prefix}/{component}"),
+                    Some("Ubuntu"),
+                )
+                .unwrap();
+                assert_eq!(mapped, format!("{expected}\\{component}"));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_paths_preserve_guest_case_across_aliases_and_verbatim_prefixes() {
+        let backend = FileBrowserBackendKind::Local;
+        let path = r"\\wsl.localhost\Ubuntu\home\user\Project";
+        assert!(file_browser_path_eq(
+            backend,
+            r"\\wsl$\中\Project",
+            r"\\wsl.localhost\中\Project"
+        ));
+        for alias in [
+            r"\\WSL.LOCALHOST\UBUNTU\home\user\Project",
+            r"\\wsl$\ubuntu\home\user\Project",
+            "//wsl$/Ubuntu/home/user/Project",
+            r"\\?\UNC\wsl.localhost\Ubuntu\home\user\Project",
+            r"\\?\unc\WSL$\UBUNTU\home\user\Project",
+        ] {
+            assert!(file_browser_path_eq(backend, path, alias), "{alias}");
+            assert!(file_browser_copy_destination_invalid(
+                backend, path, alias, false
+            ));
+        }
+        assert!(!file_browser_path_eq(
+            backend,
+            path,
+            r"\\wsl.localhost\Ubuntu\home\user\project"
+        ));
+        assert!(!file_browser_path_eq(
+            backend,
+            path,
+            r"\\wsl.localhost\Debian\home\user\Project"
+        ));
+        assert!(file_browser_copy_destination_invalid(
+            backend,
+            path,
+            r"\\wsl$\ubuntu\home\user\Project\child",
+            true
+        ));
+        assert!(!file_browser_copy_destination_invalid(
+            backend,
+            path,
+            r"\\wsl$\Ubuntu\home\user\project\child",
+            true
+        ));
+        assert!(file_browser_path_eq(
+            backend,
+            r"\\server\Share\Project",
+            r"\\SERVER\share\project"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_unc_paths_keep_the_distribution_as_browser_root() {
+        let backend = FileBrowserBackendKind::Local;
+        for root in [
+            r"\\wsl.localhost\Ubuntu",
+            r"\\wsl$\Ubuntu",
+            r"\\?\UNC\wsl.localhost\Ubuntu",
+        ] {
+            assert!(file_browser_path_is_root(backend, root));
+            assert!(file_browser_path_is_root(backend, &format!("{root}\\")));
+            let home = file_browser_join(backend, root, "home");
+            assert!(file_browser_path_eq(
+                backend,
+                &file_browser_parent(backend, &home),
+                root
+            ));
+            assert!(file_browser_path_eq(
+                backend,
+                &file_browser_root(backend, &home),
+                root
+            ));
+            assert_eq!(file_browser_name(backend, &home), "home");
+            assert!(file_browser_copy_destination_invalid(
+                backend, root, &home, true
+            ));
+        }
     }
 }
 

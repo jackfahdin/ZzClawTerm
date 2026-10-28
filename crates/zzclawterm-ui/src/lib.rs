@@ -30,6 +30,7 @@ mod theme;
 mod theme_bridge;
 mod tooltip;
 mod widgets;
+pub mod window_chrome;
 
 pub use app_menu_bar::{ZzClawAppMenu, ZzClawAppMenuBar};
 pub use button::{ZzClawButton, ZzClawButtonVariant, ZzClawIconButton};
@@ -87,8 +88,8 @@ pub use theme_bridge::apply_component_theme;
 pub use tooltip::ZzClawTooltip;
 pub use widgets::{
     ZzClawHorizontalScrollbar, ZzClawScrollArea, ZzClawUniformListScrollbar, capability_line,
-    empty_panel, empty_panel_with_icon, mode_button, section_header, session_info_row,
-    small_button, status_pill, svg_icon_button,
+    empty_panel, empty_panel_with_icon, mode_button, section_header, small_button, status_pill,
+    svg_icon_button,
 };
 
 #[cfg(test)]

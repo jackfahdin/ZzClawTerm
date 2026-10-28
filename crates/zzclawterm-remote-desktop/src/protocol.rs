@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use zzclawterm_core::SecretString;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Maximum UTF-8 payload accepted for a single committed-text event.
 ///
@@ -68,6 +68,9 @@ pub struct RdpSessionConfig {
     pub password: Option<SecretString>,
     pub use_nla: bool,
     pub certificate_policy: RdpCertificatePolicy,
+    /// Request an administrative session; assignment remains server-controlled.
+    #[serde(default)]
+    pub administrative_session: bool,
     pub display: RdpDisplayConfig,
     pub clipboard: RdpClipboardConfig,
     pub reconnect: RdpReconnectConfig,
@@ -85,6 +88,7 @@ impl fmt::Debug for RdpSessionConfig {
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .field("use_nla", &self.use_nla)
             .field("certificate_policy", &self.certificate_policy)
+            .field("administrative_session", &self.administrative_session)
             .field("display", &self.display)
             .field("clipboard", &self.clipboard)
             .field("reconnect", &self.reconnect)
@@ -111,6 +115,26 @@ pub struct RdpDisplayConfig {
     pub width: u32,
     pub height: u32,
     pub color_depth: u8,
+    /// RDPEGFX surface updates. See `zzclawterm_core::RdpDisplaySettings`.
+    #[serde(default)]
+    pub graphics_pipeline: bool,
+    #[serde(default = "rdp_default_true")]
+    pub display_wallpaper: bool,
+    #[serde(default = "rdp_default_true")]
+    pub display_themes: bool,
+    #[serde(default = "rdp_default_true")]
+    pub enable_font_smoothing: bool,
+    #[serde(default)]
+    pub enable_desktop_composition: bool,
+    /// Inverted: true asks the server to turn the effect off.
+    #[serde(default = "rdp_default_true")]
+    pub disable_full_window_drag: bool,
+    #[serde(default = "rdp_default_true")]
+    pub disable_menu_animations: bool,
+    #[serde(default)]
+    pub disable_cursor_shadow: bool,
+    #[serde(default)]
+    pub disable_cursor_blinking: bool,
 }
 
 /// Ephemeral client display information sent to the helper. This is not part
@@ -123,6 +147,10 @@ pub struct RdpDisplayMetrics {
     pub physical_size_mm: Option<(u32, u32)>,
 }
 
+fn rdp_default_true() -> bool {
+    true
+}
+
 impl Default for RdpDisplayConfig {
     fn default() -> Self {
         Self {
@@ -130,6 +158,40 @@ impl Default for RdpDisplayConfig {
             width: 1920,
             height: 1080,
             color_depth: 32,
+            graphics_pipeline: false,
+            display_wallpaper: true,
+            display_themes: true,
+            enable_font_smoothing: true,
+            enable_desktop_composition: false,
+            disable_full_window_drag: true,
+            disable_menu_animations: true,
+            disable_cursor_shadow: false,
+            disable_cursor_blinking: false,
+        }
+    }
+}
+
+/// Build the helper's display configuration from a saved connection.
+///
+/// Both launch paths (opening a connection and restoring one at startup) go
+/// through here, so a setting can never be honoured when opening a tab and
+/// ignored after a restart.
+impl From<&zzclawterm_core::RdpDisplaySettings> for RdpDisplayConfig {
+    fn from(settings: &zzclawterm_core::RdpDisplaySettings) -> Self {
+        Self {
+            mode: parse_rdp_display_mode(&settings.mode),
+            width: settings.width,
+            height: settings.height,
+            color_depth: settings.color_depth,
+            graphics_pipeline: settings.graphics_pipeline,
+            display_wallpaper: settings.display_wallpaper,
+            display_themes: settings.display_themes,
+            enable_font_smoothing: settings.enable_font_smoothing,
+            enable_desktop_composition: settings.enable_desktop_composition,
+            disable_full_window_drag: settings.disable_full_window_drag,
+            disable_menu_animations: settings.disable_menu_animations,
+            disable_cursor_shadow: settings.disable_cursor_shadow,
+            disable_cursor_blinking: settings.disable_cursor_blinking,
         }
     }
 }
@@ -974,9 +1036,38 @@ pub fn parse_vnc_scale_mode(value: &str) -> VncScaleMode {
 mod tests {
     use super::{
         CommittedTextError, MAX_COMMITTED_TEXT_BYTES, RdpCertificatePolicy, RdpClipboardConfig,
-        RdpClipboardMode, RdpDisplayMode, parse_rdp_certificate_policy, parse_rdp_clipboard_mode,
-        parse_rdp_display_mode, validate_committed_text,
+        RdpClipboardMode, RdpDisplayConfig, RdpDisplayMode, RdpSessionConfig,
+        parse_rdp_certificate_policy, parse_rdp_clipboard_mode, parse_rdp_display_mode,
+        validate_committed_text,
     };
+
+    #[test]
+    fn legacy_display_ipc_and_saved_defaults_agree() {
+        let display: RdpDisplayConfig = serde_json::from_value(serde_json::json!({
+            "mode": "fit_window", "width": 1920, "height": 1080, "color_depth": 32
+        }))
+        .unwrap();
+        assert_eq!(display, RdpDisplayConfig::default());
+        assert_eq!(
+            display,
+            RdpDisplayConfig::from(&zzclawterm_core::RdpDisplaySettings::default())
+        );
+        let document = serde_json::json!({
+            "name":"legacy", "host":"example.invalid", "port":3389,
+            "username":"", "domain":"", "password":null, "use_nla":true,
+            "certificate_policy":"prompt",
+            "display":{"mode":"fit_window","width":1920,"height":1080,"color_depth":32},
+            "clipboard":{"mode":"text_only"}, "reconnect":{"enabled":true,"max_attempts":5}
+        });
+        let session: RdpSessionConfig = serde_json::from_value(document).unwrap();
+        assert!(!session.administrative_session);
+        assert_eq!(session.display, display);
+        let encoded = serde_json::to_value(&session).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RdpSessionConfig>(encoded).unwrap(),
+            session
+        );
+    }
 
     #[test]
     fn certificate_policy_accepts_public_and_legacy_names() {

@@ -756,7 +756,7 @@ impl TerminalSurface {
         true
     }
 
-    fn pending_local_scroll_state_reanchored_for_frame(
+    pub(in crate::features) fn pending_local_scroll_state_reanchored_for_frame(
         &self,
         frame: &TerminalScrollVisualState,
     ) -> Option<TerminalScrollVisualState> {
@@ -771,9 +771,7 @@ impl TerminalSurface {
             return None;
         }
         frame.history.scrolled_since(state.history)?;
-        if state.scroll_offset == 0 {
-            state.scroll_residual_lines = 0.0;
-        } else {
+        if state.scroll_offset > 0 {
             state.scroll_offset = frame
                 .history
                 .reanchor_offset(state.history, state.scroll_offset);
@@ -789,11 +787,11 @@ impl TerminalSurface {
             state.scroll_residual_lines,
             state.scrollback_len,
         );
-        state.has_new_while_scrolled = frame.has_new_while_scrolled
-            || terminal_visual_scroll_active_for_state(
-                state.scroll_offset,
-                state.scroll_residual_lines,
-            );
+        state.has_new_while_scrolled = terminal_visual_scroll_active_for_state(
+            state.scroll_offset,
+            state.scroll_residual_lines,
+        ) && (frame.has_new_while_scrolled
+            || state.has_new_while_scrolled);
         state.performance_overlay = frame.performance_overlay;
         state.skipped_output_chars = frame.skipped_output_chars;
         Some(state)
@@ -848,6 +846,9 @@ impl TerminalSurface {
         let has_new_while_scrolled = state.has_new_while_scrolled;
         let performance_overlay = state.performance_overlay;
         let skipped_output_chars = state.skipped_output_chars;
+        let snapshot_pending = self.snapshot.is_some()
+            && (self.display_offset != display_offset
+                || !terminal_visual_scroll_active_for_state(scroll_offset, scroll_residual_lines));
         let state_matches = self.scroll_offset == scroll_offset
             && (self.scroll_residual_lines - scroll_residual_lines).abs() < f32::EPSILON * 8.0
             && self.scrollback_len == scrollback_len
@@ -857,7 +858,7 @@ impl TerminalSurface {
             && self.skipped_output_chars == skipped_output_chars
             && !self.show_cursor
             && if self.snapshot.is_some() {
-                self.scroll_snapshot_pending == (self.display_offset != display_offset)
+                self.scroll_snapshot_pending == snapshot_pending
             } else {
                 self.display_offset == display_offset && !self.scroll_snapshot_pending
             };
@@ -869,9 +870,7 @@ impl TerminalSurface {
         if self.snapshot.is_none() {
             self.display_offset = display_offset;
         }
-        self.set_scroll_snapshot_pending(
-            self.snapshot.is_some() && self.display_offset != display_offset,
-        );
+        self.set_scroll_snapshot_pending(snapshot_pending);
         self.clear_pending_scroll_snapshot_offsets_if_scrollback_changed(scrollback_len);
         self.scrollback_len = scrollback_len;
         self.viewport_rows = viewport_rows.max(1);
@@ -1899,6 +1898,11 @@ impl TerminalSurface {
             && self.skipped_output_chars == state.skipped_output_chars
             && if self.snapshot.is_some() {
                 self.scroll_snapshot_pending == (self.display_offset != state.display_offset)
+                    || (self.scroll_snapshot_pending
+                        && !terminal_visual_scroll_active_for_state(
+                            state.scroll_offset,
+                            state.scroll_residual_lines,
+                        ))
             } else {
                 self.display_offset == state.display_offset && !self.scroll_snapshot_pending
             }
@@ -1967,6 +1971,28 @@ impl TerminalSurface {
         }
     }
 
+    /// Commit live text and its geometry together. Range coverage of a history
+    /// window says nothing about the freshness of its mutable bottom rows.
+    pub(in crate::features) fn apply_live_scroll_frame(
+        &mut self,
+        state: &TerminalScrollVisualState,
+        live: Option<(TerminalSurfaceFrameSnapshot, TerminalCursorBlinkBasis)>,
+    ) -> bool {
+        if let Some((mut frame, basis)) = live {
+            frame.has_action_link_decorations = self.has_action_link_decorations;
+            if let Some(pending) = self.pending_local_scroll_sync.as_mut() {
+                pending.state = frame.scroll.clone();
+            }
+            self.set_cursor_blink_basis(basis);
+            self.apply_frame_snapshot(frame)
+        } else {
+            let changed = self.update_scroll_chrome_without_snapshot(state);
+            let was_pending = self.scroll_snapshot_pending;
+            self.set_scroll_snapshot_pending(self.snapshot.is_some());
+            changed || was_pending != self.scroll_snapshot_pending
+        }
+    }
+
     fn scroll_visual_state_needs_repaint(&self, state: &TerminalScrollVisualState) -> bool {
         if state.history.preserves_coordinates_from(self.history)
             && self.has_snapshot_covering_display_offset(
@@ -2024,7 +2050,21 @@ impl TerminalSurface {
             && let Some(result) = self.apply_local_scroll_wheel_visual_state(raw_lines)
         {
             if result.visual_changed {
-                let state = self.current_scroll_visual_state();
+                let mut state = self.current_scroll_visual_state();
+                if !self.visual_scroll_active() {
+                    let live = app.read(cx).terminal_live_surface_frame(&session_id);
+                    self.apply_live_scroll_frame(&state, live);
+                    state = self.current_scroll_visual_state();
+                    if self.scroll_snapshot_pending || self.snapshot.is_none() {
+                        let app = app.clone();
+                        let session_id = session_id.clone();
+                        cx.defer(move |cx| {
+                            app.update(cx, |app, _| {
+                                app.request_terminal_live_snapshot(&session_id);
+                            });
+                        });
+                    }
+                }
                 self.schedule_keyword_highlights(false, false, cx);
                 cx.notify();
                 let mut request_offsets = Vec::new();
@@ -2166,7 +2206,14 @@ impl TerminalSurface {
             performance_overlay: self.performance_overlay,
             skipped_output_chars: self.skipped_output_chars,
         };
-        let text_updated = self.apply_scroll_visual_state(state);
+        let text_updated = if terminal_visual_scroll_active_for_state(next_offset, next_residual) {
+            self.apply_scroll_visual_state(state)
+        } else {
+            // The event adapter supplies the authoritative live frame before
+            // notifying. Never promote a covering history window in between.
+            self.update_scroll_chrome_without_snapshot(&state);
+            false
+        };
         self.scroll_interaction_generation = self.scroll_interaction_generation.saturating_add(1);
         Some(TerminalSurfaceLocalScrollResult {
             generation: self.scroll_interaction_generation,
@@ -2183,7 +2230,11 @@ impl TerminalSurface {
             session_id: self.session_id.clone(),
             scroll_offset: self.scroll_offset,
             scroll_residual_lines: self.scroll_residual_lines,
-            display_offset: self.display_offset,
+            display_offset: terminal_display_offset_from_state(
+                self.scroll_offset,
+                self.scroll_residual_lines,
+                self.scrollback_len,
+            ),
             scrollback_len: self.scrollback_len,
             viewport_rows: self.viewport_rows,
             has_new_while_scrolled: self.has_new_while_scrolled,
@@ -2241,6 +2292,9 @@ impl TerminalSurface {
         let Some(pending) = self.pending_local_scroll_sync.take() else {
             return;
         };
+        if self.scroll_interaction_generation != pending.generation {
+            return;
+        }
         let state = app.update(cx, |this, cx| {
             this.sync_terminal_local_scroll_visual_state_from_surface(pending.state, cx)
         });
@@ -2248,6 +2302,17 @@ impl TerminalSurface {
             return;
         }
         if let Some(state) = state {
+            if !terminal_visual_scroll_active_for_state(
+                state.scroll_offset,
+                state.scroll_residual_lines,
+            ) {
+                let live = app.read(cx).terminal_live_surface_frame(&state.session_id);
+                if self.apply_live_scroll_frame(&state, live) {
+                    self.schedule_keyword_highlights(false, false, cx);
+                    cx.notify();
+                }
+                return;
+            }
             let repaint_needed = self.scroll_visual_state_needs_repaint(&state);
             let text_updated = self.apply_scroll_visual_state(state.clone());
             let text_first_repaint_ready = terminal_surface_text_first_repaint_ready(
@@ -2671,6 +2736,22 @@ impl Render for TerminalSurface {
                 cell_height: cell_h,
             }) - (viewport_anchor_row + snapshot.leading_cleared_rows(viewport_anchor_row)) as f32
                 * cell_h;
+        let visual_y_offset = if self.scroll_snapshot_pending && !self.visual_scroll_active() {
+            // A missing live frame must not move old bottom rows into view.
+            // Keep the last painted geometry until live text can be committed.
+            self.painted_hit_test_geometry
+                .filter(|geometry| {
+                    geometry.viewport_rows == self.viewport_rows
+                        && geometry.cell_height == cell_h
+                        && self
+                            .painted_hit_test_snapshot
+                            .as_ref()
+                            .is_some_and(|painted| Arc::ptr_eq(painted, &snapshot))
+                })
+                .map_or(visual_y_offset, |geometry| geometry.visual_y_offset)
+        } else {
+            visual_y_offset
+        };
         if terminal_geometry_diagnostics_enabled() {
             tracing::info!(
                 diagnostic = "terminal_surface_geometry",

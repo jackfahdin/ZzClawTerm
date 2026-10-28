@@ -14,7 +14,7 @@ use super::mcp::{McpApprovalDecision, McpApprovalRequest};
 use super::terminal::{FULL_SHELL_PAINT_COUNT, terminal_surface_paint_count};
 use super::view_widgets::{
     APP_OVERLAY_PRIORITY, full_window_input_layer, full_window_overlay_layer, modal_scrim_is_drawn,
-    passive_overlay_layer,
+    passive_overlay_layer, selectable_overlay_layer,
 };
 use crate::features::perf::{GpuiPerfContext, record_gpui_perf_sample};
 use crate::features::runtime_jobs::ActivitySide;
@@ -179,6 +179,7 @@ impl ZzClawTermApp {
     }
 
     pub(crate) fn start_after_window_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell.capture_renderer(window);
         if let Some(handle) = window
             .window_handle()
             .downcast::<zzclawterm_ui::ZzClawRoot>()
@@ -197,6 +198,7 @@ impl ZzClawTermApp {
         cx.observe_window_bounds(window, |this, window, cx| {
             let browser_was_visible = this.transfer_browser_is_visible();
             this.refresh_window_render_inputs(window, cx);
+            this.constrain_session_info_to_viewport();
             this.transfer_browser_visibility_changed(browser_was_visible, cx);
         })
         .detach();
@@ -750,7 +752,7 @@ impl ZzClawTermApp {
                 ))
             })
             .when(overlay.session_info_open, |this| {
-                this.child(full_window_overlay_layer(
+                this.child(selectable_overlay_layer(
                     "session-info-input-layer",
                     self.session_info_overlay(cx),
                 ))

@@ -18,7 +18,7 @@ impl ZzClawTermApp {
             self.defer_ai_panel_snapshot_flush(cx);
             return;
         }
-        let snapshot = self.ai.settings_config_cloned();
+        let snapshot = self.ai.pending_settings();
         if let Some((generation, snapshot)) = self.ai.queue_settings_persistence(snapshot) {
             self.submit_ai_settings_save(generation, snapshot, cx);
         }
@@ -32,6 +32,7 @@ impl ZzClawTermApp {
         snapshot: AiSettings,
         cx: &mut Context<Self>,
     ) {
+        let submitted = snapshot.clone();
         let request = zzclawterm_store::store_mutation(StoreDomain::Ai, move |store| {
             store.save_ai_settings(snapshot)
         });
@@ -57,7 +58,7 @@ impl ZzClawTermApp {
                 if completion.apply_result
                     && let Ok(saved) = event.outcome.as_ref()
                 {
-                    this.ai.accept_saved_settings(saved.clone());
+                    this.ai.accept_saved_settings(saved.clone(), &submitted);
                     this.refresh_ai_usage_counts(cx);
                     this.request_shared_state_refresh(crate::app_shell::SharedStateDomain::Ai, cx);
                 }

@@ -6,13 +6,23 @@ use gpui::FocusHandle;
 use zzclawterm_core::{
     AgentCommandExecutionMode, AiAgentKind, AiCustomActionConfig, AiModelConfigItem,
     AiModelDiscovery, AiModelSource, AiPermissionMode, AiProviderCredential, AiProviderKind,
-    AiReasoningEffort, AiSettings, CodexThreadMode, ExternalMcpSessionScope, RiskLevel,
-    ai_model_id_for_credential, ai_model_id_for_provider, merge_model_discoveries, now_rfc3339,
+    AiReasoningEffort, AiSettings, CodexThreadMode, ExternalMcpSessionScope,
+    McpTerminalDisplayMode, RiskLevel, ai_model_id_for_credential, ai_model_id_for_provider,
+    merge_model_discoveries, now_rfc3339,
 };
 
 use crate::models::{AiActionEditorField, AiActionListKind};
 
 use super::{AiFeatureState, AiFullAccessSetting, AiSettingsMutation, AiSettingsState};
+
+/// Split `ai.credential.{id}.header.{header_id}.{name|value}` input ids into
+/// `(credential_id, "{header_id}.{name|value}")`.
+fn split_header_input_rest(rest: &str) -> Option<(&str, &str)> {
+    rest.split_once(".header.").filter(|(_, tail)| {
+        tail.rsplit_once('.')
+            .is_some_and(|(_, field)| field == "name" || field == "value")
+    })
+}
 
 fn is_builtin_ai_provider_id(id: &str) -> bool {
     matches!(
@@ -193,6 +203,13 @@ impl AiFeatureState {
         self.settings.config.external_mcp.session_scope = scope;
     }
 
+    pub(in crate::features) fn set_settings_mcp_terminal_display_mode(
+        &mut self,
+        mode: McpTerminalDisplayMode,
+    ) {
+        self.settings.config.external_mcp.terminal_display_mode = mode;
+    }
+
     pub(in crate::features) fn settings_enabled(&self) -> bool {
         self.settings.config.enabled
     }
@@ -225,6 +242,15 @@ impl AiFeatureState {
                 .filter(|secret| !secret.is_empty())
             {
                 credential.api_key = Some(secret.clone().into());
+            }
+            for header in &mut credential.extra_headers {
+                if let Some(secret) = self
+                    .settings
+                    .credential_header_secret_drafts
+                    .get(&(credential.id.clone(), header.id.clone()))
+                {
+                    header.value = secret.clone();
+                }
             }
         }
         // Legacy profile fields only participate when that legacy editor changed.
@@ -280,6 +306,7 @@ impl AiFeatureState {
                 } else {
                     Some(self.settings.secret_draft.clone())
                 },
+                extra_headers: Vec::new(),
                 enabled: true,
             };
             if let Some(existing) = next
@@ -291,6 +318,7 @@ impl AiFeatureState {
                 credential.icon_data_url = existing.icon_data_url.clone();
                 credential.api_protocol = existing.api_protocol;
                 credential.api_format = existing.api_format.clone();
+                credential.extra_headers = std::mem::take(&mut existing.extra_headers);
                 *existing = credential;
             } else {
                 next.provider_credentials.push(credential);
@@ -377,6 +405,7 @@ impl AiFeatureState {
         self.settings.config = config;
         if clear_secret_draft {
             self.settings.credential_secret_drafts.clear();
+            self.settings.credential_header_secret_drafts.clear();
             self.settings.secret_draft.expose_secret_mut().clear();
         }
     }
@@ -391,6 +420,7 @@ impl AiFeatureState {
         self.invalidate_provider_jobs();
         self.agent_management.invalidate();
         self.settings.credential_secret_drafts.clear();
+        self.settings.credential_header_secret_drafts.clear();
         self.settings.config = config;
         self.settings.model_draft = model;
         self.settings.base_url_draft = base_url;
@@ -401,6 +431,7 @@ impl AiFeatureState {
         self.invalidate_provider_jobs();
         self.agent_management.invalidate();
         self.provider_view_mut().revealed_id = None;
+        self.provider_view_mut().revealed_header_id = None;
         self.settings.action_edit = None;
         self.settings.manual_model_edit_group = None;
     }
@@ -415,8 +446,101 @@ impl AiFeatureState {
         &self.settings.credential_secret_drafts
     }
 
-    pub(in crate::features) fn accept_saved_settings(&mut self, saved: AiSettings) {
+    pub(in crate::features) fn settings_credential_header_secret_drafts(
+        &self,
+    ) -> &HashMap<(String, String), zzclawterm_core::SecretString> {
+        &self.settings.credential_header_secret_drafts
+    }
+
+    pub(in crate::features) fn add_settings_credential_header(
+        &mut self,
+        credential_id: &str,
+    ) -> Option<String> {
+        use zzclawterm_core::{MAX_AI_CUSTOM_HEADERS, new_custom_header};
+        let credential = self
+            .settings
+            .config
+            .provider_credentials
+            .iter_mut()
+            .find(|credential| credential.id == credential_id)?;
+        if credential.extra_headers.len() >= MAX_AI_CUSTOM_HEADERS {
+            return None;
+        }
+        let header = new_custom_header();
+        let id = header.id.clone();
+        credential.extra_headers.push(header);
+        self.invalidate_provider_jobs();
+        self.panel.status = "AI custom header added".to_string();
+        Some(id)
+    }
+
+    pub(in crate::features) fn remove_settings_credential_header(
+        &mut self,
+        credential_id: &str,
+        header_id: &str,
+    ) -> bool {
+        let Some(credential) = self
+            .settings
+            .config
+            .provider_credentials
+            .iter_mut()
+            .find(|credential| credential.id == credential_id)
+        else {
+            return false;
+        };
+        let before = credential.extra_headers.len();
+        credential
+            .extra_headers
+            .retain(|header| header.id != header_id);
+        if credential.extra_headers.len() == before {
+            return false;
+        }
+        self.settings
+            .credential_header_secret_drafts
+            .remove(&(credential_id.to_string(), header_id.to_string()));
+        self.invalidate_provider_jobs();
+        self.panel.status = "AI custom header removed".to_string();
+        true
+    }
+
+    pub(in crate::features) fn accept_saved_settings(
+        &mut self,
+        saved: AiSettings,
+        submitted: &AiSettings,
+    ) {
+        // A save may finish after an input edit that did not enqueue another save.
+        if self.pending_settings() != *submitted {
+            return;
+        }
         self.settings.config = saved;
+        self.settings.credential_header_secret_drafts.clear();
+    }
+
+    pub(in crate::features) fn settings_header_errors(
+        &self,
+    ) -> HashMap<(String, String), zzclawterm_core::ai::provider_settings::CustomHeaderError> {
+        use zzclawterm_core::ai::provider_settings::{CustomHeaderError, validate_custom_header};
+        let mut errors = HashMap::new();
+        for credential in self.pending_settings().provider_credentials {
+            let mut names = HashSet::new();
+            for header in credential.extra_headers {
+                if header.name.trim_matches([' ', '\t']).is_empty()
+                    && header.value.trim_matches([' ', '\t']).is_empty()
+                {
+                    continue;
+                }
+                let error = validate_custom_header(&header.name, header.value.expose_secret())
+                    .err()
+                    .or_else(|| {
+                        (!names.insert(header.name.trim().to_ascii_lowercase()))
+                            .then_some(CustomHeaderError::DuplicateName)
+                    });
+                if let Some(error) = error {
+                    errors.insert((credential.id.clone(), header.id), error);
+                }
+            }
+        }
+        errors
     }
 
     pub(in crate::features) fn queue_settings_persistence(
@@ -849,6 +973,14 @@ impl AiFeatureState {
         text: String,
     ) -> bool {
         self.invalidate_provider_jobs();
+        if let Some((credential_id, header_rest)) = split_header_input_rest(rest) {
+            let handled =
+                self.apply_settings_credential_header_input(credential_id, header_rest, text);
+            if handled {
+                self.panel.status = "AI credential edited".to_string();
+            }
+            return handled;
+        }
         let Some((credential_id, field)) = rest.rsplit_once('.') else {
             return false;
         };
@@ -880,6 +1012,60 @@ impl AiFeatureState {
         true
     }
 
+    fn apply_settings_credential_header_input(
+        &mut self,
+        credential_id: &str,
+        header_rest: &str,
+        text: String,
+    ) -> bool {
+        let Some((header_id, field)) = header_rest.rsplit_once('.') else {
+            return false;
+        };
+        match field {
+            "name" => {
+                let Some(header) = self
+                    .settings
+                    .config
+                    .provider_credentials
+                    .iter_mut()
+                    .find(|credential| credential.id == credential_id)
+                    .and_then(|credential| {
+                        credential
+                            .extra_headers
+                            .iter_mut()
+                            .find(|header| header.id == header_id)
+                    })
+                else {
+                    return false;
+                };
+                header.name = text;
+            }
+            "value" => {
+                if !self
+                    .settings
+                    .config
+                    .provider_credentials
+                    .iter()
+                    .any(|credential| {
+                        credential.id == credential_id
+                            && credential
+                                .extra_headers
+                                .iter()
+                                .any(|header| header.id == header_id)
+                    })
+                {
+                    return false;
+                }
+                self.settings.credential_header_secret_drafts.insert(
+                    (credential_id.to_string(), header_id.to_string()),
+                    text.into(),
+                );
+            }
+            _ => return false,
+        }
+        true
+    }
+
     #[cfg(test)]
     pub(in crate::features) fn commit_settings_credential_edits(&mut self, credential_id: &str) {
         let secret_draft = self
@@ -897,6 +1083,15 @@ impl AiFeatureState {
         {
             if !secret_draft.is_empty() {
                 credential.api_key = Some(secret_draft.clone().into());
+            }
+            for header in &mut credential.extra_headers {
+                if let Some(secret) = self
+                    .settings
+                    .credential_header_secret_drafts
+                    .get(&(credential.id.clone(), header.id.clone()))
+                {
+                    header.value = secret.clone();
+                }
             }
             let name = credential.name.clone();
             let base_url = credential.base_url.clone();
@@ -920,6 +1115,19 @@ impl AiFeatureState {
             }
         }
         self.settings.credential_secret_drafts.remove(credential_id);
+        if let Some(credential) = self
+            .settings
+            .config
+            .provider_credentials
+            .iter()
+            .find(|credential| credential.id == credential_id)
+        {
+            for header in &credential.extra_headers {
+                self.settings
+                    .credential_header_secret_drafts
+                    .remove(&(credential_id.to_string(), header.id.clone()));
+            }
+        }
         self.panel.status = "AI credential saved".to_string();
     }
 
@@ -932,6 +1140,20 @@ impl AiFeatureState {
             self.panel.status = "Built-in AI credentials cannot be deleted".to_string();
             return AiSettingsMutation::Notify;
         }
+        let removed_header_ids: Vec<String> = self
+            .settings
+            .config
+            .provider_credentials
+            .iter()
+            .find(|credential| credential.id == credential_id)
+            .map(|credential| {
+                credential
+                    .extra_headers
+                    .iter()
+                    .map(|header| header.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         self.settings
             .config
             .provider_credentials
@@ -944,6 +1166,11 @@ impl AiFeatureState {
             self.select_first_enabled_model();
         }
         self.settings.credential_secret_drafts.remove(credential_id);
+        for header_id in removed_header_ids {
+            self.settings
+                .credential_header_secret_drafts
+                .remove(&(credential_id.to_string(), header_id));
+        }
         self.panel.status = "AI credential removed".to_string();
         AiSettingsMutation::Persist
     }

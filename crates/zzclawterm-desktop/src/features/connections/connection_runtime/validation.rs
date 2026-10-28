@@ -38,7 +38,7 @@ impl ConnectionEditorValidationError {
                         ConnectionEditorSelect::SshAgentEndpoint,
                     ),
                 };
-                return location(ConnectionEditorSection::Authentication, target);
+                return location(ConnectionEditorSection::Basic, target);
             }
             Self::SshAgentForwarding { endpoint_index, .. } => {
                 let target = endpoint_index
@@ -196,6 +196,26 @@ mod tests {
                 ConnectionEditorField::Host,
             ),
             (
+                ConnectionEditorValidationError::UsernameRequired,
+                ConnectionEditorSection::Basic,
+                ConnectionEditorField::Username,
+            ),
+            (
+                ConnectionEditorValidationError::PasswordReplacementRequired,
+                ConnectionEditorSection::Basic,
+                ConnectionEditorField::Password,
+            ),
+            (
+                ConnectionEditorValidationError::VncUsernameTooLong,
+                ConnectionEditorSection::Basic,
+                ConnectionEditorField::Username,
+            ),
+            (
+                ConnectionEditorValidationError::VncPasswordTooLong,
+                ConnectionEditorSection::Basic,
+                ConnectionEditorField::Password,
+            ),
+            (
                 ConnectionEditorValidationError::PostLoginDelayInvalid,
                 ConnectionEditorSection::PostLogin,
                 ConnectionEditorField::PostLoginDelay,
@@ -237,7 +257,7 @@ mod tests {
         let error = build_saved_connection_from_editor(&draft).unwrap_err();
         assert_eq!(
             error.location(&draft).section,
-            ConnectionEditorSection::Authentication
+            ConnectionEditorSection::Basic
         );
         assert_eq!(
             error.location(&draft).target,

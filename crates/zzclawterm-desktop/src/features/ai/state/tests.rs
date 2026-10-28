@@ -391,6 +391,7 @@ fn model_catalog_mutations_keep_default_model_valid() {
             provider_kind: AiProviderKind::OpenaiCompatible,
             base_url: Some("https://example.invalid".to_string()),
             api_key: None,
+            extra_headers: Vec::new(),
             enabled: true,
         });
     state.settings.config.default_model_id = None;
@@ -435,6 +436,159 @@ fn credential_edits_move_secret_drafts_into_both_compatible_records() {
 }
 
 #[test]
+fn credential_header_edits_flow_through_drafts_into_config() {
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut state = state(&cx);
+    let header_id = state
+        .add_settings_credential_header("openai")
+        .expect("add header");
+    assert!(state.apply_settings_credential_input(
+        &format!("openai.header.{header_id}.name"),
+        "X-Token".to_string(),
+    ));
+    assert!(state.apply_settings_credential_input(
+        &format!("openai.header.{header_id}.value"),
+        "secret".to_string(),
+    ));
+
+    let pending = state.pending_settings();
+    let pending_header = pending.provider_credentials[0]
+        .extra_headers
+        .iter()
+        .find(|header| header.id == header_id)
+        .expect("pending header");
+    assert_eq!(pending_header.name, "X-Token");
+    assert_eq!(pending_header.value.expose_secret(), "secret");
+    assert!(
+        state.settings.config.provider_credentials[0]
+            .extra_headers
+            .iter()
+            .all(|header| header.value.is_empty())
+    );
+
+    state.commit_settings_credential_edits("openai");
+    let stored = state.settings.config.provider_credentials[0]
+        .extra_headers
+        .iter()
+        .find(|header| header.id == header_id)
+        .expect("stored header");
+    assert_eq!(stored.name, "X-Token");
+    assert_eq!(stored.value.expose_secret(), "secret");
+    assert!(
+        !state
+            .settings
+            .credential_header_secret_drafts
+            .contains_key(&("openai".to_string(), header_id.clone()))
+    );
+
+    assert!(state.remove_settings_credential_header("openai", &header_id));
+    assert!(
+        state.settings.config.provider_credentials[0]
+            .extra_headers
+            .is_empty()
+    );
+}
+
+#[test]
+fn header_drafts_with_repeated_ids_stay_with_their_credential() {
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut state = state(&cx);
+    for credential in &mut state.settings.config.provider_credentials[..2] {
+        credential.extra_headers = vec![zzclawterm_core::AiHttpHeader {
+            id: "same-id".into(),
+            name: "X-Token".into(),
+            value: "stored-fixture".into(),
+        }];
+    }
+    let other_id = state.settings.config.provider_credentials[1].id.clone();
+    assert!(
+        state.apply_settings_credential_input(
+            "openai.header.same-id.value",
+            "edited-fixture".into()
+        )
+    );
+    state.select_settings_provider(Some(other_id.clone()));
+    let pending = state.pending_settings();
+    assert_eq!(
+        pending.provider_credentials[0].extra_headers[0]
+            .value
+            .expose_secret(),
+        "edited-fixture"
+    );
+    assert_eq!(
+        pending.provider_credentials[1].extra_headers[0]
+            .value
+            .expose_secret(),
+        "stored-fixture"
+    );
+    assert!(
+        !state.apply_settings_credential_input("missing.header.same-id.value", "ignored".into())
+    );
+    assert!(
+        !state.apply_settings_credential_input("openai.header.missing.value", "ignored".into())
+    );
+    assert!(state.remove_settings_credential_header(&other_id, "same-id"));
+    assert_eq!(
+        state.pending_settings().provider_credentials[0].extra_headers[0]
+            .value
+            .expose_secret(),
+        "edited-fixture"
+    );
+    state.replace_settings_config(AiSettings::default(), true);
+    assert!(state.settings.credential_header_secret_drafts.is_empty());
+}
+
+#[test]
+fn header_editor_survives_save_completion_and_restores_cancel_snapshot() {
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut state = state(&cx);
+    let original = state.settings_draft_snapshot();
+    let header_id = state.add_settings_credential_header("openai").unwrap();
+    let blank = state.pending_settings();
+    let mut saved = blank.clone();
+    zzclawterm_core::normalize_ai_settings(&mut saved);
+    state.accept_saved_settings(saved, &blank);
+    assert_eq!(
+        state.settings.config.provider_credentials[0]
+            .extra_headers
+            .len(),
+        1
+    );
+    let submitted = state.pending_settings();
+    state.apply_settings_credential_input(
+        &format!("openai.header.{header_id}.name"),
+        "X-Token".into(),
+    );
+    state.apply_settings_credential_input(
+        &format!("openai.header.{header_id}.value"),
+        "new-fixture".into(),
+    );
+    state.accept_saved_settings(submitted.clone(), &submitted);
+    assert_eq!(
+        state.pending_settings().provider_credentials[0].extra_headers[0]
+            .value
+            .expose_secret(),
+        "new-fixture"
+    );
+    assert!(state.settings_header_errors().is_empty());
+    let submitted = state.pending_settings();
+    state.accept_saved_settings(
+        zzclawterm_core::mask_ai_settings(submitted.clone()),
+        &submitted,
+    );
+    assert!(state.settings.credential_header_secret_drafts.is_empty());
+    state.restore_settings_draft(original.0, original.1, original.2, original.3);
+    assert!(
+        state.pending_settings().provider_credentials[0]
+            .extra_headers
+            .is_empty()
+    );
+}
+
+#[test]
 fn credential_catalog_changes_preserve_an_absent_default_model() {
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -471,6 +625,7 @@ fn credential_catalog_changes_preserve_an_absent_default_model() {
             provider_kind: AiProviderKind::OpenaiCompatible,
             base_url: Some("https://example.invalid".to_string()),
             api_key: None,
+            extra_headers: Vec::new(),
             enabled: true,
         });
     assert_eq!(

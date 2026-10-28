@@ -314,14 +314,6 @@ fn run() -> io::Result<()> {
                         "VNC IPC ClientHello may only be sent once",
                     ));
                 }
-                if version != PROTOCOL_VERSION {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "VNC IPC protocol version {version} does not match {PROTOCOL_VERSION}"
-                        ),
-                    ));
-                }
                 send_control(
                     &output_tx,
                     VncControlMessage::ServerHello {
@@ -331,6 +323,18 @@ fn run() -> io::Result<()> {
                         },
                     },
                 )?;
+                if version != PROTOCOL_VERSION {
+                    drop(output_tx);
+                    writer
+                        .join()
+                        .map_err(|_| io::Error::other("VNC stdout writer panicked"))??;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "VNC IPC protocol version {version} does not match {PROTOCOL_VERSION}"
+                        ),
+                    ));
+                }
                 hello_complete = true;
             }
             VncControlMessage::Connect { session_id, config } => {

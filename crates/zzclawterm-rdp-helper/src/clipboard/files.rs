@@ -414,8 +414,13 @@ pub(super) fn read_clipboard_paths() -> Option<Vec<PathBuf>> {
 }
 
 fn write_clipboard_paths(paths: &[PathBuf]) -> Result<(), String> {
-    arboard::Clipboard::new()
-        .map_err(|error| error.to_string())?
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    // arboard's file-list setter only writes CF_HDROP; it does not empty the
+    // clipboard. Explorer's file data object from the previous local copy then
+    // stays on the OLE clipboard and paste targets keep using the old files,
+    // even though CF_HDROP already points at the new ones.
+    clipboard.clear().map_err(|error| error.to_string())?;
+    clipboard
         .set()
         .file_list(paths)
         .map_err(|error| error.to_string())
@@ -530,6 +535,11 @@ fn append_local_entry(
     if metadata.is_file() {
         descriptor = descriptor.with_file_size(metadata.len());
     }
+    // MS-RDPECLIP 2.2.5.2.3.1 reserves the creation/access slots and requires
+    // zeroes on the wire; only lastWriteTime is defined for this descriptor.
+    if let Some(time) = to_filetime(metadata.modified().ok()) {
+        descriptor = descriptor.with_last_write_time(time);
+    }
     if let Some(parent) = parent {
         descriptor = descriptor.with_relative_path(path_to_wire(parent)?);
     }
@@ -567,6 +577,24 @@ fn path_to_wire(path: &Path) -> Result<String, String> {
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|parts| parts.join("\\"))
+}
+
+/// Converts to a Windows FILETIME (100 ns ticks since 1601-01-01 UTC), the
+/// representation every `CLIPRDR_FILEDESCRIPTOR` timestamp uses. `None` when
+/// the platform cannot report the time or it predates the FILETIME epoch.
+pub(super) fn to_filetime(time: Option<SystemTime>) -> Option<u64> {
+    const UNIX_EPOCH_OFFSET_SECS: i128 = 11_644_473_600;
+    let ticks_since_unix = match time?.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => {
+            i128::from(duration.as_secs()) * 10_000_000 + i128::from(duration.subsec_nanos() / 100)
+        }
+        Err(error) => {
+            let duration = error.duration();
+            -(i128::from(duration.as_secs()) * 10_000_000
+                + i128::from(duration.subsec_nanos() / 100))
+        }
+    };
+    u64::try_from(UNIX_EPOCH_OFFSET_SECS * 10_000_000 + ticks_since_unix).ok()
 }
 
 fn serve_snapshot_request(
@@ -706,7 +734,7 @@ fn descriptor_relative_path(descriptor: &FileDescriptor) -> Result<PathBuf, Stri
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use ironrdp_cliprdr::pdu::{
         FileContentsFlags, FileContentsRequest, FileContentsResponse, FileDescriptor,
@@ -714,8 +742,46 @@ mod tests {
 
     use super::{
         FILE_CHUNK_SIZE, FileState, MAX_TRANSFER_BYTES, build_local_snapshot, cleanup_stale_cache,
-        descriptor_relative_path, prepare_remote_files, serve_snapshot_request,
+        descriptor_relative_path, prepare_remote_files, serve_snapshot_request, to_filetime,
     };
+
+    #[test]
+    fn filetime_uses_windows_epoch_ticks() {
+        assert_eq!(
+            to_filetime(Some(SystemTime::UNIX_EPOCH)),
+            Some(116_444_736_000_000_000)
+        );
+        assert_eq!(
+            to_filetime(Some(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800)
+            )),
+            Some(132_223_104_000_000_000)
+        );
+        assert_eq!(
+            to_filetime(Some(SystemTime::UNIX_EPOCH - Duration::from_secs(1))),
+            Some(116_444_735_990_000_000)
+        );
+        assert_eq!(to_filetime(None), None);
+    }
+
+    #[test]
+    fn local_snapshot_descriptors_carry_last_write_time() {
+        let root =
+            std::env::temp_dir().join(format!("zzclawterm-clip-time-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("timed.bin");
+        fs::write(&path, b"data").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let snapshot = build_local_snapshot(&[path]).unwrap();
+        let descriptor = &snapshot.descriptors[0];
+
+        assert_eq!(
+            descriptor.last_write_time,
+            to_filetime(metadata.modified().ok())
+        );
+        assert!(descriptor.last_write_time.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn rejects_traversal_device_names_and_duplicate_paths() {

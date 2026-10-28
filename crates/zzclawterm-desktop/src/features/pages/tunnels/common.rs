@@ -67,7 +67,6 @@ pub(super) fn network_group_editor_content(
     editor: NetworkGroupEditorState,
     cx: &mut Context<ZzClawTermApp>,
 ) -> impl IntoElement {
-    let palette = app.theme_palette();
     let name_input = app
         .text_input_field(
             "network.group-editor.name",
@@ -77,23 +76,15 @@ pub(super) fn network_group_editor_content(
             cx,
         )
         .into_any_element();
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(palette.text_muted))
-                .child(t!("network.groupDialogDescription")),
-        )
-        .child(name_input)
-        .when_some(editor.error.clone(), |this, error| {
+    div().flex().flex_col().gap_4().child(name_input).when_some(
+        editor.error.clone(),
+        |this, error| {
             this.child(
                 div()
                     .text_size(px(12.))
                     .text_color(rgb(0xfda4af))
                     .child(error),
             )
-        })
+        },
+    )
 }

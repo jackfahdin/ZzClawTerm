@@ -45,6 +45,8 @@ fn connection(id: &str) -> SavedConnection {
 }
 
 fn app(cx: &mut TestAppContext, root: &TestTempDir, mode: AssetViewMode) -> Entity<ZzClawTermApp> {
+    // Pointer assertions need stationary dialog bounds on every platform.
+    cx.update(|cx| cx.set_reduce_motion(true));
     let runtime = AppRuntime::from_parts_for_test(
         RuntimeMode::Portable,
         root.path().to_path_buf(),
@@ -367,8 +369,12 @@ fn asset_copy_move_and_delete_ignore_connection_panel_multi_selection() {
         click(cx, position, MouseButton::Right, 1);
         cx.simulate_keystrokes("down down down down down down enter");
         draw(cx);
+        // Mount the dialog, then paint its final layout before reading bounds.
+        draw(cx);
         let confirm = cx.debug_bounds("nya-dialog-action-button").unwrap();
         cx.simulate_click(confirm.center(), Modifiers::default());
+        draw(cx);
+        cx.update(|window, cx| assert!(!window.has_active_nya_dialog(cx)));
         wait_for(cx, &app, |app| {
             app.connection_state.connection_by_id("third").is_none()
         });

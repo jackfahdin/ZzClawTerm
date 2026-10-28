@@ -26,12 +26,37 @@ pub(in crate::features) enum CloudSyncLiveState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::features) enum SyncHistoryFilter {
+    #[default]
+    All,
+    Success,
+    Failed,
+    Conflict,
+}
+
+impl SyncHistoryFilter {
+    pub(in crate::features) fn matches(self, entry: &CloudSyncHistoryEntry) -> bool {
+        match self {
+            Self::All => true,
+            Self::Success => entry.status == "success",
+            Self::Failed => entry.status == "failed",
+            Self::Conflict => entry.status == "conflict",
+        }
+    }
+}
+
+const HISTORY_PAGE_SIZE: usize = 20;
+
 pub(in crate::features) struct CloudSyncFeatureState {
     settings: CloudSyncSettings,
     state: CloudSyncState,
     history: Vec<CloudSyncHistoryEntry>,
     history_expanded: HashSet<String>,
+    history_filter: SyncHistoryFilter,
+    history_visible_limit: usize,
     conflict: Option<CloudSyncConflictState>,
+    pending_resolution: Option<zzclawterm_core::cloud_sync::conflict::CloudResolutionRequest>,
     secret_draft: CloudSyncSecretDraft,
     status: String,
     /// Prevent overlapping network jobs from applying cloud state out of order.
@@ -88,7 +113,10 @@ impl CloudSyncFeatureState {
             state,
             history,
             history_expanded: HashSet::new(),
+            history_filter: SyncHistoryFilter::All,
+            history_visible_limit: HISTORY_PAGE_SIZE,
             conflict: None,
+            pending_resolution: None,
             secret_draft: CloudSyncSecretDraft::default(),
             status: String::new(),
             live_state: CloudSyncLiveState::Idle,
@@ -128,6 +156,59 @@ impl CloudSyncFeatureState {
 
     pub(in crate::features) fn history_expanded(&self) -> &HashSet<String> {
         &self.history_expanded
+    }
+
+    pub(in crate::features) fn history_filter(&self) -> SyncHistoryFilter {
+        self.history_filter
+    }
+
+    pub(in crate::features) fn filter_history(&mut self, filter: SyncHistoryFilter) {
+        self.history_filter = filter;
+        self.history_visible_limit = HISTORY_PAGE_SIZE;
+    }
+
+    pub(in crate::features) fn navigate_history_filter(&mut self, key: &str) -> bool {
+        let filters = [
+            SyncHistoryFilter::All,
+            SyncHistoryFilter::Success,
+            SyncHistoryFilter::Failed,
+            SyncHistoryFilter::Conflict,
+        ];
+        let index = filters
+            .iter()
+            .position(|filter| *filter == self.history_filter)
+            .unwrap_or(0);
+        let index = match key {
+            "left" => (index + filters.len() - 1) % filters.len(),
+            "right" => (index + 1) % filters.len(),
+            "home" => 0,
+            "end" => filters.len() - 1,
+            _ => return false,
+        };
+        self.filter_history(filters[index]);
+        true
+    }
+
+    pub(in crate::features) fn history_visible_limit(&self) -> usize {
+        self.history_visible_limit
+    }
+
+    pub(in crate::features) fn show_more_history(&mut self) {
+        self.history_visible_limit = self.history_visible_limit.saturating_add(HISTORY_PAGE_SIZE);
+    }
+
+    /// Historical success is evidence of an earlier operation, never of current
+    /// equality. Only the live conflict owner authorizes resolution actions.
+    pub(in crate::features) fn activity_status(&self) -> &'static str {
+        if self.job_running() {
+            "running"
+        } else if self.conflict.is_some() {
+            "conflict"
+        } else if !self.settings.enabled {
+            "disabled"
+        } else {
+            "idle"
+        }
     }
 
     pub(in crate::features) fn conflict(&self) -> Option<&CloudSyncConflictState> {
@@ -175,6 +256,25 @@ impl CloudSyncFeatureState {
         secret_draft: &CloudSyncSecretDraft,
     ) -> bool {
         settings == &self.settings && secret_draft == &self.secret_draft
+    }
+
+    pub(in crate::features) fn rebase_credential_rotation(
+        &mut self,
+        base: &mut CloudSyncSettings,
+        current: &CloudSyncSettings,
+    ) {
+        let mut effective = self.pending_settings();
+        zzclawterm_core::cloud_sync::credentials::rebase_rotated_tokens(
+            base,
+            &mut effective,
+            current,
+        );
+        let mut previous = self.settings.clone();
+        zzclawterm_core::cloud_sync::credentials::rebase_rotated_tokens(
+            &mut previous,
+            &mut self.settings,
+            current,
+        );
     }
 
     pub(in crate::features) fn replace_settings(
@@ -327,6 +427,8 @@ impl CloudSyncFeatureState {
     }
 
     pub(super) fn replace_history(&mut self, history: Vec<CloudSyncHistoryEntry>) {
+        self.history_expanded
+            .retain(|id| history.iter().any(|entry| &entry.id == id));
         self.history = history;
     }
 
@@ -346,10 +448,58 @@ impl CloudSyncFeatureState {
     ) {
         if let CloudSyncError::Conflict(preview) = error {
             self.conflict = Some(CloudSyncConflictState {
+                selected_revision: {
+                    let readable: Vec<_> = preview.branches.iter().filter(|b| b.readable).collect();
+                    (readable.len() == 1).then(|| readable[0].revision.clone())
+                },
                 preview: preview.as_ref().clone(),
                 provider_action,
             });
         }
+    }
+
+    pub(in crate::features) fn select_conflict_branch(&mut self, revision: &str) {
+        if let Some(conflict) = &mut self.conflict
+            && conflict
+                .preview
+                .branches
+                .iter()
+                .any(|branch| branch.readable && branch.revision == revision)
+        {
+            conflict.selected_revision = Some(revision.to_string());
+        }
+    }
+
+    pub(super) fn prepare_resolution(&mut self, use_cloud: bool) -> bool {
+        let Some(conflict) = &self.conflict else {
+            return false;
+        };
+        let Some(local_content_hash) = conflict.preview.local_content_hash.clone() else {
+            return false;
+        };
+        if (!use_cloud && conflict.preview.overwrite_blocked)
+            || (use_cloud && conflict.selected_revision.is_none())
+        {
+            return false;
+        }
+        self.pending_resolution = Some(
+            zzclawterm_core::cloud_sync::conflict::CloudResolutionRequest {
+                observed_revisions: conflict.preview.observed_revisions.clone(),
+                selected_revision: if use_cloud {
+                    conflict.selected_revision.clone()
+                } else {
+                    None
+                },
+                local_content_hash,
+            },
+        );
+        true
+    }
+
+    pub(super) fn take_resolution(
+        &mut self,
+    ) -> Option<zzclawterm_core::cloud_sync::conflict::CloudResolutionRequest> {
+        self.pending_resolution.take()
     }
 
     pub(super) fn begin_github_auth(
@@ -658,7 +808,60 @@ mod tests {
         CloudSyncInputField, CloudSyncSecretDraft, GithubGistAuthEvent, GithubGistAuthJobEvent,
     };
 
-    use super::{CloudSyncFeatureState, CloudSyncLiveState};
+    use super::{CloudSyncFeatureState, CloudSyncLiveState, SyncHistoryFilter};
+
+    #[test]
+    fn historical_success_and_cancelled_prompts_do_not_claim_current_sync_health() {
+        let mut cloud_sync = CloudSyncFeatureState::new(
+            CloudSyncSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            CloudSyncState::default(),
+            vec![CloudSyncHistoryEntry::sync(
+                "success",
+                "manual_provider_push",
+                None,
+                None,
+                "uploaded",
+            )],
+        );
+        assert_eq!(cloud_sync.activity_status(), "idle");
+        cloud_sync.complete_job(CloudSyncState::default(), "uploaded".to_string());
+        cloud_sync.set_status("cancelled");
+        assert_eq!(cloud_sync.activity_status(), "idle");
+        assert_eq!(cloud_sync.status(), "cancelled");
+        assert!(cloud_sync.begin_job());
+        assert_eq!(cloud_sync.activity_status(), "running");
+    }
+
+    #[test]
+    fn history_filter_resets_paging_and_refresh_prunes_only_missing_expansions() {
+        let mut cloud_sync = CloudSyncFeatureState::new(
+            CloudSyncSettings::default(),
+            CloudSyncState::default(),
+            Vec::new(),
+        );
+        let conflict =
+            CloudSyncHistoryEntry::sync("conflict", "manual_provider_push", None, None, "conflict");
+        let success =
+            CloudSyncHistoryEntry::sync("success", "manual_provider_push", None, None, "uploaded");
+        cloud_sync.replace_history(vec![success.clone(), conflict.clone()]);
+        cloud_sync.toggle_history_details(&conflict.id);
+        cloud_sync.show_more_history();
+        assert_eq!(cloud_sync.history_visible_limit(), 40);
+        cloud_sync.filter_history(SyncHistoryFilter::Conflict);
+        assert_eq!(cloud_sync.history_visible_limit(), 20);
+        assert!(cloud_sync.history_filter().matches(&conflict));
+        assert!(!cloud_sync.history_filter().matches(&success));
+        assert!(cloud_sync.history_expanded().contains(&conflict.id));
+        assert!(
+            cloud_sync.conflict().is_none(),
+            "historical conflicts cannot authorize resolution"
+        );
+        cloud_sync.replace_history(vec![success]);
+        assert!(cloud_sync.history_expanded().is_empty());
+    }
 
     #[test]
     fn cloud_sync_state_owns_loaded_data_and_github_job_channel() {
@@ -738,8 +941,12 @@ mod tests {
 
         assert!(cloud_sync.begin_job());
         assert!(!cloud_sync.begin_job());
+        assert_eq!(cloud_sync.activity_status(), "running");
         cloud_sync.fail_job(
             &CloudSyncError::Conflict(Box::new(CloudConflictPreview {
+                branches: Vec::new(),
+                observed_revisions: Vec::new(),
+                local_content_hash: None,
                 detected_at_ms: 1,
                 provider: "webdav".to_string(),
                 kind: CloudConflictKind::ContentConflict,
@@ -762,8 +969,20 @@ mod tests {
         assert_eq!(cloud_sync.live_state(), CloudSyncLiveState::Failed);
         assert_eq!(cloud_sync.status(), "push failed");
         assert_eq!(cloud_sync.conflict().unwrap().preview.provider, "webdav");
+        assert_eq!(cloud_sync.activity_status(), "conflict");
+        // A later failed attempt or a historical success cannot clear a live conflict.
+        cloud_sync.fail_job_with_status("cancelled attempt".to_string());
+        cloud_sync.replace_history(vec![CloudSyncHistoryEntry::sync(
+            "success",
+            "manual_push",
+            None,
+            None,
+            "old upload",
+        )]);
+        assert_eq!(cloud_sync.activity_status(), "conflict");
 
         assert!(cloud_sync.begin_job());
+        assert_eq!(cloud_sync.activity_status(), "running");
         let completed_state = CloudSyncState {
             device_id: "device-2".to_string(),
             ..CloudSyncState::default()
@@ -784,6 +1003,9 @@ mod tests {
             Vec::new(),
         );
         let preview = CloudConflictPreview {
+            branches: Vec::new(),
+            observed_revisions: Vec::new(),
+            local_content_hash: None,
             detected_at_ms: 1,
             provider: "s3".to_string(),
             kind: CloudConflictKind::RemoteInconsistent,
@@ -853,5 +1075,97 @@ mod tests {
         cloud_sync.cancel_github_auth();
         assert!(cancel.load(Ordering::Relaxed));
         assert!(!cloud_sync.github_auth().pending);
+    }
+    #[test]
+    fn conflict_resolution_requires_an_explicit_readable_branch_and_pins_the_preview() {
+        use zzclawterm_core::cloud_sync::conflict::CloudConflictBranch;
+        let mut state = CloudSyncFeatureState::new(
+            CloudSyncSettings::default(),
+            CloudSyncState::default(),
+            Vec::new(),
+        );
+        let mut preview: CloudConflictPreview = serde_json::from_value(serde_json::json!({
+            "detected_at_ms": 1, "provider": "test", "local_payload_hash": "local",
+            "remote_payload_hash": "remote", "remote_revision": "a", "remote_created_at_ms": 1,
+            "remote_device_id": "a", "message": "conflict", "local_content_hash": "local-content",
+            "observed_revisions": ["a", "b", "c"]
+        }))
+        .unwrap();
+        preview.branches = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| CloudConflictBranch {
+                revision: id.into(),
+                device_id: id.into(),
+                device_name: None,
+                created_at_ms: 1,
+                readable: id != "c",
+                differences: Vec::new(),
+            })
+            .collect();
+        state.capture_conflict(
+            &CloudSyncError::Conflict(Box::new(preview.clone())),
+            "test".into(),
+            true,
+        );
+        assert!(state.conflict().unwrap().selected_revision.is_none());
+        assert!(!state.prepare_resolution(true));
+        state.select_conflict_branch("c");
+        assert!(!state.prepare_resolution(true));
+        state.select_conflict_branch("b");
+        assert!(state.prepare_resolution(true));
+        let request = state.take_resolution().unwrap();
+        assert_eq!(request.selected_revision.as_deref(), Some("b"));
+        assert_eq!(request.observed_revisions, preview.observed_revisions);
+        assert_eq!(request.local_content_hash, "local-content");
+        assert!(state.take_resolution().is_none());
+        assert!(state.prepare_resolution(false));
+        assert!(state.take_resolution().unwrap().selected_revision.is_none());
+        preview.branches[1].readable = false;
+        state.capture_conflict(
+            &CloudSyncError::Conflict(Box::new(preview)),
+            "test".into(),
+            true,
+        );
+        assert_eq!(
+            state.conflict().unwrap().selected_revision.as_deref(),
+            Some("a")
+        );
+    }
+    #[test]
+    fn cloud_sync_rotated_tokens_keep_clean_drafts_clean_and_preserve_explicit_secret_edits() {
+        let mut base = CloudSyncSettings::default();
+        base.google_drive.access_token = Some("old-access".into());
+        base.google_drive.refresh_token = Some("old-refresh".into());
+        let original = base.clone();
+        let mut state =
+            CloudSyncFeatureState::new(base.clone(), CloudSyncState::default(), Vec::new());
+        let mut current = base.clone();
+        current.google_drive.access_token = Some("new-access".into());
+        current.google_drive.refresh_token = Some("new-refresh".into());
+        state.rebase_credential_rotation(&mut base, &current);
+        assert!(state.settings_draft_matches(&base, &CloudSyncSecretDraft::default()));
+        assert_eq!(state.settings().google_drive, current.google_drive);
+
+        let mut state =
+            CloudSyncFeatureState::new(original.clone(), CloudSyncState::default(), Vec::new());
+        state.secret_draft.google_drive_refresh_token = "user-refresh".into();
+        let mut base = original;
+        state.rebase_credential_rotation(&mut base, &current);
+        assert_eq!(
+            state
+                .pending_settings()
+                .google_drive
+                .refresh_token
+                .as_deref(),
+            Some("user-refresh")
+        );
+        assert_eq!(
+            state.settings().google_drive.access_token.as_deref(),
+            Some("new-access")
+        );
+        assert_ne!(
+            base, current,
+            "an explicit edit retains the save-time conflict baseline"
+        );
     }
 }

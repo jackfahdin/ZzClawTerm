@@ -1289,10 +1289,17 @@ impl ZzClawTermApp {
                                     };
                                     this.reveal_connection_editor_validation(
                                         super::validation::ConnectionEditorValidationLocation {
-                                            section: crate::models::ConnectionEditorSection::Authentication,
-                                            target: crate::models::ConnectionEditorFocusTarget::Select(select),
+                                            section: crate::models::ConnectionEditorSection::Basic,
+                                            target:
+                                                crate::models::ConnectionEditorFocusTarget::Select(
+                                                    select,
+                                                ),
                                             algorithm_tab: None,
-                                        }, message, window, cx);
+                                        },
+                                        message,
+                                        window,
+                                        cx,
+                                    );
                                 });
                             });
                         });

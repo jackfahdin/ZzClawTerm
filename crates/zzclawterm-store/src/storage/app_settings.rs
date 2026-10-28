@@ -6,6 +6,7 @@
 //! unchanged.
 
 use std::collections::HashMap;
+use zzclawterm_core::models::window_decoration::WindowDecoration;
 use zzclawterm_core::models::window_material::{WindowMaterial, default_window_background_opacity};
 
 use super::{
@@ -23,7 +24,18 @@ use zzclawterm_core::{
 };
 
 // Reject malformed known fields before an unrelated save can replace their data.
-fn read_window_appearance(value: &serde_json::Value) -> Result<(WindowMaterial, u8), StorageError> {
+fn read_window_appearance(
+    value: &serde_json::Value,
+) -> Result<(WindowMaterial, u8, WindowDecoration), StorageError> {
+    let decorations = match json_path(value, &["appearance", "window_decorations"]) {
+        None => WindowDecoration::default(),
+        Some(serde_json::Value::String(value)) => WindowDecoration::from(value.clone()),
+        Some(_) => {
+            return Err(StorageError::InvalidData(
+                "window decorations must be a string".into(),
+            ));
+        }
+    };
     let material = match json_path(value, &["appearance", "window_material"]) {
         None => WindowMaterial::Opaque,
         Some(serde_json::Value::String(material)) => WindowMaterial::from(material.clone()),
@@ -43,7 +55,7 @@ fn read_window_appearance(value: &serde_json::Value) -> Result<(WindowMaterial, 
                 StorageError::InvalidData("window background opacity must be an integer".into())
             })?,
     };
-    Ok((material, opacity))
+    Ok((material, opacity, decorations))
 }
 
 impl ConnectionStore {
@@ -65,9 +77,11 @@ impl ConnectionStore {
             &mut value,
         )
         .map_err(StorageError::InvalidData)?;
-        let (window_material, window_background_opacity) = read_window_appearance(&value)?;
+        let (window_material, window_background_opacity, window_decorations) =
+            read_window_appearance(&value)?;
         Ok(AppSettingsSummary {
             window_material,
+            window_decorations,
             window_background_opacity,
             theme: json_string(&value, &["appearance", "theme"], "github-dark"),
             custom_themes: json_path(&value, &["appearance", "custom_themes"])
@@ -1127,6 +1141,11 @@ impl ConnectionStore {
     ) -> Result<AppSettingsSummary, StorageError> {
         let mut value = self.load_settings_value()?;
         read_window_appearance(&value)?;
+        set_nested_json_string(
+            &mut value,
+            &["appearance", "window_decorations"],
+            settings.window_decorations.as_str().to_owned(),
+        );
         set_nested_json_string(&mut value, &["appearance", "theme"], settings.theme.clone());
         set_nested_json_string(
             &mut value,

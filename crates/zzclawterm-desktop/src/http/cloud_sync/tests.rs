@@ -96,7 +96,7 @@ fn s3_list_parser_reads_keys_and_continuation_token() {
     let page = parse_s3_list_page(body).expect("parse S3 list");
 
     assert_eq!(
-        page.keys,
+        page.objects.into_iter().map(|e| e.path).collect::<Vec<_>>(),
         vec![
             "root/sync/snapshots/r1.redb.enc",
             "root/sync/snapshots/r2.redb.enc"
@@ -180,12 +180,13 @@ fn percent_encode_path_preserves_separators_and_encodes_segments() {
 #[test]
 fn onedrive_urls_use_graph_path_addressing_templates() {
     let remote = NativeOneDriveRemote {
+        token_sink: std::sync::Arc::new(|_| Ok(())),
         client: zed_reqwest::blocking::Client::builder()
             .build()
             .expect("client"),
         root: "ZzClaw Term".to_string(),
         access_token: Mutex::new("token".to_string().into()),
-        refresh_token: None,
+        refresh_token: Mutex::new(zzclawterm_core::SecretString::default()),
         client_id: None,
         client_secret: None,
     };
@@ -220,6 +221,7 @@ fn aliyun_drive_type_matches_legacy_values() {
 #[test]
 fn aliyun_drive_item_path_uses_rooted_absolute_path() {
     let remote = NativeAliyunDriveRemote {
+        token_sink: std::sync::Arc::new(|_| Ok(())),
         client: zed_reqwest::blocking::Client::builder()
             .build()
             .expect("client"),
@@ -240,7 +242,7 @@ fn aliyun_drive_item_path_uses_rooted_absolute_path() {
 }
 
 #[test]
-fn aliyun_drive_error_helpers_preserve_code_and_message() {
+fn aliyun_drive_error_helpers_do_not_expose_response_body() {
     let body = r#"{"code":"NotFound.File","message":"file missing"}"#;
 
     assert_eq!(
@@ -248,8 +250,162 @@ fn aliyun_drive_error_helpers_preserve_code_and_message() {
         Some("NotFound.File")
     );
     assert!(
-        aliyun_drive_remote_error(StatusCode::BAD_REQUEST, body, "lookup")
+        aliyun_drive_remote_error(StatusCode::BAD_REQUEST, body, "lookup", None)
             .to_string()
-            .contains("NotFound.File: file missing")
+            .contains("HTTP 400")
     );
+}
+
+#[test]
+fn cloud_sync_http_errors_never_include_query_tokens_or_echoed_response_bodies() {
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use zzclawterm_core::{SnippetHttpClient, SnippetHttpMethod, SnippetHttpRequest};
+    let client = zed_reqwest::blocking::Client::new();
+    let raw = client
+        .get("invalid-scheme://example.test/?token=PRIVATE-QUERY")
+        .send()
+        .unwrap_err();
+    let error = super::helpers::safe_http_error("test", raw);
+    assert!(!format!("{error} {error:?}").contains("PRIVATE"));
+    for status in [401, 429, 503] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "PRIVATE-ECHOED-CREDENTIAL";
+            write!(stream, "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nRetry-After: 1900\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let error = super::NativeSnippetHttpClient::new()
+            .unwrap()
+            .send(SnippetHttpRequest {
+                method: SnippetHttpMethod::Get,
+                url: format!("http://{address}/?signature=PRIVATE-SIGNATURE"),
+                headers: BTreeMap::new(),
+                query: BTreeMap::new(),
+                json_body: None,
+            })
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(!format!("{error} {error:?}").contains("PRIVATE"));
+        assert_eq!(
+            error.retry_after(),
+            Some(std::time::Duration::from_secs(1900))
+        );
+        assert!(
+            matches!(error, zzclawterm_core::CloudSyncError::Http { status: actual, .. } if actual == status)
+        );
+    }
+    // Malformed XML/JSON can include arbitrary server-controlled tag/field text.
+    for error in [
+        parse_webdav_file_names("<PRIVATE-XML></different>").unwrap_err(),
+        parse_s3_list_page("<PRIVATE-XML></different>")
+            .err()
+            .unwrap(),
+        super::helpers::safe_json::<serde_json::Value>("PRIVATE-JSON", "test").unwrap_err(),
+        aliyun_drive_remote_error(StatusCode::UNAUTHORIZED, "PRIVATE-TOKEN", "lookup", None),
+    ] {
+        assert!(!format!("{error} {error:?}").contains("PRIVATE"));
+    }
+}
+
+#[test]
+fn cloud_sync_retry_after_accepts_seconds_and_future_http_dates() {
+    use zed_reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+    let mut headers = HeaderMap::new();
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("321"));
+    assert_eq!(super::helpers::retry_after_seconds(&headers), Some(321));
+    let date =
+        httpdate::fmt_http_date(std::time::SystemTime::now() + std::time::Duration::from_secs(600));
+    headers.insert(RETRY_AFTER, HeaderValue::from_str(&date).unwrap());
+    assert!(matches!(
+        super::helpers::retry_after_seconds(&headers),
+        Some(598..=600)
+    ));
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("invalid"));
+    assert_eq!(super::helpers::retry_after_seconds(&headers), None);
+}
+
+#[test]
+fn cloud_sync_token_save_is_required_before_install_and_survives_later_cancellation() {
+    use std::sync::Arc;
+    use zzclawterm_core::cloud_sync::credentials::{CloudCredentialUpdate, DriveProvider};
+    use zzclawterm_core::{CloudSyncError, SecretString};
+    let access = Arc::new(Mutex::new(SecretString::from("old-access")));
+    let refresh = Arc::new(Mutex::new(SecretString::from("old-refresh")));
+    let update = CloudCredentialUpdate {
+        provider: DriveProvider::Google,
+        client_id: None,
+        client_secret: None,
+        expected_access_token: Some("old-access".into()),
+        expected_refresh_token: Some("old-refresh".into()),
+        access_token: "new-access".into(),
+        refresh_token: Some("new-refresh".into()),
+    };
+    let fail: super::CloudTokenSink = Arc::new(|_| Err(CloudSyncError::CredentialPersistence));
+    assert!(matches!(
+        super::helpers::install_refreshed_tokens(&access, &refresh, &fail, update.clone()),
+        Err(CloudSyncError::CredentialPersistence)
+    ));
+    assert_eq!(access.lock().unwrap().expose_secret(), "old-access");
+    assert_eq!(refresh.lock().unwrap().expose_secret(), "old-refresh");
+    let old_access = access.clone();
+    let old_refresh = refresh.clone();
+    let saved = Arc::new(Mutex::new(None));
+    let persisted = saved.clone();
+    let sink: super::CloudTokenSink = Arc::new(move |update| {
+        assert_eq!(old_access.lock().unwrap().expose_secret(), "old-access");
+        assert_eq!(old_refresh.lock().unwrap().expose_secret(), "old-refresh");
+        *persisted.lock().unwrap() = Some(update);
+        Ok(())
+    });
+    super::helpers::install_refreshed_tokens(&access, &refresh, &sink, update).unwrap();
+    let control = zzclawterm_core::cloud_sync::control::CloudSyncOperationControl::default();
+    control.request_cancel();
+    assert!(control.checkpoint().is_err());
+    assert_eq!(access.lock().unwrap().expose_secret(), "new-access");
+    assert_eq!(
+        saved
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .refresh_token
+            .as_deref(),
+        Some("new-refresh")
+    );
+    let access_only = CloudCredentialUpdate {
+        provider: DriveProvider::Google,
+        client_id: None,
+        client_secret: None,
+        expected_access_token: Some("new-access".into()),
+        expected_refresh_token: Some("new-refresh".into()),
+        access_token: "next-access".into(),
+        refresh_token: None,
+    };
+    let sink: super::CloudTokenSink = Arc::new(|_| Ok(()));
+    super::helpers::install_refreshed_tokens(&access, &refresh, &sink, access_only).unwrap();
+    assert_eq!(access.lock().unwrap().expose_secret(), "next-access");
+    assert_eq!(refresh.lock().unwrap().expose_secret(), "new-refresh");
+}
+
+#[test]
+fn cloud_sync_oauth_revocation_is_typed_without_exposing_error_descriptions() {
+    let error = super::helpers::oauth_failure(
+        "Google Drive",
+        400,
+        r#"{"error":"invalid_grant","error_description":"PRIVATE-REFRESH-TOKEN"}"#,
+        None,
+    );
+    assert!(matches!(
+        error,
+        zzclawterm_core::CloudSyncError::Authentication { status: 400, .. }
+    ));
+    assert_eq!(error.classification(), "authentication");
+    assert!(!format!("{error} {error:?}").contains("PRIVATE"));
 }

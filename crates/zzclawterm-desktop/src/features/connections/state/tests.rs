@@ -1224,6 +1224,32 @@ fn toggle_connection_editor_raw_tcp_preserves_enter_mode() {
 }
 
 #[test]
+fn toggle_connection_editor_administrative_session_leaves_nla_alone() {
+    let mut draft = Some(connection_editor_state_with_secret_draft());
+    let baseline_nla = draft.as_ref().expect("draft").rdp_security.use_nla;
+    let baseline_policy = draft
+        .as_ref()
+        .expect("draft")
+        .rdp_security
+        .certificate_policy
+        .clone();
+
+    for expected in [true, false] {
+        assert!(toggle_connection_editor_flag(
+            &mut draft,
+            ConnectionEditorToggle::RdpAdministrativeSession
+        ));
+        let editor = draft.as_ref().expect("editor remains open");
+        assert_eq!(editor.rdp_security.administrative_session, expected);
+        assert_eq!(
+            editor.rdp_security.use_nla, baseline_nla,
+            "the console-session switch must not move NLA"
+        );
+        assert_eq!(editor.rdp_security.certificate_policy, baseline_policy);
+    }
+}
+
+#[test]
 fn connection_editor_credential_overlay_closes_competing_popups() {
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);

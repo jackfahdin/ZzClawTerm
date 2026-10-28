@@ -49,7 +49,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn panel_body(
         &mut self,
         panel: NavItem,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match panel {
@@ -66,7 +66,9 @@ impl ZzClawTermApp {
                 .into_any_element(),
             NavItem::Tunnels => self.tunnels_view(cx).into_any_element(),
             NavItem::SecurityAuth => self.security_auth_panel(cx).into_any_element(),
-            NavItem::SyncBackupHistory => self.sync_backup_history_panel(cx).into_any_element(),
+            NavItem::SyncBackupHistory => self
+                .sync_backup_history_panel(window, cx)
+                .into_any_element(),
             NavItem::Connections => self
                 .connection_panel
                 .clone()

@@ -1,8 +1,7 @@
 mod labels;
 pub(in crate::features) use labels::{
-    TerminalTimestampFormatter, cloud_sync_history_status, cloud_sync_history_summary,
-    cloud_sync_kind_text_color, cloud_sync_status_dot_color, cloud_sync_status_text_color,
-    compact_id, configured_cloud_sync_provider, docker_compose_project_key, docker_state_color,
+    TerminalTimestampFormatter, cloud_sync_history_status, cloud_sync_status_dot_color, compact_id,
+    configured_cloud_sync_provider, docker_compose_project_key, docker_state_color,
     docker_state_label, docker_state_rank, download_file_name_from_remote_path,
     format_cloud_provider, format_duration_ms, format_history_timestamp_ms, format_last_used_ms,
     format_permissions_octal, format_rate, format_uptime, non_empty_string, none_if_blank,
@@ -19,4 +18,9 @@ pub(in crate::features) mod markdown;
 pub(in crate::features) use markdown::{
     InlineMdStyle, MarkdownBlock, extract_think_content, parse_inline_markdown,
     parse_markdown_blocks,
+};
+
+mod sync_history;
+pub(in crate::features) use sync_history::{
+    SyncHistoryTimeFormatter, cloud_sync_history_summary, cloud_sync_history_trigger,
 };

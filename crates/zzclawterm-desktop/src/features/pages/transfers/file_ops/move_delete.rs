@@ -368,7 +368,7 @@ impl ZzClawTermApp {
             .collect::<Vec<_>>()
             .join("\n");
         let remaining = delete_count.saturating_sub(6);
-        let mut detail = t!("fileExplorer.deleteConfirmHint").to_string();
+        let mut detail = t!("common.deletingConfirmDesc").to_string();
         if delete_count > 1 {
             detail.push_str("\n\n");
             detail.push_str(&preview);

@@ -331,7 +331,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
-            profile_settings(r#"cmd.exe /Q /D /K "prompt NYATERM_WT_READY$G""#),
+            profile_settings(r#"cmd.exe /Q /D /K "prompt ZZCLAWTERM_WT_READY$G""#),
         )
         .unwrap();
         let config = LocalSessionConfig {
@@ -350,8 +350,9 @@ mod tests {
         // The expected output does not occur verbatim in the echoed command.
         let marker = uuid::Uuid::new_v4().simple().to_string();
         let expected = format!("zzclawterm-wt-{marker}");
-        let input =
-            format!("set \"NYATERM_WT_TEST={marker}\"\recho zzclawterm-wt-%NYATERM_WT_TEST%\r");
+        let input = format!(
+            "set \"ZZCLAWTERM_WT_TEST={marker}\"\recho zzclawterm-wt-%ZZCLAWTERM_WT_TEST%\r"
+        );
         let mut terminal = zzclawterm_terminal::TerminalCore::new(100, 30);
         let mut sent_input = false;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -371,7 +372,11 @@ mod tests {
                 }
             }
             let lines = terminal.lines();
-            if !sent_input && lines.iter().any(|line| line.contains("NYATERM_WT_READY>")) {
+            if !sent_input
+                && lines
+                    .iter()
+                    .any(|line| line.contains("ZZCLAWTERM_WT_READY>"))
+            {
                 manager.write(&session.id, input.as_bytes()).unwrap();
                 sent_input = true;
             }

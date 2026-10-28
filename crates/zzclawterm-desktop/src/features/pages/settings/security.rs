@@ -7,7 +7,8 @@ use crate::features::pages::settings::panel::SettingsPanel;
 use zzclawterm_ui::ZzClawTooltip;
 
 use super::{
-    settings_form_row, settings_form_section, settings_switch, settings_switch_with_enabled,
+    settings_form_row, settings_form_section, settings_input_control, settings_switch,
+    settings_switch_with_enabled,
 };
 
 impl SettingsPanel {
@@ -44,9 +45,7 @@ impl SettingsPanel {
         let master_input_desc = t!("settings.masterPasswordDesc");
         let session_security_label = t!("settings.sessionSecurity");
         let startup_lock_label = t!("settings.enableStartupLock");
-        let startup_lock_desc = t!("settings.enableStartupLockDesc");
         let idle_lock_switch_label = t!("settings.enableIdleLock");
-        let idle_lock_switch_desc = t!("settings.enableIdleLockDesc");
         let idle_lock_label = t!("settings.idleLockMinutes");
         let idle_lock_desc = t!("settings.idleLockMinutesDesc");
         let _minutes_label = t!("common.minutes");
@@ -101,13 +100,8 @@ impl SettingsPanel {
                         palette,
                         master_input_label,
                         Some(SharedString::from(master_input_desc)),
-                        div()
-                            // The row's control slot is content-sized, and a box
-                            // with nothing typed in it has no content.
-                            .w(px(260.))
-                            .flex()
-                            .opacity(if master_password_enabled { 1.0 } else { 0.45 })
-                            .child(div().min_w_0().flex_1().child(master_password_input)),
+                        settings_input_control(master_password_input)
+                            .opacity(if master_password_enabled { 1.0 } else { 0.45 }),
                     )),
             ))
             .child(settings_form_section(
@@ -121,7 +115,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         startup_lock_label,
-                        Some(SharedString::from(startup_lock_desc)),
+                        None,
                         settings_switch(
                             palette,
                             "settings-startup-lock-enabled",
@@ -134,7 +128,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         idle_lock_switch_label,
-                        Some(SharedString::from(idle_lock_switch_desc)),
+                        None,
                         settings_switch(
                             palette,
                             "settings-idle-lock-enabled",

@@ -23,21 +23,23 @@ fn required_env(name: &str) -> String {
 }
 
 #[test]
-#[ignore = "requires NYATERM_TEST_SHELL_HOST/PORT/USERNAME/ROOT and a disposable SSH server without SFTP"]
+#[ignore = "requires ZZCLAWTERM_TEST_SHELL_HOST/PORT/USERNAME/ROOT and a disposable SSH server without SFTP"]
 fn shell_external_edit_downloads_into_private_workspace_and_preserves_remote_metadata()
 -> anyhow::Result<()> {
     let service = RemoteFileService::new(SshSessionConfig {
-        host: required_env("NYATERM_TEST_SHELL_HOST"),
-        port: required_env("NYATERM_TEST_SHELL_PORT").parse()?,
-        username: required_env("NYATERM_TEST_SHELL_USERNAME"),
-        password: env::var("NYATERM_TEST_SHELL_PASSWORD").ok().map(Into::into),
+        host: required_env("ZZCLAWTERM_TEST_SHELL_HOST"),
+        port: required_env("ZZCLAWTERM_TEST_SHELL_PORT").parse()?,
+        username: required_env("ZZCLAWTERM_TEST_SHELL_USERNAME"),
+        password: env::var("ZZCLAWTERM_TEST_SHELL_PASSWORD")
+            .ok()
+            .map(Into::into),
         allow_none_auth: true,
         host_key_verifier: Some(Arc::new(AcceptDisposableServerKey)),
         ..SshSessionConfig::default()
     });
     let remote_dir = format!(
         "{}/zzclawterm-editor-e2e-{}",
-        required_env("NYATERM_TEST_SHELL_ROOT").trim_end_matches('/'),
+        required_env("ZZCLAWTERM_TEST_SHELL_ROOT").trim_end_matches('/'),
         uuid::Uuid::new_v4()
     );
     service.create_dir_path(&remote_dir, Some(0o700))?;
@@ -53,7 +55,7 @@ fn shell_external_edit_downloads_into_private_workspace_and_preserves_remote_met
             backend != RemoteFileBackendKind::Sftp,
             "Server must disable SFTP"
         );
-        if let Ok(expected) = env::var("NYATERM_TEST_SHELL_BACKEND") {
+        if let Ok(expected) = env::var("ZZCLAWTERM_TEST_SHELL_BACKEND") {
             anyhow::ensure!(backend.cache_name() == expected, "Unexpected shell backend");
         }
         service.create_file_path(&remote_path.display_path, Some(0o640))?;
@@ -62,8 +64,8 @@ fn shell_external_edit_downloads_into_private_workspace_and_preserves_remote_met
         service.update_path_attributes(
             &remote_path.display_path,
             SftpAttributeUpdate {
-                owner: env::var("NYATERM_TEST_SHELL_OWNER").ok(),
-                group: env::var("NYATERM_TEST_SHELL_GROUP").ok(),
+                owner: env::var("ZZCLAWTERM_TEST_SHELL_OWNER").ok(),
+                group: env::var("ZZCLAWTERM_TEST_SHELL_GROUP").ok(),
                 ..SftpAttributeUpdate::default()
             },
         )?;

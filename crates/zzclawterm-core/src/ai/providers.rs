@@ -1015,6 +1015,7 @@ mod tests {
             provider_kind: AiProviderKind::OpenaiCompatible,
             base_url: Some("https://api.example.com/v1".to_string()),
             api_key: None,
+            extra_headers: Vec::new(),
             enabled: true,
         };
         let raw = r#"{"data":[{"id":"llama3"},{"id":" "},{"id":"qwen3"}]}"#;
@@ -1054,6 +1055,7 @@ mod tests {
                 provider_kind: AiProviderKind::Deepseek,
                 base_url: Some("https://api.deepseek.com/v1".to_string()),
                 api_key: Some("key".to_string().into()),
+                extra_headers: Vec::new(),
                 enabled: true,
             }),
         };
@@ -1437,6 +1439,7 @@ mod tests {
                 provider_kind: AiProviderKind::Anthropic,
                 base_url: None,
                 api_key: Some("key".to_string().into()),
+                extra_headers: Vec::new(),
                 enabled: true,
             }),
         };

@@ -6,10 +6,15 @@ use thiserror::Error;
 
 use crate::{PortableSnapshotError, RawPortableSnapshot};
 
+pub mod cache;
+pub mod conflict;
 pub mod control;
+pub mod credentials;
 mod gc;
 mod heads;
 mod history;
+pub mod io;
+pub mod metadata_cache;
 mod protocol;
 mod remote;
 mod s3;
@@ -52,6 +57,23 @@ pub const REMOTE_SYNC_POINTER_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum CloudSyncError {
+    #[error("{provider} {operation} failed (HTTP {status})")]
+    Http {
+        provider: String,
+        operation: String,
+        status: u16,
+        retry_after_seconds: Option<u64>,
+    },
+    #[error("{provider} {operation} authentication failed (HTTP {status})")]
+    Authentication {
+        provider: String,
+        operation: String,
+        status: u16,
+    },
+    #[error("cloud credentials changed during token refresh; retry with the current account")]
+    CredentialsChanged,
+    #[error("refreshed cloud credentials could not be saved")]
+    CredentialPersistence,
     #[error("cloud sync was cancelled before commit")]
     Cancelled,
     #[error(
@@ -222,6 +244,46 @@ impl CloudSyncError {
 }
 
 impl CloudSyncError {
+    pub fn classification(&self) -> &'static str {
+        match self {
+            Self::Authentication { .. } => "authentication",
+            Self::Http {
+                status: 403 | 429,
+                retry_after_seconds: Some(_),
+                ..
+            } => "rate_limited",
+            Self::Http {
+                status: 401 | 403, ..
+            } => "authentication",
+            Self::Http { status: 429, .. } => "rate_limited",
+            Self::Http {
+                status: 500..=599, ..
+            } => "server",
+            Self::Http { .. } => "http",
+            Self::Conflict(_) => "conflict",
+            Self::CredentialsChanged => "credentials_changed",
+            Self::CredentialPersistence => "credential_persistence",
+            Self::Cancelled => "cancelled",
+            Self::GistCapacity => "gist_capacity",
+            Self::LocalChangedDuringSync => "local_changed",
+            Self::StaleRemoteRevision => "stale_remote",
+            Self::Io(_) => "io",
+            Self::LocalStore(_) => "store",
+            Self::PortableSnapshot(_) => "snapshot",
+            _ => "sync",
+        }
+    }
+
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Http {
+                retry_after_seconds: Some(seconds),
+                ..
+            } => Some(std::time::Duration::from_secs(*seconds)),
+            _ => None,
+        }
+    }
+
     pub fn code(&self) -> Option<&'static str> {
         matches!(self, Self::GistCapacity).then_some(GIST_CAPACITY_ERROR_CODE)
     }
@@ -307,6 +369,12 @@ pub enum CloudConflictKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CloudConflictPreview {
+    #[serde(default)]
+    pub branches: Vec<conflict::CloudConflictBranch>,
+    #[serde(default)]
+    pub observed_revisions: Vec<String>,
+    #[serde(default)]
+    pub local_content_hash: Option<String>,
     pub detected_at_ms: u64,
     pub provider: String,
     #[serde(default)]
@@ -510,6 +578,28 @@ pub trait CloudSyncRemote {
         Ok(None)
     }
 
+    fn read_conditional(
+        &self,
+        path: &str,
+        _etag: Option<&str>,
+    ) -> Result<io::CloudObjectRead, CloudSyncError> {
+        Ok(match self.read_if_exists(path)? {
+            Some(bytes) => io::CloudObjectRead::Modified { bytes, etag: None },
+            None => io::CloudObjectRead::Missing,
+        })
+    }
+    fn list_metadata(&self, path: &str) -> Result<Vec<io::CloudObjectMetadata>, CloudSyncError> {
+        Ok(self
+            .list_files(path)?
+            .into_iter()
+            .map(|path| io::CloudObjectMetadata {
+                path,
+                ..Default::default()
+            })
+            .collect())
+    }
+    fn observe(&self, _event: io::CloudSyncIoEvent) {}
+
     fn provider(&self) -> &'static str;
     fn create_dir(&self, path: &str) -> Result<(), CloudSyncError>;
     fn read_if_exists(&self, path: &str) -> Result<Option<Vec<u8>>, CloudSyncError>;
@@ -621,7 +711,12 @@ pub fn push_snapshot_with_remote_controlled(
     force: bool,
     control: &control::CloudSyncOperationControl,
 ) -> Result<CloudSyncResult, CloudSyncError> {
-    push_snapshot_prepared(local_store, options, remote, state, force, control, None)
+    conflict::with_details(
+        push_snapshot_prepared(local_store, options, remote, state, force, control, None),
+        &control.local_store(local_store),
+        &control.remote(remote),
+        options,
+    )
 }
 
 fn push_snapshot_prepared(
@@ -753,6 +848,7 @@ fn push_snapshot_prepared(
         return Err(CloudSyncError::RemoteNewer);
     }
 
+    snapshot.meta.device_name = options.device_name.clone();
     snapshot.meta.sync_clock =
         Some(heads.next_clock(state.last_synced_clock.as_ref(), &options.device_id)?);
     let uploaded =
@@ -843,17 +939,22 @@ pub fn pull_snapshot_with_remote_controlled(
     before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
     control: &control::CloudSyncOperationControl,
 ) -> Result<CloudSyncResult, CloudSyncError> {
-    pull_snapshot_prepared(
-        local_store,
+    conflict::with_details(
+        pull_snapshot_prepared(
+            local_store,
+            options,
+            remote,
+            state,
+            force,
+            PullExecution {
+                before_apply,
+                control,
+            },
+            None,
+        ),
+        &control.local_store(local_store),
+        &control.remote(remote),
         options,
-        remote,
-        state,
-        force,
-        PullExecution {
-            before_apply,
-            control,
-        },
-        None,
     )
 }
 
@@ -1000,6 +1101,7 @@ fn pull_snapshot_prepared(
         snapshot.meta.revision_id = uuid_v4();
         snapshot.meta.created_at_ms = current_time_ms();
         snapshot.meta.device_id = options.device_id.clone();
+        snapshot.meta.device_name = options.device_name.clone();
         snapshot.meta.sync_clock =
             Some(heads.next_clock(state.last_synced_clock.as_ref(), &options.device_id)?);
         snapshot.recalculate_hash()?;
@@ -1149,14 +1251,19 @@ impl CloudSyncCheck {
         remote: &dyn CloudSyncRemote,
         control: &control::CloudSyncOperationControl,
     ) -> Result<CloudSyncResult, CloudSyncError> {
-        push_snapshot_prepared(
-            store,
+        conflict::with_details(
+            push_snapshot_prepared(
+                store,
+                options,
+                remote,
+                &self.state,
+                false,
+                control,
+                Some(self.prepared),
+            ),
+            &control.local_store(store),
+            &control.remote(remote),
             options,
-            remote,
-            &self.state,
-            false,
-            control,
-            Some(self.prepared),
         )
     }
 
@@ -1168,17 +1275,22 @@ impl CloudSyncCheck {
         before_apply: &dyn Fn() -> Result<(), CloudSyncError>,
         control: &control::CloudSyncOperationControl,
     ) -> Result<CloudSyncResult, CloudSyncError> {
-        pull_snapshot_prepared(
-            store,
+        conflict::with_details(
+            pull_snapshot_prepared(
+                store,
+                options,
+                remote,
+                &self.state,
+                false,
+                PullExecution {
+                    before_apply,
+                    control,
+                },
+                Some(self.prepared),
+            ),
+            &control.local_store(store),
+            &control.remote(remote),
             options,
-            remote,
-            &self.state,
-            false,
-            PullExecution {
-                before_apply,
-                control,
-            },
-            Some(self.prepared),
         )
     }
 }
@@ -1190,12 +1302,52 @@ pub fn check_snapshot_with_remote_state(
     state: &CloudSyncState,
     allow_auto_pull: bool,
 ) -> Result<CloudSyncCheck, CloudSyncError> {
+    conflict::with_details(
+        check_snapshot_inner(local_store, options, remote, state, allow_auto_pull, None),
+        local_store,
+        remote,
+        options,
+    )
+}
+
+/// Cached inspection never authorizes a write or local application by itself.
+pub fn check_snapshot_with_remote_cached(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    allow_auto_pull: bool,
+    cache: &mut cache::CloudSyncCheckCache,
+) -> Result<CloudSyncCheck, CloudSyncError> {
+    cache.scope(options, remote.provider());
+    let result = check_snapshot_inner(
+        local_store,
+        options,
+        remote,
+        state,
+        allow_auto_pull,
+        Some(cache),
+    );
+    conflict::with_cached_details(result, local_store, remote, options, cache)
+}
+
+fn check_snapshot_inner(
+    local_store: &dyn CloudLocalStore,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    state: &CloudSyncState,
+    allow_auto_pull: bool,
+    mut cache: Option<&mut cache::CloudSyncCheckCache>,
+) -> Result<CloudSyncCheck, CloudSyncError> {
     ensure_enabled(options)?;
     let mut local = local_store.build_sync_snapshot(options)?;
     local.recalculate_hash()?;
     let mut checked_state = state.clone();
     checked_state.last_checked_at_ms = Some(current_time_ms());
     let heads = heads::read(local_store, remote, &options.remote_root)?;
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.prepare_preview(&heads.maximal());
+    }
     heads.require_single(options, remote.provider(), &local.meta.payload_hash)?;
     let pointer = heads.selected.clone();
     let Some(pointer) = pointer else {
@@ -1217,6 +1369,53 @@ pub fn check_snapshot_with_remote_state(
         remote.provider(),
         &local.meta.payload_hash,
     )?;
+    if let Some(receipt) = cache.as_deref_mut().and_then(|cache| cache.get(&pointer)) {
+        remote.observe(io::CloudSyncIoEvent::CacheHit);
+        let local_hash = local.sync_content_hash()?;
+        let decision = if local_hash == receipt.content_hash {
+            CloudRemoteCheckDecision::UpToDate
+        } else {
+            let local_changed = local_content_changed(state, &local_hash);
+            let remote_changed =
+                state.last_applied_remote_revision.as_deref() != Some(&pointer.revision_id);
+            match (remote_changed, local_changed, allow_auto_pull) {
+                (true, true, _) => CloudRemoteCheckDecision::Conflict,
+                (true, false, true) => CloudRemoteCheckDecision::AutoPull,
+                (true, false, false) => CloudRemoteCheckDecision::RemoteAvailable,
+                (false, true, _) => CloudRemoteCheckDecision::LocalChanged,
+                _ => CloudRemoteCheckDecision::UpToDate,
+            }
+        };
+        if decision == CloudRemoteCheckDecision::Conflict {
+            return Err(CloudSyncError::Conflict(Box::new(conflict_preview(
+                options,
+                remote.provider(),
+                &local.meta.payload_hash,
+                &pointer,
+            ))));
+        }
+        if decision == CloudRemoteCheckDecision::UpToDate {
+            checked_state.last_synced_content_hash = Some(local_hash);
+            checked_state.last_synced_payload_hash = Some(local.meta.payload_hash.clone());
+            checked_state.last_synced_clock = pointer.sync_clock.clone();
+            checked_state.last_applied_remote_revision = Some(pointer.revision_id.clone());
+        }
+        checked_state.last_validated_remote_revision = Some(pointer.revision_id.clone());
+        checked_state.last_full_validation_at_ms = Some(receipt.validated_at_ms);
+        return Ok(CloudSyncCheck {
+            decision,
+            pointer: Some(pointer),
+            state: checked_state,
+            prepared: PreparedSync {
+                local,
+                heads,
+                remote: None,
+            },
+        });
+    }
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.remove(&pointer);
+    }
     let remote_snapshot =
         match protocol::resolve_remote_snapshot(local_store, remote, options, &pointer)? {
             protocol::RemoteSnapshotResolution::Current(snapshot)
@@ -1237,6 +1436,9 @@ pub fn check_snapshot_with_remote_state(
                 )));
             }
         };
+    if let Some(cache) = cache {
+        cache.record(&pointer, &remote_snapshot, &local)?;
+    }
     let decision =
         decide_snapshot_check(state, &local, &remote_snapshot, &pointer, allow_auto_pull)?;
     if decision == CloudRemoteCheckDecision::Conflict {
@@ -1343,6 +1545,9 @@ fn conflict_preview(
     remote: &RemoteSyncPointer,
 ) -> CloudConflictPreview {
     CloudConflictPreview {
+        branches: Vec::new(),
+        observed_revisions: Vec::new(),
+        local_content_hash: None,
         detected_at_ms: current_time_ms(),
         provider: provider.to_string(),
         kind: CloudConflictKind::ContentConflict,
@@ -1380,6 +1585,9 @@ fn remote_inconsistent_preview(
         message.push_str(&unreadable.reason);
     }
     CloudConflictPreview {
+        branches: Vec::new(),
+        observed_revisions: Vec::new(),
+        local_content_hash: None,
         detected_at_ms: current_time_ms(),
         provider: provider.to_string(),
         kind: CloudConflictKind::RemoteInconsistent,

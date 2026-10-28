@@ -42,6 +42,7 @@ license = "Apache-2.0"
 repository = "https://github.com/jackfahdin/ZzClawTerm"
 
 [workspace.dependencies]
+httpdate = "1.0"
 aes-gcm = "0.11"
 argon2 = { version = "0.5.3", features = ["zeroize"] }
 alacritty_terminal = "0.26.1-dev"
@@ -69,7 +70,7 @@ gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "c0543
 hayro = { version = "=0.7.1", features = ["embed-fonts"] }
 hex = "0.4"
 hmac = "0.13"
-ironrdp-input = "0.7.0"
+ironrdp-input = "0.8.0"
 jsonc-parser = { version = "0.34", features = ["serde"] }
 keyring = { version = "3.6", features = [
     "apple-native",
@@ -170,8 +171,8 @@ debug = "full"
 
 [patch.crates-io]
 alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "3b60b2ed9544cad2cbba9e92fa0785e885cb4af1" }
-ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
 sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca9a72f2a70b456186e2472b27f0d45d" }
 # The published ironrdp-client and ironrdp-connector packages declare their
 # sibling crates as registry dependencies, but in the IronRDP repository those
@@ -181,13 +182,13 @@ sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca
 # are identical on both sides. `ironrdp-tls` is here for the same reason:
 # `zzclawterm-rdp-helper` names its certificate-validation types directly, because
 # ironrdp-client does not re-export them.
-ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
-ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "1bc71d95c6414d5603792cb6cf8913e903205a33" }
+ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
 
 # gpui-kit takes zed-reqwest from git while this workspace uses the
 # published crate; without this both end up in the graph.

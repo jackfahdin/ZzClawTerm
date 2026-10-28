@@ -416,3 +416,267 @@ fn cleanup_retains_concurrent_snapshots_when_device_listing_is_stale() {
     ));
     assert_eq!(*remote.files.lock().unwrap(), original);
 }
+
+#[test]
+fn cloud_sync_explicit_resolution_pins_a_non_default_branch_and_rejects_stale_previews() {
+    use crate::cloud_sync::conflict::{CloudResolutionRequest, resolve_with_remote};
+    use crate::cloud_sync::control::CloudSyncOperationControl;
+    let root = unique_temp_dir("branch-choice");
+    let mut a = options(&root.join("a"), &root, "a");
+    a.device_name = Some("Device A".into());
+    let remote = MemoryRemote::default();
+    let initial = push_snapshot_with_remote(
+        &OptionsTestLocalStore(&a),
+        &a,
+        &remote,
+        &CloudSyncState::default(),
+        false,
+    )
+    .unwrap();
+    let initial_files = remote.files.lock().unwrap().clone();
+    let mut states = Vec::new();
+    for id in ["a", "b", "c"] {
+        let mut device = options(&root.join(id), &root, id);
+        device.device_name = Some(format!("Device {id}"));
+        let isolated = MemoryRemote {
+            files: Mutex::new(initial_files.clone()),
+            ..Default::default()
+        };
+        let baseline = if id == "a" {
+            initial.clone()
+        } else {
+            pull_snapshot_with_remote(
+                &OptionsTestLocalStore(&device),
+                &device,
+                &isolated,
+                &CloudSyncState::default(),
+                true,
+            )
+            .unwrap()
+        };
+        ConnectionStore::open(&device.config_dir)
+            .unwrap()
+            .replace_sessions(&SessionsConfig {
+                connections: vec![local_connection(id, &format!("branch {id}"), "bash")],
+                ..Default::default()
+            })
+            .unwrap();
+        let publication = push_snapshot_with_remote(
+            &OptionsTestLocalStore(&device),
+            &device,
+            &isolated,
+            &baseline.state,
+            false,
+        )
+        .unwrap();
+        let pointer = publication.pointer.as_ref().unwrap();
+        let snapshot_path = crate::cloud_sync::remote_path(
+            &device.remote_root,
+            &crate::cloud_sync::legacy_sync_snapshot_file(&pointer.revision_id),
+        );
+        let head_path = crate::cloud_sync::heads::device_head_path(&device.remote_root, id);
+        for path in [snapshot_path, head_path] {
+            remote
+                .write(&path, &isolated.read_if_exists(&path).unwrap().unwrap())
+                .unwrap();
+        }
+        states.push(publication.state);
+    }
+    let store = OptionsTestLocalStore(&a);
+    let CloudSyncError::Conflict(preview) =
+        check_snapshot_with_remote_state(&store, &a, &remote, &states[0], true)
+            .err()
+            .unwrap()
+    else {
+        panic!("expected conflict");
+    };
+    assert_eq!(preview.branches.len(), 3);
+    assert!(
+        preview
+            .branches
+            .iter()
+            .all(|b| b.readable && b.device_name.is_some())
+    );
+    let chosen = preview
+        .branches
+        .iter()
+        .find(|b| b.revision != preview.remote_revision && b.device_id != "a")
+        .unwrap();
+    let chosen_device = chosen.device_id.clone();
+    let request = CloudResolutionRequest {
+        observed_revisions: preview.observed_revisions.clone(),
+        selected_revision: Some(chosen.revision.clone()),
+        local_content_hash: preview.local_content_hash.clone().unwrap(),
+    };
+    // A preview never authorizes replacing data edited during confirmation.
+    let local_before = ConnectionStore::open(&a.config_dir)
+        .unwrap()
+        .load_sessions()
+        .unwrap();
+    ConnectionStore::open(&a.config_dir)
+        .unwrap()
+        .replace_sessions(&SessionsConfig {
+            connections: vec![local_connection(
+                "late",
+                "edited during confirmation",
+                "bash",
+            )],
+            ..Default::default()
+        })
+        .unwrap();
+    let changed = resolve_with_remote(
+        &store,
+        &a,
+        &remote,
+        &states[0],
+        &request,
+        &|| Ok(()),
+        &CloudSyncOperationControl::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(changed, CloudSyncError::Conflict(p) if p.local_content_hash.as_ref() != Some(&request.local_content_hash))
+    );
+    assert_eq!(
+        ConnectionStore::open(&a.config_dir)
+            .unwrap()
+            .load_sessions()
+            .unwrap()
+            .connections[0]
+            .id,
+        "late"
+    );
+    ConnectionStore::open(&a.config_dir)
+        .unwrap()
+        .replace_sessions(&local_before)
+        .unwrap();
+
+    // Losing the chosen immutable snapshot refreshes readability and never
+    // substitutes the protocol's default branch.
+    let files_before = remote.files.lock().unwrap().clone();
+    let chosen_path = crate::cloud_sync::remote_path(
+        &a.remote_root,
+        &crate::cloud_sync::legacy_sync_snapshot_file(&chosen.revision),
+    );
+    remote.files.lock().unwrap().remove(&chosen_path);
+    let missing = resolve_with_remote(
+        &store,
+        &a,
+        &remote,
+        &states[0],
+        &request,
+        &|| Ok(()),
+        &CloudSyncOperationControl::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(missing, CloudSyncError::Conflict(p) if p.branches.iter().any(|b| b.revision == chosen.revision && !b.readable))
+    );
+    *remote.files.lock().unwrap() = files_before.clone();
+
+    // A new commit arriving after execution starts invalidates publication.
+    let mut arriving = crate::cloud_sync::heads::read(&store, &remote, &a.remote_root)
+        .unwrap()
+        .maximal()
+        .into_iter()
+        .find(|p| p.revision_id == chosen.revision)
+        .unwrap();
+    arriving.revision_id = "arriving-during-resolution".into();
+    arriving.device_id = "new-device".into();
+    arriving
+        .sync_clock
+        .as_mut()
+        .unwrap()
+        .counters
+        .insert("new-device".into(), 1);
+    let raced = resolve_with_remote(
+        &store,
+        &a,
+        &remote,
+        &states[0],
+        &request,
+        &|| crate::cloud_sync::heads::publish(&remote, &a.remote_root, &arriving),
+        &CloudSyncOperationControl::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(raced, CloudSyncError::Conflict(p) if p.observed_revisions.contains(&arriving.revision_id))
+    );
+    assert_eq!(
+        ConnectionStore::open(&a.config_dir)
+            .unwrap()
+            .load_sessions()
+            .unwrap(),
+        local_before
+    );
+    *remote.files.lock().unwrap() = files_before;
+
+    let resolved = resolve_with_remote(
+        &store,
+        &a,
+        &remote,
+        &states[0],
+        &request,
+        &|| Ok(()),
+        &CloudSyncOperationControl::default(),
+    )
+    .unwrap();
+    let sessions = ConnectionStore::open(&a.config_dir)
+        .unwrap()
+        .load_sessions()
+        .unwrap();
+    assert_eq!(
+        sessions.connections[0].name,
+        format!("branch {chosen_device}")
+    );
+    assert!(matches!(
+        resolve_with_remote(
+            &store,
+            &a,
+            &remote,
+            &resolved.state,
+            &request,
+            &|| Ok(()),
+            &CloudSyncOperationControl::default()
+        ),
+        Err(CloudSyncError::Conflict(_))
+    ));
+    let checked =
+        check_snapshot_with_remote_state(&store, &a, &remote, &resolved.state, true).unwrap();
+    assert_eq!(checked.decision, CloudRemoteCheckDecision::UpToDate);
+}
+
+#[test]
+fn cloud_sync_device_name_is_optional_and_does_not_make_unchanged_content_dirty() {
+    let root = unique_temp_dir("device-name");
+    let mut device = options(&root, &root, "device");
+    device.device_name = Some("Original name".into());
+    let store = OptionsTestLocalStore(&device);
+    let remote = MemoryRemote::default();
+    let first =
+        push_snapshot_with_remote(&store, &device, &remote, &CloudSyncState::default(), false)
+            .unwrap();
+    let snapshot = crate::cloud_sync::protocol::read_snapshot_for_pointer(
+        &store,
+        &remote,
+        &device,
+        first.pointer.as_ref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot.meta.device_name.as_deref(), Some("Original name"));
+    let mut old_metadata = serde_json::to_value(&snapshot.meta).unwrap();
+    old_metadata.as_object_mut().unwrap().remove("device_name");
+    let old: crate::PortableSnapshotMeta = serde_json::from_value(old_metadata).unwrap();
+    assert!(old.device_name.is_none());
+    device.device_name = Some("Renamed".into());
+    let same = push_snapshot_with_remote(
+        &OptionsTestLocalStore(&device),
+        &device,
+        &remote,
+        &first.state,
+        false,
+    )
+    .unwrap();
+    assert_eq!(same.outcome, crate::CloudSyncOutcome::UpToDate);
+    assert_eq!(same.pointer, first.pointer);
+}

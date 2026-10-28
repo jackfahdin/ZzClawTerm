@@ -5,6 +5,8 @@ use gpui::{
 
 use super::child_window::ChildWindowChrome;
 use crate::theme::ThemePalette;
+use crate::window_chrome::WindowChrome;
+use zzclawterm_ui::window_chrome::{TitleDragEvent, title_drag_region};
 use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant};
 
 pub(in crate::features) fn logo_mark(palette: ThemePalette) -> impl IntoElement {
@@ -118,40 +120,14 @@ fn window_control_button_with_area(
     native_control: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let hovered_color = if matches!(area, WindowControlArea::Close) {
-        0xffffff
-    } else {
-        palette.text
-    };
-    div()
-        .id(SharedString::from(id))
-        .group(SharedString::from(id))
-        .w(px(46.))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(rgb(palette.text_muted))
-        .when(native_control, |this| this.window_control_area(area))
-        .cursor_pointer()
-        .hover(|this| {
-            if matches!(area, WindowControlArea::Close) {
-                this.bg(rgb(0xe81123)).text_color(rgb(0xffffff))
-            } else {
-                this.bg(rgb(palette.hover)).text_color(rgb(palette.text))
-            }
-        })
-        .child(
-            svg()
-                .size(px(16.))
-                .flex_none()
-                .path(icon_path)
-                .text_color(rgb(palette.text_muted))
-                .group_hover(SharedString::from(id), move |this| {
-                    this.text_color(rgb(hovered_color))
-                }),
-        )
-        .on_click(on_click)
+    zzclawterm_ui::window_chrome::window_control_button(
+        palette,
+        id,
+        icon_path,
+        area,
+        native_control,
+        on_click,
+    )
 }
 
 fn toggle_child_window_zoom(window: &mut Window, _cx: &mut App) {
@@ -186,16 +162,12 @@ pub(in crate::features) fn child_window_header(
     title: impl Into<SharedString>,
     icon_path: Option<&'static str>,
     chrome: ChildWindowChrome,
-    window: &Window,
+    window: &mut Window,
+    cx: &mut App,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let title = title.into();
-    let is_maximized = window.is_maximized();
-    let minimizable = window.is_minimizable();
-    let maximizable = window.is_resizable();
-    // A sheet has no title bar: nothing to leave a traffic-light gutter for, and
-    // nothing to drag it by.
-    let has_title_bar = chrome == ChildWindowChrome::Window;
+    let policy = WindowChrome::child(window, chrome == ChildWindowChrome::Sheet);
     div()
         .h(px(40.))
         .flex_none()
@@ -213,12 +185,23 @@ pub(in crate::features) fn child_window_header(
                 .items_center()
                 .gap_2()
                 .px_3()
-                .when(cfg!(target_os = "macos") && has_title_bar, |this| {
+                .when(policy.native_button_gutter, |this| {
                     // Room for the traffic lights AppKit draws over the content.
                     this.pl(px(70.))
                 })
-                .when(has_title_bar, |this| {
-                    this.window_control_area(WindowControlArea::Drag)
+                .map(|this| {
+                    title_drag_region(
+                        this,
+                        "child-title-region",
+                        policy.drag,
+                        window,
+                        cx,
+                        |event, window, cx| match event {
+                            TitleDragEvent::Pressed => {}
+                            TitleDragEvent::StartMove => window.start_window_move(),
+                            TitleDragEvent::DoubleClick => toggle_child_window_zoom(window, cx),
+                        },
+                    )
                 })
                 .when_some(icon_path, |this, icon_path| {
                     this.child(
@@ -245,7 +228,7 @@ pub(in crate::features) fn child_window_header(
                 .flex_none()
                 .flex()
                 .items_center()
-                .when(!cfg!(target_os = "macos") && minimizable, |this| {
+                .when(policy.minimize, |this| {
                     this.child(child_window_control_button(
                         palette,
                         "child-window-min",
@@ -254,11 +237,11 @@ pub(in crate::features) fn child_window_header(
                         |_, window, _| window.minimize_window(),
                     ))
                 })
-                .when(!cfg!(target_os = "macos") && maximizable, |this| {
+                .when(policy.maximize, |this| {
                     this.child(child_window_control_button(
                         palette,
                         "child-window-max",
-                        if is_maximized {
+                        if policy.restore {
                             "icons/window/restore.svg"
                         } else {
                             "icons/window/maximize.svg"
@@ -267,7 +250,7 @@ pub(in crate::features) fn child_window_header(
                         |_, window, cx| toggle_child_window_zoom(window, cx),
                     ))
                 })
-                .when(!cfg!(target_os = "macos"), |this| {
+                .when(policy.close, |this| {
                     this.child(child_window_control_button(
                         palette,
                         "child-window-close",
@@ -282,7 +265,7 @@ pub(in crate::features) fn child_window_header(
 pub(in crate::features) fn child_window_titlebar(
     title: impl Into<SharedString>,
 ) -> Option<TitlebarOptions> {
-    cfg!(target_os = "macos").then(|| TitlebarOptions {
+    (cfg!(target_os = "macos") || cfg!(target_os = "linux")).then(|| TitlebarOptions {
         title: Some(title.into()),
         appears_transparent: true,
         ..Default::default()
@@ -394,6 +377,28 @@ pub(in crate::features) fn full_window_overlay_layer(
     deferred(full_window_input_layer(id).child(content)).with_priority(APP_OVERLAY_PRIORITY)
 }
 
+/// Overlay layer that keeps the window's text-selection listeners alive.
+///
+/// [`full_window_input_layer`] stops mouse propagation, and window-level mouse
+/// listeners run in paint order, so its `stop_propagation` also starves a
+/// selectable text painted inside the overlay. `occlude()` already keeps the
+/// pointer away from the elements behind the layer.
+pub(in crate::features) fn selectable_overlay_layer(
+    id: impl Into<String>,
+    content: impl IntoElement,
+) -> gpui::Deferred {
+    deferred(
+        div()
+            .id(SharedString::from(id.into()))
+            .key_context(crate::shortcuts::MODAL_KEY_CONTEXT)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .child(content),
+    )
+    .with_priority(APP_OVERLAY_PRIORITY)
+}
+
 /// Lifts an overlay that deliberately owns no input layer above the resize
 /// handles. Hover-driven surfaces must not block the pointer underneath them.
 pub(in crate::features) fn passive_overlay_layer(content: impl IntoElement) -> gpui::Deferred {
@@ -496,6 +501,67 @@ mod tests {
         lower_events: Arc<AtomicUsize>,
         backdrop_clicks: Arc<AtomicUsize>,
         child_clicks: Arc<AtomicUsize>,
+    }
+
+    struct SelectableInputLayerFixture {
+        background_events: Arc<AtomicUsize>,
+        overlay_clicks: Arc<AtomicUsize>,
+    }
+
+    impl Render for SelectableInputLayerFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let down = self.background_events.clone();
+            let up = self.background_events.clone();
+            let moved = self.background_events.clone();
+            let scrolled = self.background_events.clone();
+            let clicked = self.overlay_clicks.clone();
+            div()
+                .size_full()
+                .relative()
+                .on_any_mouse_down(move |_, _, _| {
+                    down.fetch_add(1, Ordering::SeqCst);
+                })
+                .on_mouse_up(MouseButton::Left, move |_, _, _| {
+                    up.fetch_add(1, Ordering::SeqCst);
+                })
+                .on_mouse_move(move |_, _, _| {
+                    moved.fetch_add(1, Ordering::SeqCst);
+                })
+                .on_scroll_wheel(move |_, _, _| {
+                    scrolled.fetch_add(1, Ordering::SeqCst);
+                })
+                .child(super::selectable_overlay_layer(
+                    "selectable-test-layer",
+                    div()
+                        .id("selectable-test-content")
+                        .size_full()
+                        .on_click(move |_, _, _| {
+                            clicked.fetch_add(1, Ordering::SeqCst);
+                        }),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn selectable_layer_occludes_background_pointer_and_scroll_handlers(cx: &mut TestAppContext) {
+        let background_events = Arc::new(AtomicUsize::new(0));
+        let overlay_clicks = Arc::new(AtomicUsize::new(0));
+        let (_, cx) = cx.add_window_view(|_, _| SelectableInputLayerFixture {
+            background_events: background_events.clone(),
+            overlay_clicks: overlay_clicks.clone(),
+        });
+        draw(cx);
+        let position = point(px(12.), px(12.));
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_click(position, Modifiers::none());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Lines(point(0., -3.)),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        assert_eq!(overlay_clicks.load(Ordering::SeqCst), 1);
+        assert_eq!(background_events.load(Ordering::SeqCst), 0);
     }
 
     struct ChildControlsFixture {

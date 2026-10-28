@@ -129,12 +129,14 @@ impl TerminalWindowNode {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn active_tabs(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_active_tabs(&mut out);
         out
     }
 
+    #[cfg(test)]
     pub(super) fn collect_active_tabs(&self, out: &mut Vec<String>) {
         match self {
             Self::Leaf { active_tab_id, .. } => {

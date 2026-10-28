@@ -113,6 +113,7 @@ fn test_config() -> RdpSessionConfig {
         password: None,
         use_nla: false,
         certificate_policy: RdpCertificatePolicy::Prompt,
+        administrative_session: false,
         display: RdpDisplayConfig::default(),
         clipboard: RdpClipboardConfig::default(),
         reconnect: RdpReconnectConfig::default(),
@@ -419,9 +420,11 @@ fn heartbeat_responds_on_a_static_session_and_preserves_sequence() {
 }
 
 #[test]
-fn version_nine_helpers_are_explicitly_incompatible_with_version_ten() {
-    assert_eq!(PROTOCOL_VERSION, 10);
-    assert_helper_rejects(vec![RdpControlMessage::ClientHello { version: 9 }]);
+fn older_and_newer_helpers_are_explicitly_incompatible_with_version_eleven() {
+    assert_eq!(PROTOCOL_VERSION, 11);
+    for version in [9, 10, PROTOCOL_VERSION + 1] {
+        assert_helper_rejects(vec![RdpControlMessage::ClientHello { version }]);
+    }
     assert_helper_rejects(vec![RdpControlMessage::Ping { sequence: 1 }]);
     assert_helper_rejects(vec![
         client_hello(),
@@ -438,7 +441,7 @@ fn session_start_rolls_back_each_worker_creation_failure() {
             env!("CARGO_BIN_EXE_zzclawterm-rdp-helper"),
         );
     }
-    for stage in 0..5 {
+    for stage in 0..6 {
         let manager = zzclawterm_remote_desktop::RdpSessionManager::new();
         let _failure = zzclawterm_core::runtime::worker::fail_after(stage);
         let result = manager.create_session_with_id("spawn-failure".into(), test_config());
@@ -447,5 +450,18 @@ fn session_start_rolls_back_each_worker_creation_failure() {
             "startup stage {stage} must return Ipc"
         );
         assert!(manager.state("spawn-failure").is_none());
+    }
+}
+
+#[test]
+fn mismatched_client_receives_actual_helper_version_before_exit() {
+    for version in [PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1] {
+        let mut child = spawn_helper();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        send(&mut stdin, &RdpControlMessage::ClientHello { version });
+        assert_server_hello(recv(&mut stdout));
+        drop(stdin);
+        assert!(!child.wait().unwrap().success());
     }
 }

@@ -2,7 +2,7 @@ mod chrome;
 pub(in crate::features) use chrome::{
     APP_OVERLAY_PRIORITY, bounded_dialog_width, child_window_header, dialog_action_button,
     full_window_input_layer, full_window_overlay_layer, horizontal_resize_handle_visual, logo_mark,
-    modal_dialog_shell, panel_header_with_actions, passive_overlay_layer,
+    modal_dialog_shell, panel_header_with_actions, passive_overlay_layer, selectable_overlay_layer,
     vertical_resize_handle_visual, window_control_button,
 };
 
@@ -24,7 +24,7 @@ pub(in crate::features) use inspector_widgets::{
 mod stats;
 pub(in crate::features) use stats::stats_progress_bar;
 mod rows;
-pub(in crate::features) use rows::{CloudSyncHistoryRowLabels, cloud_sync_history_row};
+pub(in crate::features) use rows::cloud_sync_history_row;
 
 mod icons;
 pub(in crate::features) use icons::{
@@ -34,3 +34,5 @@ pub(in crate::features) use icons::{
 
 pub(in crate::features) mod markdown;
 pub(in crate::features) use markdown::markdown_content_view;
+
+pub(in crate::features) mod cloud_sync_conflict;

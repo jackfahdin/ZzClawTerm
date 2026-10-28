@@ -194,6 +194,48 @@ mod tests {
     use super::TransferDeleteBatch;
     use zzclawterm_transport::{FileBrowserBackendKind, RemoteFilePath};
 
+    #[cfg(windows)]
+    #[test]
+    fn deleting_a_wsl_directory_does_not_refresh_its_case_distinct_sibling() {
+        let root = r"\\wsl.localhost\Ubuntu\home\user";
+        let mut batch = TransferDeleteBatch::new(
+            FileBrowserBackendKind::Local,
+            vec![(
+                "upper".into(),
+                RemoteFilePath::new(format!(r"{root}\Project")),
+            )],
+        );
+        assert!(batch.settle("upper", Ok(())));
+        let outcome = batch.outcome();
+        assert_eq!(
+            outcome.refresh_target(&RemoteFilePath::new(format!(r"{root}\project\child"))),
+            None
+        );
+        assert_eq!(
+            outcome.refresh_target(&RemoteFilePath::new(
+                r"\\wsl$\UBUNTU\home\user\Project\child"
+            )),
+            Some(RemoteFilePath::new(root))
+        );
+
+        let mut batch = TransferDeleteBatch::new(
+            FileBrowserBackendKind::Local,
+            vec![
+                (
+                    "upper".into(),
+                    RemoteFilePath::new(format!(r"{root}\Project\a")),
+                ),
+                (
+                    "lower".into(),
+                    RemoteFilePath::new(format!(r"{root}\project\b")),
+                ),
+            ],
+        );
+        batch.settle("upper", Ok(()));
+        batch.settle("lower", Ok(()));
+        assert_eq!(batch.outcome().parents().len(), 2);
+    }
+
     #[test]
     fn batch_waits_for_all_results_and_refreshes_each_parent_once() {
         let mut batch = TransferDeleteBatch::new(

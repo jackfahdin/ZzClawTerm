@@ -6,14 +6,6 @@ use gpui::{
 };
 use gpui_kit::component::scroll::Scrollbar;
 
-fn platform_code_font_family() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "JetBrains Mono"
-    }
-}
-
 #[derive(IntoElement)]
 pub struct ZzClawScrollArea {
     id: SharedString,
@@ -227,42 +219,6 @@ pub fn capability_line(
                 .text_xs()
                 .text_color(rgb(palette.text_muted))
                 .child(value.into()),
-        )
-}
-
-pub fn session_info_row(
-    palette: ThemePalette,
-    label: impl Into<SharedString>,
-    value: String,
-) -> impl IntoElement {
-    let label: SharedString = label.into();
-    div()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.input))
-        .px_3()
-        .py_2()
-        .flex()
-        .items_start()
-        .gap_3()
-        .child(
-            div()
-                .w(px(104.))
-                .flex_none()
-                .text_xs()
-                .font_weight(FontWeight(700.))
-                .text_color(rgb(palette.text_muted))
-                .child(label),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .font_family(platform_code_font_family())
-                .text_xs()
-                .text_color(rgb(palette.text))
-                .child(value),
         )
 }
 

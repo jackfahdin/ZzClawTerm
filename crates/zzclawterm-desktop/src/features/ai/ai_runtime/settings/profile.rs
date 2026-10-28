@@ -1,7 +1,7 @@
 use gpui::Context;
 use zzclawterm_core::{
     AgentCommandExecutionMode, AiAgentKind, AiMode, AiPermissionMode, AiReasoningEffort,
-    CodexThreadMode, ExternalMcpSessionScope, RiskLevel,
+    CodexThreadMode, ExternalMcpSessionScope, McpTerminalDisplayMode, RiskLevel,
 };
 
 use crate::features::ZzClawTermApp;
@@ -205,6 +205,16 @@ impl ZzClawTermApp {
         self.ai.set_settings_mcp_scope(scope);
         self.persist_ai_settings_now(cx);
         self.reconfigure_mcp_host_and_report();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn set_ai_mcp_terminal_display_mode(
+        &mut self,
+        mode: McpTerminalDisplayMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.ai.set_settings_mcp_terminal_display_mode(mode);
+        self.persist_ai_settings_now(cx);
         cx.notify();
     }
 

@@ -4,6 +4,8 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context as _, anyhow, bail};
 
+use crate::file_browser::{FileBrowserBackendKind, file_browser_identity};
+
 use super::{
     RemoteBinaryFile, RemoteTextDocument, RemoteTextMetadata, RemoteTextRevision,
     RemoteTextWriteResult, SftpFileEntry, SftpFileProperties, SftpFileType, SftpRemoteTextFile,
@@ -397,9 +399,10 @@ fn path_to_string(path: impl AsRef<Path>) -> String {
 
 fn local_path_identity(path: &Path) -> String {
     let path = path_to_string(path);
-    #[cfg(windows)]
-    let path = path.to_lowercase();
-    format!("local-path:{path}")
+    format!(
+        "local-path:{}",
+        file_browser_identity(FileBrowserBackendKind::Local, &path)
+    )
 }
 
 fn system_time_secs(time: std::io::Result<std::time::SystemTime>) -> u64 {

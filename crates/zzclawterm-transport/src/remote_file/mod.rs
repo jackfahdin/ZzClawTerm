@@ -1141,7 +1141,7 @@ impl RemoteFileService {
                     "External edit sync requires an existing regular file"
                 );
                 let temporary = format!(
-                    "{}.nyaterm-edit-{}",
+                    "{}.zzclawterm-edit-{}",
                     remote_path.display_path,
                     uuid::Uuid::new_v4().simple()
                 );

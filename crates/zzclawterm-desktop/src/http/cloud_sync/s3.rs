@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use zzclawterm_core::cloud_sync::io::{CloudObjectMetadata, CloudObjectRead, CloudSyncIoStats};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -15,10 +17,18 @@ use super::helpers::map_s3_http_error;
 pub struct NativeS3Remote {
     client: zed_reqwest::blocking::Client,
     settings: S3SyncSettings,
+    stats: Arc<Mutex<CloudSyncIoStats>>,
 }
 
 impl NativeS3Remote {
     pub fn new(settings: &S3SyncSettings) -> Result<Self, CloudSyncError> {
+        Self::new_with_stats(settings, Arc::new(Mutex::new(CloudSyncIoStats::default())))
+    }
+
+    pub(crate) fn new_with_stats(
+        settings: &S3SyncSettings,
+        stats: Arc<Mutex<CloudSyncIoStats>>,
+    ) -> Result<Self, CloudSyncError> {
         build_s3_signed_request(
             settings,
             S3HttpMethod::Head,
@@ -34,6 +44,7 @@ impl NativeS3Remote {
         Ok(Self {
             client,
             settings: settings.clone(),
+            stats,
         })
     }
 
@@ -42,6 +53,16 @@ impl NativeS3Remote {
         method: S3HttpMethod,
         path: &str,
         body: Option<Vec<u8>>,
+    ) -> Result<zed_reqwest::blocking::Response, CloudSyncError> {
+        self.send_conditional(method, path, body, None)
+    }
+
+    fn send_conditional(
+        &self,
+        method: S3HttpMethod,
+        path: &str,
+        body: Option<Vec<u8>>,
+        etag: Option<&str>,
     ) -> Result<zed_reqwest::blocking::Response, CloudSyncError> {
         let payload_hash = body
             .as_deref()
@@ -63,6 +84,17 @@ impl NativeS3Remote {
         let mut builder = self.client.request(http_method, &request.url);
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
+        }
+        if let Some(etag) = etag {
+            builder = builder.header(zed_reqwest::header::IF_NONE_MATCH, etag);
+        }
+        {
+            let mut stats = self
+                .stats
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            stats.requests += 1;
+            stats.uploaded_bytes += body.as_ref().map_or(0, Vec::len) as u64;
         }
         if let Some(body) = body {
             builder = builder.body(body);
@@ -94,7 +126,36 @@ impl NativeS3Remote {
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        self.stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .requests += 1;
         builder.send().map_err(map_s3_http_error)
+    }
+    fn response_bytes(
+        &self,
+        mut response: zed_reqwest::blocking::Response,
+    ) -> Result<Vec<u8>, CloudSyncError> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 8_192];
+        loop {
+            let count = response.read(&mut buffer).map_err(|error| {
+                CloudSyncError::Io(std::io::Error::new(
+                    error.kind(),
+                    "S3 response body could not be read",
+                ))
+            })?;
+            if count == 0 {
+                break;
+            }
+            self.stats
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .downloaded_bytes += count as u64;
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        Ok(bytes)
     }
 }
 
@@ -108,51 +169,99 @@ impl CloudSyncRemote for NativeS3Remote {
     }
 
     fn read_if_exists(&self, path: &str) -> Result<Option<Vec<u8>>, CloudSyncError> {
-        let response = self.send(S3HttpMethod::Get, path, None)?;
+        match self.read_conditional(path, None)? {
+            CloudObjectRead::Missing => Ok(None),
+            CloudObjectRead::Modified { bytes, .. } => Ok(Some(bytes)),
+            CloudObjectRead::NotModified => {
+                Err(CloudSyncError::Remote("S3 returned no object body".into()))
+            }
+        }
+    }
+
+    fn read_conditional(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<CloudObjectRead, CloudSyncError> {
+        let mut response = self.send_conditional(S3HttpMethod::Get, path, None, etag)?;
+        if etag.is_some() && matches!(response.status().as_u16(), 400 | 405 | 501) {
+            let _ = self.response_bytes(response);
+            response = self.send_conditional(S3HttpMethod::Get, path, None, None)?;
+        }
         let status = response.status();
+        let retry = super::helpers::retry_after_seconds(response.headers());
+        let etag = response
+            .headers()
+            .get(zed_reqwest::header::ETAG)
+            .and_then(|h| h.to_str().ok())
+            .filter(|s| !s.is_empty() && s.len() <= 1_024)
+            .map(ToOwned::to_owned);
+        let bytes = self.response_bytes(response);
+        if status == StatusCode::NOT_MODIFIED {
+            self.stats
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .not_modified += 1;
+            return Ok(CloudObjectRead::NotModified);
+        }
         if status == StatusCode::NOT_FOUND {
-            return Ok(None);
+            return Ok(CloudObjectRead::Missing);
         }
         if status.is_success() {
-            return response
-                .bytes()
-                .map(|bytes| Some(bytes.to_vec()))
-                .map_err(map_s3_http_error);
+            return Ok(CloudObjectRead::Modified {
+                bytes: bytes?,
+                etag,
+            });
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "S3 GET failed ({status}): {}",
-            body.trim()
-        )))
+        Err(super::helpers::http_failure(
+            "S3",
+            "read",
+            status.as_u16(),
+            retry,
+        ))
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<(), CloudSyncError> {
         let response = self.send(S3HttpMethod::Put, path, Some(bytes.to_vec()))?;
         let status = response.status();
+        let retry = super::helpers::retry_after_seconds(response.headers());
+        let _ = self.response_bytes(response);
         if status.is_success() {
             return Ok(());
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "S3 PUT failed ({status}): {}",
-            body.trim()
-        )))
+        Err(super::helpers::http_failure(
+            "S3",
+            "write",
+            status.as_u16(),
+            retry,
+        ))
     }
 
     fn delete(&self, path: &str) -> Result<(), CloudSyncError> {
         let response = self.send(S3HttpMethod::Delete, path, None)?;
-        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        let status = response.status();
+        let retry = super::helpers::retry_after_seconds(response.headers());
+        let _ = self.response_bytes(response);
+        if status.is_success() || status == StatusCode::NOT_FOUND {
             return Ok(());
         }
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "S3 DELETE failed ({status}): {}",
-            body.trim()
-        )))
+        Err(super::helpers::http_failure(
+            "S3",
+            "delete",
+            status.as_u16(),
+            retry,
+        ))
     }
 
     fn list_files(&self, path: &str) -> Result<Vec<String>, CloudSyncError> {
+        Ok(self
+            .list_metadata(path)?
+            .into_iter()
+            .map(|e| e.path)
+            .collect())
+    }
+
+    fn list_metadata(&self, path: &str) -> Result<Vec<CloudObjectMetadata>, CloudSyncError> {
         let provider_root = self.settings.root.trim().trim_matches('/');
         let prefix = remote_path(provider_root, path);
         let mut continuation = None;
@@ -160,23 +269,29 @@ impl CloudSyncRemote for NativeS3Remote {
         loop {
             let response = self.send_list(&prefix, continuation.as_deref())?;
             let status = response.status();
-            let body = response.text().map_err(map_s3_http_error)?;
+            let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+            let body = self.response_bytes(response);
             if !status.is_success() {
-                return Err(CloudSyncError::Remote(format!(
-                    "S3 LIST failed ({status}): {}",
-                    body.trim()
-                )));
+                return Err(super::helpers::http_failure(
+                    "S3",
+                    "request",
+                    status.as_u16(),
+                    _retry_after_seconds,
+                ));
             }
+            let body = String::from_utf8(body?)
+                .map_err(|_| CloudSyncError::Remote("invalid S3 LIST response".into()))?;
             let page = parse_s3_list_page(&body)?;
-            files.extend(page.keys.into_iter().map(|key| {
-                if provider_root.is_empty() {
-                    key
-                } else {
-                    key.strip_prefix(provider_root)
-                        .unwrap_or(&key)
+            files.extend(page.objects.into_iter().map(|mut entry| {
+                if !provider_root.is_empty() {
+                    entry.path = entry
+                        .path
+                        .strip_prefix(provider_root)
+                        .unwrap_or(&entry.path)
                         .trim_start_matches('/')
-                        .to_string()
+                        .to_string();
                 }
+                entry
             }));
             if !page.truncated {
                 break;
@@ -193,48 +308,78 @@ impl CloudSyncRemote for NativeS3Remote {
 }
 
 pub(super) struct S3ListPage {
-    pub(super) keys: Vec<String>,
+    pub(super) objects: Vec<CloudObjectMetadata>,
     pub(super) truncated: bool,
     pub(super) next_token: Option<String>,
 }
 
 pub(super) fn parse_s3_list_page(body: &str) -> Result<S3ListPage, CloudSyncError> {
+    let invalid = || CloudSyncError::Remote("invalid S3 LIST response".into());
     let mut reader = Reader::from_str(body);
     reader.config_mut().trim_text(true);
-    let mut field = None;
-    let mut keys = Vec::new();
+    let mut field = Vec::new();
+    let mut objects = Vec::new();
+    let mut current: Option<CloudObjectMetadata> = None;
     let mut truncated = false;
     let mut next_token = None;
+    let mut text_value = String::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(event)) => field = Some(event.local_name().as_ref().to_vec()),
-            Ok(Event::End(_)) => field = None,
-            Ok(Event::Text(text)) => {
-                let value = text
-                    .decode()
-                    .map_err(|error| {
-                        CloudSyncError::Remote(format!("invalid S3 LIST response: {error}"))
-                    })?
+            Ok(Event::Start(event)) => {
+                field = event.local_name().as_ref().to_vec();
+                text_value.clear();
+                if field == b"Contents" {
+                    current = Some(CloudObjectMetadata::default());
+                }
+            }
+            Ok(Event::Text(text)) => text_value.push_str(&text.decode().map_err(|_| invalid())?),
+            Ok(Event::GeneralRef(reference)) => {
+                let name = reference.decode().map_err(|_| invalid())?;
+                let decoded = quick_xml::escape::unescape(&format!("&{name};"))
+                    .map_err(|_| invalid())?
                     .into_owned();
-                match field.as_deref() {
-                    Some(b"Key") => keys.push(value),
-                    Some(b"IsTruncated") => truncated = value == "true",
-                    Some(b"NextContinuationToken") => next_token = Some(value),
+                text_value.push_str(&decoded);
+            }
+            Ok(Event::End(event)) => {
+                match event.local_name().as_ref() {
+                    b"Key" => {
+                        if let Some(entry) = &mut current {
+                            entry.path = text_value.clone();
+                        }
+                    }
+                    b"ETag" => {
+                        if let Some(entry) = &mut current {
+                            entry.etag = Some(text_value.clone());
+                        }
+                    }
+                    b"Size" => {
+                        if let Some(entry) = &mut current {
+                            entry.size = text_value.parse().ok();
+                        }
+                    }
+                    b"Contents" => {
+                        if let Some(entry) = current.take() {
+                            objects.push(entry);
+                        }
+                    }
+                    b"IsTruncated" => truncated = text_value == "true",
+                    b"NextContinuationToken" => next_token = Some(text_value.clone()),
                     _ => {}
                 }
+                field.clear();
+                text_value.clear();
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => {
-                return Err(CloudSyncError::Remote(format!(
-                    "invalid S3 LIST response: {error}"
-                )));
-            }
+            Err(_) => return Err(invalid()),
         }
     }
     Ok(S3ListPage {
-        keys,
+        objects,
         truncated,
         next_token,
     })
 }
+
+#[cfg(test)]
+mod tests;

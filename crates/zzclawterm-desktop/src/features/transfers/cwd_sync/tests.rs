@@ -872,3 +872,203 @@ fn tree_mode_follows_cwd_and_seeds_the_target_directory_listing() {
         });
     });
 }
+
+#[cfg(windows)]
+#[test]
+fn posix_local_shell_cwds_are_translated_for_the_windows_file_browser() {
+    with_browser(|app, cx, _root| {
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let SessionLaunchConfig::Local(config) =
+                    &mut app.session.metadata_mut(SESSION).unwrap().launch_config
+                else {
+                    panic!("local session");
+                };
+                config.shell_path = Some("wsl.exe".into());
+            })
+        });
+        report(app, cx, "/mnt/d/Codes/RustProjects".into());
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).session.cwd(SESSION),
+                Some("/mnt/d/Codes/RustProjects")
+            );
+        });
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("zzclawterm"));
+        assert_directory(app, cx, r"D:\Codes\RustProjects", "zzclawterm");
+
+        let before = request_count(app, cx);
+        report(app, cx, "/d/Projects".into());
+        assert_eq!(request_count(app, cx), before);
+        cx.update(|_, cx| {
+            assert_eq!(app.read(cx).session.cwd(SESSION), Some("/d/Projects"));
+        });
+        report(app, cx, "/home/debian/notes".into());
+        assert_eq!(request_count(app, cx), before);
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).session.cwd(SESSION),
+                Some("/home/debian/notes")
+            );
+        });
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_internal_cwds_navigate_the_browser_through_wsl_localhost() {
+    with_browser(|app, cx, _root| {
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let SessionLaunchConfig::Local(config) =
+                    &mut app.session.metadata_mut(SESSION).unwrap().launch_config
+                else {
+                    panic!("local session");
+                };
+                config.shell_path = Some("wsl.exe".into());
+                config.shell_args = vec!["-d".into(), "Ubuntu".into()];
+            })
+        });
+        report(app, cx, "/mnt/d/Projects".into());
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("zzclawterm"));
+        assert_directory(app, cx, r"D:\Projects", "zzclawterm");
+
+        report(app, cx, "/home/user/notes".into());
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("zzclawterm"));
+        assert_directory(
+            app,
+            cx,
+            r"\\wsl.localhost\Ubuntu\home\user\notes",
+            "zzclawterm",
+        );
+
+        // The WSL automount root has no drive-letter form and lands on the 9P
+        // namespace too.
+        report(app, cx, "/mnt".into());
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("zzclawterm"));
+        assert_directory(app, cx, r"\\wsl.localhost\Ubuntu\mnt", "zzclawterm");
+
+        // A cwd Windows cannot represent (`:` in a component) must not send the
+        // browser to a POSIX path it would resolve against the current drive.
+        let before = request_count(app, cx);
+        report(app, cx, "/home/user/keep:notes".into());
+        assert_eq!(request_count(app, cx), before);
+
+        // Without a distribution selection there is nothing to navigate to and
+        // the browser keeps its current directory.
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let SessionLaunchConfig::Local(config) =
+                    &mut app.session.metadata_mut(SESSION).unwrap().launch_config
+                else {
+                    panic!("local session");
+                };
+                config.shell_args = Vec::new();
+            })
+        });
+        let before = request_count(app, cx);
+        report(app, cx, "/home/user/notes".into());
+        assert_eq!(request_count(app, cx), before);
+    });
+}
+
+#[cfg(windows)]
+fn with_wsl_browser(test: impl FnOnce(&Entity<ZzClawTermApp>, &mut VisualTestContext)) {
+    with_browser(|app, cx, _| {
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let SessionLaunchConfig::Local(config) =
+                    &mut app.session.metadata_mut(SESSION).unwrap().launch_config
+                else {
+                    panic!("local session");
+                };
+                config.shell_path = Some("wsl.exe".into());
+                config.shell_args = vec!["-d".into(), "Ubuntu".into()];
+            })
+        });
+        test(app, cx);
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_case_only_cwd_changes_follow_and_explicit_sync_realigns_the_browser() {
+    with_wsl_browser(|app, cx| {
+        report(app, cx, "/home/user/Project".into());
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("upper"));
+        let before = request_count(app, cx);
+
+        report(app, cx, "/home/user/project".into());
+        assert_eq!(request_count(app, cx), before + 1);
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("lower"));
+        assert_directory(
+            app,
+            cx,
+            r"\\wsl.localhost\Ubuntu\home\user\project",
+            "lower",
+        );
+
+        // Leave the browser in the case-distinct sibling while the shell stays put.
+        let id = navigate(app, cx, r"\\wsl.localhost\Ubuntu\home\user\Project".into());
+        finish(app, cx, &id, Ok("manual"));
+        let before = request_count(app, cx);
+        cx.update(|_, cx| app.update(cx, |app, cx| app.start_transfer_sync_cwd_job(cx)));
+        assert_eq!(request_count(app, cx), before + 1);
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("lower"));
+        assert_directory(
+            app,
+            cx,
+            r"\\wsl.localhost\Ubuntu\home\user\project",
+            "lower",
+        );
+
+        let before = request_count(app, cx);
+        report(app, cx, "/home/user/project/".into());
+        cx.update(|_, cx| app.update(cx, |app, cx| app.start_transfer_sync_cwd_job(cx)));
+        assert_eq!(request_count(app, cx), before);
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn invalid_wsl_cwds_do_not_navigate_or_trim_into_another_directory_and_following_recovers() {
+    with_wsl_browser(|app, cx| {
+        report(app, cx, "/home/user/notes".into());
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("notes"));
+        let before = request_count(app, cx);
+        for cwd in [
+            "/home/user/notes ",
+            "/home/user/notes.",
+            "/home/user/a:b",
+            "/home/user/NUL",
+            "/home/user/a?b",
+            "/mnt/c/notes ",
+            "/mnt/c/a:b",
+            "/mnt/c/../notes",
+        ] {
+            report(app, cx, cwd.into());
+            cx.update(|_, cx| app.update(cx, |app, cx| app.start_transfer_sync_cwd_job(cx)));
+            assert_eq!(request_count(app, cx), before, "{cwd:?}");
+            assert_directory(app, cx, r"\\wsl.localhost\Ubuntu\home\user\notes", "notes");
+            cx.update(|_, cx| assert_eq!(app.read(cx).session.cwd(SESSION), Some(cwd)));
+        }
+        report(app, cx, "/home/user/recovered".into());
+        assert_eq!(request_count(app, cx), before + 1);
+        let id = latest_request(app, cx);
+        finish(app, cx, &id, Ok("recovered"));
+        assert_directory(
+            app,
+            cx,
+            r"\\wsl.localhost\Ubuntu\home\user\recovered",
+            "recovered",
+        );
+    });
+}

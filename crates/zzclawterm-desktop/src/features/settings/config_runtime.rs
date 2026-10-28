@@ -20,20 +20,6 @@ fn snapshot_password_prompt_title_key(kind: SnapshotPasswordPromptKind) -> &'sta
     match kind {
         SnapshotPasswordPromptKind::Export => "runtimePrompt.snapshotExport",
         SnapshotPasswordPromptKind::Import => "runtimePrompt.snapshotImport",
-        SnapshotPasswordPromptKind::CloudForcePush => "runtimePrompt.cloudForcePush",
-        SnapshotPasswordPromptKind::CloudForcePull => "runtimePrompt.cloudForcePull",
-        SnapshotPasswordPromptKind::CloudProviderPush => "runtimePrompt.cloudProviderPush",
-        SnapshotPasswordPromptKind::CloudProviderPull => "runtimePrompt.cloudProviderPull",
-        SnapshotPasswordPromptKind::CloudProviderForcePush => {
-            "runtimePrompt.cloudProviderForcePush"
-        }
-        SnapshotPasswordPromptKind::CloudProviderForcePull => {
-            "runtimePrompt.cloudProviderForcePull"
-        }
-        SnapshotPasswordPromptKind::CloudRecoverCurrent
-        | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-            "settings.useCurrentRemoteSnapshot"
-        }
     }
 }
 
@@ -106,26 +92,9 @@ impl ZzClawTermApp {
         self.shell.set_status(match kind {
             SnapshotPasswordPromptKind::Export => t!("settings.nyaExportPassword"),
             SnapshotPasswordPromptKind::Import => t!("settings.nyaImportPassword"),
-            SnapshotPasswordPromptKind::CloudForcePush
-            | SnapshotPasswordPromptKind::CloudForcePull
-            | SnapshotPasswordPromptKind::CloudProviderPush
-            | SnapshotPasswordPromptKind::CloudProviderPull
-            | SnapshotPasswordPromptKind::CloudProviderForcePush
-            | SnapshotPasswordPromptKind::CloudProviderForcePull
-            | SnapshotPasswordPromptKind::CloudRecoverCurrent
-            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                t!("settings.syncSnapshotPassword")
-            }
         });
         self.settings
             .set_store_message(t!("settings.nyaAwaitingMasterPassword"));
-        if !matches!(
-            kind,
-            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
-        ) {
-            self.cloud_sync
-                .set_status(t!("settings.syncAwaitingPassword"));
-        }
         let title = t!(snapshot_password_prompt_title_key(kind));
         self.open_form_dialog(
             (
@@ -144,14 +113,7 @@ impl ZzClawTermApp {
     }
 
     fn clear_stale_local_snapshot_password_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(prompt) = self.settings.snapshot_password_prompt() else {
-            return;
-        };
-        if matches!(
-            prompt.kind,
-            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
-        ) {
-            let _ = self.settings.take_snapshot_password_prompt();
+        if self.settings.take_snapshot_password_prompt().is_some() {
             self.forget_text_inputs("snapshot-password.");
             self.settings.set_store_message("config picker cancelled");
             cx.notify();
@@ -163,14 +125,7 @@ impl ZzClawTermApp {
             return div().into_any_element();
         };
         let palette = self.theme_palette();
-        let description = if matches!(
-            prompt.kind,
-            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
-        ) {
-            t!("runtimePrompt.localSnapshotDescription")
-        } else {
-            t!("runtimePrompt.cloudSnapshotDescription")
-        };
+        let description = t!("runtimePrompt.localSnapshotDescription");
         let password_input = self.text_input_box(
             "snapshot-password.value",
             &prompt.value,
@@ -199,15 +154,6 @@ impl ZzClawTermApp {
             .into_any_element()
     }
 
-    pub(in crate::features) fn start_snapshot_password_prompt(
-        &mut self,
-        kind: SnapshotPasswordPromptKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_snapshot_password_dialog(kind, window, cx);
-    }
-
     fn submit_snapshot_password_prompt(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(state) = self.settings.take_snapshot_password_prompt() else {
             return true;
@@ -230,30 +176,6 @@ impl ZzClawTermApp {
             SnapshotPasswordPromptKind::Import => {
                 self.prompt_encrypted_portable_snapshot_import_path(password, cx);
             }
-            SnapshotPasswordPromptKind::CloudForcePush => {
-                self.run_local_cloud_sync_push(password, true, cx);
-            }
-            SnapshotPasswordPromptKind::CloudForcePull => {
-                self.run_local_cloud_sync_pull(password, true, cx);
-            }
-            SnapshotPasswordPromptKind::CloudProviderPush => {
-                self.run_provider_cloud_sync_push(password, false, cx);
-            }
-            SnapshotPasswordPromptKind::CloudProviderPull => {
-                self.run_provider_cloud_sync_pull(password, false, cx);
-            }
-            SnapshotPasswordPromptKind::CloudProviderForcePush => {
-                self.run_provider_cloud_sync_push(password, true, cx);
-            }
-            SnapshotPasswordPromptKind::CloudProviderForcePull => {
-                self.run_provider_cloud_sync_pull(password, true, cx);
-            }
-            SnapshotPasswordPromptKind::CloudRecoverCurrent => {
-                self.run_cloud_sync_recovery(password, false, cx);
-            }
-            SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                self.run_cloud_sync_recovery(password, true, cx);
-            }
         }
         true
     }
@@ -263,29 +185,9 @@ impl ZzClawTermApp {
             return;
         };
         self.forget_text_inputs("snapshot-password.");
-        if !matches!(
-            state.kind,
-            SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
-        ) {
-            self.cloud_sync.set_status(t!("settings.syncCancelled"));
-        }
         self.shell.set_status(match state.kind {
             SnapshotPasswordPromptKind::Export => t!("settings.nyaExportCancelled"),
             SnapshotPasswordPromptKind::Import => t!("settings.nyaImportCancelled"),
-            SnapshotPasswordPromptKind::CloudForcePush
-            | SnapshotPasswordPromptKind::CloudProviderPush
-            | SnapshotPasswordPromptKind::CloudProviderForcePush => {
-                t!("settings.syncPushCancelled")
-            }
-            SnapshotPasswordPromptKind::CloudForcePull
-            | SnapshotPasswordPromptKind::CloudProviderPull
-            | SnapshotPasswordPromptKind::CloudProviderForcePull => {
-                t!("settings.syncPullCancelled")
-            }
-            SnapshotPasswordPromptKind::CloudRecoverCurrent
-            | SnapshotPasswordPromptKind::CloudProviderRecoverCurrent => {
-                t!("settings.syncRecoveryCancelled")
-            }
         });
         self.settings
             .set_store_message(t!("settings.configPathPickerClosed"));
@@ -695,6 +597,13 @@ impl ZzClawTermApp {
     ) {
         use crate::app_shell::SharedStateDomain;
 
+        if let Some(mut draft) = self.shell.settings_draft_snapshot().cloned() {
+            self.cloud_sync.rebase_credential_rotation(
+                &mut draft.cloud_sync_settings,
+                &snapshot.cloud_sync_settings,
+            );
+            self.shell.set_settings_draft_snapshot(draft);
+        }
         let has_clean_settings_draft =
             self.shell.has_settings_draft() && !self.settings_draft_dirty();
         let settings_blocked = self.settings_draft_dirty()

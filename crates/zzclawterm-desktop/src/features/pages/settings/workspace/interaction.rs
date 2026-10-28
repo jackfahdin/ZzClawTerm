@@ -97,9 +97,7 @@ impl SettingsPanel {
                     .child(settings_form_row(
                         palette,
                         t!("settings.terminalRightClickAction"),
-                        Some(SharedString::from(t!(
-                            "settings.terminalRightClickActionDesc"
-                        ))),
+                        None,
                         self.settings_select_control(
                             "settings.interaction.terminal-right-click-action",
                             vec![
@@ -194,9 +192,7 @@ impl SettingsPanel {
                         this.child(settings_form_row(
                             palette,
                             t!("settings.commandSuggestionsMinChars"),
-                            Some(SharedString::from(t!(
-                                "settings.commandSuggestionsMinCharsDesc"
-                            ))),
+                            None,
                             self.existing_number_input_box(
                                 "settings.number.command-suggestion-min-chars",
                             ),
@@ -204,13 +200,17 @@ impl SettingsPanel {
                         .child(settings_form_row(
                             palette,
                             t!("settings.commandSuggestionsMaxChars"),
-                            Some(SharedString::from(t!(
-                                "settings.commandSuggestionsMaxCharsDesc"
-                            ))),
+                            None,
                             self.existing_number_input_box(
                                 "settings.number.command-suggestion-max-chars",
                             ),
                         ))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(palette.text_dimmed))
+                                .child(t!("settings.commandSuggestionsLengthDesc")),
+                        )
                     })
                     .child(
                         div()

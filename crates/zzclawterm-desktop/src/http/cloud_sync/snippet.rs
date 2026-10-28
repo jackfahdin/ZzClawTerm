@@ -1,3 +1,4 @@
+use super::metrics::{CountedRequest, CountedResponse};
 use std::time::Duration;
 
 use zzclawterm_core::{
@@ -22,6 +23,11 @@ impl NativeSnippetHttpClient {
 
 impl SnippetHttpClient for NativeSnippetHttpClient {
     fn send(&self, request: SnippetHttpRequest) -> Result<SnippetHttpResponse, CloudSyncError> {
+        let provider = if request.headers.contains_key("X-GitHub-Api-Version") {
+            "GitHub Gist"
+        } else {
+            "Gitee snippet"
+        };
         let mut builder = match request.method {
             SnippetHttpMethod::Get => self.client.get(&request.url),
             SnippetHttpMethod::Patch => self.client.patch(&request.url),
@@ -37,20 +43,22 @@ impl SnippetHttpClient for NativeSnippetHttpClient {
             builder = builder.json(&body);
         }
 
-        let response = builder.send().map_err(map_http_error)?;
+        let response = builder
+            .send_counted()
+            .map_err(|error| super::helpers::safe_http_error(provider, error))?;
         let status = response.status().as_u16();
-        let body = response.text().map_err(map_http_error)?;
+        let retry = super::helpers::retry_after_seconds(response.headers());
+        if matches!(status, 401 | 403 | 429 | 500..=599) {
+            let _ = response.bytes_counted();
+            return Err(super::helpers::http_failure(
+                provider, "request", status, retry,
+            ));
+        }
+        let body = response.text_counted()?;
         Ok(SnippetHttpResponse { status, body })
     }
 }
 
 fn map_http_error(error: zed_reqwest::Error) -> CloudSyncError {
-    if error.is_timeout() {
-        CloudSyncError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("snippet HTTP operation timed out: {error}"),
-        ))
-    } else {
-        CloudSyncError::Remote(format!("snippet HTTP request failed: {error}"))
-    }
+    super::helpers::safe_http_error("snippet", error)
 }

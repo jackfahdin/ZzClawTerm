@@ -1,3 +1,4 @@
+use super::metrics::{CountedRequest, CountedResponse};
 use std::time::Duration;
 
 use quick_xml::Reader;
@@ -93,6 +94,7 @@ impl NativeWebdavRemote {
             &webdav_cnonce(),
             "00000001",
         )?;
+        let _ = response.bytes_counted();
         self.send_once(method, url, body, Some(auth), headers)
     }
 
@@ -116,7 +118,7 @@ impl NativeWebdavRemote {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        request.send().map_err(map_webdav_http_error)
+        request.send_counted().map_err(map_webdav_http_error)
     }
 }
 
@@ -140,16 +142,20 @@ impl CloudSyncRemote for NativeWebdavRemote {
                 CloudSyncError::Remote(format!("failed to build WebDAV MKCOL method: {error}"))
             })?;
             let response = self.send(method, &url, None)?;
-            match response.status() {
+            let status = response.status();
+            let retry = super::helpers::retry_after_seconds(response.headers());
+            let _ = response.bytes_counted();
+            match status {
                 StatusCode::CREATED | StatusCode::OK | StatusCode::METHOD_NOT_ALLOWED => {}
                 status if status.as_u16() == 409 => {}
                 status if status.is_success() => {}
                 status => {
-                    let body = response.text().unwrap_or_default();
-                    return Err(CloudSyncError::Remote(format!(
-                        "WebDAV MKCOL failed ({status}): {}",
-                        body.trim()
-                    )));
+                    return Err(super::helpers::http_failure(
+                        "WebDAV",
+                        "create directory",
+                        status.as_u16(),
+                        retry,
+                    ));
                 }
             }
         }
@@ -160,20 +166,21 @@ impl CloudSyncRemote for NativeWebdavRemote {
         let url = self.url_for(path);
         let response = self.send(Method::GET, &url, None)?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status == StatusCode::NOT_FOUND {
+            let _ = response.bytes_counted();
             return Ok(None);
         }
         if status.is_success() {
-            return response
-                .bytes()
-                .map(|bytes| Some(bytes.to_vec()))
-                .map_err(map_webdav_http_error);
+            return response.bytes_counted().map(|bytes| Some(bytes.to_vec()));
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "WebDAV GET failed ({status}): {}",
-            body.trim()
-        )))
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "WebDAV",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<(), CloudSyncError> {
@@ -187,27 +194,35 @@ impl CloudSyncRemote for NativeWebdavRemote {
         let url = self.url_for(path);
         let response = self.send(Method::PUT, &url, Some(bytes.to_vec()))?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status.is_success() {
+            let _ = response.bytes_counted();
             return Ok(());
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "WebDAV PUT failed ({status}): {}",
-            body.trim()
-        )))
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "WebDAV",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn delete(&self, path: &str) -> Result<(), CloudSyncError> {
         let response = self.send(Method::DELETE, &self.url_for(path), None)?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            let _ = response.bytes_counted();
             return Ok(());
         }
         let status = response.status();
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "WebDAV DELETE failed ({status}): {}",
-            body.trim()
-        )))
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "WebDAV",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn list_files(&self, path: &str) -> Result<Vec<String>, CloudSyncError> {
@@ -221,15 +236,19 @@ impl CloudSyncRemote for NativeWebdavRemote {
             &[("Depth", "1"), ("Content-Type", "application/xml")],
         )?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status == StatusCode::NOT_FOUND {
+            let _ = response.bytes_counted();
             return Ok(Vec::new());
         }
-        let body = response.text().map_err(map_webdav_http_error)?;
+        let body = response.text_counted()?;
         if !status.is_success() && status.as_u16() != 207 {
-            return Err(CloudSyncError::Remote(format!(
-                "WebDAV PROPFIND failed ({status}): {}",
-                body.trim()
-            )));
+            return Err(super::helpers::http_failure(
+                "WebDAV",
+                "request",
+                status.as_u16(),
+                _retry_after_seconds,
+            ));
         }
         parse_webdav_file_names(&body).map(|names| {
             let prefix = trim_remote_path(path);
@@ -251,8 +270,8 @@ pub(super) fn parse_webdav_file_names(body: &str) -> Result<Vec<String>, CloudSy
             Ok(Event::Start(event)) if event.local_name().as_ref() == b"href" => in_href = true,
             Ok(Event::End(event)) if event.local_name().as_ref() == b"href" => in_href = false,
             Ok(Event::Text(text)) if in_href => {
-                let href = text.decode().map_err(|error| {
-                    CloudSyncError::Remote(format!("invalid WebDAV PROPFIND response: {error}"))
+                let href = text.decode().map_err(|_| {
+                    CloudSyncError::Remote("invalid WebDAV PROPFIND response".into())
                 })?;
                 let href = href.trim_end_matches('/');
                 if let Some(name) = href
@@ -265,10 +284,10 @@ pub(super) fn parse_webdav_file_names(body: &str) -> Result<Vec<String>, CloudSy
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
-            Err(error) => {
-                return Err(CloudSyncError::Remote(format!(
-                    "invalid WebDAV PROPFIND response: {error}"
-                )));
+            Err(_) => {
+                return Err(CloudSyncError::Remote(
+                    "invalid WebDAV PROPFIND response".into(),
+                ));
             }
         }
     }

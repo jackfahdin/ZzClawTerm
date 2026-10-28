@@ -3,7 +3,6 @@ use rust_i18n::t;
 use gpui::{Context, Window};
 
 use crate::features::ZzClawTermApp;
-use crate::models::SnapshotPasswordPromptKind;
 
 impl ZzClawTermApp {
     pub(crate) fn cloud_sync_session_restore_blocked(&self) -> bool {
@@ -33,22 +32,18 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn prompt_provider_cloud_sync_push(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        self.start_snapshot_password_prompt(
-            SnapshotPasswordPromptKind::CloudProviderPush,
-            window,
-            cx,
-        );
+        self.run_provider_cloud_sync_push(false, cx);
     }
 
     pub(in crate::features) fn prompt_provider_cloud_sync_pull(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.block_cloud_sync_for_settings_draft(cx) {
@@ -62,34 +57,32 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        self.start_snapshot_password_prompt(
-            SnapshotPasswordPromptKind::CloudProviderPull,
-            window,
-            cx,
-        );
+        self.run_provider_cloud_sync_pull(false, cx);
     }
 
     pub(in crate::features) fn prompt_cloud_sync_force_push(
         &mut self,
         provider_action: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        let kind = if provider_action {
-            SnapshotPasswordPromptKind::CloudProviderForcePush
+        if !self.cloud_sync.prepare_resolution(false) {
+            return;
+        }
+        if provider_action {
+            self.run_provider_cloud_sync_push(true, cx);
         } else {
-            SnapshotPasswordPromptKind::CloudForcePush
-        };
-        self.start_snapshot_password_prompt(kind, window, cx);
+            self.run_local_cloud_sync_push(true, cx);
+        }
     }
 
     pub(in crate::features) fn prompt_cloud_sync_force_pull(
         &mut self,
         provider_action: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.block_cloud_sync_for_settings_draft(cx) {
@@ -103,18 +96,20 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let kind = if provider_action {
-            SnapshotPasswordPromptKind::CloudProviderForcePull
+        if !self.cloud_sync.prepare_resolution(true) {
+            return;
+        }
+        if provider_action {
+            self.run_provider_cloud_sync_pull(true, cx);
         } else {
-            SnapshotPasswordPromptKind::CloudForcePull
-        };
-        self.start_snapshot_password_prompt(kind, window, cx);
+            self.run_local_cloud_sync_pull(true, cx);
+        }
     }
 
     pub(in crate::features) fn prompt_cloud_sync_recover_current(
         &mut self,
         provider_action: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.block_cloud_sync_for_settings_draft(cx) {
@@ -128,12 +123,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let kind = if provider_action {
-            SnapshotPasswordPromptKind::CloudProviderRecoverCurrent
-        } else {
-            SnapshotPasswordPromptKind::CloudRecoverCurrent
-        };
-        self.start_snapshot_password_prompt(kind, window, cx);
+        self.run_cloud_sync_recovery(provider_action, cx);
     }
 }
 

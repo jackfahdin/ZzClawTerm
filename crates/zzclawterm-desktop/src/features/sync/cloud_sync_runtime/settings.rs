@@ -6,6 +6,37 @@ use crate::features::ZzClawTermApp;
 use crate::models::{CloudSyncInputField, SettingsTab};
 
 impl ZzClawTermApp {
+    pub(crate) fn queue_cloud_sync_credentials_refresh(&mut self, cx: &mut Context<Self>) {
+        let store = self.store_blocking_client();
+        let task = self
+            .blocking_jobs
+            .submit_task("cloud-sync-credentials-refresh", move |_| {
+                store.request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                    store.load_cloud_sync_settings()
+                })
+            });
+        cx.spawn(async move |this, cx| {
+            let Ok(current) = crate::features::runtime_jobs::await_blocking_result(task).await
+            else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(mut snapshot) = this.shell.settings_draft_snapshot().cloned() {
+                    this.cloud_sync
+                        .rebase_credential_rotation(&mut snapshot.cloud_sync_settings, &current);
+                    this.shell.set_settings_draft_snapshot(snapshot);
+                } else {
+                    let mut base = this.cloud_sync.settings().clone();
+                    this.cloud_sync
+                        .rebase_credential_rotation(&mut base, &current);
+                }
+                this.request_settings_panel_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::features) fn update_cloud_sync_provider(
         &mut self,
         provider: &str,

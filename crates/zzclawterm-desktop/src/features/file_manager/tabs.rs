@@ -158,6 +158,7 @@ impl ZzClawTermApp {
         self.shell.navigation.selected_nav = NavItem::Workspace;
         self.shell.navigation.main_mode = MainMode::Workspace;
         self.shell.request_session_tab_scroll_into_view();
+        self.close_action_link_menu(cx);
         self.collapse_sidebars_for_file_manager(cx);
         workspace.update(cx, |workspace, cx| workspace.request_focus(cx));
         cx.notify();

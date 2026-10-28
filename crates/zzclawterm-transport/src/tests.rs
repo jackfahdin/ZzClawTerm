@@ -1815,6 +1815,45 @@ fn ssh_ready_marker_helpers_strip_current_and_legacy_markers() {
 }
 
 #[test]
+fn local_reader_thread_preserves_startup_output_and_routes_cwd_events() {
+    let (_, integration) = crate::local_shell_integration::LocalShellIntegration::prepare(
+        &crate::local_shell::ResolvedLocalShell {
+            program: "wsl.exe".to_string(),
+            args: Vec::new(),
+        },
+        "session-1",
+    )
+    .expect("wsl.exe receives the prompt script");
+
+    let mut payload = b"startup noise".to_vec();
+    payload.extend_from_slice(b"\x1b]7777;ZzClawTermReady:session-1\x07prompt> ");
+    payload.extend_from_slice(b"\x1b]7;file://host/mnt/d/Codes\x07");
+
+    let queue = SessionEventQueue::new();
+    let handle = super::spawn_reader_thread(
+        "session-1".to_string(),
+        Box::new(std::io::Cursor::new(payload)),
+        queue.clone(),
+        Some(integration),
+    )
+    .expect("reader thread spawns");
+    handle.join().expect("reader thread reaches EOF");
+
+    let drain = queue.drain_with_output_budget(8, Some(4096));
+    assert_eq!(drain.events.len(), 3);
+    assert!(matches!(
+        &drain.events[0],
+        SessionEvent::CwdChanged { session_id, cwd }
+            if session_id == "session-1" && cwd == "/mnt/d/Codes"
+    ));
+    assert!(matches!(
+        &drain.events[1],
+        SessionEvent::Output { data, .. } if data.as_slice() == b"startup noiseprompt> "
+    ));
+    assert!(matches!(&drain.events[2], SessionEvent::Exited { .. }));
+}
+
+#[test]
 fn session_event_queue_drains_metadata_even_with_zero_output_budget() {
     let queue = SessionEventQueue::new();
     queue.push(SessionEvent::CwdChanged {
@@ -3250,18 +3289,20 @@ fn dropping_telnet_manager_interrupts_idle_writer() {
 
 #[test]
 fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
-    // On a loaded runner the writer's first idle deadline can fire before
-    // `write(b"x")` lands in the mailbox, so the gate reports each write's
-    // kind and only the gated payload blocks; leading NOPs are skipped.
-    struct FirstWriteGate {
-        started: mpsc::Sender<bool>,
+    struct ApplicationWriteGate {
+        started: mpsc::Sender<Instant>,
         release: Option<mpsc::Receiver<()>>,
     }
-    impl Write for FirstWriteGate {
+    impl Write for ApplicationWriteGate {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            let gated = data == b"x";
-            self.started.send(gated).unwrap();
-            if gated && let Some(release) = self.release.take() {
+            // A busy runner may let the writer send an idle NOP before the test
+            // queues its input. Gate the application payload, not the first NOP.
+            if data == b"x" || self.release.is_none() {
+                self.started.send(Instant::now()).unwrap();
+            }
+            if data == b"x"
+                && let Some(release) = self.release.take()
+            {
                 release.recv().unwrap();
             }
             Ok(data.len())
@@ -3274,7 +3315,7 @@ fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
     let (release_tx, release_rx) = mpsc::channel();
     let interval = Duration::from_millis(100);
     let mut writer = test_telnet_writer(
-        FirstWriteGate {
+        ApplicationWriteGate {
             started: started_tx,
             release: Some(release_rx),
         },
@@ -3283,17 +3324,21 @@ fn telnet_slow_write_starts_a_new_idle_interval_instead_of_catching_up() {
         SessionEventQueue::new(),
     );
     writer.write(b"x".to_vec()).unwrap();
-    while !started_rx.recv_timeout(Duration::from_secs(3)).unwrap() {}
+    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!(matches!(
         started_rx.recv_timeout(interval * 2),
         Err(mpsc::RecvTimeoutError::Timeout)
     ));
+    let released_at = Instant::now();
     release_tx.send(()).unwrap();
-    assert!(matches!(
-        started_rx.recv_timeout(Duration::from_millis(50)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
-    assert!(!started_rx.recv_timeout(Duration::from_secs(3)).unwrap());
+    // The observing test thread may resume after a complete idle interval on a
+    // busy runner. Measure when the writer sends, rather than when we receive.
+    std::thread::sleep(interval * 2);
+    let next_write_at = started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(
+        next_write_at.duration_since(released_at) >= interval,
+        "a slow send must start a full idle interval before the next NOP"
+    );
     writer.close();
 }
 

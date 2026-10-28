@@ -516,6 +516,11 @@ function HomepageHeader() {
               </Link>
               <DownloadButton />
             </div>
+            <p>
+              <Link to="/docs/getting-started/migration-v2">
+                <Translate id="home.migrationV2">1.x 升级到 2.0：便携版与 MSI 请先阅读手动迁移说明</Translate>
+              </Link>
+            </p>
 
             <div className={styles.heroBadges}>
               {badges.map((badge) => (

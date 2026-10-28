@@ -4,26 +4,76 @@ use sha2::{Digest as ShaDigest, Sha256};
 use zed_reqwest::header::WWW_AUTHENTICATE;
 use zzclawterm_core::CloudSyncError;
 
-pub(super) fn map_s3_http_error(error: zed_reqwest::Error) -> CloudSyncError {
+pub(super) fn safe_http_error(provider: &str, error: zed_reqwest::Error) -> CloudSyncError {
+    // Do not format reqwest errors: their URLs may contain tokens or signatures.
     if error.is_timeout() {
         CloudSyncError::Io(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!("S3 operation timed out: {error}"),
+            format!("{provider} operation timed out"),
         ))
     } else {
-        CloudSyncError::Remote(format!("S3 request failed: {error}"))
+        http_failure(
+            provider,
+            "request",
+            error.status().map_or(0, |s| s.as_u16()),
+            None,
+        )
     }
 }
 
-pub(super) fn map_webdav_http_error(error: zed_reqwest::Error) -> CloudSyncError {
-    if error.is_timeout() {
-        CloudSyncError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("WebDAV operation timed out: {error}"),
-        ))
-    } else {
-        CloudSyncError::Remote(format!("WebDAV request failed: {error}"))
+pub(super) fn http_failure(
+    provider: &str,
+    operation: &str,
+    status: impl Into<u16>,
+    retry_after_seconds: Option<u64>,
+) -> CloudSyncError {
+    CloudSyncError::Http {
+        provider: provider.into(),
+        operation: operation.into(),
+        status: status.into(),
+        retry_after_seconds,
     }
+}
+
+pub(super) fn retry_after_seconds(headers: &zed_reqwest::header::HeaderMap) -> Option<u64> {
+    if let Some(value) = headers
+        .get(zed_reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Ok(seconds) = value.parse() {
+            return Some(seconds);
+        }
+        if let Ok(date) = httpdate::parse_http_date(value) {
+            return Some(
+                date.duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+        }
+    }
+    // GitHub reports primary rate limits as HTTP 403 with reset headers.
+    if headers
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        == Some("0")
+    {
+        let reset: u64 = headers
+            .get("x-ratelimit-reset")?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        return Some(reset.saturating_sub(now));
+    }
+    None
+}
+
+pub(super) fn map_s3_http_error(error: zed_reqwest::Error) -> CloudSyncError {
+    safe_http_error("S3", error)
+}
+pub(super) fn map_webdav_http_error(error: zed_reqwest::Error) -> CloudSyncError {
+    safe_http_error("WebDAV", error)
 }
 
 pub(super) fn normalize_endpoint(endpoint: &str) -> String {
@@ -249,9 +299,9 @@ pub(super) fn digest_hash(algorithm: &str, value: &str) -> Result<String, CloudS
             hasher.update(value.as_bytes());
             Ok(hex::encode(hasher.finalize()))
         }
-        other => Err(CloudSyncError::Remote(format!(
-            "WebDAV Digest algorithm {other} is not supported"
-        ))),
+        _ => Err(CloudSyncError::Remote(
+            "WebDAV Digest algorithm is not supported".into(),
+        )),
     }
 }
 
@@ -289,4 +339,62 @@ pub(super) fn json_string_field(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| CloudSyncError::Remote(format!("{operation} response is missing {field}")))
+}
+
+pub(super) fn safe_json<T: serde::de::DeserializeOwned>(
+    body: &str,
+    provider: &str,
+) -> Result<T, CloudSyncError> {
+    serde_json::from_str(body).map_err(|_| http_failure(provider, "invalid response", 0_u16, None))
+}
+
+/// Persistence is the boundary: failed saves must never authorize another request.
+pub(super) fn install_refreshed_tokens(
+    access: &std::sync::Mutex<zzclawterm_core::SecretString>,
+    refresh: &std::sync::Mutex<zzclawterm_core::SecretString>,
+    sink: &super::CloudTokenSink,
+    update: zzclawterm_core::cloud_sync::credentials::CloudCredentialUpdate,
+) -> Result<(), CloudSyncError> {
+    sink(update.clone())?;
+    *access.lock().expect("access token lock") = update.access_token;
+    if let Some(token) = update.refresh_token {
+        *refresh.lock().expect("refresh token lock") = token;
+    }
+    Ok(())
+}
+
+/// OAuth uses HTTP 400 for expired/revoked refresh credentials. Classify only
+/// recognized codes, without carrying a provider's description into diagnostics.
+pub(super) fn oauth_failure(
+    provider: &str,
+    status: u16,
+    body: &str,
+    retry: Option<u64>,
+) -> CloudSyncError {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let code = value
+        .as_ref()
+        .and_then(|v| v.get("error").or_else(|| v.get("code")))
+        .and_then(|v| v.as_str());
+    if matches!(status, 400 | 401)
+        && matches!(
+            code,
+            Some(
+                "invalid_grant"
+                    | "invalid_client"
+                    | "unauthorized_client"
+                    | "invalid_token"
+                    | "InvalidRefreshToken"
+                    | "RefreshTokenExpired"
+            )
+        )
+    {
+        CloudSyncError::Authentication {
+            provider: provider.into(),
+            operation: "token refresh".into(),
+            status,
+        }
+    } else {
+        http_failure(provider, "token refresh", status, retry)
+    }
 }

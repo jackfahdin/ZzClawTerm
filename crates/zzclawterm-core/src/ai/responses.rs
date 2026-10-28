@@ -416,6 +416,7 @@ mod tests {
                 api_format: AiApiFormat::Responses,
                 base_url: base_url.map(str::to_string),
                 api_key: Some("fixture-key".to_string().into()),
+                extra_headers: Vec::new(),
                 enabled: true,
             }),
         }

@@ -41,6 +41,7 @@ pub fn convert_v2_snapshot(
     };
     snapshot.meta.revision_id = meta.revision_id;
     snapshot.meta.created_at_ms = meta.created_at_ms;
+    snapshot.meta.device_name = meta.device_name;
 
     if let Some(raw) = json_docs
         .get("portable-settings")

@@ -209,3 +209,9 @@ The workflow is: commit to the fork branch, push, then bump the pinned revision 
 - Transport, terminal, and core crates stay independent of GPUI.
 - New UI text updates both locale files under `crates/zzclawterm-desktop/src/i18n/locales/`.
 - Never use real credentials in tests, logs, or diagnostic data.
+
+## GPUI main-branch cutover
+
+The GPUI cutover candidate is submitted from `cutover/gpui` to `main`. Keep `migration/gpui` during the transition and archive the former Tauri main branch at `archive/tauri-v1`. Subsequent development and stable publishing move to `main` only after the cutover PR merges.
+
+The candidate version `2.0.0` does not mean it has been published. Maintainers run Release with `verify_release=true`, `upload_release=false`, and a fixed `source_ref` for a signed rehearsal. See `scripts/release/GPUI_CUTOVER.md` in the repository for gates, evidence, and recovery steps, and the [migration guide](../getting-started/migration-v2) for user upgrades.

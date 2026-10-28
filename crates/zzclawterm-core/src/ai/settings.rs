@@ -7,9 +7,10 @@
 
 use std::collections::HashSet;
 
+use super::provider_settings::normalize_custom_headers;
 use super::{
     AI_REQUEST_USER_AGENT_DEFAULT, AgentCommandExecutionMode, AiAgentKind, AiApiFormat,
-    AiBackendKind, AiCustomActionConfig, AiMode, AiModelConfigItem, AiModelSource,
+    AiBackendKind, AiCustomActionConfig, AiHttpHeader, AiMode, AiModelConfigItem, AiModelSource,
     AiPermissionMode, AiProviderCredential, AiProviderKind, AiProviderProfile, AiReasoningEffort,
     AiSettings, ClaudeCodeIntegrationSettings, CodexIntegrationSettings, ExternalMcpSettings,
     MASKED_SECRET_VALUE, RiskLevel, ai_model_id_for_credential, ai_model_id_for_provider,
@@ -26,8 +27,18 @@ pub fn mask_ai_settings(mut settings: AiSettings) -> AiSettings {
     }
     for credential in &mut settings.provider_credentials {
         credential.api_key = mask_secret(credential.api_key.take());
+        mask_custom_header_values(&mut credential.extra_headers);
     }
     settings
+}
+
+fn mask_custom_header_values(headers: &mut [AiHttpHeader]) {
+    for header in headers.iter_mut() {
+        if header.value.is_empty() {
+            continue;
+        }
+        header.value = MASKED_SECRET_VALUE.into();
+    }
 }
 
 pub fn merge_masked_ai_settings(current: &AiSettings, mut next: AiSettings) -> AiSettings {
@@ -44,15 +55,60 @@ pub fn merge_masked_ai_settings(current: &AiSettings, mut next: AiSettings) -> A
         profile.api_key = merge_secret(current_secret, profile.api_key.as_ref());
     }
     for credential in &mut next.provider_credentials {
-        let current_secret = current
+        let current_credential = current
             .provider_credentials
             .iter()
-            .find(|item| item.id == credential.id)
-            .and_then(|item| item.api_key.as_ref());
+            .find(|item| item.id == credential.id);
+        let current_secret = current_credential.and_then(|item| item.api_key.as_ref());
         credential.api_key = merge_secret(current_secret, credential.api_key.as_ref());
+        credential.extra_headers = merge_custom_header_values(
+            current_credential.map(|item| item.extra_headers.as_slice()),
+            &credential.extra_headers,
+        );
     }
     normalize_ai_settings(&mut next);
     next
+}
+
+/// Merges masked custom header values against the stored credential.
+///
+/// Rows are matched by `id` (falling back to a case-insensitive name match
+/// for rows without an id). A masked value keeps the stored secret, an empty
+/// value clears it, and rows absent from `incoming` are dropped.
+fn merge_custom_header_values(
+    current: Option<&[AiHttpHeader]>,
+    incoming: &[AiHttpHeader],
+) -> Vec<AiHttpHeader> {
+    let current = current.unwrap_or_default();
+    let mut merged = Vec::with_capacity(incoming.len());
+    for header in incoming {
+        let name = header.name.trim_matches([' ', '\t']);
+        let stored = if header.id.is_empty() {
+            current
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))
+        } else {
+            current.iter().find(|item| item.id == header.id)
+        };
+        let incoming_value = header.value.expose_secret();
+        let value = if incoming_value == MASKED_SECRET_VALUE {
+            stored
+                .map(|item| item.value.expose_secret().to_string())
+                .unwrap_or_default()
+        } else {
+            incoming_value.to_string()
+        };
+        merged.push(AiHttpHeader {
+            id: if header.id.is_empty() {
+                stored.map(|item| item.id.clone()).unwrap_or_default()
+            } else {
+                header.id.clone()
+            },
+            name: name.to_string(),
+            value: value.into(),
+        });
+    }
+    merged
 }
 
 pub fn normalize_ai_settings(settings: &mut AiSettings) -> bool {
@@ -79,11 +135,22 @@ pub fn normalize_ai_settings(settings: &mut AiSettings) -> bool {
             .map(credential_from_profile)
             .collect();
     }
+    let mut header_ids = HashSet::new();
     for credential in &mut settings.provider_credentials {
         if credential.api_protocol.is_none()
             && is_builtin_ollama_provider(&credential.id, &credential.provider_kind)
         {
             migrate_legacy_ollama_base_url(&mut credential.base_url);
+        }
+        normalize_custom_headers(&mut credential.extra_headers);
+        for header in &mut credential.extra_headers {
+            let base = header.id.clone();
+            for suffix in 0_u64.. {
+                if header_ids.insert(header.id.clone()) {
+                    break;
+                }
+                header.id = format!("{base}-{suffix}");
+            }
         }
     }
 
@@ -171,10 +238,13 @@ pub fn ai_settings_has_secret(settings: &AiSettings) -> bool {
             .provider_profiles
             .iter()
             .any(|profile| optional_secret_present(&profile.api_key))
-        || settings
-            .provider_credentials
-            .iter()
-            .any(|credential| optional_secret_present(&credential.api_key))
+        || settings.provider_credentials.iter().any(|credential| {
+            optional_secret_present(&credential.api_key)
+                || credential
+                    .extra_headers
+                    .iter()
+                    .any(|header| !header.value.is_empty())
+        })
 }
 
 impl Default for AiSettings {
@@ -221,7 +291,7 @@ impl Default for AiSettings {
 }
 
 pub(super) fn default_schema_version() -> u32 {
-    6
+    7
 }
 
 pub(super) fn default_codex_runtime() -> Option<String> {
@@ -449,6 +519,7 @@ fn credential_from_profile(profile: &AiProviderProfile) -> AiProviderCredential 
         api_format: AiApiFormat::ChatCompletions,
         base_url: profile.base_url.clone(),
         api_key: profile.api_key.clone(),
+        extra_headers: Vec::new(),
         enabled: profile.enabled,
     }
 }
@@ -525,8 +596,8 @@ fn optional_secret_present(value: &Option<crate::SecretString>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentCommandExecutionMode, AiSettings, MASKED_SECRET_VALUE, RiskLevel, mask_ai_settings,
-        merge_masked_ai_settings, normalize_ai_settings,
+        AgentCommandExecutionMode, AiHttpHeader, AiSettings, MASKED_SECRET_VALUE, RiskLevel,
+        mask_ai_settings, merge_masked_ai_settings, normalize_ai_settings,
     };
 
     #[test]
@@ -566,8 +637,145 @@ mod tests {
         );
     }
 
+    fn test_header(id: &str, name: &str, value: &str) -> AiHttpHeader {
+        AiHttpHeader {
+            id: id.to_string(),
+            name: name.to_string(),
+            value: value.into(),
+        }
+    }
+
     #[test]
-    fn normalize_migrates_legacy_profiles_to_v6_settings() {
+    fn custom_headers_normalize_preserves_rows_and_assigns_unique_ids() {
+        let mut settings = AiSettings::default();
+        settings.provider_credentials[0].extra_headers = vec![
+            test_header("", "  X-Custom  ", "  one  "),
+            test_header("keep-id", "x-custom", "two"),
+            test_header("", "", "dropped-no-name"),
+            test_header("", "X-Empty", ""),
+            test_header("", "Authorization", "Bearer override"),
+        ];
+
+        assert!(normalize_ai_settings(&mut settings));
+
+        let headers = &settings.provider_credentials[0].extra_headers;
+        assert_eq!(headers.len(), 5);
+        let custom = headers
+            .iter()
+            .find(|header| header.name == "x-custom")
+            .expect("x-custom header");
+        assert_eq!(custom.value.expose_secret(), "two");
+        assert_eq!(custom.id, "keep-id");
+        let auth = headers
+            .iter()
+            .find(|header| header.name == "Authorization")
+            .expect("authorization header");
+        assert_eq!(auth.value.expose_secret(), "Bearer override");
+        assert!(!auth.id.is_empty());
+    }
+
+    #[test]
+    fn normalize_preserves_excess_headers_for_validation() {
+        use crate::ai::MAX_AI_CUSTOM_HEADERS;
+        let mut settings = AiSettings::default();
+        settings.provider_credentials[0].extra_headers = (0..MAX_AI_CUSTOM_HEADERS + 5)
+            .map(|index| test_header("", &format!("X-Header-{index}"), "value"))
+            .collect();
+
+        normalize_ai_settings(&mut settings);
+
+        assert_eq!(
+            settings.provider_credentials[0].extra_headers.len(),
+            MAX_AI_CUSTOM_HEADERS + 5
+        );
+    }
+
+    #[test]
+    fn custom_header_values_are_masked_and_merged() {
+        let mut settings = AiSettings::default();
+        settings.provider_credentials[0].extra_headers = vec![
+            test_header("h1", "X-Token", "secret-1"),
+            test_header("h2", "X-Other", "secret-2"),
+        ];
+
+        let masked = mask_ai_settings(settings.clone());
+        assert_eq!(
+            masked.provider_credentials[0].extra_headers[0]
+                .value
+                .expose_secret(),
+            MASKED_SECRET_VALUE
+        );
+
+        let mut next = masked;
+        // h1 keeps the masked value, h2 is cleared, h3 is new.
+        next.provider_credentials[0].extra_headers[1].value = "".into();
+        next.provider_credentials[0]
+            .extra_headers
+            .push(test_header("h3", "X-New", "secret-3"));
+        let merged = merge_masked_ai_settings(&settings, next);
+        let headers = &merged.provider_credentials[0].extra_headers;
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers[0].id, "h1");
+        assert_eq!(headers[0].name, "X-Token");
+        assert_eq!(headers[0].value.expose_secret(), "secret-1");
+        assert!(headers[1].value.is_empty());
+        assert_eq!(headers[2].id, "h3");
+        assert_eq!(headers[2].value.expose_secret(), "secret-3");
+    }
+
+    #[test]
+    fn imported_header_ids_normalize_stably_and_masked_values_keep_provider_ownership() {
+        let mut imported = AiSettings::default();
+        for (index, credential) in imported.provider_credentials.iter_mut().take(2).enumerate() {
+            credential.extra_headers = vec![
+                test_header("shared", "X-Token", &format!("fixture-{index}")),
+                test_header("shared", "X-Other", "other-fixture"),
+                test_header("", "X-Missing-Id", "missing-id-fixture"),
+            ];
+        }
+        let mut current = imported.clone();
+        let mut second_load = imported;
+        normalize_ai_settings(&mut current);
+        normalize_ai_settings(&mut second_load);
+        assert_eq!(current, second_load);
+        let ids: std::collections::HashSet<_> = current
+            .provider_credentials
+            .iter()
+            .flat_map(|credential| credential.extra_headers.iter().map(|header| &header.id))
+            .collect();
+        assert_eq!(ids.len(), 6);
+        assert_eq!(
+            merge_masked_ai_settings(&current, mask_ai_settings(second_load)),
+            current
+        );
+        let mut edited = mask_ai_settings(current.clone());
+        edited.provider_credentials[0].extra_headers[0].value = "replacement-fixture".into();
+        let merged = merge_masked_ai_settings(&current, edited);
+        assert_eq!(
+            merged.provider_credentials[1].extra_headers[0]
+                .value
+                .expose_secret(),
+            "fixture-1"
+        );
+    }
+
+    #[test]
+    fn masked_header_with_new_id_does_not_capture_an_existing_names_secret() {
+        let mut current = AiSettings::default();
+        current.provider_credentials[0].extra_headers =
+            vec![test_header("old", "X-Token", "fixture")];
+        let mut next = mask_ai_settings(current.clone());
+        next.provider_credentials[0].extra_headers[0].id = "new".into();
+        let merged = merge_masked_ai_settings(&current, next);
+        assert!(
+            merged.provider_credentials[0].extra_headers[0]
+                .value
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn normalize_migrates_legacy_profiles_to_v7_settings() {
         let mut settings = AiSettings {
             schema_version: 2,
             provider_credentials: vec![],
@@ -582,7 +790,7 @@ mod tests {
         settings.provider_profiles[3].enabled = true;
 
         assert!(normalize_ai_settings(&mut settings));
-        assert_eq!(settings.schema_version, 6);
+        assert_eq!(settings.schema_version, 7);
         assert!(!settings.provider_credentials.is_empty());
         assert!(
             settings

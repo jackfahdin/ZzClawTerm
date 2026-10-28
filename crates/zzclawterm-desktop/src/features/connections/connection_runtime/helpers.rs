@@ -1603,12 +1603,24 @@ mod tests {
         let expected_security = RdpSecuritySettings {
             use_nla: false,
             certificate_policy: "strict".to_string(),
+            // Opposite of the default, so a silently re-defaulted field fails the assert.
+            administrative_session: true,
         };
         let expected_display = RdpDisplaySettings {
             mode: "fixed".to_string(),
             width: 2560,
             height: 1440,
             color_depth: 24,
+            // Every option differs from its default to detect re-defaulting.
+            graphics_pipeline: true,
+            display_wallpaper: false,
+            display_themes: false,
+            enable_font_smoothing: false,
+            enable_desktop_composition: true,
+            disable_full_window_drag: false,
+            disable_menu_animations: false,
+            disable_cursor_shadow: true,
+            disable_cursor_blinking: true,
         };
         let expected_clipboard = RdpClipboardSettings {
             mode: "disabled".to_string(),
@@ -2017,7 +2029,16 @@ pub(in crate::features) enum ConnectionEditorToggle {
     TelnetAutoLoginSendWakeEnter,
     PostLogin,
     RdpUseNla,
+    RdpAdministrativeSession,
     RdpReconnect,
+    RdpDisplayWallpaper,
+    RdpDisplayThemes,
+    RdpFontSmoothing,
+    RdpDesktopComposition,
+    RdpFullWindowDrag,
+    RdpMenuAnimations,
+    RdpCursorShadow,
+    RdpCursorBlinking,
     VncClipboard,
     VncReconnect,
     VncShared,

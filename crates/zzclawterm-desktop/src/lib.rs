@@ -9,6 +9,7 @@ mod temporary_ssh_link;
 #[cfg(test)]
 mod test_support;
 mod thread_owner;
+mod window_chrome;
 
 pub mod app_shell;
 pub mod blocking_jobs;

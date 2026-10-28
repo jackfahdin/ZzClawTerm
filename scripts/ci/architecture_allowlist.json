@@ -91,6 +91,11 @@
   ],
   "raw_scroll_container": [
     {
+      "path": "crates/zzclawterm-desktop/src/features/panels/session_overlays.rs",
+      "max_count": 1,
+      "reason": "Session information keeps its ScrollHandle in SessionFeatureState for close/reopen reset, tracks it on the in-flow body, and attaches vertical_scrollbar to the non-scrolling parent outside the header and footer."
+    },
+    {
       "path": "crates/zzclawterm-desktop/src/features/file_manager/view/table.rs",
       "max_count": 1,
       "reason": "File manager table tracks a caller-owned horizontal ScrollHandle and attaches ZzClawHorizontalScrollbar to the non-scrolling viewport alongside its independent virtual-list scrollbar."

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::Context;
 
 use crate::features::{FontCatalogPresentation, ZzClawTermApp};
-use crate::models::{SettingsTab, SnapshotPasswordPromptKind};
+use crate::models::SettingsTab;
 
 use super::panel::{
     AiSettingsPresentation, CloudSyncPresentation, MasterPasswordPresentation, SettingsChrome,
@@ -44,12 +44,7 @@ impl ZzClawTermApp {
         surface: SettingsSurface,
     ) -> SettingsSnapshot {
         let active_tab = self.shell.settings_active_tab();
-        let backup_prompt = self.settings.snapshot_password_prompt().filter(|prompt| {
-            matches!(
-                prompt.kind,
-                SnapshotPasswordPromptKind::Export | SnapshotPasswordPromptKind::Import
-            )
-        });
+        let backup_prompt = self.settings.snapshot_password_prompt();
         let draft_dirty = self.settings_draft_dirty() || self.settings.theme_designer().dirty();
         SettingsSnapshot {
             chrome: SettingsChrome {
@@ -115,8 +110,9 @@ impl ZzClawTermApp {
             ai: AiSettingsPresentation {
                 providers: self.ai.provider_view().clone(),
                 config: Arc::new(zzclawterm_core::mask_ai_settings(
-                    self.ai.settings_config().clone(),
+                    self.ai.pending_settings(),
                 )),
+                header_errors: Arc::new(self.ai.settings_header_errors()),
                 manual_model_drafts: Arc::new(self.ai.settings_manual_model_drafts().clone()),
                 credential_draft_key_ids: Arc::new(
                     self.ai
@@ -213,8 +209,8 @@ impl ZzClawTermApp {
                 .as_ref()
                 .and_then(gpui::WeakEntity::upgrade)
             {
-                controller.update(cx, |controller, _| {
-                    controller.release_settings_owner(self.workspace_id)
+                controller.update(cx, |controller, cx| {
+                    controller.release_settings_owner(self.workspace_id, cx)
                 });
             }
             self.request_settings_panel_refresh(cx);

@@ -115,12 +115,6 @@ pub(in crate::features::pages::tunnels) fn network_tunnel_editor_content(
         .gap_4()
         .child(
             div()
-                .text_size(px(12.))
-                .text_color(rgb(palette.text_muted))
-                .child(t!("network.tunnelDialogDescription")),
-        )
-        .child(
-            div()
                 .flex()
                 .flex_wrap()
                 .gap_3()

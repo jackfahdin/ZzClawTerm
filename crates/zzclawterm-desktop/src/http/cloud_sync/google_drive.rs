@@ -1,5 +1,7 @@
+use super::metrics::{CountedRequest, CountedResponse};
 use std::sync::Mutex;
 use std::time::Duration;
+use zzclawterm_core::cloud_sync::credentials::{CloudCredentialUpdate, DriveProvider};
 
 use serde_json::json;
 use zed_reqwest::StatusCode;
@@ -20,26 +22,40 @@ const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_DRIVE_FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
 pub struct NativeGoogleDriveRemote {
+    pub(super) token_sink: super::CloudTokenSink,
     client: zed_reqwest::blocking::Client,
     root: String,
     access_token: Mutex<zzclawterm_core::SecretString>,
-    refresh_token: Option<zzclawterm_core::SecretString>,
+    refresh_token: Mutex<zzclawterm_core::SecretString>,
     client_id: Option<String>,
     client_secret: Option<zzclawterm_core::SecretString>,
 }
 
 impl NativeGoogleDriveRemote {
     pub fn new(settings: &OAuthDriveSyncSettings) -> Result<Self, CloudSyncError> {
+        Self::new_with_token_sink(
+            settings,
+            std::sync::Arc::new(|_| Err(CloudSyncError::CredentialPersistence)),
+        )
+    }
+
+    pub(crate) fn new_with_token_sink(
+        settings: &OAuthDriveSyncSettings,
+        token_sink: super::CloudTokenSink,
+    ) -> Result<Self, CloudSyncError> {
         let client = zed_reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("ZzClawTerm")
             .build()
             .map_err(map_google_drive_http_error)?;
         let remote = Self {
+            token_sink,
             client,
             root: trim_remote_path(&settings.root),
             access_token: Mutex::new(trim_optional_secret(settings.access_token.as_deref()).into()),
-            refresh_token: trim_optional(settings.refresh_token.as_deref()).map(Into::into),
+            refresh_token: Mutex::new(
+                trim_optional_secret(settings.refresh_token.as_deref()).into(),
+            ),
             client_id: trim_optional(settings.client_id.as_deref()),
             client_secret: trim_optional(settings.client_secret.as_deref()).map(Into::into),
         };
@@ -66,9 +82,11 @@ impl NativeGoogleDriveRemote {
     }
 
     fn can_refresh_access_token(&self) -> bool {
-        self.refresh_token
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
+        !self
+            .refresh_token
+            .lock()
+            .expect("refresh token lock")
+            .is_empty()
             && self
                 .client_id
                 .as_deref()
@@ -80,13 +98,16 @@ impl NativeGoogleDriveRemote {
     }
 
     fn refresh_access_token(&self) -> Result<(), CloudSyncError> {
+        let expected_access_token =
+            Some(self.access_token.lock().expect("access token lock").clone());
         let refresh_token = self
             .refresh_token
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                CloudSyncError::Remote("Google Drive refresh token is required".to_string())
-            })?;
+            .lock()
+            .expect("refresh token lock")
+            .clone();
+        if refresh_token.is_empty() {
+            return Err(CloudSyncError::Remote("refresh token is required".into()));
+        }
         let client_id = self
             .client_id
             .as_deref()
@@ -104,7 +125,7 @@ impl NativeGoogleDriveRemote {
         let body = form_urlencoded(&[
             ("client_id", client_id),
             ("client_secret", client_secret),
-            ("refresh_token", refresh_token),
+            ("refresh_token", refresh_token.expose_secret()),
             ("grant_type", "refresh_token"),
         ]);
         let response = self
@@ -112,17 +133,20 @@ impl NativeGoogleDriveRemote {
             .post(GOOGLE_OAUTH_TOKEN_URL)
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(body)
-            .send()
+            .send_counted()
             .map_err(map_google_drive_http_error)?;
         let status = response.status();
-        let body = response.text().map_err(map_google_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if !status.is_success() {
-            return Err(CloudSyncError::Remote(format!(
-                "Google Drive token refresh failed ({status}): {}",
-                body.trim()
-            )));
+            return Err(super::helpers::oauth_failure(
+                "Google Drive",
+                status.as_u16(),
+                &body,
+                _retry_after_seconds,
+            ));
         }
-        let value: serde_json::Value = serde_json::from_str(&body)?;
+        let value: serde_json::Value = super::helpers::safe_json(&body, "Google Drive")?;
         let access_token = value
             .get("access_token")
             .and_then(serde_json::Value::as_str)
@@ -133,10 +157,27 @@ impl NativeGoogleDriveRemote {
                     "Google Drive token refresh response did not include access_token".to_string(),
                 )
             })?;
-        *self
-            .access_token
-            .lock()
-            .expect("google drive access token lock") = access_token.to_string().into();
+        let rotated = value
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(zzclawterm_core::SecretString::from);
+        let access_token: zzclawterm_core::SecretString = access_token.into();
+        super::helpers::install_refreshed_tokens(
+            &self.access_token,
+            &self.refresh_token,
+            &self.token_sink,
+            CloudCredentialUpdate {
+                provider: DriveProvider::Google,
+                client_id: self.client_id.clone(),
+                client_secret: self.client_secret.clone(),
+                expected_access_token,
+                expected_refresh_token: Some(refresh_token),
+                access_token: access_token.clone(),
+                refresh_token: rotated.clone(),
+            },
+        )?;
         Ok(())
     }
 
@@ -148,14 +189,15 @@ impl NativeGoogleDriveRemote {
             self.refresh_access_token()?;
         }
         let response = build(&self.client, &self.bearer_token())
-            .send()
+            .send_counted()
             .map_err(map_google_drive_http_error)?;
         if response.status() != StatusCode::UNAUTHORIZED || !self.can_refresh_access_token() {
             return Ok(response);
         }
+        let _ = response.bytes_counted();
         self.refresh_access_token()?;
         build(&self.client, &self.bearer_token())
-            .send()
+            .send_counted()
             .map_err(map_google_drive_http_error)
     }
 
@@ -173,12 +215,15 @@ impl NativeGoogleDriveRemote {
                 .query(&[("fields", "id")])
         })?;
         let status = response.status();
-        let body = response.text().map_err(map_google_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if !status.is_success() {
-            return Err(CloudSyncError::Remote(format!(
-                "Google Drive create folder failed ({status}): {}",
-                body.trim()
-            )));
+            return Err(super::helpers::http_failure(
+                "Google Drive",
+                "request",
+                status.as_u16(),
+                _retry_after_seconds,
+            ));
         }
         google_drive_json_id(&body, "created folder")
     }
@@ -252,12 +297,15 @@ impl NativeGoogleDriveRemote {
                 ])
         })?;
         let status = response.status();
-        let body = response.text().map_err(map_google_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if !status.is_success() {
-            return Err(CloudSyncError::Remote(format!(
-                "Google Drive file lookup failed ({status}): {}",
-                body.trim()
-            )));
+            return Err(super::helpers::http_failure(
+                "Google Drive",
+                "request",
+                status.as_u16(),
+                _retry_after_seconds,
+            ));
         }
         unique_google_drive_child(&body, folder_only)
     }
@@ -271,20 +319,21 @@ impl NativeGoogleDriveRemote {
                 .query(&[("alt", "media")])
         })?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status == StatusCode::NOT_FOUND {
+            let _ = response.bytes_counted();
             return Ok(None);
         }
         if status.is_success() {
-            return response
-                .bytes()
-                .map(|bytes| Some(bytes.to_vec()))
-                .map_err(map_google_drive_http_error);
+            return response.bytes_counted().map(|bytes| Some(bytes.to_vec()));
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "Google Drive media download failed ({status}): {}",
-            body.trim()
-        )))
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "Google Drive",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn create_file(&self, parent_id: &str, name: &str, bytes: &[u8]) -> Result<(), CloudSyncError> {
@@ -322,14 +371,18 @@ impl NativeGoogleDriveRemote {
                 .header(AUTHORIZATION, format!("Bearer {token}"))
         })?;
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            let _ = response.bytes_counted();
             return Ok(());
         }
         let status = response.status();
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "Google Drive file delete failed ({status}): {}",
-            body.trim()
-        )))
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "Google Drive",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn list_child_files(&self, parent_id: &str) -> Result<Vec<String>, CloudSyncError> {
@@ -355,12 +408,15 @@ impl NativeGoogleDriveRemote {
                 request
             })?;
             let status = response.status();
-            let body = response.text().map_err(map_google_drive_http_error)?;
+            let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+            let body = response.text_counted()?;
             if !status.is_success() {
-                return Err(CloudSyncError::Remote(format!(
-                    "Google Drive file list failed ({status}): {}",
-                    body.trim()
-                )));
+                return Err(super::helpers::http_failure(
+                    "Google Drive",
+                    "request",
+                    status.as_u16(),
+                    _retry_after_seconds,
+                ));
             }
             let page = parse_google_drive_list_page(&body)?;
             names.extend(page.names);
@@ -377,7 +433,7 @@ fn unique_google_drive_child(
     body: &str,
     folder_only: bool,
 ) -> Result<Option<GoogleDriveFile>, CloudSyncError> {
-    let value: serde_json::Value = serde_json::from_str(body)?;
+    let value: serde_json::Value = super::helpers::safe_json(body, "Google Drive")?;
     let files = value
         .get("files")
         .and_then(serde_json::Value::as_array)
@@ -417,7 +473,7 @@ pub(super) struct GoogleDriveListPage {
 pub(super) fn parse_google_drive_list_page(
     body: &str,
 ) -> Result<GoogleDriveListPage, CloudSyncError> {
-    let value: serde_json::Value = serde_json::from_str(body)?;
+    let value: serde_json::Value = super::helpers::safe_json(body, "Google Drive")?;
     let names = value
         .get("files")
         .and_then(serde_json::Value::as_array)
@@ -507,7 +563,7 @@ struct GoogleDriveFile {
 }
 
 fn google_drive_json_id(body: &str, label: &str) -> Result<String, CloudSyncError> {
-    let value: serde_json::Value = serde_json::from_str(body)?;
+    let value: serde_json::Value = super::helpers::safe_json(body, "Google Drive")?;
     value
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -524,14 +580,18 @@ fn google_drive_expect_success(
     operation: &str,
 ) -> Result<(), CloudSyncError> {
     let status = response.status();
+    let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
     if status.is_success() {
+        let _ = response.bytes_counted();
         return Ok(());
     }
-    let body = response.text().unwrap_or_default();
-    Err(CloudSyncError::Remote(format!(
-        "{operation} failed ({status}): {}",
-        body.trim()
-    )))
+    let _body = response.text_counted().unwrap_or_default();
+    Err(super::helpers::http_failure(
+        "Google Drive",
+        operation,
+        status.as_u16(),
+        _retry_after_seconds,
+    ))
 }
 
 pub(super) fn google_drive_multipart_body(
@@ -558,14 +618,7 @@ pub(super) fn google_drive_multipart_body(
 }
 
 fn map_google_drive_http_error(error: zed_reqwest::Error) -> CloudSyncError {
-    if error.is_timeout() {
-        CloudSyncError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("Google Drive operation timed out: {error}"),
-        ))
-    } else {
-        CloudSyncError::Remote(format!("Google Drive request failed: {error}"))
-    }
+    super::helpers::safe_http_error("Google Drive", error)
 }
 
 #[cfg(test)]

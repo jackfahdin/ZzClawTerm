@@ -1,64 +1,145 @@
 use rust_i18n::t;
 
-use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb, svg};
+use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
 use zzclawterm_core::{CloudConflictKind, truncate_preview};
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::{
-    cloud_sync_status_dot_color, cloud_sync_status_text_color, configured_cloud_sync_provider,
-    format_cloud_provider, format_duration_ms,
+    SyncHistoryTimeFormatter, cloud_sync_status_dot_color, configured_cloud_sync_provider,
+    format_cloud_provider,
 };
-use crate::features::view_widgets::{
-    CloudSyncHistoryRowLabels, cloud_sync_history_row, dialog_action_button,
-};
+use crate::features::sync::SyncHistoryFilter;
+use crate::features::view_widgets::{cloud_sync_history_row, dialog_action_button};
 use crate::widgets::small_button;
-use zzclawterm_ui::{ZzClawScrollable, ZzClawTooltip};
+use zzclawterm_ui::{
+    ZzClawButton, ZzClawButtonVariant, ZzClawScrollable, ZzClawTabItem, ZzClawTabs,
+    ZzClawTabsVariant,
+};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn sync_backup_history_panel(
         &mut self,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
-        // Tauri SyncBackupHistoryPanel:
-        // shared PanelHeader + status strip + optional conflict card + dense history list.
         let provider = configured_cloud_sync_provider(self.cloud_sync.settings());
         let provider_label = format_cloud_provider(&provider);
-        let enabled = self.cloud_sync.settings().enabled;
         let status_message = self.cloud_sync.status().to_string();
-        let last_history_status = self
+        let state = self.cloud_sync.activity_status();
+        let state_label = t!(match state {
+            "disabled" => "settings.syncState.disabled",
+            "conflict" => "settings.syncHistory.needsAttention",
+            "running" => "settings.syncState.running",
+            _ => "settings.syncState.idle",
+        });
+        let formatter = SyncHistoryTimeFormatter::new();
+        let last_success = self
             .cloud_sync
             .history()
-            .first()
-            .map(|entry| entry.status.as_str());
-        let state = if !enabled {
-            "disabled"
-        } else if self.cloud_sync.conflict().is_some() {
-            "conflict"
-        } else if self.cloud_sync.job_running() {
-            "running"
-        } else {
-            match last_history_status {
-                Some("failed") => "failed",
-                Some("success") => "success",
-                _ => "idle",
-            }
-        };
-        let state_label = match state {
-            "disabled" => t!("settings.syncState.disabled"),
-            "conflict" => t!("settings.syncState.conflict"),
-            "failed" => t!("settings.syncState.failed"),
-            "running" => t!("settings.syncState.running"),
-            "success" => t!("settings.syncState.success"),
-            _ => t!("settings.syncState.idle"),
-        };
+            .iter()
+            .filter(|entry| {
+                entry.kind == "sync"
+                    && entry.status == "success"
+                    && entry.provider.as_deref() == Some(provider.as_str())
+            })
+            .map(|entry| entry.timestamp_ms)
+            .max()
+            .map(|timestamp| {
+                format!(
+                    "{} {}",
+                    formatter.day(timestamp),
+                    formatter.clock(timestamp)
+                )
+            });
         let history = self.cloud_sync.history().to_vec();
         let expanded = self.cloud_sync.history_expanded().clone();
         let conflict = self.cloud_sync.conflict().cloned();
-        let sync_action_enabled = enabled && !self.cloud_sync.job_running();
+        let branch_view = conflict.as_ref().map(|conflict| {
+            let options =
+                crate::features::view_widgets::cloud_sync_conflict::branch_options(conflict);
+            let select = self.select_entity(
+                "cloud-conflict-branch",
+                options,
+                conflict.selected_revision.clone(),
+                self.cloud_sync.job_running(),
+                cx,
+            );
+            crate::features::view_widgets::cloud_sync_conflict::branch_details(
+                conflict,
+                div()
+                    .w_full()
+                    .h(px(zzclawterm_ui::NYA_FORM_CONTROL_HEIGHT_PX))
+                    .child(zzclawterm_ui::ZzClawSelect::new(&select)),
+            )
+        });
 
+        let filter = self.cloud_sync.history_filter();
+        let limit = self.cloud_sync.history_visible_limit();
+        let mut history = history;
+        history.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
+        let matching_count = history.iter().filter(|entry| filter.matches(entry)).count();
+        let filter_options = [
+            (SyncHistoryFilter::All, t!("settings.historyAll")),
+            (
+                SyncHistoryFilter::Success,
+                t!("settings.historyOverviewSuccess"),
+            ),
+            (
+                SyncHistoryFilter::Failed,
+                t!("settings.historyOverviewFailed"),
+            ),
+            (
+                SyncHistoryFilter::Conflict,
+                t!("settings.historyOverviewConflict"),
+            ),
+        ];
+        let selected_index = filter_options
+            .iter()
+            .position(|(value, _)| *value == filter)
+            .unwrap_or(0);
+        let filter_focus = window
+            .use_keyed_state("sync-history-filter-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let filters = div()
+            .id("sync-history-filter-keyboard")
+            .track_focus(&filter_focus)
+            .debug_selector(|| "sync-history-filter-keyboard".to_string())
+            .tab_group()
+            .tab_index(0)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.modifiers == gpui::Modifiers::default()
+                    && this
+                        .cloud_sync
+                        .navigate_history_filter(&event.keystroke.key)
+                {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .px_2()
+            .py_2()
+            .flex_none()
+            .child(
+                ZzClawTabs::new("sync-history-filters")
+                    .variant(ZzClawTabsVariant::Segmented)
+                    .selected_index(selected_index)
+                    .items(
+                        filter_options
+                            .iter()
+                            .map(|(_, label)| ZzClawTabItem::new(label.clone())),
+                    )
+                    .on_select(cx.listener(move |this, index: &usize, window, cx| {
+                        if let Some((value, _)) = filter_options.get(*index) {
+                            window.focus(&filter_focus, cx);
+                            this.cloud_sync.filter_history(*value);
+                            cx.notify();
+                        }
+                    })),
+            );
         let mut rows = div().flex().flex_col();
-        if history.is_empty() {
+        if matching_count == 0 {
             rows = rows.child(
                 div()
                     .py_6()
@@ -66,189 +147,152 @@ impl ZzClawTermApp {
                     .text_center()
                     .text_size(px(11.))
                     .text_color(rgb(palette.text_dimmed))
-                    .child(t!("settings.historyNoEntries")),
+                    .child(if history.is_empty() {
+                        t!("settings.historyNoEntries")
+                    } else {
+                        t!("settings.historyNoResultsTitle")
+                    }),
             );
         } else {
-            for entry in history {
+            let mut previous_day = None;
+            for entry in history
+                .into_iter()
+                .filter(|entry| filter.matches(entry))
+                .take(limit)
+            {
+                let day = formatter.day(entry.timestamp_ms);
+                if previous_day.as_ref() != Some(&day) {
+                    rows = rows.child(
+                        div()
+                            .px_3()
+                            .pt_3()
+                            .pb_1()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight(600.))
+                            .text_color(rgb(palette.text_muted))
+                            .child(day.clone()),
+                    );
+                    previous_day = Some(day);
+                }
                 let entry_id = entry.id.clone();
                 let is_open = expanded.contains(&entry_id);
-                let copy_message = entry.message.clone();
-                let kind_label = t!(match entry.kind.as_str() {
-                    "sync" => "settings.historyKindSync",
-                    "backup" => "settings.historyKindBackup",
-                    _ => "settings.historyKindSync",
-                });
-                let status_label = t!(match entry.status.as_str() {
-                    "success" => "settings.syncState.success",
-                    "failed" => "settings.syncState.failed",
-                    "conflict" => "settings.syncState.conflict",
-                    "running" => "settings.syncState.running",
-                    _ => "settings.syncState.idle",
-                });
-                let trigger_label =
-                    t!("settings.historyTrigger", value = entry.trigger).to_string();
-                let provider = entry
-                    .provider
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                    .map(format_cloud_provider)
-                    .unwrap_or_else(|| "-".to_string());
-                let provider_label = t!("settings.historyProvider", value = provider).to_string();
-                let duration =
-                    format_duration_ms(entry.duration_ms).unwrap_or_else(|| "-".to_string());
-                let duration_label = t!("settings.historyDuration", value = duration).to_string();
+                // Copy all original fields, including full revisions and messages.
+                let diagnostics = serde_json::to_string_pretty(&entry).unwrap_or_default();
                 rows = rows.child(cloud_sync_history_row(
                     palette,
                     entry,
-                    CloudSyncHistoryRowLabels {
-                        kind: kind_label.to_string(),
-                        status: status_label.to_string(),
-                        trigger: trigger_label,
-                        provider: provider_label,
-                        duration: duration_label,
-                        revision: t!("settings.historyRevision"),
-                        view_details: t!("settings.historyViewDetails"),
-                        hide_details: t!("settings.historyHideDetails"),
-                        copy_message: t!("settings.historyCopyMessage"),
-                    },
+                    &formatter,
                     is_open,
                     cx.listener(move |this, _, _, cx| {
                         this.toggle_cloud_sync_history_details(&entry_id, cx);
                     }),
                     cx.listener(move |this, _, _, cx| {
-                        if copy_message.trim().is_empty() {
-                            this.shell
-                                .set_status("history entry has no message".to_string());
-                            this.copy_text_with_feedback("copy-sync-history", String::new(), cx);
-                        } else {
-                            this.copy_text_with_feedback(
-                                "copy-sync-history",
-                                copy_message.clone(),
-                                cx,
-                            );
-                            this.shell
-                                .set_status("sync history message copied".to_string());
-                        }
+                        this.copy_text_with_feedback("copy-sync-history", diagnostics.clone(), cx);
                         cx.notify();
                     }),
                 ));
             }
+            if matching_count > limit {
+                rows = rows.child(
+                    div().p_2().child(
+                        ZzClawButton::new(
+                            "sync-history-show-more",
+                            t!("settings.syncHistory.showMore"),
+                        )
+                        .variant(ZzClawButtonVariant::Ghost)
+                        .small()
+                        .full_width()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cloud_sync.show_more_history();
+                            cx.notify();
+                        })),
+                    ),
+                );
+            }
         }
 
+        let indicator = if state == "running" {
+            zzclawterm_ui::chat::running_indicator("cloud-sync-running", rgb(palette.link))
+                .into_any_element()
+        } else {
+            div()
+                .size(px(8.))
+                .rounded_full()
+                .flex_none()
+                .bg(cloud_sync_status_dot_color(palette, state))
+                .into_any_element()
+        };
+        let heading = div()
+            .debug_selector(|| "sync-history-status-row".to_string())
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(indicator)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight(600.))
+                    .text_color(rgb(palette.text))
+                    .truncate()
+                    .child(state_label),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(gpui::relative(0.5))
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(rgb(palette.text_muted))
+                    .child(provider_label),
+            );
+        let last_success =
+            last_success.unwrap_or_else(|| t!("settings.syncHistory.noSuccess").to_string());
+        let header = div()
+            .flex_none()
+            .px_3()
+            .py_3()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading)
+            .child(
+                div()
+                    .pl_4()
+                    .text_size(px(11.))
+                    .text_color(rgb(palette.text_muted))
+                    .child(t!("settings.syncHistory.lastSuccess", value = last_success)),
+            )
+            .when(
+                !status_message.trim().is_empty() && conflict.is_none(),
+                |this| {
+                    this.child(
+                        div()
+                            .pl_4()
+                            .text_size(px(11.))
+                            .line_height(px(17.))
+                            .text_color(rgb(palette.text_muted))
+                            .child(t!(
+                                "settings.syncHistory.operationNotice",
+                                value = truncate_preview(&status_message, 140)
+                            )),
+                    )
+                },
+            );
         div()
             .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
             .bg(self.shell_transparent_color(palette.surface))
-            .child(
-                div()
-                    .flex_none()
-                    .px_3()
-                    .py(px(10.))
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .bg(self.shell_transparent_color(palette.surface))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .min_w_0()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size(px(8.))
-                                    .rounded_full()
-                                    .flex_none()
-                                    .bg(cloud_sync_status_dot_color(palette, state)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(palette.text_muted))
-                                    .child(t!("settings.historyCurrentState")),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight(600.))
-                                    .text_color(cloud_sync_status_text_color(palette, state))
-                                    .overflow_hidden()
-                                    .child(state_label),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(palette.border))
-                                    .child("·"),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(palette.text_muted))
-                                    .overflow_hidden()
-                                    .child(provider_label),
-                            )
-                            .child(sync_history_action_button(
-                                palette,
-                                "sync-history-push-now",
-                                "icons/fe/upload.svg",
-                                t!("settings.syncPushNow"),
-                                sync_action_enabled,
-                                cx.listener(move |this, _, window, cx| {
-                                    if !this.cloud_sync.settings().enabled
-                                        || this.cloud_sync.job_running()
-                                    {
-                                        this.shell.set_status(
-                                            "cloud sync is disabled or already running".to_string(),
-                                        );
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.prompt_provider_cloud_sync_push(window, cx);
-                                }),
-                            ))
-                            .child(sync_history_action_button(
-                                palette,
-                                "sync-history-pull-now",
-                                "icons/fe/download.svg",
-                                t!("settings.syncPullNow"),
-                                sync_action_enabled,
-                                cx.listener(move |this, _, window, cx| {
-                                    if !this.cloud_sync.settings().enabled
-                                        || this.cloud_sync.job_running()
-                                    {
-                                        this.shell.set_status(
-                                            "cloud sync is disabled or already running".to_string(),
-                                        );
-                                        cx.notify();
-                                        return;
-                                    }
-                                    this.prompt_provider_cloud_sync_pull(window, cx);
-                                }),
-                            )),
-                    )
-                    .when(
-                        !status_message.trim().is_empty() && conflict.is_none(),
-                        |this| {
-                            this.child(
-                                div()
-                                    .pl_4()
-                                    .text_size(px(12.))
-                                    .line_height(px(18.))
-                                    .text_color(rgb(palette.text_muted))
-                                    .child(truncate_preview(&status_message, 140)),
-                            )
-                        },
-                    ),
-            )
+            .child(header)
             .when_some(conflict, |this, conflict| {
+                let can_resolve = conflict.preview.local_content_hash.is_some();
+                let can_pull = can_resolve && conflict.selected_revision.is_some();
                 let preview = conflict.preview;
                 let remote_inconsistent = preview.kind == CloudConflictKind::RemoteInconsistent;
                 let overwrite_blocked = preview.overwrite_blocked;
@@ -262,6 +306,7 @@ impl ZzClawTermApp {
                         .border_1()
                         .border_color(rgb(palette.warning))
                         .bg(rgb(palette.input))
+                        .when_some(branch_view, |card, view| card.child(div().p_3().child(view)))
                         .child(
                             div()
                                 .px_3()
@@ -289,7 +334,11 @@ impl ZzClawTermApp {
                                 .py_2()
                                 .text_size(px(11.))
                                 .text_color(rgb(palette.text))
-                                .child(preview.message.clone()),
+                                .child(if remote_inconsistent {
+                                    t!("settings.syncHistory.incompleteHint")
+                                } else {
+                                    t!("settings.syncHistory.conflictExplanation")
+                                }),
                         )
                         .child(
                             div()
@@ -358,7 +407,7 @@ impl ZzClawTermApp {
                                 .pb_3()
                                 .flex()
                                 .gap_2()
-                                .child(if remote_inconsistent && has_recovery_candidate {
+                                .child(if remote_inconsistent && has_recovery_candidate && !can_pull {
                                     small_button(
                                         palette,
                                         "sync-panel-recover-current",
@@ -375,13 +424,13 @@ impl ZzClawTermApp {
                                         }),
                                     )
                                     .into_any_element()
-                                } else if remote_inconsistent {
+                                } else if remote_inconsistent && !can_pull {
                                     // Nothing on the remote can be recovered:
                                     // pulling would download the same unreadable
                                     // payload, so only the explicit overwrite is
                                     // offered.
                                     div().into_any_element()
-                                } else {
+                                } else if can_pull {
                                     small_button(
                                         palette,
                                         "sync-panel-force-pull",
@@ -398,8 +447,8 @@ impl ZzClawTermApp {
                                         }),
                                     )
                                     .into_any_element()
-                                })
-                                .when(!overwrite_blocked, |this| {
+                                } else { div().text_xs().child(t!("settings.syncChooseBranch")).into_any_element() })
+                                .when(!overwrite_blocked && can_resolve, |this| {
                                     this.child(dialog_action_button(
                                         palette,
                                         "sync-panel-force-push",
@@ -429,6 +478,9 @@ impl ZzClawTermApp {
                         ),
                 )
             })
+            .child(div().px_3().pt_3().text_size(px(12.)).font_weight(FontWeight(600.))
+                .text_color(rgb(palette.text)).child(t!("settings.syncHistory.title")))
+            .child(filters)
             .child(
                 div()
                     .id(SharedString::from("sync-backup-history-list"))
@@ -438,45 +490,6 @@ impl ZzClawTermApp {
                     .child(rows),
             )
     }
-}
-
-fn sync_history_action_button(
-    palette: crate::theme::ThemePalette,
-    id: impl Into<String>,
-    icon_path: &'static str,
-    tooltip: impl Into<SharedString>,
-    enabled: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    let tooltip: SharedString = tooltip.into();
-    let id: SharedString = id.into().into();
-    let selector = id.clone();
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_string())
-        .size(px(24.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .opacity(if enabled { 1.0 } else { 0.45 })
-        .cursor_pointer()
-        .tooltip(move |window, cx| ZzClawTooltip::new(tooltip.clone()).build(window, cx))
-        .hover(|this| {
-            if enabled {
-                this.bg(rgb(palette.surface_elevated))
-            } else {
-                this
-            }
-        })
-        .child(
-            svg()
-                .size(px(14.))
-                .flex_none()
-                .path(icon_path)
-                .text_color(rgb(palette.text_muted)),
-        )
-        .on_click(on_click)
 }
 
 #[cfg(test)]
@@ -495,7 +508,6 @@ mod tests {
 
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
-    use crate::models::SnapshotPasswordPromptKind;
     use crate::test_support::{TestConfigDir, spawn_webdav_service_unavailable_server};
 
     struct SidebarHost {
@@ -503,12 +515,18 @@ mod tests {
     }
 
     impl Render for SidebarHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(320.))
                 .h(px(720.))
                 .child(self.app.update(cx, |app, cx| {
-                    app.sync_backup_history_panel(cx).into_any_element()
+                    app.floating_side_panel(
+                        crate::models::PanelSide::Left,
+                        crate::models::NavItem::SyncBackupHistory,
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
                 }))
         }
     }
@@ -560,64 +578,106 @@ mod tests {
     }
 
     #[test]
-    fn sync_sidebar_actions_open_visible_password_dialogs_and_cancel_cleanly() {
-        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar");
+    fn sync_sidebar_header_actions_are_ordered_and_disabled_when_sync_is_disabled() {
+        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-layout");
         let mut cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = test_app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, _| app.cloud_sync.toggle_enabled());
         let host_app = app.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {
             let host = cx.new(|_| SidebarHost { app: host_app });
             zzclaw_root(host, window, cx)
         });
-        let cx: &mut VisualTestContext = cx;
-        for (id, kind) in [
-            (
-                "sync-history-push-now",
-                SnapshotPasswordPromptKind::CloudProviderPush,
-            ),
-            (
-                "sync-history-pull-now",
-                SnapshotPasswordPromptKind::CloudProviderPull,
-            ),
-        ] {
+        draw(cx);
+        let push = cx.debug_bounds("sync-history-push-now").unwrap();
+        let pull = cx.debug_bounds("sync-history-pull-now").unwrap();
+        let refresh = cx.debug_bounds("sync-history-header-refresh").unwrap();
+        let status = cx.debug_bounds("sync-history-status-row").unwrap();
+        assert!(push.origin.x < pull.origin.x && pull.origin.x < refresh.origin.x);
+        assert_eq!(push.origin.y, refresh.origin.y);
+        assert!(push.bottom() <= status.origin.y);
+        for id in ["sync-history-push-now", "sync-history-pull-now"] {
             click_action(cx, id);
-            assert!(
-                cx.debug_bounds("snapshot-password-dialog-content")
-                    .is_some()
-            );
-            assert!(cx.debug_bounds("nya-dialog-action-button").is_some());
-            cx.update(|window, cx| {
-                assert!(window.has_active_nya_dialog(cx));
-                let state = app.read(cx);
-                assert_eq!(
-                    state
-                        .settings
-                        .snapshot_password_prompt()
-                        .expect("prompt")
-                        .kind,
-                    kind
-                );
-                assert!(!state.cloud_sync.job_running());
-            });
-            cx.simulate_keystrokes("enter");
-            draw(cx);
-            cx.update(|window, cx| {
-                assert!(
-                    window.has_active_nya_dialog(cx),
-                    "empty passwords must keep the dialog open"
-                );
-                assert!(app.read(cx).settings.snapshot_password_prompt_active());
-                assert!(!app.read(cx).cloud_sync.job_running());
-            });
-            cx.simulate_keystrokes("escape");
-            draw(cx);
             cx.update(|window, cx| {
                 assert!(!window.has_active_nya_dialog(cx));
-                assert!(!app.read(cx).settings.snapshot_password_prompt_active());
+                assert!(!app.read(cx).cloud_sync.job_running());
                 assert!(app.read(cx).cloud_sync.history().is_empty());
             });
         }
+    }
+
+    fn wait_for_history(
+        cx: &mut VisualTestContext,
+        app: &Entity<ZzClawTermApp>,
+        trigger: &str,
+    ) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            draw(cx);
+            let status = cx.update(|window, cx| {
+                assert!(!window.has_active_nya_dialog(cx));
+                assert!(!app.read(cx).settings.snapshot_password_prompt_active());
+                app.read(cx)
+                    .cloud_sync
+                    .history()
+                    .iter()
+                    .find(|entry| entry.trigger == trigger)
+                    .map(|entry| entry.status.clone())
+            });
+            if let Some(status) = status {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sync operation did not record history"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn sync_sidebar_missing_master_password_opens_security_without_writing_a_snapshot() {
+        let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-missing-password");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                    store.save_master_password(None)
+                })
+                .unwrap();
+        });
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        click_action(cx, "sync-history-push-now");
+        assert_eq!(wait_for_history(cx, &app, "manual_provider_push"), "failed");
+        cx.update(|_, cx| {
+            let state = app.read(cx);
+            assert_eq!(
+                state.shell.settings_active_tab(),
+                crate::models::SettingsTab::Security
+            );
+            assert!(
+                state.shell.settings_window_is_open_or_pending() || state.shell.is_settings_page()
+            );
+            assert_eq!(
+                state.cloud_sync.status(),
+                rust_i18n::t!("settings.syncMasterPasswordRequired")
+            );
+            assert!(!state.cloud_sync.job_running());
+        });
+        assert!(
+            !test_dir
+                .path()
+                .join("config/cloud-sync-local/zzclawterm")
+                .join(SYNC_CURRENT_FILE)
+                .exists()
+        );
     }
 
     #[test]
@@ -676,6 +736,12 @@ mod tests {
             let mut settings = app.cloud_sync.settings().clone();
             settings.provider = "webdav".to_string();
             settings.webdav.endpoint = endpoint;
+            let persisted_settings = settings.clone();
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, move |store| {
+                    store.save_cloud_sync_settings(persisted_settings)
+                })
+                .expect("persist the provider configuration used by the test");
             app.cloud_sync
                 .replace_settings(settings, Default::default());
         });
@@ -686,15 +752,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         click_action(cx, "sync-history-push-now");
-        cx.update(|_, cx| {
-            app.update(cx, |app, cx| {
-                app.reset_text_input("snapshot-password.value", "synthetic-password", cx);
-                app.apply_snapshot_password_input("synthetic-password".to_string(), cx);
-            })
-        });
-        draw(cx);
-        cx.simulate_keystrokes("enter");
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             draw(cx);
             let recorded = cx.update(|_, cx| {
@@ -721,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_sidebar_password_submission_runs_push_and_pull_and_records_history() {
+    fn sync_sidebar_saved_master_password_runs_push_and_pull_and_records_history() {
         let test_dir = TestConfigDir::new("zzclawterm-sync-sidebar-roundtrip");
         let mut cx = TestAppContext::single();
         // Keep button bounds stable between rendering and simulated pointer events.
@@ -734,35 +792,19 @@ mod tests {
             zzclaw_root(host, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
-        for (id, trigger, keyboard_submit) in [
-            ("sync-history-push-now", "manual_provider_push", true),
-            ("sync-history-pull-now", "manual_provider_pull", false),
+        for (id, trigger) in [
+            ("sync-history-push-now", "manual_provider_push"),
+            ("sync-history-pull-now", "manual_provider_pull"),
         ] {
             click_action(cx, id);
-            cx.update(|_, cx| {
-                app.update(cx, |app, cx| {
-                    app.reset_text_input("snapshot-password.value", "synthetic-password", cx);
-                    app.apply_snapshot_password_input("synthetic-password".to_string(), cx);
-                })
-            });
-            draw(cx);
-            if keyboard_submit {
-                cx.simulate_keystrokes("enter");
-            } else {
-                let submit = cx
-                    .debug_bounds("nya-dialog-action-button")
-                    .expect("submit button");
-                cx.simulate_click(submit.center(), Modifiers::default());
-            }
-            draw(cx);
             cx.update(|window, cx| {
                 assert!(
                     !window.has_active_nya_dialog(cx),
-                    "submission must close the password dialog: {trigger}"
+                    "cloud sync must not open a password dialog"
                 );
                 assert!(!app.read(cx).settings.snapshot_password_prompt_active());
             });
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 draw(cx);
                 let recorded = cx.update(|_, cx| {
@@ -791,6 +833,295 @@ mod tests {
                     .is_file(),
                 "push must produce an encrypted remote snapshot"
             );
+        }
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.prompt_cloud_sync_recover_current(true, window, cx)
+            });
+        });
+        assert_eq!(
+            wait_for_history(cx, &app, "recover_current_remote"),
+            "success"
+        );
+    }
+    #[test]
+    fn cloud_sync_sidebar_branch_selection_uses_keyboard_and_restores_trigger_focus() {
+        use zzclawterm_core::cloud_sync::conflict::CloudConflictBranch;
+        use zzclawterm_core::{CloudConflictPreview, CloudSyncError};
+        let test_dir = TestConfigDir::new("zzclawterm-cloud-sync-branch-keyboard");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, test_dir.path());
+        let mut preview: CloudConflictPreview = serde_json::from_value(serde_json::json!({
+            "detected_at_ms": 1, "provider": "test", "local_payload_hash": "local",
+            "remote_payload_hash": "remote", "remote_revision": "r0", "remote_created_at_ms": 1,
+            "remote_device_id": "device", "message": "conflict", "local_content_hash": "local-content"
+        })).unwrap();
+        preview.branches = (0..16)
+            .map(|n| CloudConflictBranch {
+                revision: format!("r{n}"),
+                device_id: format!("device-{n}"),
+                device_name: None,
+                created_at_ms: 1,
+                readable: n != 15,
+                differences: Vec::new(),
+            })
+            .collect();
+        preview.observed_revisions = preview
+            .branches
+            .iter()
+            .map(|b| b.revision.clone())
+            .collect();
+        cx.update_entity(&app, |app, cx| {
+            app.apply_auto_cloud_sync_result(&Err(CloudSyncError::Conflict(Box::new(preview))), cx);
+        });
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+        let viewport = cx
+            .debug_bounds("cloud-sync-branch-scroll")
+            .expect("branch list is rendered");
+        assert!(viewport.size.height <= px(260.));
+        cx.update(|window, cx| {
+            assert!(
+                app.read(cx)
+                    .cloud_sync
+                    .conflict()
+                    .unwrap()
+                    .selected_revision
+                    .is_none()
+            );
+            app.update(cx, |app, cx| {
+                assert!(app.focus_select("cloud-conflict-branch", window, cx));
+            });
+        });
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        cx.simulate_keystrokes("down down down down");
+        draw(cx);
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        cx.update(|window, cx| {
+            let app = app.read(cx);
+            let selected = app
+                .cloud_sync
+                .conflict()
+                .unwrap()
+                .selected_revision
+                .as_deref()
+                .expect("keyboard selection commits");
+            assert_ne!(selected, "r0");
+            assert_ne!(selected, "r15", "unreadable branches cannot be chosen");
+            assert!(app.select_is_focused("cloud-conflict-branch", window, cx));
+        });
+    }
+    #[test]
+    fn sync_sidebar_running_job_disables_actions_and_rejects_duplicate_submission() {
+        let dir = TestConfigDir::new("zzclawterm-sync-sidebar-busy");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let operation = crate::features::cloud_sync_operation_lock().lock().unwrap();
+        click_action(cx, "sync-history-push-now");
+        cx.update(|window, cx| {
+            assert!(app.read(cx).cloud_sync.job_running());
+            assert!(!window.has_active_nya_dialog(cx));
+        });
+        click_action(cx, "sync-history-push-now");
+        click_action(cx, "sync-history-pull-now");
+        drop(operation);
+        assert_eq!(
+            wait_for_history(cx, &app, "manual_provider_push"),
+            "success"
+        );
+        cx.update(|_, cx| {
+            assert_eq!(app.read(cx).cloud_sync.history().len(), 1);
+        });
+    }
+
+    #[test]
+    fn sync_sidebar_tabs_filter_with_pointer_and_keyboard_and_reset_paging() {
+        let dir = TestConfigDir::new("zzclawterm-sync-sidebar-filters");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        draw(cx);
+        let bounds = cx.debug_bounds("sync-history-filter-keyboard").unwrap();
+        // The four segmented tabs share the available width equally.
+        cx.simulate_click(
+            gpui::point(
+                bounds.origin.x + bounds.size.width * 0.625,
+                bounds.center().y,
+            ),
+            Modifiers::default(),
+        );
+        draw(cx);
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).cloud_sync.history_filter(),
+                crate::features::sync::SyncHistoryFilter::Failed
+            );
+            app.update(cx, |app, _| app.cloud_sync.show_more_history());
+        });
+        cx.simulate_keystrokes("right");
+        draw(cx);
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).cloud_sync.history_filter(),
+                crate::features::sync::SyncHistoryFilter::Conflict
+            );
+            assert_eq!(app.read(cx).cloud_sync.history_visible_limit(), 20);
+        });
+        cx.simulate_keystrokes("home right end left");
+        draw(cx);
+        cx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx).cloud_sync.history_filter(),
+                crate::features::sync::SyncHistoryFilter::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn sync_sidebar_remote_password_mismatch_preserves_local_state_and_remote_pointer() {
+        let dir = TestConfigDir::new("zzclawterm-sync-sidebar-password-mismatch");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        click_action(cx, "sync-history-push-now");
+        assert_eq!(
+            wait_for_history(cx, &app, "manual_provider_push"),
+            "success"
+        );
+        let pointer_path = dir
+            .path()
+            .join("config/cloud-sync-local/zzclawterm")
+            .join(SYNC_CURRENT_FILE);
+        let pointer = std::fs::read(&pointer_path).unwrap();
+        let before = cx.update(|_, cx| {
+            app.read(cx)
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                    store.save_master_password(Some("different-synthetic-password"))?;
+                    store.load_cloud_sync_state()
+                })
+                .unwrap()
+        });
+        click_action(cx, "sync-history-pull-now");
+        assert_ne!(
+            wait_for_history(cx, &app, "manual_provider_pull"),
+            "success"
+        );
+        cx.update(|_, cx| {
+            let store = app.read(cx).store_blocking_client();
+            let (mut after, password_matches) = store
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                    Ok((
+                        store.load_cloud_sync_state()?,
+                        store.verify_master_password("different-synthetic-password")?,
+                    ))
+                })
+                .unwrap();
+            // Successful upload cleanup may independently update its attempt timestamp.
+            after.last_gc_attempt_at_ms = before.last_gc_attempt_at_ms;
+            assert_eq!(before, after);
+            assert!(password_matches);
+            assert!(!app.read(cx).cloud_sync.job_running());
+        });
+        assert_eq!(std::fs::read(pointer_path).unwrap(), pointer);
+    }
+    #[test]
+    fn sync_sidebar_conflict_actions_use_the_saved_master_password_and_pinned_preview() {
+        use zzclawterm_core::cloud_sync::{CloudLocalStore, load_sync_pointer};
+        use zzclawterm_core::{CloudConflictPreview, CloudSyncError, LocalCloudSyncOptions};
+        let dir = TestConfigDir::new("zzclawterm-sync-sidebar-resolve-password");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = test_app(&mut cx, dir.path());
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| SidebarHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        click_action(cx, "sync-history-push-now");
+        assert_eq!(
+            wait_for_history(cx, &app, "manual_provider_push"),
+            "success"
+        );
+        for (provider_action, use_cloud, trigger) in [
+            (true, false, "manual_provider_force_push"),
+            (true, true, "manual_provider_force_pull"),
+            (false, false, "manual_force_push"),
+            (false, true, "manual_force_pull"),
+        ] {
+            let store = cx.update(|_, cx| app.read(cx).store_blocking_client());
+            let state = store
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                    store.load_cloud_sync_state()
+                })
+                .unwrap();
+            let options = LocalCloudSyncOptions {
+                device_name: None,
+                config_dir: dir.join("config"),
+                portable_key_path: None,
+                remote_dir: dir.join("config/cloud-sync-local"),
+                remote_root: "zzclawterm".into(),
+                device_id: state.device_id.clone(),
+                app_version: env!("CARGO_PKG_VERSION").into(),
+                master_password: "synthetic-password".into(),
+                enabled: true,
+            };
+            let snapshot = store.build_sync_snapshot(&options).unwrap();
+            let pointer = load_sync_pointer(&store, &options).unwrap().unwrap();
+            // Pin a valid preview to real local content and the encrypted remote head.
+            let preview: CloudConflictPreview = serde_json::from_value(serde_json::json!({
+                "detected_at_ms": 1, "provider": "local_directory",
+                "local_payload_hash": snapshot.meta.payload_hash,
+                "local_content_hash": snapshot.sync_content_hash().unwrap(),
+                "remote_payload_hash": pointer.payload_hash,
+                "remote_revision": pointer.revision_id,
+                "remote_created_at_ms": pointer.created_at_ms,
+                "remote_device_id": pointer.device_id,
+                "message": "fixture conflict",
+                "observed_revisions": [pointer.revision_id],
+                "branches": [{"revision": pointer.revision_id, "device_id": pointer.device_id,
+                    "device_name": null, "created_at_ms": pointer.created_at_ms, "readable": true, "differences": []}]
+            })).unwrap();
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.apply_auto_cloud_sync_result(
+                        &Err(CloudSyncError::Conflict(Box::new(preview))),
+                        cx,
+                    );
+                    if use_cloud {
+                        app.prompt_cloud_sync_force_pull(provider_action, window, cx);
+                    } else {
+                        app.prompt_cloud_sync_force_push(provider_action, window, cx);
+                    }
+                    assert!(app.cloud_sync.job_running());
+                    assert!(!app.settings.snapshot_password_prompt_active());
+                });
+            });
+            assert_eq!(wait_for_history(cx, &app, trigger), "success", "{trigger}");
         }
     }
 }

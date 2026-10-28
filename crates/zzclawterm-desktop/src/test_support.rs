@@ -59,7 +59,8 @@ pub(crate) fn spawn_webdav_service_unavailable_server() -> (String, JoinHandle<(
         .set_nonblocking(true)
         .expect("nonblocking listener");
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Sync jobs queue behind the process-wide lock during parallel test runs.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
@@ -119,7 +120,8 @@ pub(crate) fn spawn_webdav_healthy_server() -> (String, JoinHandle<()>) {
         .set_nonblocking(true)
         .expect("nonblocking listener");
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Sync jobs queue behind the process-wide lock during parallel test runs.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,

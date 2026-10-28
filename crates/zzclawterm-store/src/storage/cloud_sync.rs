@@ -74,6 +74,60 @@ impl ConnectionStore {
         self.save_settings_value(&value)?;
         Ok(merged)
     }
+    pub fn update_cloud_credentials(
+        &self,
+        update: &zzclawterm_core::cloud_sync::credentials::CloudCredentialUpdate,
+    ) -> Result<zzclawterm_core::cloud_sync::credentials::CredentialUpdateResult, StorageError>
+    {
+        use zzclawterm_core::cloud_sync::credentials::{CredentialUpdateResult, DriveProvider};
+        let mut settings = self.load_cloud_sync_settings()?;
+        let (client_id, client_secret, refresh_token, access_token) = match update.provider {
+            DriveProvider::Google => {
+                let s = &mut settings.google_drive;
+                (
+                    &s.client_id,
+                    &s.client_secret,
+                    &mut s.refresh_token,
+                    &mut s.access_token,
+                )
+            }
+            DriveProvider::OneDrive => {
+                let s = &mut settings.onedrive;
+                (
+                    &s.client_id,
+                    &s.client_secret,
+                    &mut s.refresh_token,
+                    &mut s.access_token,
+                )
+            }
+            DriveProvider::Aliyun => {
+                let s = &mut settings.aliyun_drive;
+                (
+                    &s.client_id,
+                    &s.client_secret,
+                    &mut s.refresh_token,
+                    &mut s.access_token,
+                )
+            }
+        };
+        fn text(value: Option<&str>) -> Option<&str> {
+            value.map(str::trim).filter(|s| !s.is_empty())
+        }
+        if text(client_id.as_deref()) != text(update.client_id.as_deref())
+            || text(client_secret.as_deref()) != text(update.client_secret.as_deref())
+            || text(refresh_token.as_deref()) != text(update.expected_refresh_token.as_deref())
+            || text(access_token.as_deref()) != text(update.expected_access_token.as_deref())
+        {
+            return Ok(CredentialUpdateResult::Superseded);
+        }
+        *access_token = Some(update.access_token.clone());
+        if let Some(next) = &update.refresh_token {
+            *refresh_token = Some(next.clone());
+        }
+        self.save_cloud_sync_settings(settings)?;
+        Ok(CredentialUpdateResult::Applied)
+    }
+
     fn load_cloud_sync_settings_value(&self) -> Result<Option<serde_json::Value>, StorageError> {
         let value = self.load_settings_value()?;
         if let Some(settings) = value.get("cloud_sync") {

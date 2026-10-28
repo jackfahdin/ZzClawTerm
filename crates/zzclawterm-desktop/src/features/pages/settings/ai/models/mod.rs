@@ -8,9 +8,10 @@ use gpui::{
     px, rgb, svg,
 };
 use rust_i18n::t;
+use zzclawterm_core::MAX_AI_CUSTOM_HEADERS;
 use zzclawterm_core::ai::provider_settings::{
-    DEFAULT_MODEL_REASONING_EFFORTS, MODEL_REASONING_EFFORTS, protocol_value, provider_label,
-    provider_name_taken, provider_requires_api_key,
+    CustomHeaderError, DEFAULT_MODEL_REASONING_EFFORTS, MODEL_REASONING_EFFORTS, protocol_value,
+    provider_label, provider_name_taken, provider_requires_api_key,
 };
 use zzclawterm_core::ai::{AiModelSource, AiProviderKind};
 use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant, ZzClawIconButton, ZzClawSelectOption};
@@ -332,6 +333,127 @@ impl SettingsPanel {
                         panel.with_app(cx, |app, cx| app.test_ai_provider(false, false, cx));
                     })),
             );
+        let mut header_name_counts = std::collections::HashMap::new();
+        for header in &credential.extra_headers {
+            let name = header.name.trim().to_lowercase();
+            if !name.is_empty() {
+                *header_name_counts.entry(name).or_insert(0_usize) += 1;
+            }
+        }
+        let mut custom_headers = div().flex().flex_col().gap_2().child(
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(palette.text_muted))
+                .child(t!("ai.customHeaderDesc")),
+        );
+        for header in &credential.extra_headers {
+            let header_id = header.id.clone();
+            let name_id = format!("ai.credential.{id}.header.{header_id}.name");
+            let value_id = format!("ai.credential.{id}.header.{header_id}.value");
+            let header_error = self.ai.header_errors.get(&(id.clone(), header_id.clone()));
+            let name_duplicate = header_name_counts
+                .get(&header.name.trim().to_lowercase())
+                .is_some_and(|count| *count > 1);
+            let value_field = div()
+                .w_full()
+                .children(self.existing_text_input(&value_id).map(|field| {
+                    let credential_id = id.clone();
+                    let header_id = header_id.clone();
+                    zzclawterm_ui::ZzClawInputShell::new(value_id, &field).on_mask_toggle(
+                        cx.listener(move |panel, _, _, cx| {
+                            panel.with_app(cx, |app, cx| {
+                                app.toggle_ai_provider_header_secret(
+                                    credential_id.clone(),
+                                    header_id.clone(),
+                                    cx,
+                                )
+                            });
+                        }),
+                    )
+                }));
+            custom_headers = custom_headers.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(self.existing_text_input_box(name_id, false)),
+                            )
+                            .child(div().min_w_0().flex_1().child(value_field))
+                            .child(
+                                ZzClawIconButton::new(
+                                    format!("ai-provider-header-delete-{header_id}"),
+                                    "icons/settings/trash.svg",
+                                )
+                                .tooltip(t!("common.delete"))
+                                .on_click(cx.listener({
+                                    let id = id.clone();
+                                    let header_id = header_id.clone();
+                                    move |panel, _, _, cx| {
+                                        panel.with_app(cx, |app, cx| {
+                                            app.remove_ai_provider_header(
+                                                id.clone(),
+                                                header_id.clone(),
+                                                cx,
+                                            )
+                                        });
+                                    }
+                                })),
+                            ),
+                    )
+                    .when_some(
+                        header_error.filter(|error| **error != CustomHeaderError::DuplicateName),
+                        |body, error| {
+                            body.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(palette.danger))
+                                    .child(t!(match error {
+                                        CustomHeaderError::InvalidName =>
+                                            "ai.customHeaderNameInvalid",
+                                        CustomHeaderError::ManagedName => "ai.customHeaderManaged",
+                                        CustomHeaderError::EmptyValue =>
+                                            "ai.customHeaderValueRequired",
+                                        CustomHeaderError::ValueTooLong =>
+                                            "ai.customHeaderValueTooLong",
+                                        CustomHeaderError::InvalidValue =>
+                                            "ai.customHeaderValueInvalid",
+                                        CustomHeaderError::DuplicateName =>
+                                            "ai.customHeaderNameDuplicate",
+                                        CustomHeaderError::TooMany => "ai.customHeaderTooMany",
+                                    })),
+                            )
+                        },
+                    )
+                    .when(name_duplicate, |body| {
+                        body.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(palette.danger))
+                                .child(t!("ai.customHeaderNameDuplicate")),
+                        )
+                    }),
+            );
+        }
+        custom_headers = custom_headers.child(
+            ZzClawButton::new("ai-provider-header-add", t!("ai.customHeaderAdd"))
+                .icon("icons/settings/plus.svg")
+                .disabled(credential.extra_headers.len() >= MAX_AI_CUSTOM_HEADERS)
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |panel, _, _, cx| {
+                        panel.with_app(cx, |app, cx| app.add_ai_provider_header(id.clone(), cx));
+                    }
+                })),
+        );
         let fields = div()
             .flex()
             .flex_col()
@@ -358,6 +480,11 @@ impl SettingsPanel {
                     }
                 ),
                 key,
+            ))
+            .child(ai_provider_row(
+                palette,
+                t!("ai.customHeaderTitle"),
+                custom_headers,
             ))
             .child(div().py_3().child(test));
         page = page.child(ai_card(palette, title, delete, fields));

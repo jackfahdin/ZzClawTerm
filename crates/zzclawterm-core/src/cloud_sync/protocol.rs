@@ -199,6 +199,7 @@ fn verify_written_snapshot(
             actual_digest: sha256_hex(&read_back),
         });
     }
+    remote.observe(super::io::CloudSyncIoEvent::FullValidation);
     decode_and_validate_remote_snapshot(local_store, &read_back, options, &path, pointer)
         .map(|_| ())
 }
@@ -218,6 +219,7 @@ pub(super) fn read_snapshot_for_pointer(
             revision: pointer.revision_id.clone(),
         });
     };
+    remote.observe(super::io::CloudSyncIoEvent::FullValidation);
     decode_and_validate_remote_snapshot(local_store, &bytes, options, &path, pointer)
 }
 
@@ -250,6 +252,7 @@ fn read_current_sync_snapshot_compat(
         return Ok(None);
     };
     validate_remote_snapshot_size(&bytes, &path, "current")?;
+    remote.observe(super::io::CloudSyncIoEvent::FullValidation);
     decode_remote_snapshot(
         local_store,
         &bytes,

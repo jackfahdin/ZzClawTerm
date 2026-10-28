@@ -80,6 +80,8 @@ struct AiSettingsState {
     manual_model_edit_group: Option<String>,
     /// Per-credential API-key drafts; empty means keep the stored secret.
     credential_secret_drafts: HashMap<String, String>,
+    /// Secret drafts scoped to the credential and header identities.
+    credential_header_secret_drafts: HashMap<(String, String), zzclawterm_core::SecretString>,
     action_edit: Option<(AiActionListKind, String, AiActionEditorField)>,
     persistence_generation: u64,
     persistence_in_flight: Option<u64>,
@@ -304,6 +306,7 @@ impl AiFeatureState {
                 manual_model_focus: focus.manual_model,
                 manual_model_edit_group: None,
                 credential_secret_drafts: HashMap::new(),
+                credential_header_secret_drafts: HashMap::new(),
                 action_edit: None,
                 persistence_generation: 0,
                 persistence_in_flight: None,

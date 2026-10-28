@@ -1087,6 +1087,7 @@ mod tests {
         .unwrap();
         let client = runtime.blocking_client();
         let options = LocalCloudSyncOptions {
+            device_name: None,
             config_dir: dir.path().to_path_buf(),
             portable_key_path: None,
             remote_dir: dir.join("remote"),

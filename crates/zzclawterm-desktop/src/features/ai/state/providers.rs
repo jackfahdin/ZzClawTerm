@@ -31,6 +31,7 @@ pub(in crate::features) struct ProviderSettingsView {
     pub model_order: Vec<String>,
     pub reveal_generation: u64,
     pub revealed_id: Option<String>,
+    pub revealed_header_id: Option<(String, String)>,
     pub message: Option<String>,
     pub generation: u64,
     pub revision: u64,
@@ -87,6 +88,7 @@ impl AiFeatureState {
         let view = self.provider_view_mut();
         view.selected_id = id;
         view.revealed_id = None;
+        view.revealed_header_id = None;
         view.editing_model = None;
         view.choices_open = false;
         view.model_order.clear();
@@ -145,6 +147,7 @@ impl AiFeatureState {
             api_format: AiApiFormat::ChatCompletions,
             base_url: None,
             api_key: None,
+            extra_headers: Vec::new(),
             enabled: true,
         });
         credential.enabled = true;

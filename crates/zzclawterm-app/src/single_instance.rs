@@ -155,6 +155,11 @@ fn run_listener(
 }
 
 fn handle_connection(mut stream: TcpStream, auth_token: [u8; 16], activation_tx: ActivationSender) {
+    // Accepted sockets inherit the listener's nonblocking mode on macOS.
+    // Reading the frame through EOF requires blocking I/O with a timeout.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut frame = Vec::new();
@@ -322,17 +327,19 @@ fn restrict_instance_directory(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read as _, Write as _};
-    use std::net::{Shutdown, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::time::Duration;
 
     use futures::FutureExt as _;
 
     use zzclawterm_core::{
         ActivationAck, ActivationAckStatus, ActivationRequest, RawActivationArg,
-        decode_activation_ack, encode_activation_request,
+        activation_channel, decode_activation_ack, encode_activation_request,
     };
 
     use super::{
-        ActivationEndpoint, SingleInstanceOutcome, acquire, forward_activation, read_endpoint,
+        ActivationEndpoint, SingleInstanceOutcome, acquire, forward_activation, handle_connection,
+        read_endpoint,
     };
 
     fn request(id: u8) -> ActivationRequest {
@@ -409,6 +416,42 @@ mod tests {
         let third = acquire(&root, request(3)).unwrap();
         assert!(matches!(third, SingleInstanceOutcome::Owner(_)));
         drop(third);
+    }
+
+    #[test]
+    fn nonblocking_accepted_socket_waits_for_the_complete_activation_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        // Reproduce macOS accept inheritance even on platforms that clear it.
+        server.set_nonblocking(true).unwrap();
+        let (sender, mut receiver) = activation_channel(1);
+        let token = [7; 16];
+        let request = request(4);
+        let frame = encode_activation_request(token, &request).unwrap();
+        client.write_all(&frame[..1]).unwrap();
+        let handler = std::thread::spawn(move || handle_connection(server, token, sender));
+
+        client
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let error = client.read(&mut [0; 1]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        client.write_all(&frame[1..]).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut ack = Vec::new();
+        client.read_to_end(&mut ack).unwrap();
+        handler.join().unwrap();
+        let ack = decode_activation_ack(&ack).unwrap();
+        assert_eq!(ack.request_id, request.request_id);
+        assert_eq!(ack.status, ActivationAckStatus::Accepted);
+        assert_eq!(receiver.recv().now_or_never(), Some(Some(request)));
     }
 
     #[test]

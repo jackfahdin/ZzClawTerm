@@ -248,6 +248,11 @@ pub(in crate::features) fn child_window_options(
                 .to_string(),
         ),
         titlebar: child_window_titlebar(spec.title.clone()),
+        #[cfg(target_os = "linux")]
+        window_decorations: Some(crate::window_chrome::window_decorations_for_kind(
+            &spec.kind,
+            crate::window_chrome::requested_window_decorations(cx),
+        )),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: spec.min_size,
         display_id,

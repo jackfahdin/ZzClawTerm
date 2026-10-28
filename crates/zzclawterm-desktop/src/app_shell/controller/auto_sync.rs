@@ -60,6 +60,11 @@ impl DesktopController {
         let Some(runtime_store) = self.startup.shared_store_runtime() else {
             return;
         };
+        if let Some(at) =
+            crate::features::sync::io_runtime::CloudSyncIoRuntime::shared().last_check()
+        {
+            self.auto_sync.observed_remote_check(at);
+        }
         let now = Instant::now();
         let generation = runtime_store.sync_mutation_generation();
         let windows = &self.windows;
@@ -172,11 +177,64 @@ impl DesktopController {
             .startup
             .shared_store_runtime()
             .map(|store| store.sync_mutation_generation());
-        self.auto_sync.complete(trigger, &result, generation);
+        let history = self.auto_sync.history_entry(trigger, &result);
+        if let Some(mut history) = history {
+            let log_dir = self.runtime.log_dir().to_path_buf();
+            let store = self
+                .startup
+                .shared_store_runtime()
+                .map(|s| s.blocking_client());
+            let job = self.update_store.read(cx).blocking_jobs().submit_task(
+                "cloud-sync-auto-history",
+                move |_| {
+                    if history.provider.is_none()
+                        && let Some(store) = store
+                    {
+                        history.provider = store
+                            .request_fn(zzclawterm_store::StoreDomain::CloudSync, |s| {
+                                s.load_cloud_sync_settings()
+                            })
+                            .ok()
+                            .map(|s| s.provider);
+                    }
+                    zzclawterm_core::append_cloud_sync_history(log_dir, &history)
+                },
+            );
+            cx.spawn(async move |this, cx| {
+                if !match job {
+                    Ok(task) => matches!(task.await, Ok(Ok(()))),
+                    Err(_) => false,
+                } {
+                    tracing::warn!("automatic cloud synchronization history could not be saved");
+                }
+                let _ = this.update(cx, |controller, cx| {
+                    controller.auto_sync.complete(trigger, &result, generation);
+                    controller.notify_auto_sync_windows(&result, true, cx);
+                });
+            })
+            .detach();
+        } else {
+            self.auto_sync.complete(trigger, &result, generation);
+            self.notify_auto_sync_windows(&result, false, cx);
+        }
+    }
+
+    fn notify_auto_sync_windows(
+        &self,
+        result: &Result<AutoSyncResult, zzclawterm_core::CloudSyncError>,
+        refresh_history: bool,
+        cx: &mut Context<Self>,
+    ) {
         for entry in self.windows.values() {
             let _ = entry.shell.update(cx, |shell, cx| {
                 if let Some(app) = shell.app.as_ref() {
-                    app.update(cx, |app, cx| app.apply_auto_cloud_sync_result(&result, cx));
+                    app.update(cx, |app, cx| {
+                        app.queue_cloud_sync_credentials_refresh(cx);
+                        if refresh_history {
+                            app.queue_cloud_sync_history_refresh(None, cx);
+                        }
+                        app.apply_auto_cloud_sync_result(result, cx);
+                    });
                 }
             });
         }

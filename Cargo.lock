@@ -4443,6 +4443,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4831,8 +4837,8 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "ironrdp-async"
-version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.11.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bytes",
  "ironrdp-connector",
@@ -4844,13 +4850,13 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-bulk"
-version = "0.1.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.2.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 
 [[package]]
 name = "ironrdp-cfg"
-version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.2.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-propertyset",
 ]
@@ -4858,7 +4864,7 @@ dependencies = [
 [[package]]
 name = "ironrdp-client"
 version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -4871,6 +4877,7 @@ dependencies = [
  "ironrdp-dvc",
  "ironrdp-echo",
  "ironrdp-egfx",
+ "ironrdp-egfx-native",
  "ironrdp-graphics",
  "ironrdp-mstsgu",
  "ironrdp-pdu",
@@ -4882,6 +4889,7 @@ dependencies = [
  "ironrdp-svc",
  "ironrdp-tls",
  "ironrdp-tokio",
+ "reqwest",
  "smallvec",
  "tokio",
  "tokio-tungstenite",
@@ -4892,8 +4900,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-cliprdr"
-version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.8.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bitflags 2.13.2",
  "ironrdp-core",
@@ -4904,8 +4912,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-cliprdr-format"
-version = "0.2.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.3.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-core",
  "png 0.18.1",
@@ -4913,8 +4921,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-cliprdr-native"
-version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.8.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-cliprdr",
  "ironrdp-cliprdr-format",
@@ -4925,21 +4933,21 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "x11rb",
 ]
 
 [[package]]
 name = "ironrdp-connector"
-version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.11.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-core",
  "ironrdp-error",
  "ironrdp-pdu",
  "ironrdp-svc",
- "picky-asn1-der",
- "picky-asn1-x509",
  "rand 0.9.5",
+ "serde_json",
  "sspi",
  "tracing",
  "url",
@@ -4947,16 +4955,16 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-core"
-version = "0.2.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.3.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-error",
 ]
 
 [[package]]
 name = "ironrdp-displaycontrol"
-version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.9.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-core",
  "ironrdp-dvc",
@@ -4967,9 +4975,10 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-dvc"
-version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.9.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
+ "ironrdp-bulk",
  "ironrdp-core",
  "ironrdp-pdu",
  "ironrdp-svc",
@@ -4978,8 +4987,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-echo"
-version = "0.4.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.5.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-core",
  "ironrdp-dvc",
@@ -4989,8 +4998,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-egfx"
-version = "0.3.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.4.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bit_field",
  "bitflags 2.13.2",
@@ -5002,14 +5011,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironrdp-egfx-native"
+version = "0.1.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
+dependencies = [
+ "ironrdp-egfx",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "ironrdp-error"
-version = "0.2.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.2.1"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 
 [[package]]
 name = "ironrdp-graphics"
-version = "0.9.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.10.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bit_field",
  "bitflags 2.13.2",
@@ -5025,8 +5044,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-input"
-version = "0.7.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.8.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bitvec",
  "ironrdp-pdu",
@@ -5035,8 +5054,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-mstsgu"
-version = "0.0.1"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.0.2"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -5058,8 +5077,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-pdu"
-version = "0.9.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.10.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bit_field",
  "bitflags 2.13.2",
@@ -5081,13 +5100,13 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-propertyset"
-version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.1.1"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 
 [[package]]
 name = "ironrdp-rail"
-version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.2.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-core",
  "ironrdp-svc",
@@ -5095,16 +5114,16 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-rdcleanpath"
-version = "0.2.2"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.3.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "der 0.8.2",
 ]
 
 [[package]]
 name = "ironrdp-rdpei"
-version = "0.1.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.2.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bitflags 2.13.2",
  "ironrdp-core",
@@ -5116,8 +5135,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-session"
-version = "0.11.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.12.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-bulk",
  "ironrdp-core",
@@ -5134,8 +5153,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-svc"
-version = "0.8.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.9.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "bitflags 2.13.2",
  "ironrdp-core",
@@ -5144,8 +5163,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-tls"
-version = "0.2.2"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.3.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "rustls-native-certs",
  "tokio",
@@ -5155,8 +5174,8 @@ dependencies = [
 
 [[package]]
 name = "ironrdp-tokio"
-version = "0.10.0"
-source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=1bc71d95c6414d5603792cb6cf8913e903205a33#1bc71d95c6414d5603792cb6cf8913e903205a33"
+version = "0.11.0"
+source = "git+https://gitcode.com/JackfahdinImport/IronRDP?rev=b10cd243bc9442a07fcd776568a5fdaf1c64492f#b10cd243bc9442a07fcd776568a5fdaf1c64492f"
 dependencies = [
  "ironrdp-async",
  "ironrdp-connector",
@@ -8273,6 +8292,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -13691,6 +13711,7 @@ dependencies = [
  "gpui",
  "gpui-kit",
  "gpui_platform",
+ "log",
  "rust-embed",
  "serde_json",
  "tracing",
@@ -13760,6 +13781,7 @@ dependencies = [
  "gtk",
  "hayro",
  "hex",
+ "httpdate",
  "image",
  "keyring",
  "md5",
@@ -13886,6 +13908,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.20",
+ "tracing",
  "uuid",
  "zzclawterm-core",
 ]

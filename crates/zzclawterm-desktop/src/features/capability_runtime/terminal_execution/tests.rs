@@ -7,8 +7,54 @@ use tokio_util::sync::CancellationToken;
 use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteResult};
 use zzclawterm_terminal::agent_capture::AgentOutputCaptureProcessor;
 
-use super::{TerminalExecutionPolicy, TerminalExecutionRequest, TerminalExecutionState};
+use super::{
+    TerminalExecutionPolicy, TerminalExecutionRequest, TerminalExecutionState,
+    external_mcp_terminal_policy,
+};
 use crate::features::terminal::ai_execution::{TerminalExecutionEvent, TerminalExecutionStatus};
+
+#[test]
+fn external_mcp_terminal_display_mode_only_changes_regular_presentation() {
+    use zzclawterm_core::McpTerminalDisplayMode;
+
+    let inline = external_mcp_terminal_policy(None, McpTerminalDisplayMode::Inline, 17);
+    assert_eq!(
+        inline,
+        TerminalExecutionPolicy {
+            background: false,
+            max_lines: 17
+        }
+    );
+    let silent = external_mcp_terminal_policy(None, McpTerminalDisplayMode::Silent, 17);
+    assert_eq!(
+        silent,
+        TerminalExecutionPolicy {
+            background: false,
+            max_lines: 0
+        }
+    );
+
+    for integrated in [
+        TerminalExecutionPolicy {
+            background: false,
+            max_lines: 9,
+        },
+        TerminalExecutionPolicy {
+            background: true,
+            max_lines: 3,
+        },
+    ] {
+        for mode in [
+            McpTerminalDisplayMode::Inline,
+            McpTerminalDisplayMode::Silent,
+        ] {
+            assert_eq!(
+                external_mcp_terminal_policy(Some(integrated), mode, 17),
+                integrated
+            );
+        }
+    }
+}
 
 fn execution_request(
     id: &str,
@@ -337,6 +383,7 @@ fn automatic_execution_records_logical_commands_and_streamed_output_without_chan
 
 #[cfg(windows)]
 #[gpui::test]
+#[ignore = "requires Windows ConPTY and PowerShell; explicitly run by Windows CI in isolation"]
 fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_terminal(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -358,7 +405,7 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
     };
     let session = manager.create_local_session(config).expect("Windows PTY");
     manager
-        .write(&session.id, b"set NYATERM_CAPTURE_FIXTURE=current-pty\r")
+        .write(&session.id, b"set ZZCLAWTERM_CAPTURE_FIXTURE=current-pty\r")
         .unwrap();
     cx.update_entity(&app, |app, _| {
         let mut metadata = app.session.metadata("visible").unwrap().clone();
@@ -407,7 +454,7 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
                 client: source.into(), permission_mode: AiPermissionMode::FullAccess,
                 scope: CapabilityScope::AllSessions,
                 tool: zzclawterm_mcp_protocol::tool::TERMINAL_EXECUTE.into(),
-                arguments: json!({"sessionId":session.id,"command":if background { "echo background-value" } else { "echo %NYATERM_CAPTURE_FIXTURE%" },"timeoutMs":10000}),
+                arguments: json!({"sessionId":session.id,"command":if background { "echo background-value" } else { "echo %ZZCLAWTERM_CAPTURE_FIXTURE%" },"timeoutMs":10000}),
                 cancellation: CancellationToken::new(), approved: true, approval_decision: None, caller, reply,
             }, session.id.clone(), cx);
             assert_eq!(app.mcp.capabilities.terminal_executions.tasks[&session.id].request.policy.background, background);
@@ -471,7 +518,7 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
     assert!(!transcript.contains("┌ AI #"));
     assert_eq!(
         transcript
-            .matches("[INPUT] echo %NYATERM_CAPTURE_FIXTURE%")
+            .matches("[INPUT] echo %ZZCLAWTERM_CAPTURE_FIXTURE%")
             .count(),
         3
     );

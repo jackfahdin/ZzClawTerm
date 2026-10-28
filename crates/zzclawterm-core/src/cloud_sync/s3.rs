@@ -28,11 +28,21 @@ impl S3HttpMethod {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct S3SignedRequest {
     pub method: S3HttpMethod,
     pub url: String,
     pub headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for S3SignedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3SignedRequest")
+            .field("method", &self.method)
+            .field("url", &"<redacted>")
+            .field("headers", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,9 +238,9 @@ fn split_s3_endpoint(endpoint: &str) -> Result<S3EndpointParts, CloudSyncError> 
     };
     let scheme = scheme.trim().to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
-        return Err(CloudSyncError::Remote(format!(
-            "S3 endpoint scheme '{scheme}' is not supported"
-        )));
+        return Err(CloudSyncError::Remote(
+            "S3 endpoint scheme is not supported".into(),
+        ));
     }
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = host.trim().to_ascii_lowercase();

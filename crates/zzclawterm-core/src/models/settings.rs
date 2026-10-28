@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::default_true;
+use super::window_decoration::WindowDecoration;
 use super::window_material::{WindowMaterial, default_window_background_opacity};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -393,6 +394,9 @@ pub struct AppSettingsSummary {
     pub background_image_opacity: u8,
     #[serde(default)]
     pub window_material: WindowMaterial,
+    /// Device-local Linux window decoration preference.
+    #[serde(default)]
+    pub window_decorations: WindowDecoration,
     /// Theme tint below wallpaper and content surfaces, in percent (0..=100).
     #[serde(default = "default_window_background_opacity")]
     pub window_background_opacity: u8,
@@ -719,6 +723,7 @@ impl Default for AppSettingsSummary {
             background_image_opacity: default_background_image_opacity(),
             background_content_opacity: default_background_content_opacity(),
             window_material: WindowMaterial::default(),
+            window_decorations: WindowDecoration::default(),
             window_background_opacity: default_window_background_opacity(),
             language: "zh-CN".to_string(),
             terminal_font_family: "JetBrains Mono".to_string(),

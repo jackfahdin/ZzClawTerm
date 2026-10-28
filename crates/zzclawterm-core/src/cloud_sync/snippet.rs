@@ -26,7 +26,7 @@ pub enum SnippetHttpMethod {
     Patch,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SnippetHttpRequest {
     pub method: SnippetHttpMethod,
     pub url: String,
@@ -35,7 +35,7 @@ pub struct SnippetHttpRequest {
     pub json_body: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SnippetHttpResponse {
     pub status: u16,
     pub body: String,
@@ -51,7 +51,7 @@ pub struct SnippetHttpDocument {
     pub files: BTreeMap<String, SnippetHttpFile>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SnippetHttpFile {
     #[serde(default)]
     pub content: Option<String>,
@@ -59,6 +59,16 @@ pub struct SnippetHttpFile {
     pub raw_url: Option<String>,
     #[serde(default)]
     pub truncated: bool,
+}
+
+impl std::fmt::Debug for SnippetHttpFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnippetHttpFile")
+            .field("content", &"<redacted>")
+            .field("raw_url", &"<redacted>")
+            .field("truncated", &self.truncated)
+            .finish()
+    }
 }
 
 pub struct GiteeSnippetHttpBackend<C> {
@@ -146,7 +156,8 @@ where
             self.gitee_get_request(format!("{}/gists/{}", self.api_endpoint, self.gist_id)),
         )?;
         let body = ensure_snippet_http_text("Gitee snippet", response)?;
-        serde_json::from_str(&body).map_err(CloudSyncError::Json)
+        serde_json::from_str(&body)
+            .map_err(|_| CloudSyncError::Remote("snippet response is invalid".into()))
     }
 
     fn fetch_raw_filename(&self, filename: &str) -> Result<String, CloudSyncError> {
@@ -260,7 +271,8 @@ where
             self.github_get_request(format!("https://api.github.com/gists/{}", self.gist_id)),
         )?;
         let body = ensure_snippet_http_text("GitHub Gist", response)?;
-        serde_json::from_str(&body).map_err(CloudSyncError::Json)
+        serde_json::from_str(&body)
+            .map_err(|_| CloudSyncError::Remote("snippet response is invalid".into()))
     }
 
     fn fetch_raw_file(&self, file: &SnippetHttpFile) -> Result<String, CloudSyncError> {
@@ -371,10 +383,12 @@ fn ensure_snippet_http_success(
     {
         return Err(CloudSyncError::GistCapacity);
     }
-    Err(CloudSyncError::Remote(format!(
-        "{provider} request failed ({status}): {}",
-        body.trim()
-    )))
+    Err(CloudSyncError::Http {
+        provider: provider.into(),
+        operation: "request".into(),
+        status,
+        retry_after_seconds: None,
+    })
 }
 
 fn non_empty_optional(value: &Option<String>) -> Option<&str> {
@@ -478,4 +492,48 @@ pub fn encode_snippet_blob(bytes: &[u8]) -> String {
 
 pub fn decode_snippet_blob(content: &str) -> Result<Vec<u8>, CloudSyncError> {
     Ok(BASE64_STANDARD.decode(content.trim())?)
+}
+
+impl std::fmt::Debug for SnippetHttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnippetHttpRequest(<redacted>)")
+    }
+}
+
+impl std::fmt::Debug for SnippetHttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnippetHttpResponse(<redacted>)")
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::{
+        SnippetHttpMethod, SnippetHttpRequest, SnippetHttpResponse, ensure_snippet_http_success,
+    };
+    use crate::cloud_sync::{CloudSyncError, GIST_CAPACITY_ERROR_CODE};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn cloud_sync_snippet_diagnostics_redact_request_and_response_while_preserving_capacity_code() {
+        let request = SnippetHttpRequest {
+            method: SnippetHttpMethod::Patch,
+            url: "https://example.test/?token=PRIVATE".into(),
+            headers: BTreeMap::from([("Authorization".into(), "PRIVATE-HEADER".into())]),
+            query: BTreeMap::from([("access_token".into(), "PRIVATE-QUERY".into())]),
+            json_body: Some(serde_json::json!({"access_token": "PRIVATE-BODY"})),
+        };
+        let response = SnippetHttpResponse {
+            status: 422,
+            body: "too many files PRIVATE-ECHO".into(),
+        };
+        assert!(!format!("{request:?} {response:?}").contains("PRIVATE"));
+        let error = ensure_snippet_http_success("Gitee snippet", response.status, &response.body)
+            .unwrap_err();
+        assert!(matches!(error, CloudSyncError::GistCapacity));
+        assert_eq!(error.classification(), GIST_CAPACITY_ERROR_CODE);
+        let error = ensure_snippet_http_success("GitHub Gist", 401, "PRIVATE-ECHO").unwrap_err();
+        assert_eq!(error.classification(), "authentication");
+        assert!(!format!("{error} {error:?}").contains("PRIVATE"));
+    }
 }

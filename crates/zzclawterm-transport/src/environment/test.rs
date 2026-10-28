@@ -51,6 +51,18 @@ use std::{fs, path::PathBuf};
 
 #[cfg(any(unix, windows))]
 impl super::ShellEnvironmentCache {
+    #[cfg(windows)]
+    pub(crate) fn with_values_for_test(
+        program: PathBuf,
+        values: std::collections::HashMap<String, EnvironmentValue>,
+    ) -> Arc<Self> {
+        let cache = Self::new();
+        cache
+            .store_complete_snapshot(values, false, false, Some(program))
+            .unwrap();
+        cache
+    }
+
     pub(crate) fn with_shell_path_for_test(path: std::path::PathBuf) -> Arc<Self> {
         Self::with_shell_path_and_timeout_for_test(path, super::DEFAULT_TIMEOUT)
     }

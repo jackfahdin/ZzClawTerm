@@ -301,6 +301,7 @@ struct SessionRecord {
     child: Arc<Mutex<Option<Child>>>,
     supervisor: Option<Supervisor>,
     reader: Option<JoinHandle<()>>,
+    stderr: Option<helper_process::StderrCapture>,
 }
 
 /// Owns the `zzclawterm-vnc-helper` child processes and their event queues.
@@ -381,9 +382,10 @@ impl VncSessionManager {
             mut child,
             stdin,
             stdout,
-        } = helper_process::spawn_helper(&helper).map_err(|error| {
+            stderr,
+        } = helper_process::spawn_helper(&helper, "vnc").map_err(|error| {
             VncError::new(
-                VncErrorKind::HelperMissing,
+                VncErrorKind::Ipc,
                 format!("failed to spawn the VNC helper: {error}"),
             )
         })?;
@@ -395,6 +397,7 @@ impl VncSessionManager {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                stderr.finish();
                 return Err(VncError::new(
                     VncErrorKind::Ipc,
                     format!("failed to start the VNC IPC writer: {error}"),
@@ -411,6 +414,7 @@ impl VncSessionManager {
             writer: Arc::new(writer),
             child: Arc::new(Mutex::new(Some(child))),
             reader: None,
+            stderr: Some(stderr),
             supervisor: None,
         };
         record.reader = match spawn_reader(
@@ -419,6 +423,10 @@ impl VncSessionManager {
             queue.clone(),
             state.clone(),
             capabilities.clone(),
+            ReaderStartup {
+                writer: Arc::clone(&record.writer),
+                config,
+            },
         ) {
             Ok(reader) => Some(reader),
             Err(error) => {
@@ -445,7 +453,7 @@ impl VncSessionManager {
                     &timeout_queue,
                     &timeout_state,
                     VncErrorKind::Timeout,
-                    "helper control loop did not respond within 10 seconds".into(),
+                    "helper handshake/control loop did not respond within 10 seconds; check that the helper matches this application".into(),
                 )
             },
         ) {
@@ -463,16 +471,7 @@ impl VncSessionManager {
             &VncControlMessage::ClientHello {
                 version: PROTOCOL_VERSION,
             },
-        )
-        .and_then(|()| {
-            send_control(
-                &record.writer,
-                &VncControlMessage::Connect {
-                    session_id: session_id.clone(),
-                    config,
-                },
-            )
-        });
+        );
         if let Err(error) = start_result {
             cleanup_child(&mut record);
             return Err(error);
@@ -852,13 +851,20 @@ fn send_control(
         .map_err(|error| VncError::new(VncErrorKind::Ipc, error.to_string()))
 }
 
+struct ReaderStartup {
+    writer: Arc<helper_process::IpcWriter>,
+    config: VncSessionConfig,
+}
+
 fn spawn_reader(
     session_id: String,
     mut stdout: std::process::ChildStdout,
     queue: Arc<EventQueue>,
     state: Arc<Mutex<VncSessionState>>,
     capabilities: Arc<Mutex<Option<VncServerCapabilities>>>,
+    startup: ReaderStartup,
 ) -> std::io::Result<JoinHandle<()>> {
+    let ReaderStartup { writer, config } = startup;
     zzclawterm_core::runtime::worker::spawn(
         format!("zzclawterm-vnc-reader-{session_id}"),
         move || {
@@ -870,6 +876,7 @@ fn spawn_reader(
             }
             let _trust_lifetime = InvalidateOnExit(queue.trust.clone());
             let mut hello_received = false;
+            let mut pending_config = Some(config);
             loop {
                 let packet = match crate::ipc::read_packet_budgeted(&mut stdout) {
                     Ok(Some(packet)) => packet,
@@ -936,13 +943,37 @@ fn spawn_reader(
                             Ok(())
                         }),
                 };
-                if hello_received {
+                if result.is_ok() && hello_received {
                     queue.heartbeat.hello();
+                    if let Some(config) = pending_config.take()
+                        && let Err(error) = send_control(
+                            &writer,
+                            &VncControlMessage::Connect {
+                                session_id: session_id.clone(),
+                                config,
+                            },
+                        )
+                    {
+                        push_reader_error(&session_id, &queue, &state, error.kind, error.message);
+                        return;
+                    }
                 }
                 if let Err(error) = result {
                     push_reader_error(&session_id, &queue, &state, error.kind, error.message);
                     return;
                 }
+            }
+            if !hello_received {
+                push_reader_error(
+                    &session_id,
+                    &queue,
+                    &state,
+                    VncErrorKind::Protocol,
+                    format!(
+                        "VNC helper ended before IPC {PROTOCOL_VERSION} handshake; rebuild the helper matching this application"
+                    ),
+                );
+                return;
             }
             let current = *state
                 .lock()
@@ -1003,7 +1034,9 @@ fn handle_control(
         if version != PROTOCOL_VERSION {
             return Err(VncError::new(
                 VncErrorKind::Protocol,
-                format!("VNC helper protocol version {version} does not match {PROTOCOL_VERSION}"),
+                format!(
+                    "VNC helper protocol version {version} does not match {PROTOCOL_VERSION}; rebuild the helper matching this application"
+                ),
             ));
         }
         let mut slot = capabilities.lock().map_err(|_| {
@@ -1160,6 +1193,9 @@ fn cleanup_child(record: &mut SessionRecord) {
         &mut record.child.lock().unwrap_or_else(|p| p.into_inner()),
         &mut record.reader,
     );
+    if let Some(stderr) = record.stderr.take() {
+        stderr.finish();
+    }
     if let Some(writer) = Arc::get_mut(&mut record.writer) {
         writer.shutdown();
     }

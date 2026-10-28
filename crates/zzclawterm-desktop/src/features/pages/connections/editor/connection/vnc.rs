@@ -64,8 +64,12 @@ pub(super) fn connection_editor_vnc_section(
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
     let content = match section.editor.section {
-        ConnectionEditorSection::Basic => vnc_basic(section, cx),
-        ConnectionEditorSection::Authentication => vnc_authentication(section, cx),
+        ConnectionEditorSection::Basic => div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(vnc_basic(section, cx))
+            .child(vnc_authentication(section, cx)),
         ConnectionEditorSection::Network => vnc_network(section, cx),
         ConnectionEditorSection::Display => vnc_display(section, cx),
         ConnectionEditorSection::Security => vnc_security(section, cx),

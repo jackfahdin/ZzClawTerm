@@ -456,7 +456,7 @@ fn zzclawterm_json_retains_pipeline_shared_icons_and_future_connection_fields() 
 }
 
 #[test]
-fn nyaterm_json_import_preserves_account_and_key_sort_order() {
+fn zzclawterm_json_import_preserves_account_and_key_sort_order() {
     let prepared = parse_zzclawterm_json_content(
         r#"{
         "passwords":[{"ref":"account", "name":"Account", "password":"synthetic", "sort_order":9}],
@@ -469,7 +469,7 @@ fn nyaterm_json_import_preserves_account_and_key_sort_order() {
 }
 
 #[test]
-fn nyaterm_json_import_retains_telnet_keepalive_in_prepared_and_saved_configs() {
+fn zzclawterm_json_import_retains_telnet_keepalive_in_prepared_and_saved_configs() {
     for interval in [0, 45, 60, u32::MAX] {
         let json = serde_json::json!({
             "version":1, "sessions":[{"name":"Telnet", "type":"telnet", "host":"test.invalid",

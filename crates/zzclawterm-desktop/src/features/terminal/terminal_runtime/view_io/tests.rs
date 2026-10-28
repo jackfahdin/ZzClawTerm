@@ -172,6 +172,96 @@ fn terminal_paint_window_snapshot_prefers_latest_live_frame_over_retained_surfac
 }
 
 #[test]
+fn live_surface_frame_waits_for_matching_worker_geometry_and_a_live_snapshot() {
+    let root = TestConfigDir::new("zzclawterm-live-scroll-geometry");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "live-scroll");
+    cx.update_entity(&app, |app, _| {
+        assert!(app.terminal_live_surface_frame("live-scroll").is_none());
+        let snapshot = Arc::new(TerminalScreen::default().viewport_snapshot(0));
+        let view = app.terminal.view.views.get_mut("live-scroll").unwrap();
+        view.frame_snapshot = Some(snapshot.clone());
+        assert!(app.terminal_live_surface_frame("live-scroll").is_some());
+
+        let view = app.terminal.view.views.get_mut("live-scroll").unwrap();
+        view.grid_resize_pending = true;
+        assert!(app.terminal_live_surface_frame("live-scroll").is_none());
+
+        let view = app.terminal.view.views.get_mut("live-scroll").unwrap();
+        view.grid_resize_pending = false;
+        view.screen.resize(100, 24);
+        assert!(app.terminal_live_surface_frame("live-scroll").is_none());
+    });
+}
+
+#[test]
+fn live_surface_frame_uses_current_cursor_policy_without_resetting_blink_phase() {
+    let root = TestConfigDir::new("zzclawterm-live-scroll-cursor");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "live-scroll");
+    cx.update_entity(&app, |app, _| {
+        let mut screen = TerminalScreen::default();
+        screen.advance(b"prompt\x1b[?25h");
+        app.terminal
+            .view
+            .views
+            .get_mut("live-scroll")
+            .unwrap()
+            .frame_snapshot = Some(Arc::new(screen.viewport_snapshot(0)));
+        app.shell.set_cursor_blink_on(true);
+        let (frame, basis) = app.terminal_live_surface_frame("live-scroll").unwrap();
+        assert!(frame.show_cursor);
+        assert!(basis.cursor_visible_when_lit);
+
+        app.shell.set_cursor_blink_on(false);
+        assert!(
+            !app.terminal_live_surface_frame("live-scroll")
+                .unwrap()
+                .0
+                .show_cursor
+        );
+        assert!(!app.shell.cursor_blink_on());
+
+        app.shell.set_cursor_blink_on(true);
+        app.session.select_active_session("other-session");
+        assert!(
+            !app.terminal_live_surface_frame("live-scroll")
+                .unwrap()
+                .0
+                .show_cursor
+        );
+
+        app.session.select_active_session("live-scroll");
+        app.session.mark_session_disconnected("live-scroll");
+        assert!(
+            !app.terminal_live_surface_frame("live-scroll")
+                .unwrap()
+                .0
+                .show_cursor
+        );
+        app.session
+            .metadata_mut("live-scroll")
+            .unwrap()
+            .disconnected = false;
+        screen.advance(b"\x1b[?25l");
+        app.terminal
+            .view
+            .views
+            .get_mut("live-scroll")
+            .unwrap()
+            .frame_snapshot = Some(Arc::new(screen.viewport_snapshot(0)));
+        assert!(
+            !app.terminal_live_surface_frame("live-scroll")
+                .unwrap()
+                .0
+                .show_cursor
+        );
+    });
+}
+
+#[test]
 fn terminal_paint_window_keeps_worker_snapshot_when_ui_screen_is_stale() {
     let view = TerminalViewState::from_output(terminal_output_lines(8));
     let mut worker_screen = TerminalScreen::default();

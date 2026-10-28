@@ -89,7 +89,7 @@ impl SettingsPanel {
                     Some(SharedString::from(t!(
                         "settings.defaultFilePermissionsDesc"
                     ))),
-                    settings_input_control(260., permissions_input),
+                    settings_input_control(permissions_input),
                 )),
         ))
     }

@@ -54,8 +54,9 @@ pub fn zzclaw_root(
     cx: &mut Context<ZzClawRoot>,
 ) -> ZzClawRoot {
     let content = cx.new(|_| ZzClawRootContent::new(view));
-    // Registered component plugins mount overlays beside the content, so the
-    // root must carry the complete font stack as well.
+    // The component plugin decorates this root once with the Linux CSD frame,
+    // including resize hitboxes and overlays. Child content must not add a frame.
+    // Registered overlays also need the complete font stack.
     gpui_kit::component::Root::new(content, window, cx).font(component_typography(cx).font)
 }
 

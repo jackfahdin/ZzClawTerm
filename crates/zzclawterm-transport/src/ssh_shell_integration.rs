@@ -94,7 +94,7 @@ impl ShellIntegrationMode {
 }
 
 impl ShellKind {
-    fn from_name(name: &str) -> Self {
+    pub(super) fn from_name(name: &str) -> Self {
         let value = name.to_ascii_lowercase();
         if value.contains("fish") {
             Self::Fish
@@ -222,7 +222,7 @@ impl SshShellIntegrationState {
             suppressed_rx_chunks = self.suppressed_rx_chunks,
             suppressed_visible_bytes = self.suppressed_visible_bytes,
             buffered_osc_bytes = flushed.len(),
-            "SSH shell integration timed out; releasing queued terminal input"
+            "shell integration timed out; releasing queued terminal input"
         );
         self.force_normal();
         SshIntegrationOutput::default()
@@ -251,7 +251,8 @@ impl SshShellIntegrationState {
             SshShellIntegrationPhase::WaitInitial => self.stripper.push(bytes).into_output(),
             SshShellIntegrationPhase::Suppressing => {
                 if self.timeout_expired() {
-                    return self.force_normal_after_timeout();
+                    self.force_normal_after_timeout();
+                    return self.stripper.push(bytes).into_output();
                 }
                 self.suppressed_rx_bytes = self.suppressed_rx_bytes.saturating_add(bytes.len());
                 self.suppressed_rx_chunks = self.suppressed_rx_chunks.saturating_add(1);
@@ -838,7 +839,7 @@ __zzclawterm_cwd_prompt(){
   [ -n "${ZZCLAWTERM_BASH_CWD_READY:-}" ] || return "$ret"
   __zzclawterm_prune_history
   __zzclawterm_emit_history_command
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
   return "$ret"
 }
 __zzclawterm_precmd_d(){
@@ -853,7 +854,7 @@ __zzclawterm_prompt(){
   local ret=$?
   [ -n "${ZZCLAWTERM_BASH_HOOKS_READY:-}" ] || return "$ret"
   __zzclawterm_prune_history
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
   printf '\033]133;A\007'
   case "$PS1" in (*133\;B*) ;; (*) PS1="$PS1"'\[\033]133;B\007\]' ;; esac
   return "$ret"
@@ -1085,7 +1086,7 @@ __zzclawterm_emit_command(){
 }
 __zzclawterm_cwd_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
 }
 __zzclawterm_cwd_preexec(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
@@ -1102,7 +1103,7 @@ __zzclawterm_precmd_d(){
 }
 __zzclawterm_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_HOOKS_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
   printf '\033]133;A\007'
   [[ "$PS1" == *$'\033]133;B\007'* ]] || PS1="$PS1"$'%{\033]133;B\007%}'
 }
@@ -1150,7 +1151,7 @@ function __zzclawterm_emit_command
 end
 function __zzclawterm_cwd_prompt
   set -q ZZCLAWTERM_FISH_CWD_READY; or return 0
-  printf '\033]7;file://%s%s\007' (hostname) $PWD
+  printf '\033]7;file://%s%s\007' (hostname) (string replace -a -- '%' '%25' $PWD)
 end
 function __zzclawterm_cwd_preexec
   set -q ZZCLAWTERM_FISH_CWD_READY; or return 0
@@ -1176,7 +1177,7 @@ function __zzclawterm_precmd
     printf '\033]133;D;%s\007' "$ret"
     set -e __zzclawterm_cmd_active
   end
-  printf '\033]7;file://%s%s\007' (hostname) $PWD
+  printf '\033]7;file://%s%s\007' (hostname) (string replace -a -- '%' '%25' $PWD)
   printf '\033]133;A\007'
   __zzclawterm_ensure_prompt_wrapper
 end
@@ -1250,7 +1251,7 @@ __zzclawterm_cwd_prompt(){
     ZZCLAWTERM_LAST_HISTCMD="$histcmd"
     __zzclawterm_emit_command "$(fc -ln -1 2>/dev/null)"
   fi
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
   return "$ret"
 }
 __zzclawterm_install_prompt(){
@@ -1289,7 +1290,7 @@ __zzclawterm_emit_command(){
 }
 __zzclawterm_cwd_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "$PWD"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
 }
 __zzclawterm_cwd_preexec(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
@@ -1316,7 +1317,7 @@ function __zzclawterm_emit_command
 end
 function __zzclawterm_cwd_prompt
   set -q ZZCLAWTERM_FISH_CWD_READY; or return 0
-  printf '\033]7;file://%s%s\007' (hostname) $PWD
+  printf '\033]7;file://%s%s\007' (hostname) (string replace -a -- '%' '%25' $PWD)
 end
 function __zzclawterm_cwd_preexec
   set -q ZZCLAWTERM_FISH_CWD_READY; or return 0
@@ -1467,7 +1468,40 @@ fn parse_osc7_payload(payload: &[u8]) -> Option<String> {
         let slash = after_scheme.find('/')?;
         after_scheme[slash..].to_string()
     };
-    if path.is_empty() { None } else { Some(path) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(percent_decode_path(&path))
+    }
+}
+
+/// OSC 7 paths are URIs, so `%XX` hex escapes (spaces, non-ASCII) must be
+/// decoded. A `%` not followed by two hex digits is a literal percent sign and
+/// passes through unchanged; ZzClawTerm's own emitters escape literal `%` as
+/// `%25`, so those round-trip. If decoding produces invalid UTF-8, the original
+/// text is kept as-is.
+fn percent_decode_path(path: &str) -> String {
+    if !path.as_bytes().contains(&b'%') {
+        return path.to_string();
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let hex = &path[index + 1..index + 3];
+            decoded.push(u8::from_str_radix(hex, 16).expect("hex digits validated above"));
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| path.to_string())
 }
 
 fn parse_command_marker(inner: &[u8]) -> Option<String> {
@@ -1692,6 +1726,38 @@ mod tests {
     }
 
     #[test]
+    fn osc7_cwd_paths_decode_percent_escapes_and_keep_literal_percent_signs() {
+        let mut state = shell_integration_state("session-1");
+        mark_injection_sent(&mut state);
+        let ready = "\x1b]7777;ZzClawTermReady:session-1\x07";
+        let osc7 = |path: &str| format!("\x1b]7;file://host{path}\x07").into_bytes();
+
+        // A path may arrive before the ready marker; only post-marker output is
+        // parsed, so feed the marker first.
+        let _ = state.filter_output(ready.as_bytes());
+
+        let output = state.filter_output(&osc7("/home/user/My%20Files"));
+        assert_eq!(output.cwd_paths, vec!["/home/user/My Files".to_string()]);
+
+        let output = state.filter_output(&osc7("/home/user/%E4%BD%A0%E5%A5%BD"));
+        assert_eq!(output.cwd_paths, vec!["/home/user/你好".to_string()]);
+
+        // ZzClawTerm emitters escape literal `%` as `%25`; it must round-trip.
+        let output = state.filter_output(&osc7("/tmp/50%25ab"));
+        assert_eq!(output.cwd_paths, vec!["/tmp/50%ab".to_string()]);
+
+        // A `%` not followed by two hex digits is a literal percent sign.
+        let output = state.filter_output(&osc7("/tmp/50%zz"));
+        assert_eq!(output.cwd_paths, vec!["/tmp/50%zz".to_string()]);
+        let output = state.filter_output(&osc7("/tmp/50%a"));
+        assert_eq!(output.cwd_paths, vec!["/tmp/50%a".to_string()]);
+
+        // Decoding to invalid UTF-8 keeps the original text.
+        let output = state.filter_output(&osc7("/tmp/50%FF"));
+        assert_eq!(output.cwd_paths, vec!["/tmp/50%FF".to_string()]);
+    }
+
+    #[test]
     fn tauri_parity_keeps_motd_discards_injection_noise_and_shows_final_prompt() {
         let mut state = shell_integration_state("session-1");
         let mut visible = Vec::new();
@@ -1727,11 +1793,17 @@ mod tests {
     fn suppressing_timeout_discards_buffered_output_and_enters_normal() {
         let mut state = shell_integration_state("session-1");
         mark_injection_sent(&mut state);
+        assert!(
+            state
+                .filter_output(b"\x1b]0;partial title")
+                .visible
+                .is_empty()
+        );
         state.suppress_started_at = Some(Instant::now() - Duration::from_secs(9));
 
-        let output = state.filter_output(b"\x1b]0;partial title");
+        let output = state.filter_output(b"only output after timeout\r\n");
 
-        assert!(output.visible.is_empty());
+        assert_eq!(output.visible, b"only output after timeout\r\n");
         assert!(output.cwd_paths.is_empty());
         assert!(output.accepted_commands.is_empty());
         assert!(state.is_normal());

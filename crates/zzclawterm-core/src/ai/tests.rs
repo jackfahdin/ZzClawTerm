@@ -21,6 +21,7 @@ fn provider_debug_output_redacts_api_keys() {
         provider_kind: AiProviderKind::Openai,
         base_url: None,
         api_key: Some(secret.to_string().into()),
+        extra_headers: Vec::new(),
         enabled: true,
     };
     let output = format!("{credential:?}");

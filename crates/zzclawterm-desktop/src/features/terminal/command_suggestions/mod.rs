@@ -1288,14 +1288,20 @@ impl ZzClawTermApp {
         menu_w: f32,
         menu_h: f32,
     ) -> Option<SuggestionOverlayPlacement> {
-        let bounds = self.terminal_surface_bounds_for_session(session_id)?;
-        let insets = self.terminal_content_insets_for_bounds(session_id, bounds);
+        let session_id = session_id.or_else(|| self.session.active_id())?;
+        // Command and credential popups share cached terminal geometry, which
+        // remains available after a different workspace tab or page takes over.
+        if !self.terminal_session_has_visible_surface(session_id) {
+            return None;
+        }
+        let bounds = self.terminal_surface_bounds_for_session(Some(session_id))?;
+        let insets = self.terminal_content_insets_for_bounds(Some(session_id), bounds);
         suggestion_overlay_position(
             SuggestionOverlayGeometry {
                 bounds,
                 cell_size: self.terminal_cell_size(),
                 content_origin: (insets.left, insets.top),
-                gutter: self.terminal_gutter_width_px_for_session(session_id),
+                gutter: self.terminal_gutter_width_px_for_session(Some(session_id)),
                 viewport_size: self.shell.viewport_size(),
             },
             SuggestionOverlayTarget {

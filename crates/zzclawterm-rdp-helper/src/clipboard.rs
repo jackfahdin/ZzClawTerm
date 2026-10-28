@@ -19,15 +19,20 @@ use zzclawterm_remote_desktop::{
 
 use super::Outbound;
 
+mod fetch;
 mod files;
 
+use fetch::{FetchKind, FetchReply, RemoteFetchState};
 use files::{FileState, build_local_snapshot, file_list_fingerprint, read_clipboard_paths};
+
+const REMOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct ClipboardBridge {
     session_id: String,
     output_tx: mpsc::SyncSender<Outbound>,
     state: Mutex<ClipboardState>,
     files: Mutex<FileState>,
+    fetch: Mutex<RemoteFetchState>,
     file_enabled: bool,
     file_available: AtomicBool,
     watcher_started: AtomicBool,
@@ -80,6 +85,7 @@ impl ClipboardBridge {
             output_tx,
             state: Mutex::new(ClipboardState::default()),
             files: Mutex::new(FileState::default()),
+            fetch: Mutex::new(RemoteFetchState::default()),
             file_enabled,
             file_available: AtomicBool::new(false),
             watcher_started: AtomicBool::new(false),
@@ -134,6 +140,55 @@ impl ClipboardBridge {
             .clone();
         if let Some(sender) = sender {
             let _ = sender.send_clipboard(message);
+        }
+    }
+
+    fn send_paste(&self, format: ClipboardFormatId) {
+        self.send_clipboard_message(ClipboardMessage::SendInitiatePaste(format));
+    }
+
+    fn queue_remote_fetch(&self, desired: Option<(FetchKind, ClipboardFormatId)>) {
+        let next = self
+            .fetch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .begin_format_list(desired);
+        if let Some(format) = next {
+            self.send_paste(format);
+        }
+    }
+
+    fn finish_remote_fetch(&self, kind: FetchKind, is_error: bool) -> FetchReply {
+        let reply = self
+            .fetch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish_reply(kind, is_error);
+        if let Some(format) = reply.next {
+            self.send_paste(format);
+        }
+        reply
+    }
+
+    pub(super) fn check_remote_fetch_timeout(&self) {
+        self.expire_remote_fetch(REMOTE_FETCH_TIMEOUT);
+    }
+
+    fn expire_remote_fetch(&self, timeout: Duration) {
+        let timed_out = self
+            .fetch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expire(timeout);
+        if timed_out {
+            let _ = self.output_tx.send(Outbound::Control(RdpControlMessage::Error {
+                session_id: self.session_id.clone(),
+                error: zzclawterm_remote_desktop::RdpError::new(
+                    zzclawterm_remote_desktop::RdpErrorKind::Clipboard,
+                    "RDP clipboard response timed out; waiting for the outstanding response. Reconnect if clipboard copies remain unavailable.",
+                ),
+                fatal: false,
+            }));
         }
     }
 
@@ -388,25 +443,27 @@ impl CliprdrBackend for TextClipboardBackend {
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
         self.bridge.cancel_remote("Remote clipboard changed");
-        if self.bridge.file_available.load(Ordering::SeqCst)
-            && let Some(format) = available_formats.iter().find(|format| {
-                format
-                    .name
-                    .as_ref()
-                    .is_some_and(|name| name.value() == FORMAT_NAME_FILE_LIST)
+        let file_format = self
+            .bridge
+            .file_available
+            .load(Ordering::SeqCst)
+            .then(|| {
+                available_formats.iter().find(|format| {
+                    format
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.value() == FORMAT_NAME_FILE_LIST)
+                })
             })
-        {
-            self.bridge
-                .send_clipboard_message(ClipboardMessage::SendInitiatePaste(format.id));
-        } else if available_formats
-            .iter()
-            .any(|format| format.id() == ClipboardFormatId::CF_UNICODETEXT)
-        {
-            self.bridge
-                .send_clipboard_message(ClipboardMessage::SendInitiatePaste(
-                    ClipboardFormatId::CF_UNICODETEXT,
-                ));
-        }
+            .flatten()
+            .map(|format| (FetchKind::FileList, format.id()));
+        let desired = file_format.or_else(|| {
+            available_formats
+                .iter()
+                .find(|format| format.id() == ClipboardFormatId::CF_UNICODETEXT)
+                .map(|format| (FetchKind::Text, format.id()))
+        });
+        self.bridge.queue_remote_fetch(desired);
     }
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
@@ -420,7 +477,10 @@ impl CliprdrBackend for TextClipboardBackend {
     }
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
-        if response.is_error() {
+        let reply = self
+            .bridge
+            .finish_remote_fetch(FetchKind::Text, response.is_error());
+        if !reply.accepted {
             return;
         }
         if let Ok(text) = response.to_unicode_string() {
@@ -514,6 +574,10 @@ impl CliprdrBackend for TextClipboardBackend {
         files: &[ironrdp_cliprdr::pdu::FileDescriptor],
         clip_data_id: Option<u32>,
     ) {
+        let reply = self.bridge.finish_remote_fetch(FetchKind::FileList, false);
+        if !reply.accepted {
+            return;
+        }
         if self.bridge.shutdown.load(Ordering::SeqCst)
             || !self.bridge.file_available.load(Ordering::SeqCst)
         {

@@ -4,7 +4,7 @@ use crate::features::mcp::McpHostStatus;
 use crate::features::pages::settings::panel::SettingsPanel;
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use rust_i18n::t;
-use zzclawterm_core::{AiPermissionMode, CodexThreadMode};
+use zzclawterm_core::{AiPermissionMode, CodexThreadMode, McpTerminalDisplayMode};
 use zzclawterm_ui::{ZzClawButton, ZzClawSelectOption};
 
 fn permissions() -> Vec<ZzClawSelectOption> {
@@ -393,6 +393,22 @@ impl SettingsPanel {
             false,
             cx,
         );
+        let display_mode = self.form_select_control(
+            "ai-mcp-terminal-display-mode",
+            vec![
+                ZzClawSelectOption::new("inline", t!("ai.mcp.inline")),
+                ZzClawSelectOption::new("silent", t!("ai.mcp.silent")),
+            ],
+            Some(
+                match settings.external_mcp.terminal_display_mode {
+                    McpTerminalDisplayMode::Inline => "inline",
+                    McpTerminalDisplayMode::Silent => "silent",
+                }
+                .into(),
+            ),
+            false,
+            cx,
+        );
         let mcp_status = match self.mcp_host_status(cx) {
             McpHostStatus::Running => t!("ai.mcp.running"),
             McpHostStatus::Unavailable => t!("ai.mcp.unavailable"),
@@ -441,7 +457,13 @@ impl SettingsPanel {
                         None,
                         mcp_permission,
                     ))
-                    .child(ai_field(palette, t!("ai.mcp.sessionScope"), None, scope)),
+                    .child(ai_field(palette, t!("ai.mcp.sessionScope"), None, scope))
+                    .child(ai_field(
+                        palette,
+                        t!("ai.mcp.terminalDisplay"),
+                        None,
+                        display_mode,
+                    )),
             )
             .child(
                 div().flex().flex_wrap().gap_3().children(

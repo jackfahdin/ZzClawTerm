@@ -1,5 +1,7 @@
+use super::metrics::{CountedRequest, CountedResponse};
 use std::sync::Mutex;
 use std::time::Duration;
+use zzclawterm_core::cloud_sync::credentials::{CloudCredentialUpdate, DriveProvider};
 
 use serde_json::json;
 use zed_reqwest::StatusCode;
@@ -13,6 +15,7 @@ use super::helpers::{json_string_field, trim_optional, trim_optional_secret, tri
 const ALIYUN_DRIVE_BASE_URL: &str = "https://openapi.alipan.com";
 
 pub struct NativeAliyunDriveRemote {
+    pub(super) token_sink: super::CloudTokenSink,
     pub(super) client: zed_reqwest::blocking::Client,
     pub(super) root: String,
     pub(super) drive_type: AliyunDriveType,
@@ -25,12 +28,23 @@ pub struct NativeAliyunDriveRemote {
 
 impl NativeAliyunDriveRemote {
     pub fn new(settings: &AliyunDriveSyncSettings) -> Result<Self, CloudSyncError> {
+        Self::new_with_token_sink(
+            settings,
+            std::sync::Arc::new(|_| Err(CloudSyncError::CredentialPersistence)),
+        )
+    }
+
+    pub(crate) fn new_with_token_sink(
+        settings: &AliyunDriveSyncSettings,
+        token_sink: super::CloudTokenSink,
+    ) -> Result<Self, CloudSyncError> {
         let client = zed_reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("ZzClawTerm")
             .build()
             .map_err(map_aliyun_drive_http_error)?;
         let remote = Self {
+            token_sink,
             client,
             root: trim_remote_path(&settings.root),
             drive_type: AliyunDriveType::parse(&settings.drive_type)?,
@@ -81,6 +95,8 @@ impl NativeAliyunDriveRemote {
     }
 
     fn refresh_access_token(&self) -> Result<(), CloudSyncError> {
+        let expected_access_token =
+            Some(self.access_token.lock().expect("access token lock").clone());
         let refresh_token = self
             .refresh_token
             .lock()
@@ -116,34 +132,42 @@ impl NativeAliyunDriveRemote {
             .post(format!("{ALIYUN_DRIVE_BASE_URL}/oauth/access_token"))
             .header(CONTENT_TYPE, "application/json;charset=UTF-8")
             .json(&body)
-            .send()
+            .send_counted()
             .map_err(map_aliyun_drive_http_error)?;
         let status = response.status();
-        let body = response.text().map_err(map_aliyun_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if !status.is_success() {
-            return Err(aliyun_drive_remote_error(
-                status,
+            return Err(super::helpers::oauth_failure(
+                "Aliyun Drive",
+                status.as_u16(),
                 &body,
-                "Aliyun Drive token refresh",
+                _retry_after_seconds,
             ));
         }
-        let value: serde_json::Value = serde_json::from_str(&body)?;
+        let value: serde_json::Value = super::helpers::safe_json(&body, "Aliyun Drive")?;
         let access_token = json_string_field(&value, "access_token", "Aliyun Drive token refresh")?;
-        *self
-            .access_token
-            .lock()
-            .expect("aliyun drive access token lock") = access_token.into();
-        if let Some(refresh_token) = value
+        let rotated = value
             .get("refresh_token")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            *self
-                .refresh_token
-                .lock()
-                .expect("aliyun drive refresh token lock") = refresh_token.to_string().into();
-        }
+            .filter(|s| !s.is_empty())
+            .map(zzclawterm_core::SecretString::from);
+        let access_token: zzclawterm_core::SecretString = access_token.into();
+        super::helpers::install_refreshed_tokens(
+            &self.access_token,
+            &self.refresh_token,
+            &self.token_sink,
+            CloudCredentialUpdate {
+                provider: DriveProvider::Aliyun,
+                client_id: self.client_id.clone(),
+                client_secret: self.client_secret.clone(),
+                expected_access_token,
+                expected_refresh_token: Some(refresh_token),
+                access_token: access_token.clone(),
+                refresh_token: rotated.clone(),
+            },
+        )?;
         *self.drive_id.lock().expect("aliyun drive id lock") = None;
         Ok(())
     }
@@ -163,20 +187,23 @@ impl NativeAliyunDriveRemote {
         if auth {
             request = request.header(AUTHORIZATION, format!("Bearer {}", self.bearer_token()));
         }
-        let response = request.send().map_err(map_aliyun_drive_http_error)?;
+        let response = request
+            .send_counted()
+            .map_err(map_aliyun_drive_http_error)?;
         if response.status() != StatusCode::UNAUTHORIZED
             || !auth
             || !self.can_refresh_access_token()
         {
             return Ok(response);
         }
+        let _ = response.bytes_counted();
         self.refresh_access_token()?;
         self.client
             .post(&url)
             .header(CONTENT_TYPE, "application/json;charset=UTF-8")
             .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token()))
             .json(body)
-            .send()
+            .send_counted()
             .map_err(map_aliyun_drive_http_error)
     }
 
@@ -188,11 +215,17 @@ impl NativeAliyunDriveRemote {
     ) -> Result<serde_json::Value, CloudSyncError> {
         let response = self.send_json(endpoint, body, true)?;
         let status = response.status();
-        let body = response.text().map_err(map_aliyun_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if !status.is_success() {
-            return Err(aliyun_drive_remote_error(status, &body, operation));
+            return Err(aliyun_drive_remote_error(
+                status,
+                &body,
+                operation,
+                _retry_after_seconds,
+            ));
         }
-        Ok(serde_json::from_str(&body)?)
+        super::helpers::safe_json(&body, "Aliyun Drive")
     }
 
     fn drive_id(&self) -> Result<String, CloudSyncError> {
@@ -247,7 +280,8 @@ impl NativeAliyunDriveRemote {
             true,
         )?;
         let status = response.status();
-        let body = response.text().map_err(map_aliyun_drive_http_error)?;
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
+        let body = response.text_counted()?;
         if status.is_success() {
             return aliyun_drive_item_from_body(&body).map(Some);
         }
@@ -260,6 +294,7 @@ impl NativeAliyunDriveRemote {
             status,
             &body,
             "Aliyun Drive path lookup",
+            _retry_after_seconds,
         ))
     }
 
@@ -362,17 +397,21 @@ impl NativeAliyunDriveRemote {
             .client
             .put(upload_url)
             .body(bytes.to_vec())
-            .send()
+            .send_counted()
             .map_err(map_aliyun_drive_http_error)?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status.is_success() {
+            let _ = response.bytes_counted();
             return Ok(());
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "Aliyun Drive upload failed ({status}): {}",
-            body.trim()
-        )))
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "Aliyun Drive",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn complete_upload(&self, file_id: &str, upload_id: &str) -> Result<(), CloudSyncError> {
@@ -426,20 +465,20 @@ impl CloudSyncRemote for NativeAliyunDriveRemote {
         let response = self
             .client
             .get(download_url)
-            .send()
+            .send_counted()
             .map_err(map_aliyun_drive_http_error)?;
         let status = response.status();
+        let _retry_after_seconds = super::helpers::retry_after_seconds(response.headers());
         if status.is_success() {
-            return response
-                .bytes()
-                .map(|bytes| Some(bytes.to_vec()))
-                .map_err(map_aliyun_drive_http_error);
+            return response.bytes_counted().map(|bytes| Some(bytes.to_vec()));
         }
-        let body = response.text().unwrap_or_default();
-        Err(CloudSyncError::Remote(format!(
-            "Aliyun Drive download failed ({status}): {}",
-            body.trim()
-        )))
+        let _body = response.text_counted().unwrap_or_default();
+        Err(super::helpers::http_failure(
+            "Aliyun Drive",
+            "request",
+            status.as_u16(),
+            _retry_after_seconds,
+        ))
     }
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<(), CloudSyncError> {
@@ -576,7 +615,7 @@ impl AliyunDriveItem {
 }
 
 fn aliyun_drive_item_from_body(body: &str) -> Result<AliyunDriveItem, CloudSyncError> {
-    let value: serde_json::Value = serde_json::from_str(body)?;
+    let value: serde_json::Value = super::helpers::safe_json(body, "Aliyun Drive")?;
     Ok(AliyunDriveItem {
         file_id: json_string_field(&value, "file_id", "Aliyun Drive item")?,
         item_type: json_string_field(&value, "type", "Aliyun Drive item")?,
@@ -598,30 +637,17 @@ pub(super) fn aliyun_drive_remote_error(
     status: StatusCode,
     body: &str,
     operation: &str,
+    retry_after_seconds: Option<u64>,
 ) -> CloudSyncError {
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            let code = value.get("code").and_then(serde_json::Value::as_str);
-            let message = value.get("message").and_then(serde_json::Value::as_str);
-            match (code, message) {
-                (Some(code), Some(message)) => Some(format!("{code}: {message}")),
-                (Some(code), None) => Some(code.to_string()),
-                (None, Some(message)) => Some(message.to_string()),
-                (None, None) => None,
-            }
-        })
-        .unwrap_or_else(|| body.trim().to_string());
-    CloudSyncError::Remote(format!("{operation} failed ({status}): {message}"))
+    let _ = body; // Error bodies are used for protocol classification only.
+    super::helpers::http_failure(
+        "Aliyun Drive",
+        operation,
+        status.as_u16(),
+        retry_after_seconds,
+    )
 }
 
 fn map_aliyun_drive_http_error(error: zed_reqwest::Error) -> CloudSyncError {
-    if error.is_timeout() {
-        CloudSyncError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("Aliyun Drive operation timed out: {error}"),
-        ))
-    } else {
-        CloudSyncError::Remote(format!("Aliyun Drive request failed: {error}"))
-    }
+    super::helpers::safe_http_error("Aliyun Drive", error)
 }

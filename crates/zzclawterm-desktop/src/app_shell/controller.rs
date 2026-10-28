@@ -37,6 +37,7 @@ mod tray;
 #[cfg(test)]
 mod tray_tests;
 mod updates;
+mod window_decorations;
 mod workspaces;
 
 use auto_sync::AutoSyncCoordinator;

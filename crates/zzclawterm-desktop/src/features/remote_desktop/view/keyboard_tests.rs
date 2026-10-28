@@ -72,6 +72,7 @@ fn focused_rdp_and_vnc_surfaces_keep_tab_and_shift_tab_out_of_local_navigation()
                     password: None,
                     use_nla: true,
                     certificate_policy: Default::default(),
+                    administrative_session: false,
                     display: Default::default(),
                     clipboard: Default::default(),
                     reconnect: Default::default(),

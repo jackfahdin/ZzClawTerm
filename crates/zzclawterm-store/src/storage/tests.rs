@@ -1675,6 +1675,7 @@ fn cloud_pull_store_worker_flushes_and_reopens_with_local_provider_secrets() {
     target.save_cloud_sync_settings(local.clone()).unwrap();
     drop(target);
     let options = LocalCloudSyncOptions {
+        device_name: None,
         config_dir: target_dir.to_path_buf(),
         portable_key_path: None,
         remote_dir: source_dir.to_path_buf(),
@@ -2918,11 +2919,95 @@ fn native_window_material_is_restored_from_backup_and_preserved_during_sync() {
 }
 
 #[test]
+fn window_decorations_default_and_roundtrip_without_discarding_future_data() {
+    use zzclawterm_core::models::window_decoration::WindowDecoration;
+
+    let dir = unique_temp_dir("window-decorations-compatibility");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let legacy = serde_json::json!({"appearance": {
+        "theme": "github-dark", "future_field": {"enabled": true}
+    }});
+    store.save_settings_value(&legacy).unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    assert_eq!(settings.window_decorations, WindowDecoration::Client);
+    for decoration in [
+        WindowDecoration::Server,
+        WindowDecoration::Client,
+        WindowDecoration::Unknown("future_decoration".into()),
+    ] {
+        settings.window_decorations = decoration.clone();
+        let saved = store.save_appearance_settings(&settings).unwrap();
+        assert_eq!(saved.window_decorations, decoration);
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["appearance"]["window_decorations"], decoration.as_str());
+        assert_eq!(
+            raw["appearance"]["future_field"],
+            legacy["appearance"]["future_field"]
+        );
+        settings.theme = "github-light".into();
+        assert_eq!(
+            store
+                .save_appearance_settings(&settings)
+                .unwrap()
+                .window_decorations,
+            decoration
+        );
+    }
+}
+
+#[test]
+fn window_decorations_restore_from_backups_and_remain_local_during_sync() {
+    use zzclawterm_core::models::window_decoration::WindowDecoration;
+    use zzclawterm_core::portable_snapshot::PortableSnapshotKind;
+
+    let dir = unique_temp_dir("window-decorations-snapshots");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    settings.window_decorations = WindowDecoration::Server;
+    store.save_appearance_settings(&settings).unwrap();
+    let mut backup = store
+        .build_raw_portable_snapshot(PortableSnapshotKind::Backup, "device", "test")
+        .unwrap();
+    backup.recalculate_hash().unwrap();
+    let mut sync = store
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "device", "test")
+        .unwrap();
+    sync.recalculate_hash().unwrap();
+    let mut synced: serde_json::Value = serde_json::from_str(&sync.entities["settings"]).unwrap();
+    assert!(synced["appearance"].get("window_decorations").is_none());
+    // Even an incoming document carrying another device's value cannot replace it.
+    synced["appearance"]["window_decorations"] = serde_json::json!("server");
+    sync.entities.insert("settings".into(), synced.to_string());
+    sync.recalculate_hash().unwrap();
+    settings.window_decorations = WindowDecoration::Client;
+    store.save_appearance_settings(&settings).unwrap();
+    store.apply_raw_portable_snapshot(&sync).unwrap();
+    assert_eq!(
+        store
+            .load_app_settings_summary()
+            .unwrap()
+            .window_decorations,
+        WindowDecoration::Client
+    );
+    store.apply_raw_portable_snapshot(&backup).unwrap();
+    assert_eq!(
+        store
+            .load_app_settings_summary()
+            .unwrap()
+            .window_decorations,
+        WindowDecoration::Server
+    );
+}
+
+#[test]
 fn malformed_native_window_settings_are_rejected_without_overwriting_user_data() {
     let dir = unique_temp_dir("native-material-malformed");
     let store = ConnectionStore::open(&dir).unwrap();
     let settings = store.load_app_settings_summary().unwrap();
     for appearance in [
+        serde_json::json!({"window_decorations": {"future": "format"}}),
+        serde_json::json!({"window_decorations": null}),
+        serde_json::json!({"window_decorations": true}),
         serde_json::json!({"window_material": {"future": "format"}}),
         serde_json::json!({"window_background_opacity": "invalid"}),
         serde_json::json!({"window_background_opacity": 0.2}),
@@ -5372,6 +5457,151 @@ fn cloud_sync_settings_encrypt_and_merge_masked_provider_secrets() {
 }
 
 #[test]
+fn ai_headers_without_api_key_encrypt_roundtrip_and_reject_invalid_updates() {
+    let dir = unique_temp_dir("ai-header-only");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut settings = AiSettings::default();
+    settings.provider_credentials[0].extra_headers = vec![zzclawterm_core::AiHttpHeader {
+        id: "header-fixture".into(),
+        name: "Authorization".into(),
+        value: "Bearer header-only-fixture".into(),
+    }];
+    assert!(settings.provider_credentials[0].api_key.is_none());
+    let saved = store.save_ai_settings(settings).unwrap();
+    let raw = store
+        .read_json_table::<serde_json::Value>(SETTINGS_TABLE, SETTINGS_DEFAULT)
+        .unwrap()
+        .unwrap();
+    assert!(!raw.to_string().contains("header-only-fixture"));
+    assert!(store.load_master_key_token().unwrap().is_some());
+    assert_eq!(store.load_ai_settings().unwrap(), saved);
+    assert_eq!(
+        store
+            .save_ai_settings(zzclawterm_core::mask_ai_settings(saved.clone()))
+            .unwrap(),
+        saved
+    );
+
+    let restore_dir = unique_temp_dir("ai-header-only-restore");
+    let restore = ConnectionStore::open(&restore_dir).unwrap();
+    for kind in [PortableSnapshotKind::Backup, PortableSnapshotKind::Sync] {
+        let mut snapshot = store
+            .build_raw_portable_snapshot(kind, "fixture", "2.0.0")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        assert!(!snapshot.entities["settings"].contains("header-only-fixture"));
+        restore.apply_raw_portable_snapshot(&snapshot).unwrap();
+        assert_eq!(restore.load_ai_settings().unwrap(), saved);
+    }
+    for (name, value) in [
+        ("Host", "test"),
+        ("X-Token", "line\r\nbreak"),
+        ("X-Token", "中文"),
+        ("X-Token", ""),
+    ] {
+        let mut next = saved.clone();
+        next.provider_credentials[0].extra_headers[0].name = name.into();
+        next.provider_credentials[0].extra_headers[0].value = value.into();
+        assert!(store.save_ai_settings(next).is_err());
+        assert_eq!(store.load_ai_settings().unwrap(), saved);
+    }
+    let mut duplicate = saved.clone();
+    let mut header = duplicate.provider_credentials[0].extra_headers[0].clone();
+    header.id = "other".into();
+    header.name = "AUTHORIZATION".into();
+    duplicate.provider_credentials[0].extra_headers.push(header);
+    assert!(store.save_ai_settings(duplicate).is_err());
+    assert_eq!(store.load_ai_settings().unwrap(), saved);
+
+    store
+        .save_master_password(Some("header-sync-password"))
+        .unwrap();
+    let mut snapshot = store
+        .build_raw_portable_snapshot(PortableSnapshotKind::Sync, "fixture", "2.0.0")
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    restore
+        .save_master_password(Some("header-local-password"))
+        .unwrap();
+    assert!(
+        restore
+            .apply_cloud_sync_snapshot(&restore_dir, &snapshot, "wrong-fixture-password")
+            .is_err()
+    );
+    restore
+        .apply_cloud_sync_snapshot(&restore_dir, &snapshot, "header-sync-password")
+        .unwrap();
+    assert_eq!(restore.load_ai_settings().unwrap(), saved);
+
+    let mut corrupted = store.load_settings_value().unwrap();
+    corrupted["ai"]["provider_credentials"][0]["extra_headers"][0]["value"] =
+        serde_json::json!("enc:v1:deliberately-corrupted-fixture");
+    store.save_settings_value(&corrupted).unwrap();
+    assert!(store.load_ai_settings().is_err());
+    assert!(store.save_ai_settings(saved).is_err());
+    assert_eq!(store.load_settings_value().unwrap(), corrupted);
+}
+
+#[test]
+fn repaired_ai_header_ids_preserve_encrypted_values_and_unknown_extensions() {
+    let dir = unique_temp_dir("ai-header-import-ids");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let mut settings = AiSettings::default();
+    for credential in settings.provider_credentials.iter_mut().take(2) {
+        credential.extra_headers = vec![
+            zzclawterm_core::AiHttpHeader {
+                id: "first".into(),
+                name: "X-First".into(),
+                value: "first-fixture".into(),
+            },
+            zzclawterm_core::AiHttpHeader {
+                id: "second".into(),
+                name: "X-Second".into(),
+                value: "second-fixture".into(),
+            },
+        ];
+    }
+    store.save_ai_settings(settings).unwrap();
+    let mut imported = store.load_settings_value().unwrap();
+    for credential in imported["ai"]["provider_credentials"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .take(2)
+    {
+        let headers = credential["extra_headers"].as_array_mut().unwrap();
+        headers[0]["id"] = serde_json::json!("shared");
+        headers[0]["future_header"] = serde_json::json!({"keep": "first-extension"});
+        headers[1]["id"] = serde_json::json!("shared");
+        headers[1]["future_header"] = serde_json::json!({"keep": "second-extension"});
+    }
+    store.save_settings_value(&imported).unwrap();
+    let loaded = store.load_ai_settings().unwrap();
+    let saved = store
+        .save_ai_settings(zzclawterm_core::mask_ai_settings(loaded.clone()))
+        .unwrap();
+    assert_eq!(saved, loaded);
+    let raw = store.load_settings_value().unwrap();
+    for credential in raw["ai"]["provider_credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(2)
+    {
+        assert_eq!(
+            credential["extra_headers"][0]["future_header"]["keep"],
+            "first-extension"
+        );
+        assert_eq!(
+            credential["extra_headers"][1]["future_header"]["keep"],
+            "second-extension"
+        );
+    }
+    assert!(!raw.to_string().contains("first-fixture"));
+    assert!(!raw.to_string().contains("second-fixture"));
+}
+
+#[test]
 fn ai_settings_encrypt_and_merge_masked_provider_secrets() {
     let dir = unique_temp_dir("ai-settings");
     let store = ConnectionStore::open(&dir).expect("store");
@@ -5495,7 +5725,7 @@ fn ai_settings_loads_and_normalizes_legacy_embedded_settings() {
     store.save_settings_value(&raw).expect("save raw settings");
 
     let loaded = store.load_ai_settings().expect("load ai");
-    assert_eq!(loaded.schema_version, 6);
+    assert_eq!(loaded.schema_version, 7);
     assert_eq!(loaded.active_profile_id, "ollama");
     assert_eq!(loaded.default_model_id.as_deref(), Some("ollama:llama3"));
     assert!(!loaded.provider_credentials.is_empty());
@@ -5554,8 +5784,13 @@ fn ai_settings_v6_preserves_unknown_fields_and_drops_explicitly_deprecated_field
     );
     store.save_settings_value(&raw).expect("seed settings");
 
-    let loaded = store.load_ai_settings().expect("load settings");
-    assert_eq!(loaded.schema_version, 6);
+    let mut loaded = store.load_ai_settings().expect("load settings");
+    assert_eq!(loaded.schema_version, 7);
+    assert_eq!(
+        loaded.external_mcp.terminal_display_mode,
+        zzclawterm_core::McpTerminalDisplayMode::Inline
+    );
+    loaded.external_mcp.terminal_display_mode = zzclawterm_core::McpTerminalDisplayMode::Silent;
     assert_eq!(
         loaded.provider_profiles[0].base_url.as_deref(),
         Some("http://localhost:11434/")
@@ -5584,8 +5819,14 @@ fn ai_settings_v6_preserves_unknown_fields_and_drops_explicitly_deprecated_field
         serde_json::json!([1, 2, 3])
     );
     assert_eq!(ai["external_mcp"]["future_mcp_field"], "preserved");
+    assert_eq!(ai["external_mcp"]["terminal_display_mode"], "silent");
     assert!(ai["external_mcp"].get("server_mode").is_none());
     assert!(ai["external_mcp"].get("idle_timeout_minutes").is_none());
+    let reloaded = store.load_ai_settings().expect("reload settings");
+    assert_eq!(
+        reloaded.external_mcp.terminal_display_mode,
+        zzclawterm_core::McpTerminalDisplayMode::Silent
+    );
 
     std::fs::remove_dir_all(dir).ok();
 }
@@ -7792,4 +8033,110 @@ fn telnet_keepalive_survives_storage_backup_and_sync_round_trips() {
     }
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cloud_sync_rotated_credentials_survive_restart_and_reject_stale_accounts() {
+    use zzclawterm_core::cloud_sync::credentials::{
+        CloudCredentialUpdate, CredentialUpdateResult, DriveProvider,
+    };
+    for provider in [
+        DriveProvider::Google,
+        DriveProvider::OneDrive,
+        DriveProvider::Aliyun,
+    ] {
+        let dir = unique_temp_dir("cloud-token-rotation");
+        let store = ConnectionStore::open(&dir).unwrap();
+        let mut settings = CloudSyncSettings::default();
+        match provider {
+            DriveProvider::Google => {
+                settings.google_drive.client_id = Some("client".into());
+                settings.google_drive.refresh_token = Some("refresh-before".into());
+            }
+            DriveProvider::OneDrive => {
+                settings.onedrive.client_id = Some("client".into());
+                settings.onedrive.refresh_token = Some("refresh-before".into());
+            }
+            DriveProvider::Aliyun => {
+                settings.aliyun_drive.client_id = Some("client".into());
+                settings.aliyun_drive.refresh_token = Some("refresh-before".into());
+            }
+        }
+        store.save_cloud_sync_settings(settings).unwrap();
+        let mut raw = store.load_settings_value().unwrap();
+        raw["cloud_sync"]["future_option"] = serde_json::json!({"keep": true});
+        store.save_settings_value(&raw).unwrap();
+        let mut update = CloudCredentialUpdate {
+            provider,
+            client_id: Some("client".into()),
+            client_secret: None,
+            expected_access_token: None,
+            expected_refresh_token: Some("refresh-before".into()),
+            access_token: "access-after".into(),
+            refresh_token: Some("refresh-after".into()),
+        };
+        assert_eq!(
+            store.update_cloud_credentials(&update).unwrap(),
+            CredentialUpdateResult::Applied
+        );
+        assert_eq!(
+            store.update_cloud_credentials(&update).unwrap(),
+            CredentialUpdateResult::Superseded
+        );
+        // An access-only refresh must retain the last rotated refresh token.
+        update.expected_access_token = Some("access-after".into());
+        update.expected_refresh_token = Some("refresh-after".into());
+        update.refresh_token = None;
+        assert_eq!(
+            store.update_cloud_credentials(&update).unwrap(),
+            CredentialUpdateResult::Applied
+        );
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["cloud_sync"]["future_option"]["keep"], true);
+        let text = serde_json::to_string(&raw).unwrap();
+        assert!(!text.contains("access-after"));
+        assert!(!text.contains("refresh-after"));
+        drop(store);
+        let reopened = ConnectionStore::open(&dir).unwrap();
+        let settings = reopened.load_cloud_sync_settings().unwrap();
+        let (access, refresh) = match provider {
+            DriveProvider::Google => (
+                settings.google_drive.access_token,
+                settings.google_drive.refresh_token,
+            ),
+            DriveProvider::OneDrive => (
+                settings.onedrive.access_token,
+                settings.onedrive.refresh_token,
+            ),
+            DriveProvider::Aliyun => (
+                settings.aliyun_drive.access_token,
+                settings.aliyun_drive.refresh_token,
+            ),
+        };
+        assert_eq!(access.as_deref(), Some("access-after"));
+        assert_eq!(refresh.as_deref(), Some("refresh-after"));
+        // Reauthorization may retain a refresh token but replace access credentials.
+        let mut reauthorized = reopened.load_cloud_sync_settings().unwrap();
+        match provider {
+            DriveProvider::Google => {
+                reauthorized.google_drive.access_token = Some("reauthorized".into())
+            }
+            DriveProvider::OneDrive => {
+                reauthorized.onedrive.access_token = Some("reauthorized".into())
+            }
+            DriveProvider::Aliyun => {
+                reauthorized.aliyun_drive.access_token = Some("reauthorized".into())
+            }
+        }
+        reopened.save_cloud_sync_settings(reauthorized).unwrap();
+        assert_eq!(
+            reopened.update_cloud_credentials(&update).unwrap(),
+            CredentialUpdateResult::Superseded
+        );
+        update.client_id = Some("replaced-account".into());
+        assert_eq!(
+            reopened.update_cloud_credentials(&update).unwrap(),
+            CredentialUpdateResult::Superseded
+        );
+    }
 }

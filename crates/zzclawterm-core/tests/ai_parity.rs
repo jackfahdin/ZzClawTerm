@@ -1,8 +1,8 @@
 use serde_json::Value;
 use zzclawterm_core::{
     AiAgentKind, AiApiFormat, AiAuditFile, AiBackendKind, AiHistoryFile, AiPermissionMode,
-    AiReasoningEffort, AiSettings, ExternalMcpSessionScope, parse_anthropic_stream_chunk,
-    parse_gemini_stream_chunk, parse_openai_compatible_stream_chunk,
+    AiReasoningEffort, AiSettings, ExternalMcpSessionScope, McpTerminalDisplayMode,
+    parse_anthropic_stream_chunk, parse_gemini_stream_chunk, parse_openai_compatible_stream_chunk,
 };
 
 const SETTINGS_V3: &str = include_str!("fixtures/ai/settings_v3_tauri.json");
@@ -25,7 +25,49 @@ fn tauri_ai_settings_generations_are_valid_and_loadable() {
         let settings: AiSettings = serde_json::from_value(value).expect("load Tauri AI settings");
         assert_eq!(settings.schema_version, expected_version);
         assert!(settings.enabled);
+        assert_eq!(
+            settings.external_mcp.terminal_display_mode,
+            McpTerminalDisplayMode::Inline,
+            "legacy settings should default to inline"
+        );
     }
+}
+
+#[test]
+fn external_mcp_terminal_display_mode_round_trips_without_migration() {
+    let mut settings: AiSettings = serde_json::from_str(SETTINGS_V6).expect("load v6 settings");
+    assert_eq!(
+        settings.external_mcp.terminal_display_mode,
+        McpTerminalDisplayMode::Inline
+    );
+
+    settings.external_mcp.terminal_display_mode = McpTerminalDisplayMode::Silent;
+    let serialized = serde_json::to_value(&settings).expect("serialize settings");
+    assert_eq!(serialized["schema_version"], 6);
+    assert_eq!(
+        serialized["external_mcp"]["terminal_display_mode"],
+        "silent"
+    );
+    let restored: AiSettings = serde_json::from_value(serialized).expect("restore settings");
+    assert_eq!(
+        restored.external_mcp.terminal_display_mode,
+        McpTerminalDisplayMode::Silent
+    );
+    assert_eq!(
+        restored.external_mcp.session_scope,
+        settings.external_mcp.session_scope
+    );
+    assert_eq!(
+        restored.external_mcp.permission_mode,
+        settings.external_mcp.permission_mode
+    );
+
+    settings.external_mcp.terminal_display_mode = McpTerminalDisplayMode::Inline;
+    let serialized = serde_json::to_value(settings).expect("serialize inline settings");
+    assert_eq!(
+        serialized["external_mcp"]["terminal_display_mode"],
+        "inline"
+    );
 }
 
 #[test]

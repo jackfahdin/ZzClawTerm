@@ -1,5 +1,6 @@
 mod provider;
 mod proxy;
+use provider::apply_custom_headers;
 pub(crate) use provider::discover_provider_models_cancellable;
 pub use provider::{discover_provider_models, test_model_connection};
 use std::collections::BTreeMap;
@@ -37,11 +38,14 @@ pub fn complete_native_chat(
         .credential
         .as_ref()
         .ok_or_else(|| "AI chat requires a provider credential".to_string())?;
-    let client = proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?
-        .timeout(Duration::from_millis(settings.timeout_ms))
-        .user_agent(effective_ai_request_user_agent(settings))
-        .build()
-        .map_err(map_ai_http_error)?;
+    let client = provider::custom_header_redirects(
+        proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?,
+        credential,
+    )
+    .timeout(Duration::from_millis(settings.timeout_ms))
+    .user_agent(effective_ai_request_user_agent(settings))
+    .build()
+    .map_err(map_ai_http_error)?;
 
     if uses_responses_api(&resolved_model) {
         return complete_openai_responses_chat(
@@ -104,11 +108,14 @@ pub fn stream_native_chat(
         .credential
         .as_ref()
         .ok_or_else(|| "AI chat requires a provider credential".to_string())?;
-    let client = proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?
-        .timeout(Duration::from_millis(settings.timeout_ms))
-        .user_agent(effective_ai_request_user_agent(settings))
-        .build()
-        .map_err(map_ai_http_error)?;
+    let client = provider::custom_header_redirects(
+        proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?,
+        credential,
+    )
+    .timeout(Duration::from_millis(settings.timeout_ms))
+    .user_agent(effective_ai_request_user_agent(settings))
+    .build()
+    .map_err(map_ai_http_error)?;
 
     if uses_responses_api(&resolved_model) {
         return stream_openai_responses_chat(
@@ -182,6 +189,7 @@ fn complete_openai_responses_chat(
     {
         http_request = http_request.bearer_auth(api_key);
     }
+    http_request = apply_custom_headers(http_request, credential)?;
     let response = http_request.send().map_err(map_ai_http_error)?;
     let status = response.status();
     let response_body = response.text().map_err(map_ai_http_error)?;
@@ -216,6 +224,7 @@ fn stream_openai_responses_chat(
     {
         http_request = http_request.bearer_auth(api_key);
     }
+    http_request = apply_custom_headers(http_request, credential)?;
     let response = http_request.send().map_err(map_ai_http_error)?;
     let status = response.status();
     if !status.is_success() {
@@ -253,6 +262,7 @@ fn complete_openai_compatible_chat(
         http_request = http_request.bearer_auth(api_key);
     }
 
+    http_request = apply_custom_headers(http_request, credential)?;
     let response = http_request.send().map_err(map_ai_http_error)?;
     let status = response.status();
     let response_body = response.text().map_err(map_ai_http_error)?;
@@ -297,6 +307,7 @@ fn stream_openai_compatible_chat(
         http_request = http_request.bearer_auth(api_key);
     }
 
+    http_request = apply_custom_headers(http_request, credential)?;
     let response = http_request.send().map_err(map_ai_http_error)?;
     let status = response.status();
     if !status.is_success() {
@@ -330,13 +341,12 @@ fn stream_anthropic_chat(
         true,
     );
     let api_key = api_key(credential)?;
-    let response = client
+    let mut http_request = client
         .post(url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .json(&body)
-        .send()
-        .map_err(map_ai_http_error)?;
+        .header("anthropic-version", ANTHROPIC_VERSION);
+    http_request = apply_custom_headers(http_request, credential)?;
+    let response = http_request.json(&body).send().map_err(map_ai_http_error)?;
     let status = response.status();
     if !status.is_success() {
         let response_body = response.text().map_err(map_ai_http_error)?;
@@ -371,12 +381,9 @@ fn stream_gemini_chat(
         .map_err(|error| error.to_string())?;
     let body = build_gemini_chat_request_body(request, settings, history);
     let api_key = api_key(credential)?;
-    let response = client
-        .post(url)
-        .header("x-goog-api-key", api_key)
-        .json(&body)
-        .send()
-        .map_err(map_ai_http_error)?;
+    let mut http_request = client.post(url).header("x-goog-api-key", api_key);
+    http_request = apply_custom_headers(http_request, credential)?;
+    let response = http_request.json(&body).send().map_err(map_ai_http_error)?;
     let status = response.status();
     if !status.is_success() {
         let response_body = response.text().map_err(map_ai_http_error)?;
@@ -402,13 +409,12 @@ fn complete_anthropic_chat(
     let url = anthropic_messages_url(base_url).map_err(|error| error.to_string())?;
     let body = build_anthropic_chat_request_body(resolved_model, request, settings, history);
     let api_key = api_key(credential)?;
-    let response = client
+    let mut http_request = client
         .post(url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .json(&body)
-        .send()
-        .map_err(map_ai_http_error)?;
+        .header("anthropic-version", ANTHROPIC_VERSION);
+    http_request = apply_custom_headers(http_request, credential)?;
+    let response = http_request.json(&body).send().map_err(map_ai_http_error)?;
     let status = response.status();
     let response_body = response.text().map_err(map_ai_http_error)?;
     if !status.is_success() {
@@ -442,12 +448,9 @@ fn complete_gemini_chat(
         gemini_generate_content_url(base_url, &model_name).map_err(|error| error.to_string())?;
     let body = build_gemini_chat_request_body(request, settings, history);
     let api_key = api_key(credential)?;
-    let response = client
-        .post(url)
-        .header("x-goog-api-key", api_key)
-        .json(&body)
-        .send()
-        .map_err(map_ai_http_error)?;
+    let mut http_request = client.post(url).header("x-goog-api-key", api_key);
+    http_request = apply_custom_headers(http_request, credential)?;
+    let response = http_request.json(&body).send().map_err(map_ai_http_error)?;
     let status = response.status();
     let response_body = response.text().map_err(map_ai_http_error)?;
     if !status.is_success() {
@@ -800,6 +803,7 @@ mod tests {
             api_format: AiApiFormat::Responses,
             base_url: Some(base_url),
             api_key: Some("mock-fixture-key".to_string().into()),
+            extra_headers: Vec::new(),
             enabled: true,
         };
         let model = AiModelConfigItem {
@@ -820,6 +824,19 @@ mod tests {
             default_reasoning_effort: AiReasoningEffort::High,
             ..AiSettings::default()
         }
+    }
+
+    fn header_only_settings(base_url: String) -> AiSettings {
+        let mut settings = responses_settings(base_url);
+        settings.provider_credentials[0].provider_kind = AiProviderKind::Openai;
+        settings.models[0].provider_kind = Some(AiProviderKind::Openai);
+        settings.provider_credentials[0].api_key = None;
+        settings.provider_credentials[0].extra_headers = vec![zzclawterm_core::AiHttpHeader {
+            id: "auth-fixture".into(),
+            name: "authorization".into(),
+            value: "Bearer header-only-fixture".into(),
+        }];
+        settings
     }
 
     fn request() -> zzclawterm_core::AiChatRequest {
@@ -909,13 +926,15 @@ mod tests {
     fn complete_native_chat_routes_responses_format_to_responses_endpoint() {
         let response = r#"{"output":[{"type":"reasoning","summary":[{"text":"read only"}]},{"type":"message","content":[{"type":"output_text","text":"Use df -h"}]}]}"#;
         let (base_url, server) = mock_server(response.to_string(), "application/json");
-        let completion = complete_native_chat(&responses_settings(base_url), &request(), &[])
-            .expect("Responses completion");
+        let settings = header_only_settings(base_url);
+        let completion =
+            complete_native_chat(&settings, &request(), &[]).expect("Responses completion");
         let raw_request = server.join().expect("mock server");
 
         assert_eq!(completion.text, "Use df -h");
         assert_eq!(completion.reasoning_content.as_deref(), Some("read only"));
         assert!(raw_request.starts_with("POST /v1/responses HTTP/1.1"));
+        assert!(raw_request.contains("authorization: Bearer header-only-fixture"));
         assert!(raw_request.contains("\"store\":false"));
         assert!(raw_request.contains("\"reasoning\":{\"effort\":\"high\"}"));
     }
@@ -932,7 +951,7 @@ mod tests {
         let (base_url, server) = mock_server(response.to_string(), "text/event-stream");
         let mut deltas = Vec::new();
         let completion =
-            stream_native_chat(&responses_settings(base_url), &request(), &[], |delta| {
+            stream_native_chat(&header_only_settings(base_url), &request(), &[], |delta| {
                 deltas.push(delta)
             })
             .expect("Responses stream");
@@ -945,95 +964,259 @@ mod tests {
         assert_eq!(completion.tool_calls[0].arguments["command"], "df -h");
         assert!(deltas.iter().any(|delta| delta.done));
         assert!(raw_request.starts_with("POST /v1/responses HTTP/1.1"));
+        assert!(raw_request.contains("authorization: Bearer header-only-fixture"));
         assert!(raw_request.contains("\"stream\":true"));
     }
     #[test]
     fn protocol_override_drives_discovery_chat_stream_and_authentication() {
         use super::discover_provider_models;
         use zzclawterm_core::ai::AiProviderApiProtocol;
-        for (protocol, discovery, response, stream, path, auth) in [
-            (
-                AiProviderApiProtocol::OpenaiCompatible,
-                r#"{"data":[{"id":"gpt-test"}]}"#,
-                r#"{"choices":[{"message":{"content":"OK"}}]}"#,
-                "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
-                "/v1/chat/completions",
-                "authorization: Bearer mock-fixture-key",
-            ),
-            (
-                AiProviderApiProtocol::Anthropic,
-                r#"{"data":[{"id":"gpt-test"}],"has_more":false}"#,
-                r#"{"content":[{"type":"text","text":"OK"}]}"#,
-                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
-                "/v1/messages",
-                "x-api-key: mock-fixture-key",
-            ),
-            (
-                AiProviderApiProtocol::Gemini,
-                r#"{"models":[{"name":"models/gpt-test"}]}"#,
-                r#"{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}"#,
-                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}]}\n\n",
-                "/v1/models/gpt-test:",
-                "x-goog-api-key: mock-fixture-key",
-            ),
-            (
-                AiProviderApiProtocol::Ollama,
-                r#"{"models":[{"name":"gpt-test"}]}"#,
-                r#"{"message":{"content":"OK"},"done":true}"#,
-                "{\"message\":{\"content\":\"OK\"},\"done\":false}\n{\"done\":true}\n",
-                "/v1/api/chat",
-                "authorization: Bearer mock-fixture-key",
-            ),
-        ] {
-            let (base, server) = mock_server(discovery.into(), "application/json");
-            let mut settings = responses_settings(base);
-            // Intentionally use a brand that does not match any tested protocol.
-            settings.provider_credentials[0].provider_kind = AiProviderKind::Deepseek;
-            settings.provider_credentials[0].api_protocol = Some(protocol);
-            settings.provider_credentials[0].api_format = AiApiFormat::ChatCompletions;
-            settings.models[0].provider_kind = Some(AiProviderKind::Deepseek);
-            let models =
-                discover_provider_models(&settings, &settings.provider_credentials[0]).unwrap();
-            assert_eq!(models[0].credential_id.as_deref(), Some("mock-responses"));
-            let raw = server.join().unwrap();
-            assert!(raw.contains(auth), "{protocol:?}: {raw}");
-            assert!(
-                raw.starts_with(if protocol == AiProviderApiProtocol::Ollama {
-                    "GET /v1/api/tags"
+        for custom_auth in [false, true] {
+            for (protocol, discovery, response, stream, path, auth) in [
+                (
+                    AiProviderApiProtocol::OpenaiCompatible,
+                    r#"{"data":[{"id":"gpt-test"}]}"#,
+                    r#"{"choices":[{"message":{"content":"OK"}}]}"#,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+                    "/v1/chat/completions",
+                    "authorization: Bearer mock-fixture-key",
+                ),
+                (
+                    AiProviderApiProtocol::Anthropic,
+                    r#"{"data":[{"id":"gpt-test"}],"has_more":false}"#,
+                    r#"{"content":[{"type":"text","text":"OK"}]}"#,
+                    "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+                    "/v1/messages",
+                    "x-api-key: mock-fixture-key",
+                ),
+                (
+                    AiProviderApiProtocol::Gemini,
+                    r#"{"models":[{"name":"models/gpt-test"}]}"#,
+                    r#"{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}"#,
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+                    "/v1/models/gpt-test:",
+                    "x-goog-api-key: mock-fixture-key",
+                ),
+                (
+                    AiProviderApiProtocol::Ollama,
+                    r#"{"models":[{"name":"gpt-test"}]}"#,
+                    r#"{"message":{"content":"OK"},"done":true}"#,
+                    "{\"message\":{\"content\":\"OK\"},\"done\":false}\n{\"done\":true}\n",
+                    "/v1/api/chat",
+                    "authorization: Bearer mock-fixture-key",
+                ),
+            ] {
+                let (base, server) = mock_server(discovery.into(), "application/json");
+                let mut settings = responses_settings(base);
+                // Intentionally use a brand that does not match any tested protocol.
+                settings.provider_credentials[0].provider_kind = AiProviderKind::Deepseek;
+                settings.provider_credentials[0].api_protocol = Some(protocol);
+                settings.provider_credentials[0].api_format = AiApiFormat::ChatCompletions;
+                settings.models[0].provider_kind = Some(AiProviderKind::Deepseek);
+                if custom_auth {
+                    settings.provider_credentials[0].extra_headers =
+                        vec![zzclawterm_core::AiHttpHeader {
+                            id: "auth-fixture".into(),
+                            name: auth.split_once(':').unwrap().0.to_uppercase(),
+                            value: "custom-auth-fixture".into(),
+                        }];
+                }
+                let expected_auth = if custom_auth {
+                    format!("{}: custom-auth-fixture", auth.split_once(':').unwrap().0)
                 } else {
-                    "GET /v1/models"
-                })
-            );
-            let (base, server) = mock_server(response.into(), "application/json");
-            settings.provider_credentials[0].base_url = Some(base);
-            assert_eq!(
-                complete_native_chat(&settings, &request(), &[])
-                    .unwrap()
-                    .text,
-                "OK"
-            );
-            let raw = server.join().unwrap();
+                    auth.to_lowercase()
+                };
+                let models =
+                    discover_provider_models(&settings, &settings.provider_credentials[0]).unwrap();
+                assert_eq!(models[0].credential_id.as_deref(), Some("mock-responses"));
+                let raw = server.join().unwrap();
+                assert!(raw.to_lowercase().contains(&expected_auth), "{protocol:?}");
+                if custom_auth {
+                    assert!(!raw.contains("mock-fixture-key"));
+                }
+                assert!(
+                    raw.starts_with(if protocol == AiProviderApiProtocol::Ollama {
+                        "GET /v1/api/tags"
+                    } else {
+                        "GET /v1/models"
+                    })
+                );
+                let (base, server) = mock_server(response.into(), "application/json");
+                settings.provider_credentials[0].base_url = Some(base);
+                assert_eq!(
+                    complete_native_chat(&settings, &request(), &[])
+                        .unwrap()
+                        .text,
+                    "OK"
+                );
+                let raw = server.join().unwrap();
+                assert!(
+                    raw.starts_with(&format!("POST {path}")),
+                    "{protocol:?}: {raw}"
+                );
+                assert!(raw.to_lowercase().contains(&expected_auth));
+                if custom_auth {
+                    assert!(!raw.contains("mock-fixture-key"));
+                }
+                let (base, server) = mock_server(stream.into(), "text/event-stream");
+                settings.provider_credentials[0].base_url = Some(base);
+                let mut deltas = Vec::new();
+                assert_eq!(
+                    stream_native_chat(&settings, &request(), &[], |delta| deltas.push(delta))
+                        .unwrap()
+                        .text,
+                    "OK"
+                );
+                let raw = server.join().unwrap();
+                assert!(raw.to_lowercase().contains(&expected_auth));
+                if custom_auth {
+                    assert!(!raw.contains("mock-fixture-key"));
+                }
+                assert!(raw.starts_with(&format!("POST {path}")));
+                assert!(
+                    deltas.iter().any(|delta| delta.done),
+                    "{protocol:?} missing done"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn custom_headers_are_sent_with_discovery_and_chat_and_override_auth() {
+        use super::discover_provider_models;
+        use zzclawterm_core::AiHttpHeader;
+
+        let (base, server) =
+            mock_server(r#"{"data":[{"id":"gpt-test"}]}"#.into(), "application/json");
+        let mut settings = responses_settings(base);
+        settings.provider_credentials[0].api_format = AiApiFormat::ChatCompletions;
+        settings.provider_credentials[0].extra_headers = vec![
+            AiHttpHeader {
+                id: "h1".into(),
+                name: "X-Custom-Token".into(),
+                value: "secret-1".into(),
+            },
+            AiHttpHeader {
+                id: "h2".into(),
+                name: "authorization".into(),
+                value: "Bearer override".into(),
+            },
+        ];
+        let models =
+            discover_provider_models(&settings, &settings.provider_credentials[0]).unwrap();
+        assert_eq!(models.len(), 1);
+        let raw = server.join().unwrap().to_lowercase();
+        assert!(raw.starts_with("get /v1/models"));
+        assert!(raw.contains("x-custom-token: secret-1"), "{raw}");
+        assert!(raw.contains("authorization: bearer override"), "{raw}");
+        assert!(!raw.contains("mock-fixture-key"), "{raw}");
+
+        let (base, server) = mock_server(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#.into(),
+            "application/json",
+        );
+        settings.provider_credentials[0].base_url = Some(base);
+        assert_eq!(
+            complete_native_chat(&settings, &request(), &[])
+                .unwrap()
+                .text,
+            "OK"
+        );
+        let raw = server.join().unwrap().to_lowercase();
+        assert!(raw.starts_with("post /v1/chat/completions"), "{raw}");
+        assert!(raw.contains("x-custom-token: secret-1"), "{raw}");
+        assert!(raw.contains("authorization: bearer override"), "{raw}");
+        assert!(!raw.contains("mock-fixture-key"), "{raw}");
+    }
+
+    #[test]
+    fn invalid_custom_headers_fail_before_chat_stream_or_discovery_send() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut settings =
+            responses_settings(format!("http://{}/v1", listener.local_addr().unwrap()));
+        for (name, value) in [
+            ("Host", "routing-fixture"),
+            ("X-Token", "value\r\nfixture"),
+            ("X-Token", "中文"),
+            ("X-Token", ""),
+        ] {
+            settings.provider_credentials[0].extra_headers = vec![zzclawterm_core::AiHttpHeader {
+                id: "invalid-fixture".into(),
+                name: name.into(),
+                value: value.into(),
+            }];
+            assert!(complete_native_chat(&settings, &request(), &[]).is_err());
+            assert!(stream_native_chat(&settings, &request(), &[], |_| {}).is_err());
             assert!(
-                raw.starts_with(&format!("POST {path}")),
-                "{protocol:?}: {raw}"
+                super::discover_provider_models(&settings, &settings.provider_credentials[0])
+                    .is_err()
             );
-            assert!(raw.contains(auth));
-            let (base, server) = mock_server(stream.into(), "text/event-stream");
-            settings.provider_credentials[0].base_url = Some(base);
-            let mut deltas = Vec::new();
-            assert_eq!(
-                stream_native_chat(&settings, &request(), &[], |delta| deltas.push(delta))
-                    .unwrap()
-                    .text,
-                "OK"
-            );
-            let raw = server.join().unwrap();
-            assert!(raw.starts_with(&format!("POST {path}")));
             assert!(
-                deltas.iter().any(|delta| delta.done),
-                "{protocol:?} missing done"
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
             );
         }
+    }
+
+    #[test]
+    fn custom_header_secrets_never_follow_cross_origin_redirects() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        for operation in 0..3 {
+            let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/v1", origin.local_addr().unwrap());
+            let location = format!("http://{}/capture", target.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut stream, _) = origin.accept().unwrap();
+                read_http_request(&mut stream);
+                write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let mut settings = header_only_settings(base);
+            settings.provider_credentials[0].extra_headers[0].name = "X-Gateway-Token".into();
+            let result = match operation {
+                0 => complete_native_chat(&settings, &request(), &[]).map(|_| ()),
+                1 => stream_native_chat(&settings, &request(), &[], |_| {}).map(|_| ()),
+                _ => super::discover_provider_models(&settings, &settings.provider_credentials[0])
+                    .map(|_| ()),
+            };
+            assert!(result.is_err());
+            server.join().unwrap();
+            assert!(
+                matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        }
+    }
+
+    #[test]
+    fn custom_header_secrets_follow_redirects_within_the_same_origin() {
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", origin.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut first, _) = origin.accept().unwrap();
+            read_http_request(&mut first);
+            write!(first, "HTTP/1.1 307 Temporary Redirect\r\nLocation: /v1/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            drop(first);
+            let (mut second, _) = origin.accept().unwrap();
+            let raw = read_http_request(&mut second);
+            let body =
+                r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#;
+            write!(second, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            raw
+        });
+        let mut settings = header_only_settings(base);
+        settings.provider_credentials[0].extra_headers[0].name = "X-Gateway-Token".into();
+        assert_eq!(
+            complete_native_chat(&settings, &request(), &[])
+                .unwrap()
+                .text,
+            "OK"
+        );
+        let raw = server.join().unwrap();
+        assert!(raw.starts_with("POST /v1/redirected"));
+        assert!(
+            raw.to_lowercase()
+                .contains("x-gateway-token: bearer header-only-fixture")
+        );
     }
 
     #[test]

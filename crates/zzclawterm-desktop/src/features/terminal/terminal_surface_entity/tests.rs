@@ -2360,6 +2360,288 @@ fn protocol_scroll_wheel_defers_parent_update_until_surface_lease_is_released() 
 }
 
 #[test]
+fn returning_to_live_paints_latest_last_row_before_app_scroll_sync() {
+    assert_return_to_live_paints_latest_last_row(false, false, false);
+}
+
+#[test]
+fn fractional_pixels_returning_to_live_paint_latest_last_row_before_app_scroll_sync() {
+    assert_return_to_live_paints_latest_last_row(true, false, false);
+}
+
+#[test]
+fn returning_to_live_during_output_growth_paints_latest_last_row_before_app_scroll_sync() {
+    assert_return_to_live_paints_latest_last_row(false, true, false);
+}
+
+#[test]
+fn returning_to_live_without_a_worker_frame_keeps_painted_text_and_geometry_until_ready() {
+    assert_return_to_live_paints_latest_last_row(false, false, true);
+}
+
+#[test]
+fn fractional_pixels_returning_to_live_without_a_worker_frame_keep_geometry_until_ready() {
+    assert_return_to_live_paints_latest_last_row(true, false, true);
+}
+
+fn assert_return_to_live_paints_latest_last_row(
+    fractional: bool,
+    grow_history: bool,
+    live_missing: bool,
+) {
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let root = std::env::temp_dir().join(format!("zzclawterm-live-scroll-{}", uuid()));
+    let runtime = AppRuntime::from_parts_for_test(
+        RuntimeMode::Portable,
+        root.clone(),
+        root.join("config"),
+        root.join("logs"),
+        root.join("cache"),
+        None,
+    );
+    let stores = UiStoreHandles {
+        startup_restore: cx.new(|_| StartupRestoreStore::default()),
+        overlays: cx.new(|_| OverlayStore::default()),
+    };
+    let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+    let output = terminal_test_output_lines(80);
+    let mut screen = TerminalScreen::default();
+    screen.advance_decoded_text(&output);
+    screen.advance_decoded_text("\r");
+    let initial_offset = usize::from(!fractional);
+    let old = Arc::new(screen.viewport_snapshot_with_window(initial_offset, 32, 32));
+    if grow_history {
+        screen.advance_decoded_text("\r\nnew output\r\n");
+    }
+    screen.advance_decoded_text("latest unsubmitted input");
+    let latest = Arc::new(screen.viewport_snapshot(0));
+    assert!(
+        latest
+            .rows()
+            .last()
+            .unwrap()
+            .text
+            .contains("latest unsubmitted input")
+    );
+    if !grow_history {
+        assert_eq!(old.history, latest.history);
+        assert!(terminal_snapshot_covers_display_offset(
+            &old,
+            0,
+            latest.viewport_rows,
+            latest.scrollback_len,
+        ));
+    }
+    let surface = cx.update_entity(&app, |app, cx| {
+        app.session.select_active_session("session");
+        app.terminal
+            .seed_session_view("session".to_string(), output, "UTF-8");
+        let view = app.terminal.view.views.get_mut("session").unwrap();
+        view.frame_snapshot = (!live_missing).then(|| latest.clone());
+        view.scroll_offset = initial_offset;
+        app.sync_terminal_surface_paint("session", cx);
+        app.ensure_terminal_surface("session", cx)
+    });
+    cx.update_entity(&surface, |surface, _| {
+        // Exercise painting without the production bounds tracker requesting a
+        // worker resize for the synthetic test window.
+        surface.app = None;
+        surface.apply_frame_snapshot(TerminalSurfaceFrameSnapshot::new(
+            old.clone(),
+            TerminalScrollVisualState {
+                history: old.history,
+                session_id: "session".to_string(),
+                scroll_offset: initial_offset,
+                scroll_residual_lines: if fractional { 0.6 } else { 0.0 },
+                display_offset: initial_offset,
+                scrollback_len: old.scrollback_len,
+                viewport_rows: latest.viewport_rows,
+                has_new_while_scrolled: true,
+                performance_overlay: None,
+                skipped_output_chars: 0,
+            },
+        ));
+    });
+    let window = cx.open_window(size(px(640.0), px(600.0)), {
+        let surface = surface.clone();
+        move |_window, _cx| TerminalSurfaceLayoutTestView {
+            surface,
+            mounted: true,
+        }
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    let old_geometry = cx.read_entity(&surface, |surface, _| {
+        surface.painted_hit_test_geometry.unwrap()
+    });
+    cx.read_entity(&app, |app, _| {
+        assert_eq!(
+            app.terminal_live_surface_frame("session").is_none(),
+            live_missing
+        );
+    });
+    cx.update_entity(&surface, |surface, cx| {
+        surface.set_app(app.clone());
+        surface.handle_scroll_wheel(
+            &ScrollWheelEvent {
+                delta: if fractional {
+                    ScrollDelta::Pixels(point(px(0.), px(-0.6 * surface.cell_height)))
+                } else {
+                    ScrollDelta::Lines(point(0., -1.))
+                },
+                ..ScrollWheelEvent::default()
+            },
+            cx,
+        );
+        surface.app = None;
+    });
+    for phase in ["immediate", "pending full frame", "app sync", "full frame"] {
+        if phase == "app sync" {
+            cx.update_entity(&app, |app, _| {
+                app.terminal
+                    .view
+                    .views
+                    .get_mut("session")
+                    .unwrap()
+                    .frame_snapshot = Some(latest.clone());
+            });
+            cx.update_entity(&surface, |surface, cx| {
+                surface.flush_local_scroll_app_sync(app.clone(), cx);
+            });
+        } else if phase == "full frame" || phase == "pending full frame" {
+            cx.update_entity(&app, |app, cx| {
+                app.sync_terminal_surface_paint("session", cx);
+            });
+        }
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.read_entity(&surface, |surface, _| {
+            let (geometry, painted) = surface.painted_hit_test_state().unwrap();
+            if live_missing && (phase == "immediate" || phase == "pending full frame") {
+                assert!(Arc::ptr_eq(&painted, &old));
+                assert_eq!(geometry.display_offset, old_geometry.display_offset);
+                assert_eq!(geometry.visual_y_offset, old_geometry.visual_y_offset);
+                assert!(surface.scroll_snapshot_pending);
+                assert!(!surface.show_cursor);
+                return;
+            }
+            assert!(
+                painted
+                    .rows()
+                    .last()
+                    .unwrap()
+                    .text
+                    .contains("latest unsubmitted input"),
+                "last row regressed during {phase}",
+            );
+            assert_eq!(geometry.display_offset, 0, "{phase}");
+            let last_row_y =
+                geometry.visual_y_offset + (painted.row_count() - 1) as f32 * geometry.cell_height;
+            assert_eq!(
+                last_row_y,
+                (latest.viewport_rows - 1) as f32 * geometry.cell_height,
+                "last row moved during {phase}",
+            );
+        });
+    }
+}
+
+#[test]
+fn stale_local_scroll_sync_does_not_overwrite_the_app_scroll_target() {
+    let root = crate::test_support::TestConfigDir::new("zzclawterm-stale-local-scroll");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = crate::features::test_support::app_with_visible_local_session(
+        &mut cx,
+        root.path(),
+        "session",
+    );
+    let surface = cx.update_entity(&app, |app, cx| {
+        app.terminal.seed_session_view(
+            "session".to_string(),
+            terminal_test_output_lines(80),
+            "UTF-8",
+        );
+        app.terminal
+            .view
+            .views
+            .get_mut("session")
+            .unwrap()
+            .scroll_offset = 3;
+        app.ensure_terminal_surface("session", cx)
+    });
+    cx.update_entity(&surface, |surface, cx| {
+        let mut stale = surface.current_scroll_visual_state();
+        stale.scroll_offset = 0;
+        stale.display_offset = 0;
+        surface.remember_pending_local_scroll_sync(stale, 1);
+        surface.scroll_interaction_generation = 2;
+        surface.flush_local_scroll_app_sync(app.clone(), cx);
+    });
+    cx.read_entity(&app, |app, _| {
+        assert_eq!(app.terminal.view.views["session"].scroll_offset, 3);
+    });
+}
+
+#[test]
+fn reversing_local_scroll_before_app_sync_keeps_the_latest_wheel_target() {
+    let root = crate::test_support::TestConfigDir::new("zzclawterm-reverse-local-scroll");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = crate::features::test_support::app_with_visible_local_session(
+        &mut cx,
+        root.path(),
+        "session",
+    );
+    let mut screen = TerminalScreen::default();
+    screen.advance_decoded_text(&terminal_test_output_lines(80));
+    let live = Arc::new(screen.viewport_snapshot_with_window(0, 32, 0));
+    let surface = cx.update_entity(&app, |app, cx| {
+        app.terminal
+            .view
+            .views
+            .get_mut("session")
+            .unwrap()
+            .frame_snapshot = Some(live.clone());
+        app.sync_terminal_surface_paint("session", cx);
+        app.ensure_terminal_surface("session", cx)
+    });
+    let wheel = |cx: &mut TestAppContext, lines| {
+        cx.update_entity(&surface, |surface, cx| {
+            surface.handle_scroll_wheel(
+                &ScrollWheelEvent {
+                    delta: ScrollDelta::Lines(point(0., lines)),
+                    ..ScrollWheelEvent::default()
+                },
+                cx,
+            );
+        });
+    };
+    wheel(&mut cx, 1.0);
+    cx.update_entity(&app, |app, cx| {
+        // The app still thinks it is at live until the local timer fires.
+        assert_eq!(app.terminal.view.views["session"].scroll_offset, 0);
+        app.notify_terminal_scroll_position_only("session", cx);
+        app.notify_terminal_scroll_visual_only("session", cx);
+    });
+    cx.read_entity(&surface, |surface, _| {
+        assert_eq!(surface.scroll_offset, 1);
+        assert!(!surface.show_cursor);
+    });
+    wheel(&mut cx, -1.0);
+    cx.update_entity(&surface, |surface, cx| {
+        surface.flush_local_scroll_app_sync(app.clone(), cx);
+        assert_eq!(surface.scroll_offset, 0);
+        assert!(Arc::ptr_eq(surface.snapshot.as_ref().unwrap(), &live));
+    });
+}
+
+#[test]
 fn local_surface_scroll_app_sync_is_frame_coalesced() {
     let mut surface = TerminalSurface::new("session");
     let first = TerminalScrollVisualState {

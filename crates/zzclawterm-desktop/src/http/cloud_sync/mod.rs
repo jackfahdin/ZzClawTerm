@@ -2,6 +2,7 @@ mod aliyun;
 mod github_gist_auth;
 mod google_drive;
 mod helpers;
+pub(crate) mod metrics;
 mod onedrive;
 mod s3;
 mod snippet;
@@ -17,3 +18,11 @@ pub use webdav::NativeWebdavRemote;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) type CloudTokenSink = std::sync::Arc<
+    dyn Fn(
+            zzclawterm_core::cloud_sync::credentials::CloudCredentialUpdate,
+        ) -> Result<(), zzclawterm_core::CloudSyncError>
+        + Send
+        + Sync,
+>;

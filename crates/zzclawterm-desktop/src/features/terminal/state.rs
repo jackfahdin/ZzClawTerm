@@ -698,6 +698,7 @@ mod tests {
             "https://example.com".to_string(),
             1,
             crate::models::ActionLinkTooltipState {
+                session_id: "local".to_string(),
                 x: px(10.),
                 y: px(20.),
                 kind_label: "URL".to_string(),

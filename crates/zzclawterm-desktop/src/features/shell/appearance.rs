@@ -38,6 +38,7 @@ impl ZzClawTermApp {
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
         self.settings.replace_summary(settings);
+        crate::window_chrome::request_window_decoration_refresh(cx);
         self.sync_remote_monitoring_inputs(cx);
         self.sync_transfer_internal_editor_font_input(cx);
         self.sync_native_window_material(cx);

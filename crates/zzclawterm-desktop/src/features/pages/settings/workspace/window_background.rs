@@ -46,7 +46,7 @@ impl SettingsPanel {
         settings_form_section(
             palette,
             Some(t!("settings.windowBackground")),
-            Some(t!("settings.windowBackgroundDesc")),
+            None,
             div()
                 .flex()
                 .flex_col()

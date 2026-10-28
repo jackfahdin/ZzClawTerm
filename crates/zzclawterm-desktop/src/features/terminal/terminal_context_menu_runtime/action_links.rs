@@ -132,6 +132,9 @@ impl ZzClawTermApp {
         let Some(tip) = self.terminal.menus.action_link_tooltip.clone() else {
             return div().into_any_element();
         };
+        if !self.action_link_tooltip_has_visible_source(&tip) {
+            return div().into_any_element();
+        }
         let mod_label = if cfg!(target_os = "macos") {
             "⌘"
         } else {

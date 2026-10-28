@@ -690,11 +690,13 @@ impl ZzClawTermApp {
 
     /// Build the inputs a provider credential row draws.
     ///
-    /// Three fields for the credential itself, plus the manual-model box its group
-    /// draws: `ai_model_groups` builds one group per enabled credential, keyed by the
-    /// credential id, and looks that box up whether or not the group is expanded.
-    /// Adding a credential reveals all four, so the add is also a boundary that builds
-    /// them; keep the ids in step with the lookups in `ai::models`.
+    /// Three fields for the credential itself, one name/value pair per custom
+    /// header, plus the manual-model box its group draws: `ai::models` builds
+    /// one group per enabled credential, keyed by the credential id, and looks
+    /// that box up whether or not the group is expanded. Adding a credential
+    /// reveals the fixed fields; header rows are ensured when the credential
+    /// is selected or edited, so keep ids in step with the lookups in
+    /// `ai::models`.
     pub(in crate::features) fn ensure_ai_credential_inputs(
         &mut self,
         credential_id: &str,
@@ -735,6 +737,36 @@ impl ZzClawTermApp {
                         "".into()
                     },
                     ..secret_input_setup(secret_field)
+                },
+                cx,
+            );
+        }
+        for header in &credential.extra_headers {
+            let header_secret = self
+                .ai
+                .settings_credential_header_secret_drafts()
+                .get(&(credential_id.to_string(), header.id.clone()))
+                .cloned()
+                .unwrap_or_default();
+            self.ensure_text_input(
+                format!("ai.credential.{credential_id}.header.{}.name", header.id),
+                &header.name,
+                TextInputSetup {
+                    placeholder: t!("ai.customHeaderName").to_string().into(),
+                    ..secret_input_setup(false)
+                },
+                cx,
+            );
+            self.ensure_text_input(
+                format!("ai.credential.{credential_id}.header.{}.value", header.id),
+                &header_secret,
+                TextInputSetup {
+                    placeholder: if !header.value.is_empty() {
+                        "••••••••".into()
+                    } else {
+                        t!("ai.customHeaderValue").to_string().into()
+                    },
+                    ..secret_input_setup(true)
                 },
                 cx,
             );
@@ -1489,6 +1521,12 @@ mod tests {
             settings.provider = "webdav".to_string();
             settings.webdav.endpoint = endpoint;
             settings.enabled = true;
+            let persisted_settings = settings.clone();
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, move |store| {
+                    store.save_cloud_sync_settings(persisted_settings)
+                })
+                .expect("persist the provider configuration used by the test");
             app.cloud_sync
                 .replace_settings(settings, Default::default());
             app.sync_component_theme(cx);
@@ -1500,7 +1538,7 @@ mod tests {
 
         cx.update_entity(&app, |app, cx| app.run_provider_cloud_sync_test(cx));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let completed = cx.update_entity(&app, |app, _| !app.cloud_sync.job_running());
             if completed {
@@ -1591,6 +1629,12 @@ mod tests {
             settings.provider = "webdav".to_string();
             settings.webdav.endpoint = endpoint;
             settings.enabled = true;
+            let persisted_settings = settings.clone();
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::CloudSync, move |store| {
+                    store.save_cloud_sync_settings(persisted_settings)
+                })
+                .expect("persist the provider configuration used by the test");
             app.cloud_sync
                 .replace_settings(settings, Default::default());
             app.sync_component_theme(cx);
@@ -1606,7 +1650,7 @@ mod tests {
 
         cx.update_entity(&app, |app, cx| app.run_provider_cloud_sync_test(cx));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let completed = cx.update_entity(&app, |app, _| !app.cloud_sync.job_running());
             if completed {

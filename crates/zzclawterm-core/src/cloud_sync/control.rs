@@ -83,6 +83,28 @@ impl CloudSyncRemote for ControlledRemote<'_> {
         self.control.checkpoint()?;
         self.remote.file_capacity()
     }
+    fn read_conditional(
+        &self,
+        path: &str,
+        etag: Option<&str>,
+    ) -> Result<super::io::CloudObjectRead, CloudSyncError> {
+        self.control.checkpoint()?;
+        let result = self.remote.read_conditional(path, etag)?;
+        self.control.checkpoint()?;
+        Ok(result)
+    }
+    fn list_metadata(
+        &self,
+        path: &str,
+    ) -> Result<Vec<super::io::CloudObjectMetadata>, CloudSyncError> {
+        self.control.checkpoint()?;
+        let result = self.remote.list_metadata(path)?;
+        self.control.checkpoint()?;
+        Ok(result)
+    }
+    fn observe(&self, event: super::io::CloudSyncIoEvent) {
+        self.remote.observe(event);
+    }
     fn create_dir(&self, path: &str) -> Result<(), CloudSyncError> {
         self.control.checkpoint()?;
         self.remote.create_dir(path)

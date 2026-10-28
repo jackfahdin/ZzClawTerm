@@ -715,8 +715,42 @@ pub(super) fn toggle_connection_editor_flag(
         ConnectionEditorToggle::RdpUseNla => {
             editor.rdp_security.use_nla = !editor.rdp_security.use_nla;
         }
+        ConnectionEditorToggle::RdpAdministrativeSession => {
+            editor.rdp_security.administrative_session =
+                !editor.rdp_security.administrative_session;
+        }
         ConnectionEditorToggle::RdpReconnect => {
             editor.rdp_reconnect.enabled = !editor.rdp_reconnect.enabled;
+        }
+        ConnectionEditorToggle::RdpDisplayWallpaper => {
+            editor.rdp_display.display_wallpaper = !editor.rdp_display.display_wallpaper;
+        }
+        ConnectionEditorToggle::RdpDisplayThemes => {
+            editor.rdp_display.display_themes = !editor.rdp_display.display_themes;
+        }
+        ConnectionEditorToggle::RdpFontSmoothing => {
+            editor.rdp_display.enable_font_smoothing = !editor.rdp_display.enable_font_smoothing;
+        }
+        ConnectionEditorToggle::RdpDesktopComposition => {
+            editor.rdp_display.enable_desktop_composition =
+                !editor.rdp_display.enable_desktop_composition;
+        }
+        // The four below are stored in the same direction the remote protocol
+        // reads them: switching them on asks the server to stop drawing the effect.
+        ConnectionEditorToggle::RdpFullWindowDrag => {
+            editor.rdp_display.disable_full_window_drag =
+                !editor.rdp_display.disable_full_window_drag;
+        }
+        ConnectionEditorToggle::RdpMenuAnimations => {
+            editor.rdp_display.disable_menu_animations =
+                !editor.rdp_display.disable_menu_animations;
+        }
+        ConnectionEditorToggle::RdpCursorShadow => {
+            editor.rdp_display.disable_cursor_shadow = !editor.rdp_display.disable_cursor_shadow;
+        }
+        ConnectionEditorToggle::RdpCursorBlinking => {
+            editor.rdp_display.disable_cursor_blinking =
+                !editor.rdp_display.disable_cursor_blinking;
         }
         ConnectionEditorToggle::VncClipboard => {
             editor.vnc_clipboard.enabled = !editor.vnc_clipboard.enabled;

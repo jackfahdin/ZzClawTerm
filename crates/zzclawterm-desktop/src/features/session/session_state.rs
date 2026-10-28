@@ -117,10 +117,108 @@ impl ZzClawTermApp {
                 ));
             }
             SessionLaunchConfig::Rdp(config) => {
+                let yes = || t!("sessionInfo.yes").to_string();
+                let no = || t!("sessionInfo.no").to_string();
                 details.push((t!("sessionInfo.launch"), "RDP".to_string()));
+                details.push((t!("sessionInfo.sectionClient"), String::new()));
+                details.push((
+                    t!("sessionInfo.clientVersion"),
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ));
+                details.push((t!("sessionInfo.localOs"), local_os_summary()));
+                details.push((
+                    t!("sessionInfo.nla"),
+                    if config.use_nla { yes() } else { no() },
+                ));
+                details.push((
+                    t!("sessionInfo.remoteSession"),
+                    match crate::platform::is_remote_session() {
+                        Some(true) => yes(),
+                        Some(false) => no(),
+                        None => t!("sessionInfo.notAvailable").to_string(),
+                    },
+                ));
+                details.push((t!("sessionInfo.sectionNetwork"), String::new()));
+                details.push((
+                    t!("sessionInfo.transport"),
+                    t!("sessionInfo.tcpOnly").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.rtt"),
+                    t!("sessionInfo.notMeasured").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.bandwidth"),
+                    t!("sessionInfo.notMeasured").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.frameRate"),
+                    t!("sessionInfo.notMeasured").to_string(),
+                ));
+                details.push((t!("sessionInfo.sectionGraphics"), String::new()));
+                details.push((
+                    t!("sessionInfo.codecs"),
+                    t!("sessionInfo.bitmapUpdates").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.graphicsPipeline"),
+                    format!(
+                        "{} ({})",
+                        if config.display.graphics_pipeline {
+                            yes()
+                        } else {
+                            no()
+                        },
+                        t!("sessionInfo.forcedOff"),
+                    ),
+                ));
+                details.push((
+                    t!("sessionInfo.resolution"),
+                    format!("{} × {}", config.display.width, config.display.height),
+                ));
+                details.push((
+                    t!("sessionInfo.colorDepth"),
+                    format!("{}-bit", config.display.color_depth),
+                ));
+                let renderer = self.shell.renderer();
+                let kind = match crate::platform::RendererKind::from_specs(renderer) {
+                    crate::platform::RendererKind::Hardware => t!("sessionInfo.hardware"),
+                    crate::platform::RendererKind::Software => t!("sessionInfo.software"),
+                    crate::platform::RendererKind::Unknown => t!("sessionInfo.unknown"),
+                };
+                details.push((
+                    t!("sessionInfo.renderer"),
+                    match renderer {
+                        Some(specs) if !specs.device_name.trim().is_empty() => {
+                            format!("{} ({kind})", specs.device_name)
+                        }
+                        _ => kind.to_string(),
+                    },
+                ));
+                details.push((t!("sessionInfo.sectionRemote"), String::new()));
+                details.push((
+                    t!("sessionInfo.sessionType"),
+                    t!("sessionInfo.remoteDesktop").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.gateway"),
+                    t!("sessionInfo.notUsed").to_string(),
+                ));
+                details.push((
+                    t!("sessionInfo.logonMethod"),
+                    t!("sessionInfo.notAvailable").to_string(),
+                ));
                 details.push((t!("sessionInfo.host"), config.host.clone()));
                 details.push((t!("sessionInfo.port"), config.port.to_string()));
                 details.push((t!("sessionInfo.username"), config.username.clone()));
+                details.push((
+                    t!("sessionInfo.consoleSession"),
+                    if config.administrative_session {
+                        yes()
+                    } else {
+                        no()
+                    },
+                ));
             }
             SessionLaunchConfig::Vnc(config) => {
                 details.push((t!("sessionInfo.launch"), "VNC".to_string()));
@@ -486,7 +584,13 @@ impl ZzClawTermApp {
         };
         let text = details
             .into_iter()
-            .map(|(label, value)| format!("{label}: {value}"))
+            .map(|(label, value)| {
+                if value.is_empty() {
+                    label.to_string()
+                } else {
+                    format!("{label}: {value}")
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         self.copy_text_with_feedback("copy-session-info", text, cx);
@@ -580,6 +684,10 @@ fn terminal_activation_surface_notify_ids(
         ids.push(session_id.to_string());
     }
     ids
+}
+
+fn local_os_summary() -> String {
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 #[cfg(test)]

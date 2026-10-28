@@ -218,7 +218,7 @@ impl DesktopController {
             })
             .ok()
             .flatten();
-        self.release_settings_owner(workspace_id);
+        self.release_settings_owner(workspace_id, cx);
         self.pending_tab_moves.remove(&workspace_id);
         cx.spawn(async move |this, cx| {
             if let Some(cleanup) = cleanup {

@@ -165,13 +165,13 @@ Typical outcomes include:
 - local changes are pending upload
 - both local and remote changed, so a conflict is detected
 
-This is not real-time remote watching. It is a startup check of the current state.
+All providers, including GitHub Gist, also check every 15 minutes and when a window regains focus, with a 120-second focus throttle. Disabling startup checks skips only that trigger. Failures use backoff and valid server `Retry-After` hints; authentication failures pause until settings change.
 
 ### Auto-pull remote changes
 
 When **Auto Pull Remote Changes** is enabled, if startup check or sync check finds that only the remote side changed, NyaTerm automatically pulls and applies the current remote snapshot.
 
-This only handles cases with no unsynchronized local changes. If both local and remote changed, NyaTerm still enters conflict state instead of choosing one side automatically.
+This only handles cases with no unsynchronized local changes. Active sessions and unsaved settings drafts defer application until it is safe. If both local and remote changed, NyaTerm still enters conflict state instead of choosing one side automatically.
 
 ### Auto-push after local changes
 
@@ -231,7 +231,9 @@ The current implementation offers two resolution actions.
 
 ### Download Remote Version
 
-Pull the remote snapshot and apply it to the current device.
+The branch list shows every concurrent revision, device name (short UUID for old snapshots), time, readability and difference counts. One readable branch is selected automatically; multiple readable branches require an explicit choice. Summaries show record counts, settings categories and unknown-entity change markers without credentials, OTP values, notes or command text.
+
+Pull the selected immutable revision and apply it to the current device.
 
 Use this when:
 
@@ -253,7 +255,7 @@ The important boundary is:
 - this is not collaborative conflict resolution
 - it is effectively a choice between the local snapshot and the remote snapshot
 
-Device commits and causal records preserve concurrent branches. Explicitly choosing local or cloud publishes a new commit resolving the observed branches; cloud uses the remote branch read when the operation starts. Later concurrent edits can produce another conflict. Do not manually clear `sync/snapshots/`: it is the current data path.
+Device commits and causal records preserve concurrent branches. Explicitly choosing local or cloud publishes a new commit resolving the observed branches; cloud uses the immutable revision explicitly selected in the preview. Later concurrent edits can produce another conflict. Do not manually clear `sync/snapshots/`: it is the current data path.
 
 ## What gets synced?
 
@@ -311,3 +313,63 @@ If your main question is "what happened recently?", start with the workspace **C
 - Before making large changes to connections, OTP, or quick commands, use local `.nya` export if you need a rollback point.
 - If you switch between devices often, keep a clear device-name convention and a predictable remote-namespace strategy.
 :::
+
+
+## Credentials, devices and activity history
+
+Google Drive, OneDrive and Aliyun Drive encrypt and save refreshed access tokens
+and any returned refresh token before the next authenticated request. An absent
+refresh token retains the previous one. Save failure stops the operation; later
+sync failure or cancellation does not undo saved credentials. Unedited draft
+tokens follow rotation while explicit credential edits retain save-conflict checks.
+
+Device names are inside encrypted snapshots; UUIDs remain the identity. A rename
+appears on the next actual publication and does not cause a name-only upload.
+
+Resolution confirms the displayed observed branches and selected revision.
+Changed local content, changed branch sets and missing/unreadable selected
+snapshots refresh the preview for another confirmation. A concurrent publication
+arriving afterwards remains preserved and can cause a later conflict.
+
+Automatic uploads, downloads, conflicts, failures and successful recovery are
+recorded once per process across windows. Disabled, busy, debounce and unchanged
+checks do not add entries. Identical classification/trigger/revision failures are
+deduplicated for 15 minutes. HTTP diagnostics contain controlled classifications,
+provider, operation and status, without URLs, signed addresses or response bodies.
+History write failures do not change an already successful sync outcome.
+
+
+## Background checks and traffic
+
+Automatic checks inspect the pointer and every device head. An authenticated,
+unchanged snapshot is fully downloaded and validated at most once per 24-hour
+receipt lifetime; lightweight checks do not extend that lifetime. When S3
+supports ETags, unchanged pointers return 304 and fresh listing validators allow
+head metadata reuse. Services without conditional support fall back to GET.
+
+Windows share memory-only caches within one process. Restarting, changing remote
+configuration/accounts/credentials/master passwords, eviction and changed
+branches may require full reads. Actual push, pull, recovery and conflict
+confirmation still validate snapshots. Daily cleanup, upload readback and the
+compatibility snapshot also consume traffic.
+
+Local notifications with unchanged synchronized content can skip networking.
+Continuous editing does not delay periodic remote checks, while upload debounce
+still applies. Successful manual or automatic inspections postpone the next
+periodic check and suppress duplicate focus checks for 120 seconds. Connection
+tests do not count as inspections. Disabling startup checks does not disable the
+15-minute periodic checks.
+
+Other providers still transfer their pointer and directory API responses.
+Gist/Snippet container responses may also include file contents. The daily limit
+applies to explicit snapshot reads and validation; it does not guarantee that
+every provider sends only metadata during a lightweight check.
+
+Controlled logs summarize request counts, upload/download body bytes, 304s,
+cache hits and full validations. All providers count at the HTTP boundary,
+including authentication retries and consumed error bodies. Upload bytes measure
+the buffered body submitted for each attempt; downloads include partial reads
+before failure. These exclude headers and TLS and are not billing figures.
+Summaries contain no addresses, object
+paths, ETags, credentials or synchronized content. Actual traffic depends on
+uptime, device count, snapshot size, edits, retries and storage capabilities.

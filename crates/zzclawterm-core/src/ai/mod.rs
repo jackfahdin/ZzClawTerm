@@ -25,6 +25,9 @@ pub use self::agent::*;
 pub use self::claude_code::*;
 pub use self::codex::*;
 pub use self::diagnostics::*;
+pub use self::provider_settings::{
+    custom_header_pairs, is_valid_custom_header_name, new_custom_header, normalize_custom_headers,
+};
 use self::providers::promote_reasoning_to_text;
 pub use self::providers::*;
 pub use self::responses::*;
@@ -116,6 +119,14 @@ pub enum ExternalMcpSessionScope {
     AllSessions,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTerminalDisplayMode {
+    #[default]
+    Inline,
+    Silent,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalMcpSettings {
     #[serde(default)]
@@ -124,6 +135,8 @@ pub struct ExternalMcpSettings {
     pub permission_mode: AiPermissionMode,
     #[serde(default)]
     pub session_scope: ExternalMcpSessionScope,
+    #[serde(default)]
+    pub terminal_display_mode: McpTerminalDisplayMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,9 +376,27 @@ pub struct AiProviderCredential {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<SecretString>,
+    #[serde(default)]
+    pub extra_headers: Vec<AiHttpHeader>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
+
+/// A user-defined HTTP header sent with every request made for a provider
+/// credential. The value is encrypted at rest, like `api_key`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiHttpHeader {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub value: SecretString,
+}
+
+pub const MAX_AI_CUSTOM_HEADERS: usize = 32;
+pub const MAX_AI_CUSTOM_HEADER_NAME_LEN: usize = 256;
+pub const MAX_AI_CUSTOM_HEADER_VALUE_LEN: usize = 8192;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -470,6 +501,7 @@ impl std::fmt::Debug for AiProviderCredential {
             .field("api_format", &self.api_format)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("extra_headers", &self.extra_headers.len())
             .field("enabled", &self.enabled)
             .finish()
     }

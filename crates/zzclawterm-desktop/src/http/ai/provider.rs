@@ -1,5 +1,6 @@
 use serde_json::json;
 use std::io::{BufRead, BufReader};
+use std::str::FromStr;
 use std::time::Duration;
 use zzclawterm_core::ai::provider_settings::{
     ProviderModelCursor, effective_protocol, is_builtin_provider, parse_provider_model_page,
@@ -8,6 +9,54 @@ use zzclawterm_core::ai::{
     AiBackendKind, AiChatCompletion, AiChatRequest, AiChatStreamDelta, AiMessage, AiModelDiscovery,
     AiProviderApiProtocol, AiProviderCredential, AiReasoningEffort, AiSettings, ResolvedAiModel,
 };
+
+/// Arbitrary gateway auth headers are not covered by reqwest's built-in list
+/// of credentials stripped on cross-host redirects. Keep them on their origin.
+pub(crate) fn custom_header_redirects(
+    builder: zed_reqwest::blocking::ClientBuilder,
+    credential: &AiProviderCredential,
+) -> zed_reqwest::blocking::ClientBuilder {
+    if !zzclawterm_core::custom_header_pairs(credential).is_ok_and(|headers| !headers.is_empty()) {
+        return builder;
+    }
+    builder.redirect(zed_reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("Too many AI endpoint redirects")
+        } else if attempt
+            .previous()
+            .first()
+            .is_some_and(|original| original.origin() != attempt.url().origin())
+        {
+            attempt.error("AI custom headers cannot follow a redirect to a different origin")
+        } else {
+            attempt.follow()
+        }
+    }))
+}
+
+/// Applies a credential's custom headers to a raw request builder. Applied
+/// after auth headers so user overrides win.
+pub(crate) fn apply_custom_headers(
+    builder: zed_reqwest::blocking::RequestBuilder,
+    credential: &AiProviderCredential,
+) -> Result<zed_reqwest::blocking::RequestBuilder, String> {
+    let mut map = zed_reqwest::header::HeaderMap::new();
+    for (name, value) in
+        zzclawterm_core::custom_header_pairs(credential).map_err(|error| error.to_string())?
+    {
+        let parsed_name = zed_reqwest::header::HeaderName::from_str(&name)
+            .map_err(|_| "Invalid custom header name")?;
+        let mut parsed_value = zed_reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|_| "Invalid custom header value")?;
+        parsed_value.set_sensitive(true);
+        map.insert(parsed_name, parsed_value);
+    }
+    if map.is_empty() {
+        Ok(builder)
+    } else {
+        Ok(builder.headers(map))
+    }
+}
 
 pub fn discover_provider_models(
     settings: &AiSettings,
@@ -37,12 +86,14 @@ pub(crate) fn discover_provider_models_cancellable(
     };
     let url =
         zzclawterm_core::ai::ollama::ollama_url(base, path).map_err(|error| error.to_string())?;
-    let client =
-        super::proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?
-            .timeout(Duration::from_secs(15))
-            .user_agent(zzclawterm_core::effective_ai_request_user_agent(settings))
-            .build()
-            .map_err(|error| error.to_string())?;
+    let client = custom_header_redirects(
+        super::proxy::apply_proxy(zed_reqwest::blocking::Client::builder(), &settings.proxy)?,
+        credential,
+    )
+    .timeout(Duration::from_secs(15))
+    .user_agent(zzclawterm_core::effective_ai_request_user_agent(settings))
+    .build()
+    .map_err(|error| error.to_string())?;
     let mut names = Vec::new();
     let mut cursor: Option<ProviderModelCursor> = None;
     let mut seen = std::collections::HashSet::new();
@@ -76,6 +127,7 @@ pub(crate) fn discover_provider_models_cancellable(
                 _ => request.bearer_auth(key),
             };
         }
+        request = apply_custom_headers(request, credential)?;
         let response = request.send().map_err(|error| error.to_string())?;
         if !response.status().is_success() {
             return Err(format!("Provider returned {}", response.status()));
@@ -145,6 +197,7 @@ pub fn complete_ollama(
     if let Some(key) = credential.api_key.as_deref().filter(|key| !key.is_empty()) {
         http = http.bearer_auth(key);
     }
+    http = apply_custom_headers(http, credential)?;
     let response = http.send().map_err(|error| error.to_string())?;
     if !response.status().is_success() {
         return Err(format!("Ollama returned {}", response.status()));

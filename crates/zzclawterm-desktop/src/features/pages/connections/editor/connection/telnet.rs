@@ -81,8 +81,12 @@ pub(super) fn connection_editor_telnet_section(
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
     let content = match section.editor.section {
-        ConnectionEditorSection::Basic => telnet_basic(section, cx),
-        ConnectionEditorSection::Authentication => telnet_authentication(section, cx),
+        ConnectionEditorSection::Basic => div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(telnet_basic(section, cx))
+            .child(telnet_authentication(section, cx)),
         ConnectionEditorSection::Terminal => telnet_terminal(section, cx),
         ConnectionEditorSection::Compatibility => telnet_compatibility(section, cx),
         ConnectionEditorSection::AutoLogin => telnet_auto_login(section, cx),

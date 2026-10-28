@@ -1,9 +1,11 @@
 use rust_i18n::t;
 
+use crate::window_chrome::WindowChrome;
 use gpui::{
     Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, SharedString, Window,
     WindowControlArea, div, prelude::*, px, rgb, svg,
 };
+use zzclawterm_ui::window_chrome::title_drag_region;
 use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant, ZzClawInput};
 
 use crate::features::view_widgets::{window_control_button, zzclawterm_app_icon};
@@ -21,6 +23,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
+        let chrome = WindowChrome::main(window);
         let unlock_busy = self.security.screen_lock_unlock_busy();
         let password_draft = self.security.screen_lock_password_draft().to_string();
         let password_input = self.text_input(
@@ -208,39 +211,51 @@ impl ZzClawTermApp {
                                 .debug_selector(|| "lock-title-drag".to_string())
                                 .h_full()
                                 .flex_1()
-                                .window_control_area(WindowControlArea::Drag)
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(Self::handle_title_bar_mouse_down),
-                                ),
+                                .map(|this| {
+                                    let on_event = cx.listener(Self::handle_title_drag_event);
+                                    title_drag_region(
+                                        this,
+                                        "lock-title-region",
+                                        chrome.drag,
+                                        window,
+                                        cx,
+                                        on_event,
+                                    )
+                                }),
                         )
-                        .child(window_control_button(
-                            palette,
-                            "lock-window-min",
-                            "icons/window/minimize.svg",
-                            WindowControlArea::Min,
-                            |_, window, _| window.minimize_window(),
-                        ))
-                        .child(window_control_button(
-                            palette,
-                            "lock-window-max",
-                            if window.is_maximized() {
-                                "icons/window/restore.svg"
-                            } else {
-                                "icons/window/maximize.svg"
-                            },
-                            WindowControlArea::Max,
-                            |_, window, _| window.zoom_window(),
-                        ))
-                        .child(window_control_button(
-                            palette,
-                            "lock-window-close",
-                            "icons/window/close.svg",
-                            WindowControlArea::Close,
-                            cx.listener(|this, _, window, cx| {
-                                this.handle_window_close_request(window, cx);
-                            }),
-                        )),
+                        .when(chrome.minimize, |this| {
+                            this.child(window_control_button(
+                                palette,
+                                "lock-window-min",
+                                "icons/window/minimize.svg",
+                                WindowControlArea::Min,
+                                |_, window, _| window.minimize_window(),
+                            ))
+                        })
+                        .when(chrome.maximize, |this| {
+                            this.child(window_control_button(
+                                palette,
+                                "lock-window-max",
+                                if chrome.restore {
+                                    "icons/window/restore.svg"
+                                } else {
+                                    "icons/window/maximize.svg"
+                                },
+                                WindowControlArea::Max,
+                                |_, window, _| window.zoom_window(),
+                            ))
+                        })
+                        .when(chrome.close, |this| {
+                            this.child(window_control_button(
+                                palette,
+                                "lock-window-close",
+                                "icons/window/close.svg",
+                                WindowControlArea::Close,
+                                cx.listener(|this, _, window, cx| {
+                                    this.handle_window_close_request(window, cx);
+                                }),
+                            ))
+                        }),
                 )
             })
             .child(

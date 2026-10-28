@@ -131,7 +131,7 @@ HOME) expected=$HOME ;;
 WINDOWS) expected=$(wslpath -u "$2") ;;
 *) expected=$1 ;;
 esac
-if [ "$PWD" = "$expected" ]; then printf 'NYATERM_WSL_DIRECTORY_OK\n'; fi
+if [ "$PWD" = "$expected" ]; then printf 'ZZCLAWTERM_WSL_DIRECTORY_OK\n'; fi
 sleep 1"#;
         let mut shell_args: Vec<String> = [
             "--exec",
@@ -174,7 +174,7 @@ sleep 1"#;
             if terminal
                 .lines()
                 .iter()
-                .any(|line| line.contains("NYATERM_WSL_DIRECTORY_OK"))
+                .any(|line| line.contains("ZZCLAWTERM_WSL_DIRECTORY_OK"))
             {
                 verified = true;
                 break;

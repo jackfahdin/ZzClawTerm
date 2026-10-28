@@ -636,6 +636,10 @@ pub struct RdpSecuritySettings {
     pub use_nla: bool,
     #[serde(default = "default_rdp_certificate_policy")]
     pub certificate_policy: String,
+    /// Request an administrative session. The server determines the actual
+    /// session assignment; this does not guarantee access to a console session.
+    #[serde(default)]
+    pub administrative_session: bool,
 }
 
 impl Default for RdpSecuritySettings {
@@ -643,6 +647,7 @@ impl Default for RdpSecuritySettings {
         Self {
             use_nla: true,
             certificate_policy: default_rdp_certificate_policy(),
+            administrative_session: false,
         }
     }
 }
@@ -657,6 +662,33 @@ pub struct RdpDisplaySettings {
     pub height: u32,
     #[serde(default = "default_rdp_color_depth")]
     pub color_depth: u8,
+    /// Persisted request for RDPEGFX. The helper currently disables this path
+    /// pending end-to-end validation; saved requests are retained for future support.
+    #[serde(default)]
+    pub graphics_pipeline: bool,
+    /// mRemoteNG `DisplayWallpaper`. Polarity is the client's: false means the
+    /// server is told not to send wallpaper at all.
+    #[serde(default = "default_true")]
+    pub display_wallpaper: bool,
+    /// mRemoteNG `DisplayThemes`, same inverted polarity.
+    #[serde(default = "default_true")]
+    pub display_themes: bool,
+    /// mRemoteNG `EnableFontSmoothing`. This one is not inverted.
+    #[serde(default = "default_true")]
+    pub enable_font_smoothing: bool,
+    /// mRemoteNG `EnableDesktopComposition`. Not inverted.
+    #[serde(default)]
+    pub enable_desktop_composition: bool,
+    /// The four below carry mRemoteNG's `DisableXxx` names and are inverted like
+    /// it: true asks the server to turn that effect off.
+    #[serde(default = "default_true")]
+    pub disable_full_window_drag: bool,
+    #[serde(default = "default_true")]
+    pub disable_menu_animations: bool,
+    #[serde(default)]
+    pub disable_cursor_shadow: bool,
+    #[serde(default)]
+    pub disable_cursor_blinking: bool,
 }
 
 impl Default for RdpDisplaySettings {
@@ -666,6 +698,15 @@ impl Default for RdpDisplaySettings {
             width: default_rdp_width(),
             height: default_rdp_height(),
             color_depth: default_rdp_color_depth(),
+            graphics_pipeline: false,
+            display_wallpaper: true,
+            display_themes: true,
+            enable_font_smoothing: true,
+            enable_desktop_composition: false,
+            disable_full_window_drag: true,
+            disable_menu_animations: true,
+            disable_cursor_shadow: false,
+            disable_cursor_blinking: false,
         }
     }
 }

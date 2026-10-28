@@ -1107,21 +1107,46 @@ impl ZzClawTermApp {
             }
             NavItem::SyncBackupHistory => {
                 let palette = self.theme_palette();
+                let enabled = self.cloud_sync.settings().enabled && !self.cloud_sync.job_running();
                 Some(
-                    header_svg_icon_button(
-                        palette,
-                        "sync-history-header-refresh",
-                        "icons/fe/refresh.svg",
-                        t!("resourceMonitor.refresh"),
-                        true,
-                        cx.listener(|this, _, _, cx| {
-                            this.queue_cloud_sync_history_refresh(None, cx);
-                            this.shell
-                                .set_status("refreshing cloud sync history".to_string());
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(header_svg_icon_button(
+                            palette,
+                            "sync-history-push-now",
+                            "icons/fe/upload.svg",
+                            t!("settings.syncPushNow"),
+                            enabled,
+                            cx.listener(|this, _, window, cx| {
+                                this.prompt_provider_cloud_sync_push(window, cx);
+                            }),
+                        ))
+                        .child(header_svg_icon_button(
+                            palette,
+                            "sync-history-pull-now",
+                            "icons/fe/download.svg",
+                            t!("settings.syncPullNow"),
+                            enabled,
+                            cx.listener(|this, _, window, cx| {
+                                this.prompt_provider_cloud_sync_pull(window, cx);
+                            }),
+                        ))
+                        .child(header_svg_icon_button(
+                            palette,
+                            "sync-history-header-refresh",
+                            "icons/fe/refresh.svg",
+                            t!("resourceMonitor.refresh"),
+                            true,
+                            cx.listener(|this, _, _, cx| {
+                                this.queue_cloud_sync_history_refresh(None, cx);
+                                this.shell
+                                    .set_status("refreshing cloud sync history".to_string());
+                                cx.notify();
+                            }),
+                        ))
+                        .into_any_element(),
                 )
             }
             _ => None,

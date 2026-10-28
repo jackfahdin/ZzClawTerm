@@ -175,7 +175,7 @@ fn sftp_service_round_trips_file_manager_operations() -> anyhow::Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires NYATERM_TEST_SFTP_* variables and a disposable SFTP directory"]
+#[ignore = "requires ZZCLAWTERM_TEST_SFTP_* variables and a disposable SFTP directory"]
 fn shared_copy_engine_preserves_raw_targets_across_source_combinations() -> anyhow::Result<()> {
     use zzclawterm_transport::{
         FileBrowserService, FileCopyRequest, RemoteFilePath, RemoteFileService,
@@ -183,7 +183,7 @@ fn shared_copy_engine_preserves_raw_targets_across_source_combinations() -> anyh
     let config = test_config();
     let origin = FileBrowserService::remote(RemoteFileService::new(config.clone()));
     let other_session = FileBrowserService::remote(RemoteFileService::new(config));
-    let root = required_env("NYATERM_TEST_SFTP_ROOT")
+    let root = required_env("ZZCLAWTERM_TEST_SFTP_ROOT")
         .trim_end_matches('/')
         .to_string();
     let remote_root = RemoteFilePath::new(format!(
@@ -264,15 +264,15 @@ fn shared_copy_engine_preserves_raw_targets_across_source_combinations() -> anyh
 
 /// Read-only remote fixtures; every sample downloads into a fresh local directory.
 #[test]
-#[ignore = "requires SFTP credentials, NYATERM_BENCH_LOCAL_ROOT and three prepared remote fixtures"]
+#[ignore = "requires SFTP credentials, ZZCLAWTERM_BENCH_LOCAL_ROOT and three prepared remote fixtures"]
 fn sftp_download_release_benchmark_five_samples() -> anyhow::Result<()> {
     use std::time::Instant;
     let service = SftpService::new(test_config());
-    let local_root = required_env("NYATERM_BENCH_LOCAL_ROOT");
+    let local_root = required_env("ZZCLAWTERM_BENCH_LOCAL_ROOT");
     let fixtures = [
-        required_env("NYATERM_BENCH_FILE"),
-        required_env("NYATERM_BENCH_SMALL_DIR"),
-        required_env("NYATERM_BENCH_MIXED_DIR"),
+        required_env("ZZCLAWTERM_BENCH_FILE"),
+        required_env("ZZCLAWTERM_BENCH_SMALL_DIR"),
+        required_env("ZZCLAWTERM_BENCH_MIXED_DIR"),
     ];
     for (index, fixture) in fixtures.iter().enumerate() {
         let mut samples = Vec::new();

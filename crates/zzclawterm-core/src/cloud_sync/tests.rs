@@ -45,6 +45,9 @@ struct ConnectionStore {
 fn cloud_sync_debug_output_redacts_all_secret_values() {
     let secret = "nya-cloud-secret-never-log";
     let mut settings = CloudSyncSettings::default();
+    settings.webdav.endpoint = format!("https://example.test/?token={secret}");
+    settings.s3.endpoint = format!("https://example.test/?signature={secret}");
+    settings.gitee_snippet.api_endpoint = format!("https://example.test/?token={secret}");
     settings.webdav.password = Some(secret.to_string().into());
     settings.s3.access_key_id = Some(secret.to_string().into());
     settings.s3.secret_access_key = Some(secret.to_string().into());
@@ -56,8 +59,21 @@ fn cloud_sync_debug_output_redacts_all_secret_values() {
     settings.aliyun_drive.access_token = Some(secret.to_string().into());
     settings.github_gist.access_token = Some(secret.to_string().into());
     let settings_output = format!("{settings:?}");
+    let request = super::S3SignedRequest {
+        method: super::S3HttpMethod::Get,
+        url: format!("https://example.test/?signature={secret}"),
+        headers: BTreeMap::from([("x-amz-security-token".into(), secret.into())]),
+    };
+    assert!(!format!("{request:?}").contains(secret));
+    let file = super::SnippetHttpFile {
+        content: Some(secret.into()),
+        raw_url: Some(secret.into()),
+        truncated: false,
+    };
+    assert!(!format!("{file:?}").contains(secret));
 
     let options = LocalCloudSyncOptions {
+        device_name: None,
         config_dir: PathBuf::from("config"),
         portable_key_path: None,
         remote_dir: PathBuf::from("remote"),
@@ -2549,6 +2565,7 @@ fn remote_check_decides_conflict_when_local_and_remote_changed() {
 
 fn options(config_dir: &Path, remote_dir: &Path, device_id: &str) -> LocalCloudSyncOptions {
     LocalCloudSyncOptions {
+        device_name: None,
         config_dir: config_dir.to_path_buf(),
         portable_key_path: None,
         remote_dir: remote_dir.to_path_buf(),

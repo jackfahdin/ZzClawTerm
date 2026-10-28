@@ -21,6 +21,7 @@ use crate::terminal::{TerminalBufferMatch, TerminalLineDecorations, ZzClawTermin
 
 use super::{
     TERMINAL_INPUT_LATENCY_WINDOW, TERMINAL_USER_SCROLL_ACTIVE_WINDOW, TerminalScrollVisualState,
+    terminal_visual_scroll_active_for_state,
 };
 
 mod input;
@@ -920,6 +921,77 @@ impl ZzClawTermApp {
         true
     }
 
+    fn terminal_cursor_presentation_for_snapshot(
+        &self,
+        session_id: &str,
+        snapshot: &TerminalSnapshot,
+        display_offset: usize,
+    ) -> (bool, TerminalCursorBlinkBasis, String) {
+        let is_active = self.session.active_id() == Some(session_id);
+        let is_disconnected = self.session.is_disconnected(session_id);
+        let remote_cursor_visible = snapshot.cursor.visible
+            && snapshot.cursor.shape != zzclawterm_terminal::CursorShape::Hidden
+            && snapshot.cursor.row != usize::MAX;
+        let blink_enabled = self.settings.summary().cursor_blink || snapshot.cursor.blinking;
+        let visible = |blink_on| {
+            terminal_cursor_visible_for_display_offset(
+                is_active,
+                is_disconnected,
+                display_offset,
+                remote_cursor_visible,
+                blink_enabled,
+                blink_on,
+            )
+        };
+        let basis = TerminalCursorBlinkBasis {
+            is_active,
+            is_disconnected,
+            cursor_visible_when_lit: visible(true),
+            blink_enabled,
+        };
+        let style = match snapshot.cursor.shape {
+            zzclawterm_terminal::CursorShape::Underline => "underline".to_string(),
+            zzclawterm_terminal::CursorShape::Beam => "bar".to_string(),
+            zzclawterm_terminal::CursorShape::Hidden | zzclawterm_terminal::CursorShape::Block => {
+                self.settings.summary().cursor_style.clone()
+            }
+        };
+        (visible(self.shell.cursor_blink_on()), basis, style)
+    }
+
+    /// Read the worker's live frame without entering or updating its surface.
+    /// The wheel callback holds that entity's lease until the first paint is ready.
+    pub(in crate::features) fn terminal_live_surface_frame(
+        &self,
+        session_id: &str,
+    ) -> Option<(TerminalSurfaceFrameSnapshot, TerminalCursorBlinkBasis)> {
+        let view = self.terminal.view.views.get(session_id)?;
+        let viewport_rows = view.viewport_rows_for_ui();
+        let snapshot = terminal_paint_window_snapshot_for_view(Some(view), 0, viewport_rows, None)?;
+        let (show_cursor, basis, style) =
+            self.terminal_cursor_presentation_for_snapshot(session_id, &snapshot, 0);
+        let scroll = TerminalScrollVisualState {
+            session_id: session_id.to_string(),
+            history: view.history_state(),
+            scroll_offset: 0,
+            scroll_residual_lines: 0.0,
+            display_offset: 0,
+            scrollback_len: view.scrollback_len_for_ui(),
+            viewport_rows,
+            has_new_while_scrolled: false,
+            performance_overlay: view.performance_overlay,
+            skipped_output_chars: view.skipped_output_chars,
+        };
+        Some((
+            TerminalSurfaceFrameSnapshot::new(snapshot, scroll).with_presentation(
+                false,
+                show_cursor,
+                style,
+            ),
+            basis,
+        ))
+    }
+
     /// Push the current view/frame paint state into the session surface and notify it.
     pub(in crate::features) fn sync_terminal_surface_paint(
         &mut self,
@@ -943,7 +1015,6 @@ impl ZzClawTermApp {
         let is_visible = self.terminal_session_has_visible_surface(session_id);
         let presentation = TerminalPresentation::resolve(is_active, is_visible);
         let work_policy = TerminalWorkPolicy::for_presentation(presentation);
-        let is_disconnected = self.session.is_disconnected(session_id);
         let render_output_pressure = self.runtime_output_pressure_active();
         let view = self.terminal.view.views.get(session_id);
         let history = view
@@ -981,6 +1052,36 @@ impl ZzClawTermApp {
             .get(session_id)
             .map(|view| view.viewport_rows_for_ui())
             .unwrap_or(1);
+        // A wheel event can be a frame ahead of the app's 16 ms scroll sync.
+        // Select text and cursor policy for that local target, rather than
+        // feeding a historical paint back into a surface already at live.
+        let local_scroll = surface
+            .read(cx)
+            .pending_local_scroll_state_reanchored_for_frame(&TerminalScrollVisualState {
+                session_id: session_id.to_string(),
+                history,
+                scroll_offset,
+                scroll_residual_lines,
+                display_offset: terminal_visual_display_offset(
+                    scroll_offset,
+                    scroll_residual_lines,
+                    scrollback_len,
+                ),
+                scrollback_len,
+                viewport_rows,
+                has_new_while_scrolled: has_new,
+                performance_overlay,
+                skipped_output_chars: skipped,
+            });
+        let scroll_offset = local_scroll
+            .as_ref()
+            .map_or(scroll_offset, |state| state.scroll_offset);
+        let scroll_residual_lines = local_scroll
+            .as_ref()
+            .map_or(scroll_residual_lines, |state| state.scroll_residual_lines);
+        let has_new = local_scroll
+            .as_ref()
+            .map_or(has_new, |state| state.has_new_while_scrolled);
         let display_offset =
             terminal_visual_display_offset(scroll_offset, scroll_residual_lines, scrollback_len);
         let user_scroll_active = terminal_user_scroll_active(
@@ -1168,40 +1269,8 @@ impl ZzClawTermApp {
             // when the previous frame was in the hidden blink phase.
             self.shell.reset_cursor_blink_phase();
         }
-        let cursor_row = snapshot.cursor.row;
-        let remote_cursor_visible = snapshot.cursor.visible
-            && snapshot.cursor.shape != zzclawterm_terminal::CursorShape::Hidden
-            && cursor_row != usize::MAX;
-        let blink_enabled = self.settings.summary().cursor_blink || snapshot.cursor.blinking;
-        let show_cursor = terminal_cursor_visible_for_display_offset(
-            is_active,
-            is_disconnected,
-            display_offset,
-            remote_cursor_visible,
-            blink_enabled,
-            self.shell.cursor_blink_on(),
-        );
-        let cursor_blink_basis = TerminalCursorBlinkBasis {
-            is_active,
-            is_disconnected,
-            cursor_visible_when_lit: terminal_cursor_visible_for_display_offset(
-                is_active,
-                is_disconnected,
-                display_offset,
-                remote_cursor_visible,
-                blink_enabled,
-                true,
-            ),
-            blink_enabled,
-        };
-        let cursor_style = match snapshot.cursor.shape {
-            zzclawterm_terminal::CursorShape::Underline => "underline".to_string(),
-            zzclawterm_terminal::CursorShape::Beam => "bar".to_string(),
-            zzclawterm_terminal::CursorShape::Hidden => {
-                self.settings.summary().cursor_style.clone()
-            }
-            zzclawterm_terminal::CursorShape::Block => self.settings.summary().cursor_style.clone(),
-        };
+        let (show_cursor, cursor_blink_basis, cursor_style) =
+            self.terminal_cursor_presentation_for_snapshot(session_id, &snapshot, display_offset);
 
         let search_mapping_started_at = Instant::now();
         let paint_policy = EffectiveTerminalPaintPolicy::resolve(
@@ -1508,6 +1577,42 @@ impl ZzClawTermApp {
         });
     }
 
+    fn sync_terminal_live_scroll_surface(
+        &mut self,
+        surface: &Entity<TerminalSurface>,
+        state: &TerminalScrollVisualState,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if terminal_visual_scroll_active_for_state(state.scroll_offset, state.scroll_residual_lines)
+        {
+            return false;
+        }
+        if surface
+            .read(cx)
+            .pending_local_scroll_state_reanchored_for_frame(state)
+            .is_some_and(|pending| {
+                terminal_visual_scroll_active_for_state(
+                    pending.scroll_offset,
+                    pending.scroll_residual_lines,
+                )
+            })
+        {
+            self.sync_terminal_surface_paint(&state.session_id, cx);
+            return true;
+        }
+        let live = self.terminal_live_surface_frame(&state.session_id);
+        if live.is_none() {
+            self.request_terminal_live_snapshot(&state.session_id);
+        }
+        surface.update(cx, |surface, cx| {
+            if surface.apply_live_scroll_frame(state, live) {
+                surface.schedule_keyword_highlights(false, false, cx);
+                cx.notify();
+            }
+        });
+        true
+    }
+
     pub(in crate::features) fn notify_terminal_scroll_position_only(
         &mut self,
         session_id: &str,
@@ -1543,6 +1648,9 @@ impl ZzClawTermApp {
             performance_overlay,
             skipped_output_chars: skipped,
         };
+        if self.sync_terminal_live_scroll_surface(&surface, &desired_scroll_state, cx) {
+            return;
+        }
         let (can_reuse_snapshot, scroll_state_current) = {
             let surface = surface.read(cx);
             (
@@ -1681,6 +1789,9 @@ impl ZzClawTermApp {
             performance_overlay,
             skipped_output_chars: skipped,
         };
+        if self.sync_terminal_live_scroll_surface(&surface, &desired_scroll_state, cx) {
+            return;
+        }
         let (can_reuse_snapshot, scroll_state_current) = {
             let surface = surface.read(cx);
             (

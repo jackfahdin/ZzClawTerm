@@ -1,5 +1,5 @@
 use gpui::rgb;
-use zzclawterm_core::{CloudSyncError, CloudSyncHistoryEntry, CloudSyncSettings, TunnelConfig};
+use zzclawterm_core::{CloudSyncError, CloudSyncSettings, TunnelConfig};
 use zzclawterm_transport::{SessionKind, SshTunnelMode, TelnetEnterMode};
 
 use crate::theme::ThemePalette;
@@ -431,60 +431,6 @@ pub(in crate::features) fn cloud_sync_status_dot_color(
         "disabled" => rgb(palette.text_dimmed),
         _ => rgb(palette.text_muted),
     }
-}
-
-pub(in crate::features) fn cloud_sync_status_text_color(
-    palette: ThemePalette,
-    status: &str,
-) -> gpui::Rgba {
-    match status {
-        "running" => rgb(palette.link),
-        "success" => rgb(palette.success),
-        "failed" => rgb(palette.danger),
-        "conflict" => rgb(palette.warning),
-        "disabled" => rgb(palette.text_dimmed),
-        _ => rgb(palette.text_muted),
-    }
-}
-
-pub(in crate::features) fn cloud_sync_kind_text_color(
-    palette: ThemePalette,
-    kind: &str,
-) -> gpui::Rgba {
-    match kind {
-        "sync" => rgb(palette.link),
-        "backup" => rgb(palette.link),
-        _ => rgb(palette.text_muted),
-    }
-}
-
-pub(in crate::features) fn cloud_sync_history_summary(entry: &CloudSyncHistoryEntry) -> String {
-    let normalized = entry
-        .message
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if normalized.is_empty() {
-        return format!("{} · {}", entry.kind, entry.status);
-    }
-    if !normalized.contains('\n') && normalized.chars().count() <= 110 {
-        return normalized;
-    }
-    // Prefer first sentence when short enough.
-    let first = normalized
-        .split(['.', '!', '?'])
-        .next()
-        .unwrap_or("")
-        .trim();
-    if !first.is_empty() && first.chars().count() <= 110 {
-        let end = first.chars().count();
-        let punct = normalized.chars().nth(end).unwrap_or('.');
-        if matches!(punct, '.' | '!' | '?') {
-            return format!("{first}{punct}");
-        }
-        return first.to_string();
-    }
-    format!("{} · {}", entry.kind, entry.status)
 }
 
 pub(in crate::features) fn normalize_startup_command(value: &str) -> String {

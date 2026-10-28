@@ -9,7 +9,7 @@ use crate::features::terminal::terminal_runtime::{
 };
 use crate::models::{
     ActionLinkMenuAction, ActionLinkMenuState, ActionLinkTooltipState, TerminalPerformanceMode,
-    TerminalWindowNode, terminal_action_link_matcher_key, terminal_expensive_interactions_enabled,
+    terminal_action_link_matcher_key, terminal_expensive_interactions_enabled,
 };
 use crate::terminal::terminal_byte_index_for_cell_col;
 
@@ -66,6 +66,9 @@ impl ZzClawTermApp {
             return false;
         };
         self.terminal.menus.action_link_hover_pending = None;
+        if !self.action_link_tooltip_has_visible_source(&tip) {
+            return self.clear_action_link_tooltip_state();
+        }
         // Only show if still matching the pending key (not superseded).
         if self
             .terminal
@@ -78,6 +81,16 @@ impl ZzClawTermApp {
         }
         self.terminal.menus.action_link_tooltip = Some(tip);
         true
+    }
+
+    pub(in crate::features) fn action_link_tooltip_has_visible_source(
+        &self,
+        tip: &ActionLinkTooltipState,
+    ) -> bool {
+        self.terminal_session_at_point(Point::new(tip.x, tip.y))
+            .flatten()
+            .as_deref()
+            == Some(tip.session_id.as_str())
     }
 
     pub(in crate::features) fn update_action_link_hover(
@@ -135,8 +148,13 @@ impl ZzClawTermApp {
             self.clear_action_link_tooltip(cx);
             return;
         };
+        let Some(session_id) = hover_session.flatten() else {
+            self.clear_action_link_tooltip(cx);
+            return;
+        };
         let match_key = format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
+            session_id,
             item.kind.label(),
             item.value,
             item.start,
@@ -148,6 +166,7 @@ impl ZzClawTermApp {
             .or_else(|| default.open_url.clone())
             .unwrap_or_else(|| default.label.clone());
         let next = ActionLinkTooltipState {
+            session_id,
             x: event.position.x,
             y: event.position.y,
             kind_label: item.kind.label().to_string(),
@@ -278,36 +297,31 @@ impl ZzClawTermApp {
         &self,
         position: Point<Pixels>,
     ) -> Option<Option<String>> {
-        let visible_session_ids = self.visible_terminal_surface_session_ids();
+        // Bounds survive tab/page switches. Only the authoritative visible set
+        // may participate in root-level hover and mouse-report hit-testing.
+        let visible_session_ids = self.visible_terminal_session_ids();
         for session_id in &visible_session_ids {
-            if let Some(bounds) = self.terminal.layout.session_surface_bounds.get(session_id)
-                && terminal_bounds_contains(*bounds, position)
+            let bounds = self
+                .terminal
+                .layout
+                .session_surface_bounds
+                .get(*session_id)
+                .copied()
+                .or_else(|| {
+                    (visible_session_ids.len() == 1
+                        && self.shell.terminal_window_tree_ref().is_none()
+                        && self.shell.workspace_split().is_none()
+                        && self.session.active_id() == Some(*session_id))
+                    .then_some(self.terminal.layout.surface_bounds)
+                    .flatten()
+                });
+            if let Some(bounds) = bounds
+                && terminal_bounds_contains(bounds, position)
             {
-                return Some(Some(session_id.clone()));
+                return Some(Some((*session_id).to_string()));
             }
         }
-        let bounds = self.terminal.layout.surface_bounds?;
-        if terminal_bounds_contains(bounds, position) {
-            return Some(self.session.active_id_owned());
-        }
         None
-    }
-
-    fn visible_terminal_surface_session_ids(&self) -> Vec<String> {
-        if let Some(window_root) = self.shell.terminal_window_tree().as_ref()
-            && matches!(window_root, TerminalWindowNode::Split { .. })
-        {
-            return window_root
-                .active_tabs()
-                .into_iter()
-                .filter(|id| self.session.has_session(id))
-                .collect();
-        }
-        self.shell
-            .workspace_split()
-            .map(|root| root.session_ids())
-            .or_else(|| self.session.active_id_owned().map(|id| vec![id]))
-            .unwrap_or_default()
     }
 
     pub(in crate::features) fn close_action_link_menu(&mut self, cx: &mut Context<Self>) {
@@ -316,9 +330,7 @@ impl ZzClawTermApp {
             self.shell.set_status("action link menu closed".to_string());
             changed = true;
         }
-        if self.terminal.menus.action_link_tooltip.take().is_some() {
-            changed = true;
-        }
+        changed |= self.clear_action_link_tooltip_state();
         if changed {
             cx.notify();
         }
@@ -509,11 +521,16 @@ mod tests {
 
     use super::action_link_tooltip_timer_is_current;
 
-    use gpui::px;
+    use gpui::{AppContext as _, Bounds, TestAppContext, point, px, size};
+    use zzclawterm_core::{InternalEditorDisplay, test_support::TestTempDir};
 
+    use crate::features::file_manager::{FileManagerSeed, FileManagerWorkspace, PaneEndpoint};
     use crate::features::terminal::terminal_runtime::{
         TERMINAL_INPUT_LATENCY_WINDOW, TERMINAL_USER_SCROLL_ACTIVE_WINDOW,
     };
+    use crate::features::test_support::{app_with_visible_local_session, editor_document};
+    use crate::models::{NavItem, SmartSplitMode, TerminalWindowNode, WorkspaceTabId};
+    use crate::test_support::TestAppCleanup;
 
     use super::{
         ActionLinkTooltipState, action_link_hover_should_yield_to_terminal_latency,
@@ -564,6 +581,7 @@ mod tests {
 
     fn tooltip(match_key: &str) -> ActionLinkTooltipState {
         ActionLinkTooltipState {
+            session_id: "local".to_string(),
             x: px(10.0),
             y: px(20.0),
             kind_label: "host".to_string(),
@@ -609,5 +627,186 @@ mod tests {
         assert!(clear_action_link_tooltip_state(&mut visible, &mut pending));
         assert!(visible.is_none());
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn cached_terminal_bounds_do_not_hit_file_manager_editor_or_page() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-hidden-terminal-hit-test");
+        let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+        app.update(&mut cx, |app, cx| {
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.)));
+            let position = bounds.center();
+            app.terminal.layout.surface_bounds = Some(bounds);
+            assert_eq!(
+                app.terminal_session_at_point(position),
+                Some(Some("local".to_string()))
+            );
+            assert!(
+                app.suggestion_overlay_position_for_session(Some("local"), 0, 0, 340., 100.)
+                    .is_some()
+            );
+            app.terminal
+                .layout
+                .session_surface_bounds
+                .insert("local".into(), bounds);
+            for tab in [
+                WorkspaceTabId::FileManager("files".into()),
+                WorkspaceTabId::Editor("document".into()),
+            ] {
+                let key = tab.layout_key();
+                app.shell
+                    .restore_terminal_window_tree(Some(TerminalWindowNode::leaf(
+                        vec!["local".into(), key.clone()],
+                        Some(key),
+                    )));
+                assert_eq!(app.session.active_id(), Some("local"));
+                assert!(app.terminal_session_at_point(position).is_none());
+                assert!(app.action_link_at_point(position, cx).is_none());
+                assert!(
+                    app.suggestion_overlay_position_for_session(Some("local"), 0, 0, 340., 100.)
+                        .is_none()
+                );
+            }
+            app.shell.restore_terminal_window_tree(None);
+            app.shell.show_page(NavItem::Settings);
+            assert!(app.terminal_session_at_point(position).is_none());
+            assert!(
+                app.suggestion_overlay_position_for_session(Some("local"), 0, 0, 340., 100.)
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn split_hit_testing_never_falls_back_to_hidden_active_session_bounds() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-split-terminal-hit-test");
+        let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+        app.update(&mut cx, |app, _| {
+            let left = Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.)));
+            let right = Bounds::new(point(px(500.), px(0.)), size(px(500.), px(300.)));
+            let key = WorkspaceTabId::FileManager("files".into()).layout_key();
+            app.shell
+                .restore_terminal_window_tree(TerminalWindowNode::build_smart_split_layout(
+                    &[key, "peer".into()],
+                    SmartSplitMode::Vertical,
+                ));
+            app.terminal.layout.surface_bounds = Some(left);
+            app.terminal
+                .layout
+                .session_surface_bounds
+                .insert("local".into(), left);
+            app.terminal
+                .layout
+                .session_surface_bounds
+                .insert("peer".into(), right);
+            assert!(app.terminal_session_at_point(left.center()).is_none());
+            assert_eq!(
+                app.terminal_session_at_point(right.center()),
+                Some(Some("peer".into()))
+            );
+            assert!(
+                app.suggestion_overlay_position_for_session(Some("local"), 0, 0, 340., 100.)
+                    .is_none()
+            );
+            assert!(
+                app.suggestion_overlay_position_for_session(Some("peer"), 0, 0, 340., 100.)
+                    .is_some()
+            );
+            // Even the visible terminal's old aggregate bounds cannot enlarge
+            // its per-session hit area over the file manager.
+            app.session.select_active_session("peer");
+            assert!(app.terminal_session_at_point(left.center()).is_none());
+            app.shell.set_pane_focus_mode(true);
+            app.session.select_active_session("local");
+            assert!(app.terminal_session_at_point(right.center()).is_none());
+        });
+    }
+
+    #[test]
+    fn delayed_action_link_tooltip_requires_its_original_visible_surface() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-hidden-tooltip-delay");
+        let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+        app.update(&mut cx, |app, _| {
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.)));
+            app.terminal.layout.surface_bounds = Some(bounds);
+            let tip = tooltip("pending");
+            app.terminal.menus.action_link_hover_pending = Some(("pending".into(), 1, tip.clone()));
+            assert!(app.apply_action_link_tooltip_delay(1));
+            assert!(app.action_link_tooltip_has_visible_source(&tip));
+
+            for tab in [
+                WorkspaceTabId::FileManager("files".into()).layout_key(),
+                WorkspaceTabId::Editor("document".into()).layout_key(),
+                "peer".to_string(),
+            ] {
+                app.terminal
+                    .layout
+                    .session_surface_bounds
+                    .insert(tab.clone(), bounds);
+                app.shell
+                    .restore_terminal_window_tree(Some(TerminalWindowNode::leaf(
+                        vec!["local".into(), tab.clone()],
+                        Some(tab),
+                    )));
+                assert!(!app.action_link_tooltip_has_visible_source(&tip));
+                app.terminal.menus.action_link_tooltip = Some(tip.clone());
+                app.terminal.menus.action_link_hover_pending =
+                    Some(("pending".into(), 2, tip.clone()));
+                assert!(app.apply_action_link_tooltip_delay(2));
+                assert!(app.terminal.menus.action_link_tooltip.is_none());
+                assert!(app.terminal.menus.action_link_hover_pending.is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn activating_non_terminal_tabs_cancels_visible_and_pending_action_links() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-action-link-tab-switch");
+        let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+        let workspace = cx.new(|cx| {
+            FileManagerWorkspace::new(
+                app.clone(),
+                "files".into(),
+                FileManagerSeed {
+                    left: PaneEndpoint::Local,
+                    left_path: None,
+                    right: PaneEndpoint::Local,
+                    right_path: None,
+                },
+                cx,
+            )
+        });
+        app.update(&mut cx, |app, cx| {
+            app.reconcile_terminal_windows();
+            app.file_manager.insert("files".into(), workspace);
+            let document =
+                editor_document("local", "/example.txt", InternalEditorDisplay::Workspace);
+            let editor_id = document.id.clone();
+            app.transfer.open_editor_tab(document);
+            for tab in [
+                WorkspaceTabId::FileManager("files".into()),
+                WorkspaceTabId::Editor(editor_id),
+            ] {
+                let key = tab.layout_key();
+                let mut tree = app.shell.terminal_window_tree().unwrap();
+                tree.ensure_tab(&key, None);
+                app.shell.restore_terminal_window_tree(Some(tree));
+                let tip = tooltip("pending");
+                app.terminal.menus.action_link_tooltip = Some(tip.clone());
+                app.terminal.menus.action_link_hover_pending = Some(("pending".into(), 1, tip));
+                app.activate_workspace_tab(&key, cx);
+                assert!(app.terminal.menus.action_link_tooltip.is_none());
+                assert!(app.terminal.menus.action_link_hover_pending.is_none());
+                assert!(!app.apply_action_link_tooltip_delay(1));
+            }
+        });
     }
 }

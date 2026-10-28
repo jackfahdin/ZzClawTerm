@@ -3637,7 +3637,7 @@ mod tests {
             app.update(cx, |app, cx| {
                 app.set_connection_editor_kind(ConnectionKindTab::Vnc, cx);
                 app.set_connection_editor_section(
-                    crate::models::ConnectionEditorSection::Authentication,
+                    crate::models::ConnectionEditorSection::Basic,
                     cx,
                 );
                 app.set_connection_editor_password_source(
@@ -3707,7 +3707,7 @@ mod tests {
                 app.security
                     .replace_catalog(Vec::new(), Vec::new(), vec![account], Vec::new());
                 app.set_connection_editor_section(
-                    crate::models::ConnectionEditorSection::Authentication,
+                    crate::models::ConnectionEditorSection::Basic,
                     cx,
                 );
             })
@@ -3752,7 +3752,7 @@ mod tests {
             app.update(cx, |app, cx| {
                 app.set_connection_editor_kind(ConnectionKindTab::Vnc, cx);
                 app.set_connection_editor_section(
-                    crate::models::ConnectionEditorSection::Authentication,
+                    crate::models::ConnectionEditorSection::Basic,
                     cx,
                 );
                 app.set_connection_editor_password_source(
@@ -3808,10 +3808,7 @@ mod tests {
             draft.username = "root".into();
             app.connection_state.begin_editor(draft);
             app.connection_state.build_editor_fields(cx);
-            app.set_connection_editor_section(
-                crate::models::ConnectionEditorSection::Authentication,
-                cx,
-            );
+            app.set_connection_editor_section(crate::models::ConnectionEditorSection::Basic, cx);
         });
         let host_app = app.clone();
         let (_, vcx) = cx.add_window_view(move |window, cx| {
@@ -4008,6 +4005,24 @@ mod tests {
                         let panel = vcx.debug_bounds("connection-editor-panel").unwrap();
                         let scroll = vcx.debug_bounds("connection-editor-scroll").unwrap();
                         let body = vcx.debug_bounds(protocol_selectors(kind).0).unwrap();
+                        if *section == ConnectionEditorSection::Basic
+                            && matches!(
+                                kind,
+                                ConnectionKindTab::Ssh
+                                    | ConnectionKindTab::Telnet
+                                    | ConnectionKindTab::Rdp
+                                    | ConnectionKindTab::Vnc
+                            )
+                        {
+                            let host = vcx.debug_bounds("connection-editor-field-Host").unwrap();
+                            let username = vcx
+                                .debug_bounds("connection-editor-field-Username")
+                                .unwrap();
+                            let description =
+                                vcx.debug_bounds("connection-editor-description").unwrap();
+                            assert!(host.bottom() <= username.top(), "{kind:?}");
+                            assert!(username.bottom() <= description.top(), "{kind:?}");
+                        }
                         assert!(
                             panel.left() >= host.left() && panel.right() <= host.right(),
                             "{kind:?}/{section:?}: {panel:?} in {host:?}"
@@ -4075,7 +4090,7 @@ mod tests {
             let state = &app.read(cx).connection_state;
             assert_eq!(
                 state.active_editor_draft().unwrap().section,
-                ConnectionEditorSection::Authentication
+                ConnectionEditorSection::Network
             );
             state.editor_navigation_focus().is_focused(window)
         }));
@@ -4153,6 +4168,53 @@ mod tests {
         });
         let field = vcx
             .debug_bounds("connection-editor-field-SftpShellDetectionTimeout")
+            .unwrap();
+        let viewport = vcx.debug_bounds("connection-editor-scroll").unwrap();
+        assert!(
+            field.top() >= viewport.top() && field.top() < viewport.bottom(),
+            "{field:?} in {viewport:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn save_returns_to_basic_and_scrolls_to_an_invalid_authentication_field(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::models::ConnectionEditorSection;
+        let test_dir = TestConfigDir::new("zzclawterm-editor-auth-validation");
+        let (app, vcx) = hosted_editor(cx, test_dir.path(), 420., 480., 24.);
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let mut draft = app.connection_state.active_editor_draft().unwrap();
+                draft.host = "example.test".into();
+                draft.username = "root".into();
+                draft.auth_mode = "agent".into();
+                draft.agent_endpoint = zzclawterm_core::SshAgentEndpoint::UnixSocket {
+                    path: String::new(),
+                };
+                app.connection_state.begin_editor(draft);
+                app.connection_state.build_editor_fields(cx);
+                app.set_connection_editor_section(ConnectionEditorSection::Network, cx);
+                app.save_connection_editor(window, cx);
+            });
+        });
+        for _ in 0..6 {
+            draw_editor(&app, vcx);
+        }
+        vcx.update(|window, cx| {
+            let state = &app.read(cx).connection_state;
+            let draft = state.active_editor_draft().unwrap();
+            assert_eq!(draft.section, ConnectionEditorSection::Basic);
+            assert!(
+                draft
+                    .field_errors
+                    .contains_key(&ConnectionEditorField::AgentUnixSocket)
+            );
+            let input = &state.editor_fields()[&ConnectionEditorField::AgentUnixSocket];
+            assert!(input.read(cx).component_focus_handle(cx).is_focused(window));
+        });
+        let field = vcx
+            .debug_bounds("connection-editor-field-AgentUnixSocket")
             .unwrap();
         let viewport = vcx.debug_bounds("connection-editor-scroll").unwrap();
         assert!(

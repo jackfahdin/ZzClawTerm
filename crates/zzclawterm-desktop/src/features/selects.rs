@@ -12,7 +12,7 @@ use gpui::{
 };
 use zzclawterm_core::{
     AiAgentKind, AiPermissionMode, CodexThreadMode, ExistingFileBehavior, ExternalMcpSessionScope,
-    RecordingMode, RecordingRotationPolicy, RiskLevel,
+    McpTerminalDisplayMode, RecordingMode, RecordingRotationPolicy, RiskLevel,
 };
 use zzclawterm_transport::SftpDuplicatePolicy;
 use zzclawterm_ui::{
@@ -270,6 +270,12 @@ impl ZzClawTermApp {
                 self.set_terminal_theme((value != FOLLOW_UI_THEME_VALUE).then_some(value), cx)
             }
             "appearance-minimum-contrast" => self.set_minimum_contrast_ratio(value, cx),
+            "appearance-window-decorations" => self.set_window_decorations(
+                zzclawterm_core::models::window_decoration::WindowDecoration::from(
+                    value.to_owned(),
+                ),
+                cx,
+            ),
             "appearance-background-fit" => self.set_background_image_fit(value, cx),
             "appearance-window-material" => self.set_window_material(
                 zzclawterm_core::models::window_material::WindowMaterial::from(value.to_owned()),
@@ -450,6 +456,11 @@ impl ZzClawTermApp {
                 self.apply_temporary_serial_port_name(value.to_string(), cx);
             }
             "cloud-provider-select" => self.update_cloud_sync_provider(value, cx),
+            "cloud-conflict-branch" => {
+                self.cloud_sync.select_conflict_branch(value);
+                self.request_settings_panel_refresh(cx);
+                cx.notify();
+            }
             "ai-proxy-mode" | "ai-proxy-protocol" => {
                 self.ai.set_proxy_selection(id, value);
                 cx.notify();
@@ -520,6 +531,15 @@ impl ZzClawTermApp {
                 },
                 cx,
             ),
+            "ai-mcp-terminal-display-mode" => match value {
+                "inline" => {
+                    self.set_ai_mcp_terminal_display_mode(McpTerminalDisplayMode::Inline, cx)
+                }
+                "silent" => {
+                    self.set_ai_mcp_terminal_display_mode(McpTerminalDisplayMode::Silent, cx)
+                }
+                _ => {}
+            },
             id if id.starts_with("quick-command.variable.") => {
                 if let Some(index) = id
                     .strip_prefix("quick-command.variable.")

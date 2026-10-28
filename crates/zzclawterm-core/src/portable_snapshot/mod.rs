@@ -75,6 +75,8 @@ pub struct PortableSnapshotMeta {
     pub snapshot_kind: PortableSnapshotKind,
     pub revision_id: String,
     pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
     pub created_at_ms: u64,
     pub payload_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +118,7 @@ impl RawPortableSnapshot {
                 snapshot_kind,
                 revision_id: uuid::Uuid::new_v4().to_string(),
                 device_id,
+                device_name: None,
                 created_at_ms: current_time_ms(),
                 payload_hash: String::new(),
                 entities_hash: None,
@@ -169,6 +172,7 @@ const DEVICE_LOCAL_UI_FIELDS: &[&str] = &[
 ];
 
 const DEVICE_LOCAL_APPEARANCE_FIELDS: &[&str] = &[
+    "window_decorations",
     "window_material",
     "window_background_opacity",
     "background_image_path",

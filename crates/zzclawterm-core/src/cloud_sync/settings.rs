@@ -110,7 +110,7 @@ pub struct GithubGistSyncSettings {
 }
 
 macro_rules! impl_redacted_sync_debug {
-    ($type:ident, safe { $($safe:ident),* $(,)? }, secret { $($secret:ident),* $(,)? }) => {
+    ($type:ident, safe { $($safe:ident),* $(,)? }, secret { $($secret:ident),* $(,)? } $(, hidden { $($hidden:ident),* $(,)? })?) => {
         impl std::fmt::Debug for $type {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut debug = formatter.debug_struct(stringify!($type));
@@ -119,6 +119,7 @@ macro_rules! impl_redacted_sync_debug {
                     stringify!($secret),
                     &self.$secret.as_ref().map(|_| "<redacted>"),
                 );)*
+                $($(debug.field(stringify!($hidden), &"<redacted>");)*)?
                 debug.finish()
             }
         }
@@ -127,17 +128,13 @@ macro_rules! impl_redacted_sync_debug {
 
 impl_redacted_sync_debug!(
     WebdavSyncSettings,
-    safe {
-        endpoint,
-        root,
-        username
-    },
-    secret { password }
+    safe { root, username },
+    secret { password },
+    hidden { endpoint }
 );
 impl_redacted_sync_debug!(
     S3SyncSettings,
     safe {
-        endpoint,
         bucket,
         region,
         root,
@@ -147,15 +144,14 @@ impl_redacted_sync_debug!(
         access_key_id,
         secret_access_key,
         session_token
-    }
+    },
+    hidden { endpoint }
 );
 impl_redacted_sync_debug!(
     GiteeSnippetSyncSettings,
-    safe {
-        api_endpoint,
-        gist_id
-    },
-    secret { access_token }
+    safe { gist_id },
+    secret { access_token },
+    hidden { api_endpoint }
 );
 impl_redacted_sync_debug!(
     OAuthDriveSyncSettings,
@@ -295,6 +291,7 @@ pub struct LocalCloudSyncOptions {
     pub remote_dir: PathBuf,
     pub remote_root: String,
     pub device_id: String,
+    pub device_name: Option<String>,
     pub app_version: String,
     pub master_password: SecretString,
     pub enabled: bool,

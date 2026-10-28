@@ -323,6 +323,8 @@ pub(in crate::features) struct AiSettingsPresentation {
     pub(in crate::features) config: Arc<AiSettings>,
     pub(in crate::features) manual_model_drafts: Arc<HashMap<String, String>>,
     pub(in crate::features) credential_draft_key_ids: Arc<HashSet<String>>,
+    pub(in crate::features) header_errors:
+        Arc<HashMap<(String, String), zzclawterm_core::ai::provider_settings::CustomHeaderError>>,
     pub(in crate::features) agent_management: AgentManagementView,
 }
 
@@ -333,6 +335,7 @@ impl AiSettingsPresentation {
             config: Arc::new(AiSettings::default()),
             manual_model_drafts: Arc::new(HashMap::new()),
             credential_draft_key_ids: Arc::new(HashSet::new()),
+            header_errors: Arc::new(HashMap::new()),
             agent_management: AgentManagementView::default(),
         }
     }
@@ -821,7 +824,6 @@ impl SettingsPanel {
         div()
             .id(id)
             .w_full()
-            .max_w(px(360.))
             .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
             .child(ZzClawSelect::new(&select))
     }
@@ -849,7 +851,6 @@ impl SettingsPanel {
         div()
             .id(id)
             .w_full()
-            .max_w(px(360.))
             .h(px(NYA_FORM_CONTROL_HEIGHT_PX))
             .child(select_element)
     }
@@ -866,10 +867,13 @@ impl SettingsPanel {
         I: Into<SharedString>,
         S: Into<String>,
     {
-        div()
-            .w(px(260.))
-            .max_w_full()
-            .child(self.form_select_control(id, options, Some(selected_value.into()), disabled, cx))
+        super::settings_input_control(self.form_select_control(
+            id,
+            options,
+            Some(selected_value.into()),
+            disabled,
+            cx,
+        ))
     }
 
     pub(in crate::features::pages::settings) fn settings_select_field<I, L, S>(
@@ -1014,7 +1018,7 @@ impl SettingsPanel {
         }
     }
 
-    fn select_entity(
+    pub(in crate::features::pages::settings) fn select_entity(
         &mut self,
         id: SharedString,
         options: Vec<ZzClawSelectOption>,

@@ -794,11 +794,41 @@ impl ConnectionStore {
     pub fn save_ai_settings(&self, next: AiSettings) -> Result<AiSettings, StorageError> {
         let current = self.load_ai_settings()?;
         let merged = merge_masked_ai_settings(&current, next);
+        for (index, credential) in merged.provider_credentials.iter().enumerate() {
+            zzclawterm_core::ai::provider_settings::custom_header_pairs(credential).map_err(
+                |error| StorageError::InvalidData(format!("AI provider {}: {error}", index + 1)),
+            )?;
+        }
         let encrypted = self.encrypt_ai_settings(merged.clone())?;
         let mut value = self.load_settings_value()?;
         let mut encrypted_value = serde_json::to_value(encrypted)?;
         if let Some(current_value) = value.get(SETTINGS_AI_FIELD) {
-            merge_unknown_json(current_value, &mut encrypted_value);
+            let mut current_value = current_value.clone();
+            // Loading repairs missing/duplicate header IDs without reordering or
+            // dropping rows. Align the raw IDs before merging extension fields,
+            // so that repairs do not discard fields from imported documents.
+            if let Some(credentials) = current_value
+                .get_mut("provider_credentials")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for credential in credentials {
+                    let Some(normalized) = current.provider_credentials.iter().find(|item| {
+                        credential.get("id").and_then(serde_json::Value::as_str)
+                            == Some(item.id.as_str())
+                    }) else {
+                        continue;
+                    };
+                    if let Some(headers) = credential
+                        .get_mut("extra_headers")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for (raw, header) in headers.iter_mut().zip(&normalized.extra_headers) {
+                            raw["id"] = serde_json::Value::String(header.id.clone());
+                        }
+                    }
+                }
+            }
+            merge_unknown_json(&current_value, &mut encrypted_value);
         }
         drop_deprecated_ai_fields(&mut encrypted_value);
         set_nested_json_value(&mut value, &[SETTINGS_AI_FIELD], encrypted_value);
@@ -1103,6 +1133,15 @@ impl ConnectionStore {
         for credential in &mut settings.provider_credentials {
             credential.api_key =
                 decrypt_optional_secret(&crypto, master_key_token, &credential.api_key)?;
+            for header in &mut credential.extra_headers {
+                let value = std::mem::take(&mut header.value);
+                header.value = decrypt_optional_secret(
+                    &crypto,
+                    master_key_token,
+                    &Some(value).filter(|value| !value.is_empty()),
+                )?
+                .unwrap_or_default();
+            }
         }
         Ok(())
     }
@@ -1264,6 +1303,15 @@ fn encrypt_ai_settings_secrets(
     for credential in &mut settings.provider_credentials {
         credential.api_key =
             encrypt_optional_secret(crypto, master_key_token, &credential.api_key)?;
+        for header in &mut credential.extra_headers {
+            let value = std::mem::take(&mut header.value);
+            header.value = encrypt_optional_secret(
+                crypto,
+                master_key_token,
+                &Some(value).filter(|value| !value.is_empty()),
+            )?
+            .unwrap_or_default();
+        }
     }
     Ok(())
 }

@@ -1283,6 +1283,16 @@ impl TransferFeatureState {
         self.external_sync.windows.get(prompt_id)?.handle()
     }
 
+    pub(in crate::features) fn owns_external_sync_window(
+        &self,
+        handle: gpui::AnyWindowHandle,
+    ) -> bool {
+        self.external_sync.windows.values().any(|slot| {
+            slot.handle()
+                .is_some_and(|window| gpui::AnyWindowHandle::from(window) == handle)
+        })
+    }
+
     pub(in crate::features) fn external_sync_window_open_is_pending(
         &self,
         prompt_id: &str,

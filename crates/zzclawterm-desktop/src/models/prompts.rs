@@ -464,14 +464,6 @@ pub(crate) enum ConfigPathPromptResult {
 pub(crate) enum SnapshotPasswordPromptKind {
     Export,
     Import,
-    CloudForcePush,
-    CloudForcePull,
-    CloudProviderPush,
-    CloudProviderPull,
-    CloudProviderForcePush,
-    CloudProviderForcePull,
-    CloudRecoverCurrent,
-    CloudProviderRecoverCurrent,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -492,6 +484,7 @@ impl std::fmt::Debug for SnapshotPasswordPromptState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CloudSyncConflictState {
+    pub(crate) selected_revision: Option<String>,
     pub(crate) preview: zzclawterm_core::CloudConflictPreview,
     pub(crate) provider_action: bool,
 }
@@ -571,7 +564,7 @@ mod snapshot_password_prompt_tests {
     #[test]
     fn snapshot_password_prompt_debug_redacts_the_password() {
         let state = SnapshotPasswordPromptState {
-            kind: SnapshotPasswordPromptKind::CloudProviderPush,
+            kind: SnapshotPasswordPromptKind::Export,
             value: "snapshot-secret".to_string().into(),
         };
 

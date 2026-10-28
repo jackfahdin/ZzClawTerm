@@ -65,6 +65,7 @@ impl DesktopController {
         }
         let process_state = cx.new(|_| ProcessStateStore::new(snapshot));
         self.process_state = Some(process_state.clone());
+        crate::window_chrome::request_window_decoration_refresh(cx);
         let workspace_ids = self.windows.keys().copied().collect::<Vec<_>>();
         for workspace_id in workspace_ids {
             self.deliver_process_state(workspace_id, process_state.clone(), cx);
@@ -83,6 +84,12 @@ impl DesktopController {
     ) {
         if !event.changed {
             return;
+        }
+        if matches!(
+            event.domain,
+            SharedStateDomain::Settings | SharedStateDomain::All
+        ) {
+            crate::window_chrome::request_window_decoration_refresh(cx);
         }
         let Some(process_state) = self.process_state.clone() else {
             return;

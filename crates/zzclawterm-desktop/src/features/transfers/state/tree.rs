@@ -770,6 +770,48 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn wsl_case_distinct_nodes_keep_independent_listings_and_invalidation() {
+        let mut tree = TransferTreeState::default();
+        let backend = FileBrowserBackendKind::Local;
+        let root = r"\\wsl.localhost\Ubuntu";
+        let upper = RemoteFilePath::new(format!(r"{root}\Project"));
+        let lower = RemoteFilePath::new(format!(r"{root}\project"));
+        tree.seed(
+            "wsl",
+            backend,
+            RemoteFilePath::new(root),
+            Arc::new(vec![
+                directory("Project", &upper.display_path),
+                directory("project", &lower.display_path),
+            ]),
+        );
+        tree.reveal("wsl", backend, RemoteFilePath::new(root));
+        let view = tree.presentation(Some("wsl"), true);
+        let upper_key = view
+            .rows
+            .iter()
+            .find(|row| row.label == "Project")
+            .unwrap()
+            .key
+            .clone();
+        let lower_key = view
+            .rows
+            .iter()
+            .find(|row| row.label == "project")
+            .unwrap()
+            .key
+            .clone();
+        assert_ne!(upper_key, lower_key);
+
+        let upper_request = tree.begin_request("wsl", backend, upper.clone()).unwrap();
+        let lower_request = tree.begin_request("wsl", backend, lower.clone()).unwrap();
+        tree.invalidate("wsl", &upper, false);
+        assert!(!tree.complete("wsl", &upper, upper_request, Ok(vec![])));
+        assert!(tree.complete("wsl", &lower, lower_request, Ok(vec![])));
+    }
+
     #[test]
     fn reconnect_keeps_cached_tree_listings_but_retires_old_connection_requests() {
         let mut tree = TransferTreeState::default();

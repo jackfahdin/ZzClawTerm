@@ -189,19 +189,14 @@ impl SettingsPanel {
                             cx,
                         ),
                     ))
-                    .child(settings_form_row(
+                    .child(div().flex().justify_end().child(small_button(
                         palette,
+                        "general-open-logs",
                         t!("settings.openLogs"),
-                        Some(SharedString::from(t!("settings.openLogsDesc"))),
-                        small_button(
-                            palette,
-                            "general-open-logs",
-                            t!("settings.openLogs"),
-                            cx.listener(|this, _, _, cx| {
-                                this.reveal_log_dir(cx);
-                            }),
-                        ),
-                    ))
+                        cx.listener(|this, _, _, cx| {
+                            this.reveal_log_dir(cx);
+                        }),
+                    )))
                     .child(settings_form_row(
                         palette,
                         t!("settings.exportDiagnostics"),

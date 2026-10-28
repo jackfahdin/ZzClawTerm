@@ -274,5 +274,8 @@
   },
   "支持 SSH、RDP、VNC、串口、本地 shell、SFTP 和加密配置同步的原生桌面终端客户端": {
     "message": "A native desktop terminal client for SSH, RDP, VNC, serial, local shell, SFTP, and encrypted configuration sync"
+  },
+  "home.migrationV2": {
+    "message": "Upgrading from 1.x to 2.0: read the manual migration guide for portable and MSI installations"
   }
 }

@@ -43,6 +43,51 @@ fn clearing_new_options_does_not_resurrect_them_from_extensions() {
 }
 
 #[test]
+fn rdp_display_settings_default_survive_round_trip_and_keep_unknown_fields() {
+    // A connection written before the picture-quality settings existed.
+    let legacy: SavedConnection = serde_json::from_value(serde_json::json!({
+        "id": "rdp-legacy", "name": "Legacy", "type": "rdp", "host": "old.invalid",
+        "display": { "mode": "fixed", "width": 1024, "height": 768, "color_depth": 16,
+                     "future_rdp_option": "preserved" }
+    }))
+    .unwrap();
+    let encoded = serde_json::to_value(&legacy).unwrap();
+    // Legacy documents preserve the bitmap path and previous display behavior.
+    assert_eq!(encoded["display"]["graphics_pipeline"], false);
+    assert_eq!(encoded["display"]["display_wallpaper"], true);
+    assert_eq!(encoded["display"]["disable_cursor_blinking"], false);
+    assert_eq!(encoded["display"]["future_rdp_option"], "preserved");
+
+    // Values a newer build wrote must come back unchanged, not re-defaulted.
+    let mut current: SavedConnection = serde_json::from_value(serde_json::json!({
+        "id": "rdp-current", "name": "Current", "type": "rdp", "host": "new.invalid",
+        "display": { "mode": "fit-window", "width": 1920, "height": 1080, "color_depth": 32,
+                     "graphics_pipeline": false, "display_wallpaper": true,
+                     "display_themes": true, "enable_font_smoothing": false,
+                     "enable_desktop_composition": true, "disable_full_window_drag": false,
+                     "disable_menu_animations": false, "disable_cursor_shadow": false,
+                     "disable_cursor_blinking": false }
+    }))
+    .unwrap();
+    let round_tripped = serde_json::to_value(&current).unwrap();
+    let reloaded: SavedConnection = serde_json::from_value(round_tripped).unwrap();
+    assert_eq!(reloaded, current);
+
+    // Turning a capability back off must reach the reloaded model, because the
+    // helper reads exactly these fields when it negotiates with the server.
+    if let zzclawterm_core::ConnectionType::Rdp { display, .. } = &mut current.config {
+        display.graphics_pipeline = true;
+        display.disable_cursor_shadow = true;
+    } else {
+        panic!("expected an RDP connection");
+    }
+    let encoded = serde_json::to_value(&current).unwrap();
+    assert_eq!(encoded["display"]["graphics_pipeline"], true);
+    assert_eq!(encoded["display"]["disable_cursor_shadow"], true);
+    assert_eq!(encoded["display"]["display_wallpaper"], true);
+}
+
+#[test]
 fn supported_telnet_fixtures_default_keepalive_and_preserve_unknown_fields() {
     for fixture in [GPUI, TAURI] {
         let config: SessionsConfig = serde_json::from_str(fixture).unwrap();

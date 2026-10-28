@@ -1,12 +1,13 @@
 use rust_i18n::t;
 
+use crate::window_chrome::WindowChrome;
 use gpui::{
-    Context, IntoElement, MouseButton, MouseDownEvent, Window, WindowControlArea, div, prelude::*,
-    px, rgb, svg,
+    Context, IntoElement, MouseButton, Window, WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 use time::{OffsetDateTime, UtcOffset, Weekday, macros::format_description};
 use zzclawterm_transport::SessionKind;
 use zzclawterm_ui::ZzClawDropdownMenu;
+use zzclawterm_ui::window_chrome::{TitleDragEvent, title_drag_region};
 
 use crate::features::{
     ZzClawTermApp, formatting::format_rate, formatting::format_uptime, formatting::short_id,
@@ -84,32 +85,29 @@ impl HeaderStatusContent {
 }
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn handle_title_bar_mouse_down(
+    pub(in crate::features) fn handle_title_drag_event(
         &mut self,
-        _event: &MouseDownEvent,
-        _window: &mut Window,
+        event: &TitleDragEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.mark_title_drag_activity();
-        #[cfg(target_os = "macos")]
-        {
-            // 嵌套拖动区只处理一次双击，缩放和恢复遵循 macOS 系统偏好。
-            cx.stop_propagation();
-            if _event.click_count == 2 && !_window.is_fullscreen() {
-                _window.titlebar_double_click();
+        match event {
+            TitleDragEvent::Pressed => {
+                self.mark_title_drag_activity();
+                cx.notify();
+            }
+            TitleDragEvent::StartMove => window.start_window_move(),
+            TitleDragEvent::DoubleClick => {
+                if cfg!(target_os = "macos") {
+                    window.titlebar_double_click();
+                } else if !window.is_fullscreen()
+                    && window.is_resizable()
+                    && window.window_controls().maximize
+                {
+                    window.zoom_window();
+                }
             }
         }
-        #[cfg(target_os = "linux")]
-        {
-            // Linux 的拖动标记不会主动移动窗口；阻止嵌套拖动区重复处理同一次按下。
-            cx.stop_propagation();
-            if _event.click_count == 2 {
-                _window.zoom_window();
-            } else {
-                _window.start_window_move();
-            }
-        }
-        cx.notify();
     }
 
     pub(in crate::features) fn title_bar(
@@ -119,6 +117,7 @@ impl ZzClawTermApp {
     ) -> impl IntoElement {
         let palette = self.theme_palette();
         let macos = cfg!(target_os = "macos");
+        let chrome = WindowChrome::main(window);
         let compact_layout = !cfg!(target_os = "macos");
         let narrow_left = compact_layout && self.shell.viewport_size().0 < 1024.;
         let narrow_right = compact_layout && self.shell.viewport_size().0 < 768.;
@@ -140,12 +139,18 @@ impl ZzClawTermApp {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .when(macos, |this| this.pl(px(78.)))
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(Self::handle_title_bar_mouse_down),
-                    )
+                    .when(chrome.native_button_gutter, |this| this.pl(px(78.)))
+                    .map(|this| {
+                        let on_event = cx.listener(Self::handle_title_drag_event);
+                        title_drag_region(
+                            this,
+                            "main-title-left",
+                            chrome.drag,
+                            window,
+                            cx,
+                            on_event,
+                        )
+                    })
                     .when(!macos, |this| {
                         this.child(
                             div()
@@ -180,11 +185,7 @@ impl ZzClawTermApp {
                                             this.text_color(rgb(palette.text))
                                         }),
                                 )
-                                .when(cfg!(target_os = "linux"), |this| {
-                                    this.on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_mobile_left_drawer(cx);
                                 })),
@@ -203,13 +204,19 @@ impl ZzClawTermApp {
                     .items_center()
                     .justify_center()
                     .flex_1()
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(Self::handle_title_bar_mouse_down),
-                    )
+                    .map(|this| {
+                        let on_event = cx.listener(Self::handle_title_drag_event);
+                        title_drag_region(
+                            this,
+                            "main-title-center",
+                            chrome.drag,
+                            window,
+                            cx,
+                            on_event,
+                        )
+                    })
                     .when(header_status_visible, |this| {
-                        this.child(self.header_status_control(header_status, cx))
+                        this.child(self.header_status_control(header_status, window, cx))
                     }),
             )
             .child(
@@ -241,22 +248,24 @@ impl ZzClawTermApp {
                                             this.text_color(rgb(palette.text))
                                         }),
                                 )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_mobile_right_drawer(cx);
                                 })),
                         )
                     })
-                    .child(
-                        div()
-                            .w(px(10.))
-                            .h_full()
-                            .window_control_area(WindowControlArea::Drag)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(Self::handle_title_bar_mouse_down),
-                            ),
-                    )
-                    .when(!macos, |this| {
+                    .child(div().w(px(10.)).h_full().map(|this| {
+                        let on_event = cx.listener(Self::handle_title_drag_event);
+                        title_drag_region(
+                            this,
+                            "main-title-spacer",
+                            chrome.drag,
+                            window,
+                            cx,
+                            on_event,
+                        )
+                    }))
+                    .when(chrome.minimize, |this| {
                         this.child(window_control_button(
                             palette,
                             "window-min",
@@ -266,10 +275,12 @@ impl ZzClawTermApp {
                                 this.handle_window_minimize(window, cx);
                             }),
                         ))
-                        .child(window_control_button(
+                    })
+                    .when(chrome.maximize, |this| {
+                        this.child(window_control_button(
                             palette,
                             "window-max",
-                            if window.is_maximized() {
+                            if chrome.restore {
                                 "icons/window/restore.svg"
                             } else {
                                 "icons/window/maximize.svg"
@@ -277,7 +288,9 @@ impl ZzClawTermApp {
                             WindowControlArea::Max,
                             |_, window, _| window.zoom_window(),
                         ))
-                        .child(window_control_button(
+                    })
+                    .when(chrome.close, |this| {
+                        this.child(window_control_button(
                             palette,
                             "window-close",
                             "icons/window/close.svg",
@@ -293,6 +306,7 @@ impl ZzClawTermApp {
     fn header_status_control(
         &self,
         content: HeaderStatusContent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
@@ -335,11 +349,17 @@ impl ZzClawTermApp {
                     .overflow_hidden()
                     .px_2()
                     .py_1()
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(Self::handle_title_bar_mouse_down),
-                    )
+                    .map(|this| {
+                        let on_event = cx.listener(Self::handle_title_drag_event);
+                        title_drag_region(
+                            this,
+                            "main-header-status",
+                            WindowChrome::main(window).drag,
+                            window,
+                            cx,
+                            on_event,
+                        )
+                    })
                     .child(self.header_status_body(content, cx)),
             )
             .child(

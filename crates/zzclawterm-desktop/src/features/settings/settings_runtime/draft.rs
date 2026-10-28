@@ -325,7 +325,7 @@ impl ZzClawTermApp {
             return;
         }
         let ai_settings = self.pending_ai_settings();
-        let cloud_sync_settings = self.cloud_sync.pending_settings();
+        let mut cloud_sync_settings = self.cloud_sync.pending_settings();
         let translation_settings = self.translation.pending_settings();
         let keyword_highlights = self.settings.keyword_config().clone();
         let master_password_update = if master_password.draft.is_empty() {
@@ -377,7 +377,14 @@ impl ZzClawTermApp {
                 if ai_changed && store.load_ai_settings()? != base.ai_settings {
                     return Err(conflict());
                 }
-                if cloud_changed && store.load_cloud_sync_settings()? != base.cloud_sync_settings {
+                let current_cloud = store.load_cloud_sync_settings()?;
+                let mut cloud_base = base.cloud_sync_settings.clone();
+                zzclawterm_core::cloud_sync::credentials::rebase_rotated_tokens(
+                    &mut cloud_base,
+                    &mut cloud_sync_settings,
+                    &current_cloud,
+                );
+                if cloud_changed && current_cloud != cloud_base {
                     return Err(conflict());
                 }
                 if translation_changed
@@ -1105,6 +1112,53 @@ mod tests {
             assert_eq!(stored.window_material, WindowMaterial::Transparent);
             assert_eq!(stored.window_background_opacity, 0);
             assert_eq!(stored.background_content_opacity, 82);
+            app.cancel_settings(cx);
+        });
+    }
+
+    #[test]
+    fn window_decorations_preview_cancels_and_apply_persists() {
+        use zzclawterm_core::models::window_decoration::WindowDecoration;
+
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        app.update(&mut cx, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.set_window_decorations(WindowDecoration::Client, cx);
+            assert!(app.settings.draft_dirty_domains().is_empty());
+            app.set_window_decorations(WindowDecoration::Server, cx);
+            assert_eq!(
+                app.window_decoration_preview(),
+                Some(WindowDecoration::Server)
+            );
+            assert!(app.settings_draft_dirty());
+            let stored = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap();
+            assert_eq!(stored.window_decorations, WindowDecoration::Client);
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().window_decorations,
+                WindowDecoration::Client
+            );
+            assert!(app.window_decoration_preview().is_none());
+            app.begin_settings_draft(cx);
+            app.set_window_decorations(WindowDecoration::Server, cx);
+            app.apply_settings_draft(false, cx);
+        });
+        cx.run_until_parked();
+        app.update(&mut cx, |app, cx| {
+            let stored = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap();
+            assert_eq!(stored.window_decorations, WindowDecoration::Server);
             app.cancel_settings(cx);
         });
     }
