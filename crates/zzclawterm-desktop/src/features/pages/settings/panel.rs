@@ -2045,6 +2045,7 @@ forward_app_action!(
     toggle_cursor_blink,
     toggle_bold_default_foreground,
     toggle_interaction_copy_on_select,
+    toggle_interaction_copy_success_notification,
     toggle_mouse_events_require_alt,
     toggle_keyword_highlights,
     toggle_minimize_to_tray,

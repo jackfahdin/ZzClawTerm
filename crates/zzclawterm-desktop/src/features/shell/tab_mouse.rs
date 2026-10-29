@@ -1,9 +1,8 @@
 use rust_i18n::t;
-use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
-    ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Render, RenderOnce, SharedString,
+    ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement as _, Render, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
     rgb, rgba, svg,
 };
@@ -137,6 +136,7 @@ impl Render for SessionTabDragPreview {
 /// Interactive connection summary shown when hovering a live session tab.
 #[derive(IntoElement)]
 pub(in crate::features) struct SessionTabHoverCard {
+    app: gpui::WeakEntity<ZzClawTermApp>,
     session_id: String,
     group: String,
     ip: Option<String>,
@@ -147,11 +147,13 @@ pub(in crate::features) struct SessionTabHoverCard {
 impl RenderOnce for SessionTabHoverCard {
     fn render(self, _window: &mut Window, _cx: &mut gpui::App) -> impl IntoElement {
         let palette = self.palette;
+        let app = self.app;
         // Match Tauri's 260px tooltip content cap. The HoverCard appearance adds
         // its own horizontal padding outside this content width.
         let mut body = div().w(px(260.)).flex().flex_col().gap_2();
 
         body = body.child(session_tab_hover_card_row(
+            app.clone(),
             palette,
             t!("tabCtx.connectionGroup").to_string(),
             self.group,
@@ -159,6 +161,7 @@ impl RenderOnce for SessionTabHoverCard {
         ));
         if let Some(ip) = self.ip {
             body = body.child(session_tab_hover_card_row(
+                app.clone(),
                 palette,
                 t!("tabCtx.ipAddress").to_string(),
                 ip.clone(),
@@ -171,6 +174,7 @@ impl RenderOnce for SessionTabHoverCard {
         }
         if let Some(ssh_command) = self.ssh_command {
             body = body.child(session_tab_hover_card_row(
+                app,
                 palette,
                 t!("tabCtx.sshCommand").to_string(),
                 ssh_command.clone(),
@@ -186,6 +190,7 @@ impl RenderOnce for SessionTabHoverCard {
 }
 
 fn session_tab_hover_card_row(
+    app: gpui::WeakEntity<ZzClawTermApp>,
     palette: ThemePalette,
     label: String,
     value: String,
@@ -222,13 +227,17 @@ fn session_tab_hover_card_row(
                     .tooltip(tooltip)
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
-                        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                        window.notify_operation(
-                            "copy-tab-detail",
-                            ZzClawNotificationKind::Success,
-                            t!("common.copied").to_string(),
-                            cx,
-                        );
+                        let target = window.window_handle();
+                        if let Some(app) = app.upgrade() {
+                            app.update(cx, |app, cx| {
+                                app.copy_text_with_feedback_at(
+                                    Some(target),
+                                    "copy-tab-detail",
+                                    value.clone(),
+                                    cx,
+                                );
+                            });
+                        }
                     }),
             )
         })
@@ -236,18 +245,24 @@ fn session_tab_hover_card_row(
 
 /// Hover tooltip for session tabs (Tauri TabBar host / SSH address).
 pub(in crate::features) struct SessionTabTooltip {
+    app: gpui::WeakEntity<ZzClawTermApp>,
     pub title: String,
     pub lines: Vec<String>,
 }
 
 impl SessionTabTooltip {
-    pub(in crate::features) fn new(title: String, lines: Vec<String>) -> Self {
-        Self { title, lines }
+    pub(in crate::features) fn new(
+        app: gpui::WeakEntity<ZzClawTermApp>,
+        title: String,
+        lines: Vec<String>,
+    ) -> Self {
+        Self { app, title, lines }
     }
 }
 
 impl Render for SessionTabTooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = self.app.clone();
         let mut body = div().flex().flex_col().gap_1().child(
             div()
                 .text_size(px(12.))
@@ -256,6 +271,7 @@ impl Render for SessionTabTooltip {
                 .child(self.title.clone()),
         );
         for line in &self.lines {
+            let app = app.clone();
             let copyable = line_looks_copyable(line);
             let copy_value = line.clone();
             let row = div()
@@ -292,15 +308,17 @@ impl Render for SessionTabTooltip {
                             .child(mono_icon("icons/copy.svg", rgb(0x8f98aa).into(), 11.))
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 cx.stop_propagation();
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_value.clone(),
-                                ));
-                                window.notify_operation(
-                                    "copy-tab-detail",
-                                    ZzClawNotificationKind::Success,
-                                    t!("common.copied").to_string(),
-                                    cx,
-                                );
+                                let target = window.window_handle();
+                                if let Some(app) = app.upgrade() {
+                                    app.update(cx, |app, cx| {
+                                        app.copy_text_with_feedback_at(
+                                            Some(target),
+                                            "copy-tab-detail",
+                                            copy_value.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }
                             })),
                     )
                 });
@@ -355,6 +373,7 @@ pub(in crate::features) enum TabMouseActionTarget {
 impl ZzClawTermApp {
     pub(in crate::features) fn session_tab_hover_card(
         &self,
+        app: gpui::WeakEntity<Self>,
         session_id: &str,
         palette: ThemePalette,
     ) -> SessionTabHoverCard {
@@ -380,6 +399,7 @@ impl ZzClawTermApp {
             },
         );
         SessionTabHoverCard {
+            app,
             session_id: session_id.to_string(),
             group,
             ip: self.session.ssh_host(session_id),

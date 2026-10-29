@@ -250,6 +250,7 @@ impl ZzClawTermApp {
             preview_accent: palette.danger,
         };
         let app = cx.weak_entity();
+        let tooltip_app = cx.weak_entity();
         let drop_request_id = request_id.clone();
         div()
             .id(SharedString::from(format!(
@@ -376,8 +377,14 @@ impl ZzClawTermApp {
                     })),
             )
             .tooltip(move |_, cx| {
-                cx.new(|_| SessionTabTooltip::new(failed_name.clone(), vec![failed_error.clone()]))
-                    .into()
+                cx.new(|_| {
+                    SessionTabTooltip::new(
+                        tooltip_app.clone(),
+                        failed_name.clone(),
+                        vec![failed_error.clone()],
+                    )
+                })
+                .into()
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_failed_session_start(select_request_id.clone(), cx);
@@ -554,7 +561,7 @@ impl ZzClawTermApp {
             preview_accent: accent_color,
         };
         let drag_source_app = cx.entity().downgrade();
-        let hover_card = self.session_tab_hover_card(&session.id, palette);
+        let hover_card = self.session_tab_hover_card(drag_source_app.clone(), &session.id, palette);
         let hover_card_id = format!("session-tab-hover-card-{session_id}");
         let tab = div()
             .id(SharedString::from(format!("session-tab-{session_id}")))

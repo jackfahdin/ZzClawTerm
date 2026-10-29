@@ -334,6 +334,7 @@ impl ZzClawTermApp {
                     tooltip_lines.push(t!("tabCtx.locked").to_string());
                 }
                 let tooltip_title = title.clone();
+                let tooltip_app = cx.weak_entity();
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("open-tabs-menu-{session_id}")))
@@ -345,7 +346,11 @@ impl ZzClawTermApp {
                         .cursor_pointer()
                         .tooltip(move |_, cx| {
                             cx.new(|_| {
-                                SessionTabTooltip::new(tooltip_title.clone(), tooltip_lines.clone())
+                                SessionTabTooltip::new(
+                                    tooltip_app.clone(),
+                                    tooltip_title.clone(),
+                                    tooltip_lines.clone(),
+                                )
                             })
                             .into()
                         })

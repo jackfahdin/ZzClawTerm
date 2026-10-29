@@ -192,11 +192,13 @@ pub(in crate::features::pages::connections) fn connections_panel(
                                 else {
                                     continue;
                                 };
-                                item.child(
-                                    div().w_full().child(saved_connection_row(
-                                        snapshot, connection, depth, cx,
-                                    )),
-                                )
+                                item.child(div().w_full().child(saved_connection_row(
+                                    panel.app_handle(),
+                                    snapshot,
+                                    connection,
+                                    depth,
+                                    cx,
+                                )))
                             }
                         });
                     }

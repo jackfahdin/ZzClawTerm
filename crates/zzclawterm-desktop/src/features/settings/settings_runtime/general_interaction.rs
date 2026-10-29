@@ -207,6 +207,14 @@ impl ZzClawTermApp {
         self.save_interaction_settings(cx);
     }
 
+    pub(in crate::features) fn toggle_interaction_copy_success_notification(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.toggle_interaction_copy_success_notification();
+        self.save_interaction_settings(cx);
+    }
+
     pub(in crate::features) fn toggle_osc52_clipboard_write(&mut self, cx: &mut Context<Self>) {
         self.settings.toggle_osc52_clipboard_write();
         self.save_interaction_settings(cx);

@@ -79,6 +79,21 @@ impl SettingsPanel {
                     ))
                     .child(settings_form_row(
                         palette,
+                        t!("settings.copySuccessNotification"),
+                        None,
+                        settings_switch(
+                            palette,
+                            "interaction-copy-success-notification",
+                            self.settings
+                                .summary()
+                                .interaction_copy_success_notification,
+                            cx.listener(|this, _, _, cx| {
+                                this.toggle_interaction_copy_success_notification(cx);
+                            }),
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
                         t!("settings.allowOsc52ClipboardWrite"),
                         Some(SharedString::from(t!(
                             "settings.allowOsc52ClipboardWriteDesc"

@@ -3684,6 +3684,8 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
             .contains_key("conn-empty")
     );
     assert!(summary.interaction_copy_on_select);
+    // The stored fixture predates copy-feedback configuration and must default on.
+    assert!(summary.interaction_copy_success_notification);
     assert!(summary.interaction_right_click_paste);
     assert!(summary.interaction_allow_osc52_clipboard_write);
     assert!(!summary.interaction_terminal_zoom_enabled);
@@ -4178,6 +4180,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     interaction_update.interaction_allow_osc52_clipboard_write = false;
     interaction_update.interaction_terminal_zoom_enabled = true;
     interaction_update.interaction_credential_autofill_enabled = false;
+    interaction_update.interaction_copy_success_notification = false;
     interaction_update.interaction_alt_as_meta = false;
     interaction_update.interaction_tab_double_click_action = "reconnect_session".to_string();
     interaction_update.interaction_default_encoding = "utf-8".to_string();
@@ -4185,6 +4188,7 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
         .save_interaction_settings(&interaction_update)
         .expect("save interaction settings");
     assert!(!saved_interaction.interaction_right_click_paste);
+    assert!(!saved_interaction.interaction_copy_success_notification);
     assert_eq!(
         saved_interaction.interaction_command_suggestion_min_chars,
         4

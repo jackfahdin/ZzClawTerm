@@ -2447,6 +2447,7 @@
     "copyGithubGistUserCode": "Copier le code de l'appareil",
     "copyOnSelect": "Copier à la sélection",
     "copyOnSelectDesc": "Copier le texte du terminal sélectionné dans le presse-papiers.",
+    "copySuccessNotification": "Notification de réussite de la copie",
     "credentialStorage": "Identifiants",
     "currentOperation": "Opération",
     "cursorBar": "Barre",

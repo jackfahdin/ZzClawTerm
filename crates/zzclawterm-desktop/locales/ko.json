@@ -2447,6 +2447,7 @@
     "copyGithubGistUserCode": "장치 코드 복사",
     "copyOnSelect": "선택 시 복사",
     "copyOnSelectDesc": "선택한 터미널 텍스트를 클립보드에 복사합니다.",
+    "copySuccessNotification": "복사 성공 알림",
     "credentialStorage": "자격 증명",
     "currentOperation": "작업",
     "cursorBar": "막대",

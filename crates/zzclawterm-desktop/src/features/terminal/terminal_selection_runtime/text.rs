@@ -170,7 +170,12 @@ impl ZzClawTermApp {
                 self.shell
                     .set_status("copied terminal selection".to_string());
                 self.terminal.menus.actions_open = false;
-                if feedback {
+                if feedback
+                    && self
+                        .settings
+                        .summary()
+                        .interaction_copy_success_notification
+                {
                     self.notify_operation(
                         "copy-terminal-selection",
                         ZzClawNotificationKind::Success,

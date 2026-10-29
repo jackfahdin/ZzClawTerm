@@ -2447,6 +2447,7 @@
     "copyGithubGistUserCode": "デバイスコードをコピー",
     "copyOnSelect": "選択時にコピー",
     "copyOnSelectDesc": "選択したターミナルテキストをクリップボードにコピーします。",
+    "copySuccessNotification": "コピー成功の通知",
     "credentialStorage": "認証情報",
     "currentOperation": "操作",
     "cursorBar": "バー",

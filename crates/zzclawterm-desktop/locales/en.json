@@ -2440,6 +2440,7 @@
     "copyGithubGistUserCode": "Copy device code",
     "copyOnSelect": "Copy on Select",
     "copyOnSelectDesc": "Copy selected terminal text to clipboard.",
+    "copySuccessNotification": "Copy Success Notification",
     "credentialStorage": "Credentials",
     "currentOperation": "Operation",
     "cursorBar": "Bar",

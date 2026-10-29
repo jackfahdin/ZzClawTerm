@@ -25,6 +25,24 @@ const WALLPAPER_TILE_ELEMENT_LIMIT: usize = 8192;
 const WALLPAPER_TILE_MIN_SIZE: f32 = 8.;
 const SSH_AUTH_PROMPT_PRIORITY: usize = usize::MAX;
 
+fn copy_feedback(
+    text: &str,
+    success_notification: bool,
+) -> Option<(
+    zzclawterm_ui::notification::ZzClawNotificationKind,
+    &'static str,
+)> {
+    use zzclawterm_ui::notification::ZzClawNotificationKind;
+
+    if text.is_empty() {
+        Some((ZzClawNotificationKind::Warning, "common.nothingToCopy"))
+    } else if success_notification {
+        Some((ZzClawNotificationKind::Success, "common.copied"))
+    } else {
+        None
+    }
+}
+
 /// Which overlays the root chrome should render this frame.
 ///
 /// Computed from `ZzClawTermApp` directly. This used to be read back from a
@@ -63,30 +81,20 @@ impl ZzClawTermApp {
         text: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        use rust_i18n::t;
-        use zzclawterm_ui::notification::ZzClawNotificationKind;
-
         // Preserve whitespace and never include clipboard contents in feedback.
         let copied = !text.is_empty();
+        let feedback = copy_feedback(
+            &text,
+            self.settings
+                .summary()
+                .interaction_copy_success_notification,
+        );
         if copied {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
-        self.notify_operation_at(
-            target,
-            key,
-            if copied {
-                ZzClawNotificationKind::Success
-            } else {
-                ZzClawNotificationKind::Warning
-            },
-            t!(if copied {
-                "common.copied"
-            } else {
-                "common.nothingToCopy"
-            })
-            .to_string(),
-            cx,
-        );
+        if let Some((kind, message)) = feedback {
+            self.notify_operation_at(target, key, kind, t!(message).to_string(), cx);
+        }
         copied
     }
 
@@ -1404,7 +1412,50 @@ mod tests {
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata, TabDockEdge, TabDockZone};
 
-    use super::{fit_wallpaper_tile_size, wallpaper_tile_grid};
+    use super::{copy_feedback, fit_wallpaper_tile_size, wallpaper_tile_grid};
+    use zzclawterm_ui::notification::ZzClawNotificationKind;
+
+    #[test]
+    fn copy_feedback_is_enabled_by_default_and_never_contains_copied_text() {
+        assert_eq!(
+            copy_feedback("secret password", true),
+            Some((ZzClawNotificationKind::Success, "common.copied"))
+        );
+    }
+
+    #[test]
+    fn copy_feedback_can_suppress_only_the_success_notification() {
+        assert_eq!(copy_feedback("secret password", false), None);
+    }
+
+    #[test]
+    fn copy_feedback_keeps_the_empty_content_warning_when_disabled() {
+        assert_eq!(
+            copy_feedback("", false),
+            Some((ZzClawNotificationKind::Warning, "common.nothingToCopy"))
+        );
+    }
+
+    #[test]
+    fn copy_feedback_disabled_still_writes_to_the_clipboard() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = modal_predicate_app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            let mut settings = app.settings.summary().clone();
+            settings.interaction_copy_success_notification = false;
+            app.settings.replace_summary(settings);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into()));
+
+            assert!(app.copy_text_with_feedback_at(None, "copy-test", "secret".into(), cx));
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("secret")
+            );
+        });
+    }
 
     #[test]
     fn wallpaper_tiles_cover_viewport_and_cap_extreme_counts() {

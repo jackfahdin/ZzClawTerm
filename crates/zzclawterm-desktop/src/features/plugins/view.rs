@@ -11,7 +11,6 @@ use zzclawterm_core::plugins::manifest::{ParameterKind, ResultKind};
 use zzclawterm_core::plugins::{ErrorCode, MAX_TEXT_BYTES, PluginError, PluginStatus};
 use zzclawterm_plugin_host::manager::{Contribution, InvocationLease, PluginSource};
 use zzclawterm_plugin_host::service::{OperationReply, PluginOperation};
-use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 use zzclawterm_ui::{
     ZzClawButton, ZzClawButtonVariant, ZzClawInput, ZzClawInputState, ZzClawScrollable,
 };
@@ -700,25 +699,17 @@ impl Render for PluginPanel {
                     ZzClawButton::new("plugins-copy", t!("plugins.copy")).on_click(cx.listener(
                         |this, _, window, cx| {
                             let value = this.output.read(cx).value(cx);
-                            let copied = !value.is_empty();
-                            if copied {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
+                            let target = window.window_handle();
+                            if let Some(app) = this.app.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.copy_text_with_feedback_at(
+                                        Some(target),
+                                        "copy-plugin-result",
+                                        value,
+                                        cx,
+                                    );
+                                });
                             }
-                            window.notify_operation(
-                                "copy-plugin-result",
-                                if copied {
-                                    ZzClawNotificationKind::Success
-                                } else {
-                                    ZzClawNotificationKind::Warning
-                                },
-                                t!(if copied {
-                                    "common.copied"
-                                } else {
-                                    "common.nothingToCopy"
-                                })
-                                .to_string(),
-                                cx,
-                            );
                         },
                     )),
                 );

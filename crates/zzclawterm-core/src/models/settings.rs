@@ -582,6 +582,8 @@ pub struct AppSettingsSummary {
     #[serde(default)]
     pub ui_panel_stack_sizes: HashMap<String, u32>,
     pub interaction_copy_on_select: bool,
+    #[serde(default = "default_true")]
+    pub interaction_copy_success_notification: bool,
     #[serde(default)]
     pub interaction_allow_osc52_clipboard_write: bool,
     pub interaction_right_click_paste: bool,
@@ -804,6 +806,7 @@ impl Default for AppSettingsSummary {
             ui_right_open_panels: Vec::new(),
             ui_panel_stack_sizes: HashMap::new(),
             interaction_copy_on_select: false,
+            interaction_copy_success_notification: true,
             interaction_allow_osc52_clipboard_write: false,
             interaction_right_click_paste: false,
             interaction_terminal_right_click_action: TerminalRightClickAction::Menu,
@@ -1203,6 +1206,7 @@ mod tests {
         // The credential autofill switch joins the command-suggestion switch in
         // defaulting on, so legacy documents keep the panel enabled.
         assert!(summary.interaction_credential_autofill_enabled);
+        assert!(summary.interaction_copy_success_notification);
     }
 
     #[test]

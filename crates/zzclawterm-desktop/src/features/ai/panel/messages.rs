@@ -1,9 +1,8 @@
 use std::collections::HashSet;
-use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, SharedString, Window, div, prelude::*, px, rgb,
+    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, MouseButton, MouseDownEvent,
+    SharedString, Window, div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 use zzclawterm_core::ai::{AiAgentStepStatus, AiCommandCard, AiMessage, AiMessageRole, RiskLevel};
@@ -1109,14 +1108,11 @@ impl AiPanel {
             format!("ai-command-copy-{key}"),
             t!("ai.copyCommand"),
             ZzClawButtonVariant::Ghost,
-            cx.listener(move |_, _, window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
-                window.notify_operation(
-                    "copy-ai-command",
-                    ZzClawNotificationKind::Success,
-                    t!("common.copied").to_string(),
-                    cx,
-                );
+            cx.listener(move |panel, _, _, cx| {
+                let command = command.clone();
+                panel.with_app(cx, move |app, cx| {
+                    app.copy_text_with_feedback("copy-ai-command", command, cx);
+                });
             }),
         ));
         if phase.offers_reuse() {

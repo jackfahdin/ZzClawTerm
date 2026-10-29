@@ -473,6 +473,11 @@ impl SettingsFeatureState {
         self.summary.interaction_copy_on_select = !self.summary.interaction_copy_on_select;
     }
 
+    pub(in crate::features) fn toggle_interaction_copy_success_notification(&mut self) {
+        self.summary.interaction_copy_success_notification =
+            !self.summary.interaction_copy_success_notification;
+    }
+
     pub(in crate::features) fn toggle_osc52_clipboard_write(&mut self) {
         self.summary.interaction_allow_osc52_clipboard_write =
             !self.summary.interaction_allow_osc52_clipboard_write;

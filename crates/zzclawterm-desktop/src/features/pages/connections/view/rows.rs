@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
-use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, FontWeight, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, RenderOnce, SharedString, Window, div,
+    AnyElement, AppContext as _, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, RenderOnce, SharedString, Window, div,
     prelude::{
         FluentBuilder, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled,
     },
@@ -47,6 +46,7 @@ fn connection_group_icon(expanded: bool) -> gpui::Svg {
 /// hoverable TooltipContent.
 #[derive(IntoElement)]
 pub(in crate::features) struct ConnectionDetailsHoverCard {
+    app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
     connection_id: String,
     rows: Arc<[ConnectionDetailRow]>,
     palette: crate::theme::ThemePalette,
@@ -54,11 +54,13 @@ pub(in crate::features) struct ConnectionDetailsHoverCard {
 
 impl ConnectionDetailsHoverCard {
     pub(in crate::features) fn new(
+        app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
         connection_id: String,
         rows: Arc<[ConnectionDetailRow]>,
         palette: crate::theme::ThemePalette,
     ) -> Self {
         Self {
+            app,
             connection_id,
             rows,
             palette,
@@ -68,6 +70,7 @@ impl ConnectionDetailsHoverCard {
 
 impl RenderOnce for ConnectionDetailsHoverCard {
     fn render(self, _: &mut Window, _: &mut gpui::App) -> impl IntoElement {
+        let app = self.app.clone();
         let mut grid = div().flex().flex_col().gap(px(6.));
         for (index, row) in self.rows.iter().enumerate() {
             let value = div()
@@ -81,6 +84,7 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                 })
                 .child(row.value.clone());
             let copy = row.copy_value.clone().map(|copy_value| {
+                let app = app.clone();
                 let copy_id = format!("connection-detail-copy-{}-{index}", self.connection_id);
                 let copy_selector = copy_id.clone();
                 div()
@@ -96,15 +100,17 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                             .tooltip(t!("savedConnections.copy").to_string())
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_value.clone(),
-                                ));
-                                window.notify_operation(
-                                    "copy-connection-detail",
-                                    ZzClawNotificationKind::Success,
-                                    t!("common.copied").to_string(),
-                                    cx,
-                                );
+                                let target = window.window_handle();
+                                if let Some(app) = app.upgrade() {
+                                    app.update(cx, |app, cx| {
+                                        app.copy_text_with_feedback_at(
+                                            Some(target),
+                                            "copy-connection-detail",
+                                            copy_value.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }
                             }),
                     )
             });
@@ -501,6 +507,7 @@ fn connection_group_editor_input_box(
 }
 
 pub(in crate::features::pages::connections) fn saved_connection_row(
+    app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
     snapshot: &ConnectionListSnapshot,
     connection: SavedConnection,
     depth: usize,
@@ -710,7 +717,7 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
                             .whitespace_nowrap()
                             .child(connection.name.clone()),
                     ),
-                ConnectionDetailsHoverCard::new(connection.id.clone(), details_rows, palette),
+                ConnectionDetailsHoverCard::new(app, connection.id.clone(), details_rows, palette),
             )
             // Beside the row, vertically centred on it, matching Tauri's
             // `side="right" align="center" sideOffset={6}`. A card below the row
@@ -756,16 +763,19 @@ mod hover_card_tests {
     use std::{sync::Arc, time::Duration};
 
     use gpui::{
-        AppContext as _, Context, InteractiveElement as _, Modifiers, ParentElement as _, Render,
-        Styled as _, TestAppContext, Window, div, px,
+        AppContext as _, Context, Entity, InteractiveElement as _, Modifiers, ParentElement as _,
+        Render, Styled as _, TestAppContext, Window, div, px,
     };
     use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
+    use crate::features::ZzClawTermApp;
     use crate::theme::{apply_component_theme, theme_palette};
 
     use super::{ConnectionDetailRow, ConnectionDetailsHoverCard};
 
-    struct HoverCardHarness;
+    struct HoverCardHarness {
+        app: Entity<ZzClawTermApp>,
+    }
 
     impl Render for HoverCardHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
@@ -790,6 +800,7 @@ mod hover_card_tests {
                             .debug_selector(|| "connection-details-hover-card-trigger-test".into())
                             .size(px(40.)),
                         ConnectionDetailsHoverCard::new(
+                            self.app.downgrade(),
                             "test".to_string(),
                             rows,
                             theme_palette("github-dark"),
@@ -807,6 +818,13 @@ mod hover_card_tests {
 
     #[gpui::test]
     fn connection_hover_card_stays_open_and_copy_button_works(cx: &mut TestAppContext) {
+        let dir = crate::test_support::TestConfigDir::new("zzclawterm-connection-hover-copy");
+        let _cleanup = crate::test_support::TestAppCleanup::new(cx);
+        let app = crate::features::test_support::app_with_visible_local_session(
+            cx,
+            dir.path(),
+            "connection-hover",
+        );
         cx.update(|cx| {
             apply_component_theme(
                 theme_palette("github-dark"),
@@ -816,7 +834,7 @@ mod hover_card_tests {
             )
         });
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|_| HoverCardHarness);
+            let view = cx.new(|_| HoverCardHarness { app });
             zzclawterm_ui::zzclaw_root(view, window, cx)
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));

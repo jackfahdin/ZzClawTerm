@@ -121,18 +121,10 @@ impl ZzClawTermApp {
                                 .variant(ZzClawButtonVariant::Ghost)
                                 .tooltip(t!("about.copySupportInfo"))
                                 .on_click(cx.listener(
-                                    move |_, _, window, cx| {
-                                        use zzclawterm_ui::notification::{
-                                            ZzClawNotificationKind,
-                                            ZzClawNotificationWindowExt as _,
-                                        };
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            support_info.clone(),
-                                        ));
-                                        window.notify_operation(
+                                    move |this, _, _, cx| {
+                                        this.copy_text_with_feedback(
                                             "support-info-copied",
-                                            ZzClawNotificationKind::Success,
-                                            t!("about.supportInfoCopied"),
+                                            support_info.clone(),
                                             cx,
                                         );
                                     },

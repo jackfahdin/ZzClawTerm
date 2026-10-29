@@ -2440,6 +2440,7 @@
     "copyGithubGistUserCode": "复制机器码",
     "copyOnSelect": "选中即复制",
     "copyOnSelectDesc": "在终端中选中文本时自动将其复制到剪贴板。",
+    "copySuccessNotification": "复制成功提示",
     "credentialStorage": "凭据存储",
     "currentOperation": "当前操作",
     "cursorBar": "竖线",
