@@ -264,6 +264,8 @@ impl ZzClawTermApp {
             return;
         }
         for session_id in session_ids {
+            self.session
+                .note_directly_recorded_command_history(session_id, submitted.len());
             for command in &submitted {
                 self.session.record_command_history(session_id, command);
             }

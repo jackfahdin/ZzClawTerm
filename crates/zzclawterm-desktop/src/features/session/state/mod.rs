@@ -49,6 +49,7 @@ pub(in crate::features) struct SessionFeatureState {
     pub(super) prompts: SessionPromptState,
     pub(super) dialogs: SessionDialogState,
     command_history: HashMap<String, Vec<String>>,
+    directly_recorded_command_history: HashMap<String, usize>,
     active_search_draft: String,
     /// Shared by the active-sessions list and its scrollbar so both read one
     /// scroll position across re-renders.
@@ -93,6 +94,7 @@ struct SessionCatalogTransferEntry {
     tab_color: Option<u32>,
     locked: bool,
     command_history: Option<Vec<String>>,
+    directly_recorded_command_history: Option<usize>,
     busy_action: Option<String>,
     remote_file: Option<std::sync::Arc<RemoteFileService>>,
     ssh_connection: Option<SshConnectionLease>,
@@ -285,6 +287,9 @@ impl SessionFeatureState {
                 tab_color: self.tab_colors.remove(session_id),
                 locked: self.locked_tabs.remove(session_id),
                 command_history: self.command_history.remove(session_id),
+                directly_recorded_command_history: self
+                    .directly_recorded_command_history
+                    .remove(session_id),
                 busy_action: self.busy_actions.remove(session_id),
                 remote_file: self.protocols.remote_files.remove(session_id),
                 ssh_connection: self.protocols.ssh_connections.remove(session_id),
@@ -363,6 +368,10 @@ impl SessionFeatureState {
             }
             if let Some(value) = entry.command_history {
                 self.command_history.insert(session_id.clone(), value);
+            }
+            if let Some(value) = entry.directly_recorded_command_history {
+                self.directly_recorded_command_history
+                    .insert(session_id.clone(), value);
             }
             if let Some(value) = entry.busy_action {
                 self.busy_actions.insert(session_id.clone(), value);
@@ -476,6 +485,7 @@ impl SessionFeatureState {
                 temporary_ssh_link_error: None,
             },
             command_history: HashMap::new(),
+            directly_recorded_command_history: HashMap::new(),
             active_search_draft: String::new(),
             active_list_scroll: UniformListScrollHandle::new(),
             recording_list_scroll: UniformListScrollHandle::new(),
@@ -1081,6 +1091,35 @@ impl SessionFeatureState {
         self.command_history_for(session_id)?.get(index).cloned()
     }
 
+    pub(in crate::features) fn note_directly_recorded_command_history(
+        &mut self,
+        session_id: &str,
+        command_count: usize,
+    ) {
+        if command_count == 0 {
+            return;
+        }
+        let pending = self
+            .directly_recorded_command_history
+            .entry(session_id.to_string())
+            .or_default();
+        *pending = pending.saturating_add(command_count);
+    }
+
+    pub(in crate::features) fn consume_directly_recorded_command_history(
+        &mut self,
+        session_id: &str,
+    ) -> bool {
+        let Some(pending) = self.directly_recorded_command_history.get_mut(session_id) else {
+            return false;
+        };
+        *pending -= 1;
+        if *pending == 0 {
+            self.directly_recorded_command_history.remove(session_id);
+        }
+        true
+    }
+
     pub(in crate::features) fn record_command_history(&mut self, session_id: &str, command: &str) {
         let command = command.trim();
         if command.is_empty() {
@@ -1097,6 +1136,10 @@ impl SessionFeatureState {
     pub(in crate::features) fn migrate_command_history(&mut self, old_id: &str, new_id: &str) {
         if let Some(history) = self.command_history.remove(old_id) {
             self.command_history.insert(new_id.to_string(), history);
+        }
+        if let Some(pending) = self.directly_recorded_command_history.remove(old_id) {
+            self.directly_recorded_command_history
+                .insert(new_id.to_string(), pending);
         }
     }
 
@@ -2053,6 +2096,7 @@ impl SessionFeatureState {
             self.tab_drag = None;
         }
         self.command_history.remove(session_id);
+        self.directly_recorded_command_history.remove(session_id);
         self.busy_actions.remove(session_id);
         if self.active_id() == Some(session_id) {
             self.clear_active_session();

@@ -272,13 +272,18 @@ impl ZzClawTermApp {
                             &mut pending_frame_outputs,
                             &mut drain_timings,
                         );
-                        self.session.record_command_history(&session_id, &command);
-                        if !self.commands.queue_command_history(vec![command]) {
-                            self.settings.update_store_status(
-                                "command history worker is unavailable",
-                                false,
-                            );
-                            self.request_settings_panel_refresh(cx);
+                        if !self
+                            .session
+                            .consume_directly_recorded_command_history(&session_id)
+                        {
+                            self.session.record_command_history(&session_id, &command);
+                            if !self.commands.queue_command_history(vec![command]) {
+                                self.settings.update_store_status(
+                                    "command history worker is unavailable",
+                                    false,
+                                );
+                                self.request_settings_panel_refresh(cx);
+                            }
                         }
                     }
                     SessionEvent::Exited { session_id, reason } => {
@@ -888,5 +893,151 @@ mod recording_tests {
                 assert_eq!(std::fs::read(path).unwrap(), expected);
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod command_history_tests {
+    use futures::StreamExt as _;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use zzclawterm_core::{CommandHistoryEntry, test_support::TestTempDir};
+    use zzclawterm_transport::SessionEvent;
+
+    use crate::features::ZzClawTermApp;
+    use crate::features::runtime_jobs::CommandPersistenceResult;
+    use crate::features::test_support::app_with_visible_local_session;
+
+    fn finish_history_requests(
+        cx: &mut TestAppContext,
+        app: &Entity<ZzClawTermApp>,
+        expected_requests: usize,
+    ) -> Vec<CommandHistoryEntry> {
+        let mut receiver = cx.update_entity(app, |app, _| {
+            app.commands
+                .take_persistence_event_receiver()
+                .expect("history result receiver")
+        });
+        let mut latest = Vec::new();
+        for _ in 0..expected_requests {
+            match futures::executor::block_on(receiver.next()) {
+                Some(CommandPersistenceResult::History(Ok(history))) => latest = history,
+                Some(CommandPersistenceResult::History(Err(error))) => {
+                    panic!("history persistence failed: {error}")
+                }
+                Some(CommandPersistenceResult::QuickCommandUseCount { .. }) | None => {
+                    panic!("expected a command history persistence result")
+                }
+            }
+            cx.update_entity(app, |app, _| {
+                app.commands.note_persistence_event_delivered();
+            });
+        }
+        cx.update_entity(app, |app, _| {
+            assert!(
+                app.commands.persistence_is_idle(),
+                "unexpected extra history persistence requests"
+            );
+        });
+        latest
+    }
+
+    fn accept_commands(app: &mut ZzClawTermApp, commands: &[&str]) {
+        app.session
+            .extend_pending_events(
+                commands
+                    .iter()
+                    .map(|command| SessionEvent::CommandAccepted {
+                        session_id: "history".to_string(),
+                        command: (*command).to_string(),
+                    }),
+            );
+    }
+
+    #[test]
+    fn direct_submission_and_accepted_event_record_history_once() {
+        let root = TestTempDir::new("zzclawterm-history-single-submit");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
+        cx.update_entity(&app, |app, cx| {
+            app.record_submitted_command_history(&["history"], vec!["echo once".to_string()]);
+            accept_commands(app, &["echo once"]);
+            app.drain_session_events(cx);
+            assert_eq!(
+                app.session.command_history_for("history"),
+                Some(["echo once".to_string()].as_slice())
+            );
+        });
+        let global = finish_history_requests(&mut cx, &app, 1);
+        assert_eq!(global[0].command, "echo once");
+        assert_eq!(global[0].use_count, 1);
+    }
+
+    #[test]
+    fn repeated_direct_submissions_consume_matching_accepted_events() {
+        let root = TestTempDir::new("zzclawterm-history-repeat-submit");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
+        cx.update_entity(&app, |app, cx| {
+            for _ in 0..2 {
+                app.record_submitted_command_history(&["history"], vec!["echo repeat".to_string()]);
+            }
+            accept_commands(app, &["echo repeat", "echo repeat"]);
+            app.drain_session_events(cx);
+            assert_eq!(
+                app.session.command_history_for("history"),
+                Some(["echo repeat".to_string(), "echo repeat".to_string()].as_slice())
+            );
+        });
+        let global = finish_history_requests(&mut cx, &app, 2);
+        assert_eq!(global[0].command, "echo repeat");
+        assert_eq!(global[0].use_count, 2);
+    }
+
+    #[test]
+    fn accepted_event_without_direct_submission_records_history() {
+        let root = TestTempDir::new("zzclawterm-history-accepted-only");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
+        cx.update_entity(&app, |app, cx| {
+            accept_commands(app, &["pwd"]);
+            app.drain_session_events(cx);
+            assert_eq!(
+                app.session.command_history_for("history"),
+                Some(["pwd".to_string()].as_slice())
+            );
+        });
+        let global = finish_history_requests(&mut cx, &app, 1);
+        assert_eq!(global[0].command, "pwd");
+        assert_eq!(global[0].use_count, 1);
+    }
+
+    #[test]
+    fn accepted_events_preserve_distinct_direct_submission_order() {
+        let root = TestTempDir::new("zzclawterm-history-submit-order");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
+        cx.update_entity(&app, |app, cx| {
+            for command in ["echo first", "echo second"] {
+                app.record_submitted_command_history(&["history"], vec![command.to_string()]);
+            }
+            accept_commands(app, &["echo first", "echo second"]);
+            app.drain_session_events(cx);
+            assert_eq!(
+                app.session.command_history_for("history"),
+                Some(["echo second".to_string(), "echo first".to_string()].as_slice())
+            );
+        });
+        let global = finish_history_requests(&mut cx, &app, 2);
+        assert_eq!(
+            global
+                .iter()
+                .map(|entry| entry.command.as_str())
+                .collect::<Vec<_>>(),
+            ["echo second", "echo first"]
+        );
     }
 }

@@ -317,6 +317,11 @@ impl CommandFeatureState {
         self.runtime.note_event_delivered();
     }
 
+    #[cfg(test)]
+    pub(in crate::features) fn persistence_is_idle(&self) -> bool {
+        self.runtime.is_idle()
+    }
+
     pub(in crate::features) fn note_persistence_worker_disconnected(&mut self) -> bool {
         self.runtime.note_worker_disconnected()
     }
