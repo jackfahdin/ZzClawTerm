@@ -15,7 +15,7 @@ const changelogReleasesEn: ChangelogRelease[] = [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream NyaTerm (217 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
+          '**sync:** Sync upstream NyaTerm (219 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
           '**settings:** Add a toggle for copy success notifications.',
         ],
       },
@@ -181,7 +181,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
       {
         title: '新增',
         items: [
-          '**sync:** 同步上游 NyaTerm（217 个提交）：Cloud Sync V4 / OpenDAL、配置替换保护、tmux、补全增强、连接搜索、会话诊断通知等。',
+          '**sync:** 同步上游 NyaTerm（219 个提交）：Cloud Sync V4 / OpenDAL、配置替换保护、tmux、补全增强、连接搜索、会话诊断通知等。',
           '**settings:** 新增复制成功提示开关。',
         ],
       },
