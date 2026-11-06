@@ -1,7 +1,7 @@
 use super::components::agent_kind_display_name;
 use super::{
     AiAgentStepPresentation, AiHeaderPresentation, AiMentionCandidate, AiModelChoice,
-    AiPanelChrome, AiPanelSnapshot, AiTargetSession, AiTerminalContextState, harness,
+    AiPanelChrome, AiPanelSnapshot, AiTargetSession, harness,
 };
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::short_id;
@@ -19,7 +19,6 @@ use zzclawterm_core::AiModelConfigItem;
 use zzclawterm_core::AiProviderKind;
 use zzclawterm_core::AiReasoningEffort;
 use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::SessionKind;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn ai_header_presentation(&self) -> AiHeaderPresentation {
@@ -240,19 +239,8 @@ impl ZzClawTermApp {
         // be drafted; sending stays blocked until the run settles.
         prompt_input.update(cx, |input, cx| {
             input.set_disabled(!enabled, cx);
-            input.set_auto_grow(1, 6, cx);
+            input.set_auto_grow(3, 6, cx);
             input.set_placeholder(prompt_placeholder, cx);
-        });
-        let owner_terminal = self.session.active_id().and_then(|session_id| {
-            let info = self.session.session_info(session_id)?;
-            let state = if self.session.is_disconnected(session_id) {
-                AiTerminalContextState::Disconnected
-            } else if info.kind == SessionKind::LocalPty {
-                AiTerminalContextState::Local
-            } else {
-                AiTerminalContextState::Connected
-            };
-            Some((self.session.display_name_by_info(&info), state))
         });
 
         let model_search_input = if self.ai.discovery_menu_is_open() {
@@ -453,10 +441,6 @@ impl ZzClawTermApp {
                 .into(),
             current_ai_session_id: self.ai.chat_session_id().to_string(),
             owner_terminal_id: self.session.active_id().map(str::to_string),
-            owner_terminal_label: owner_terminal.as_ref().map(|(label, _)| label.clone()),
-            owner_terminal_state: owner_terminal
-                .map(|(_, state)| state)
-                .unwrap_or(AiTerminalContextState::Disconnected),
             last_agent_kind: self.ai.last_agent_kind(),
             owner_connection_id: self
                 .session
