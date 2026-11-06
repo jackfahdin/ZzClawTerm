@@ -210,7 +210,7 @@ jobs:
           ZZCLAWTERM_REQUIRE_VCXSRV: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '1' || '' }}
           ZZCLAWTERM_VERSION: ${{ inputs.version }}
           TARGET: ${{ matrix.target }}
-        run: python scripts/release/package_native.py "${TARGET}"
+        run: python scripts/release/package_native.py "$env:TARGET"
 
       - name: Package native application (Unix)
         if: runner.os != 'Windows'
