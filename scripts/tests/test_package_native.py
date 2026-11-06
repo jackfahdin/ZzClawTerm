@@ -532,6 +532,36 @@ class PackageNativeTests(unittest.TestCase):
         self.assertEqual(normalized_link.mode, 0o777)
         self.assertEqual(normalized_link.mtime, package_native.ARCHIVE_MTIME)
 
+    def test_macos_info_plist_uses_the_release_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "zzclawterm"
+            binary.write_bytes(b"application")
+            with (
+                mock.patch.object(package_native, "WORK_DIR", root / "work"),
+                mock.patch.object(package_native, "copy_helpers", return_value=[]),
+                mock.patch.object(package_native, "copy_release_documents"),
+                mock.patch.object(
+                    package_native,
+                    "require_tool",
+                    side_effect=RuntimeError("stop after writing Info.plist"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop after writing"):
+                    package_native.create_macos_packages(
+                        binary,
+                        package_native.TARGETS["aarch64-apple-darwin"],
+                        "0.2.1",
+                        "0.2.1",
+                    )
+            plist_path = root / "work" / "ZzClawTerm.app" / "Contents" / "Info.plist"
+            with plist_path.open("rb") as handle:
+                plist = package_native.plistlib.load(handle)
+        identity = package_native.release_identity("0.2.1")
+        url_type = plist["CFBundleURLTypes"][0]
+        self.assertEqual(url_type["CFBundleURLName"], identity.macos_identifier)
+        self.assertEqual(url_type["CFBundleURLSchemes"], list(identity.url_schemes))
+
     def test_macos_tar_gz_is_byte_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

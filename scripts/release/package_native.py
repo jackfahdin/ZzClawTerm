@@ -588,6 +588,7 @@ def create_windows_packages(
 def create_macos_packages(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
+    identity = release_identity(version)
     bundle = WORK_DIR / "ZzClawTerm.app"
     macos_dir = bundle / "Contents" / "MacOS"
     resources_dir = bundle / "Contents" / "Resources"
