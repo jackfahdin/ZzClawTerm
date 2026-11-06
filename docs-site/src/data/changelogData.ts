@@ -10,6 +10,25 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.2.1] - 2026-11-06',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (217 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
+          '**settings:** Add a toggle for copy success notifications.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**desktop:** Fix duplicate command history entries caused by dual-channel recording.',
+          '**build:** Fix ConPTY packaging and portable update verification.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[0.2.0] - 2026-10-28',
     sections: [
       {
@@ -156,6 +175,25 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.2.1] - 2026-11-06',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 NyaTerm（217 个提交）：Cloud Sync V4 / OpenDAL、配置替换保护、tmux、补全增强、连接搜索、会话诊断通知等。',
+          '**settings:** 新增复制成功提示开关。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**desktop:** 修复命令历史通过双通道重复记录的问题。',
+          '**build:** 修复 ConPTY 打包与便携版更新校验问题。',
+        ],
+      },
+    ],
+  },
   {
     version: '[0.2.0] - 2026-10-28',
     sections: [

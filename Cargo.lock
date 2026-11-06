@@ -14571,7 +14571,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -14597,7 +14597,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -14643,7 +14643,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14712,7 +14712,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-files"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14740,7 +14740,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "rmcp",
@@ -14757,7 +14757,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -14777,7 +14777,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-plugin-host"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures",
  "serde_json",
@@ -14792,7 +14792,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-rdp-helper"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -14816,7 +14816,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-recording"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "regex",
  "same-file",
@@ -14830,7 +14830,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-remote-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -14844,7 +14844,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-remote-ops"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -14858,7 +14858,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -14882,7 +14882,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-sync"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "automerge",
  "hex",
@@ -14898,7 +14898,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "encoding_rs",
@@ -14912,7 +14912,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal-gpui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aho-corasick",
  "futures",
@@ -14930,7 +14930,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-transport"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-http-proxy",
@@ -14964,7 +14964,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -14977,7 +14977,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-vnc-helper"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "sha2 0.11.0",
  "tokio",
@@ -14990,7 +14990,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-windows-rdp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "cc",
