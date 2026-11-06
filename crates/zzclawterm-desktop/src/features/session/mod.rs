@@ -7,6 +7,8 @@ use zzclawterm_files::remote_file::RemoteFileService;
 
 mod auth_runtime;
 mod duplicate_prompts;
+pub(in crate::features) mod notice_runtime;
+pub(in crate::features) mod notices;
 mod prompt_runtime;
 mod recording_runtime;
 pub(in crate::features) mod runtime_auth;

@@ -10,11 +10,6 @@
       "path": "crates/zzclawterm-desktop/src/features/app_state/store_runtime.rs",
       "max_count": 1,
       "reason": "The GPUI shutdown responsiveness test uses a watchdog thread and joins it before returning."
-    },
-    {
-      "path": "crates/zzclawterm-desktop/src/features/ai/native_jobs/tests.rs",
-      "max_count": 1,
-      "reason": "The retry tests use a bounded mock HTTP server thread and join it before returning."
     }
   ],
   "desktop_thread_builder": [

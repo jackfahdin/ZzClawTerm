@@ -5,6 +5,7 @@ use super::auth_runtime::{
     KeyboardInteractivePromptState, NativeOtpCodePreview, NativeOtpProvider,
 };
 use super::duplicate_prompts::{SftpDuplicatePromptBroker, SftpDuplicatePromptState};
+use super::notices::{SessionNoticeState, SessionNotices};
 use super::trzsz_runtime::TrzszSessionState;
 use super::zmodem_runtime::ZmodemSessionState;
 use crate::app_shell::session_hub::ssh_connections::{SshConnectionLease, SshConnectionPool};
@@ -38,6 +39,7 @@ const ACTIVE_HISTORY_LIMIT: usize = 64;
 
 pub(in crate::features) struct SessionFeatureState {
     pub(in crate::features) unsupported_restore_tabs: Vec<zzclawterm_core::RestorableOpenTab>,
+    pub(in crate::features) notices: SessionNoticeState,
     manager: Arc<SessionManager>,
     ssh_connections: SshConnectionPool,
     event_bridge: SessionEventBridge,
@@ -83,6 +85,7 @@ pub(crate) struct SessionCatalogTransferBundle {
 struct SessionCatalogTransferEntry {
     session_id: String,
     metadata: SessionRuntimeMetadata,
+    notices: Option<SessionNotices>,
     start_tab_placement: Option<SessionStartTabPlacement>,
     custom_name: Option<String>,
     dynamic_title: Option<String>,
@@ -278,6 +281,7 @@ impl SessionFeatureState {
             let metadata = self.metadata.remove(session_id)?;
             entries.push(SessionCatalogTransferEntry {
                 session_id: session_id.clone(),
+                notices: self.notices.take(session_id),
                 metadata,
                 start_tab_placement: self
                     .start_tab_placements
@@ -323,6 +327,7 @@ impl SessionFeatureState {
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::TmuxState { session_id, .. }
+                | SessionEvent::Notice { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if selected.contains(session_id) {
@@ -352,6 +357,9 @@ impl SessionFeatureState {
         for entry in bundle.entries {
             let session_id = entry.session_id;
             self.metadata.insert(session_id.clone(), entry.metadata);
+            if let Some(notices) = entry.notices {
+                self.notices.insert(session_id.clone(), notices);
+            }
             if let Some(value) = entry.start_tab_placement {
                 self.start_tab_placements.insert(session_id.clone(), value);
             }
@@ -497,6 +505,7 @@ impl SessionFeatureState {
             active_search_draft: String::new(),
             active_list_scroll: UniformListScrollHandle::new(),
             busy_actions: HashMap::new(),
+            notices: SessionNoticeState::default(),
             active: ActiveSessionState::default(),
             order: Vec::new(),
             metadata: HashMap::new(),
@@ -978,6 +987,7 @@ impl SessionFeatureState {
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::TmuxState { session_id, .. }
+                | SessionEvent::Notice { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if id == session_id {
@@ -1021,6 +1031,7 @@ impl SessionFeatureState {
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::TmuxState { session_id, .. }
+                | SessionEvent::Notice { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id.clone(),
             })
             .collect();
@@ -2011,6 +2022,9 @@ impl SessionFeatureState {
         };
         let was_disconnected = metadata.disconnected;
         metadata.disconnected = false;
+        if was_disconnected {
+            self.notices.clear(session_id);
+        }
         was_disconnected
     }
 
@@ -2142,6 +2156,7 @@ impl SessionFeatureState {
         &mut self,
         session_id: &str,
     ) -> Option<String> {
+        self.notices.clear(session_id);
         self.event_bridge.release_session(session_id);
         self.remove_xymodem_session_runtime(session_id);
         self.remove_zmodem_session_runtime(session_id);

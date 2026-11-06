@@ -142,7 +142,7 @@ fn mouse_drag_selects_across_surfaces_and_keyboard_copy_keeps_literal_whitespace
         let scope = fixture.read(cx).scope.clone();
         assert_eq!(scope.selected_text(window, cx), "first\n  second  ");
     });
-    vcx.simulate_keystrokes("ctrl-c");
+    vcx.simulate_keystrokes("secondary-c");
     vcx.update(|_, cx| {
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),
@@ -249,7 +249,7 @@ fn dragging_across_virtual_rows_preserves_endpoints_and_copies_unmounted_middle_
             expected
         )
     });
-    vcx.simulate_keystrokes("ctrl-c");
+    vcx.simulate_keystrokes("secondary-c");
     vcx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected));
 }
 
@@ -382,7 +382,7 @@ fn transcript_copy_delegates_to_focused_inputs_and_select_all_reaches_text(
     let vcx: &mut VisualTestContext = vcx;
     draw(vcx);
     vcx.update(|window, cx| fixture.read(cx).text.clone().focus(window, cx));
-    vcx.simulate_keystrokes("ctrl-a ctrl-c");
+    vcx.simulate_keystrokes("secondary-a secondary-c");
     vcx.update(|_, cx| {
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),
@@ -396,7 +396,7 @@ fn transcript_copy_delegates_to_focused_inputs_and_select_all_reaches_text(
         input.update(cx, |input, cx| input.select_all(window, cx));
     });
     draw(vcx);
-    vcx.simulate_keystrokes("ctrl-c");
+    vcx.simulate_keystrokes("secondary-c");
     vcx.update(|_, cx| {
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),
@@ -438,7 +438,7 @@ fn streaming_tail_selection_copies_original_range_and_outside_click_clears_highl
         assert_eq!(scope.selected_text(window, cx), "first");
         assert!(fixture.read(cx).first.applied_selection.borrow().is_some());
     });
-    vcx.simulate_keystrokes("ctrl-c");
+    vcx.simulate_keystrokes("secondary-c");
     vcx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "first"));
     vcx.simulate_click(gpui::point(px(350.), px(180.)), Default::default());
     draw(vcx);
@@ -491,7 +491,7 @@ fn streamed_literal_fence_growth_preserves_the_selected_payload(cx: &mut TestApp
         let scope = fixture.read(cx).scope.clone();
         assert_eq!(scope.selected_text(window, cx), "  output  ");
     });
-    vcx.simulate_keystrokes("ctrl-c");
+    vcx.simulate_keystrokes("secondary-c");
     vcx.update(|_, cx| {
         assert_eq!(
             cx.read_from_clipboard().unwrap().text().unwrap(),

@@ -12,7 +12,7 @@ pub(crate) use zzclawterm_terminal_gpui::{
     terminal_screen_from_output,
 };
 
-pub(crate) const INITIAL_TERMINAL_BANNER: &str = "$ zzclawterm --native\nGPUI shell initialized.\nStart a local terminal or open a saved connection.\n";
+pub(crate) const INITIAL_TERMINAL_BANNER: &str = "";
 
 pub(crate) fn initial_terminal_screen() -> zzclawterm_terminal::TerminalScreen {
     zzclawterm_terminal_gpui::initial_terminal_screen(INITIAL_TERMINAL_BANNER)
