@@ -200,14 +200,25 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/install-vcxsrv.ps1
 
-      - name: Package native application
-        shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+      - name: Package native application (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
-          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
           ZZCLAWTERM_ARTIFACT_VERSION: ${{ inputs.version }}
           ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
           # 只有承诺自带 X server 的那条腿要求来源必须存在，缺了直接失败而不是静默出包。
           ZZCLAWTERM_REQUIRE_VCXSRV: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '1' || '' }}
+          ZZCLAWTERM_VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: python scripts/release/package_native.py "${TARGET}"
+
+      - name: Package native application (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+          ZZCLAWTERM_ARTIFACT_VERSION: ${{ inputs.version }}
+          ZZCLAWTERM_GITHUB_GIST_CLIENT_ID: ${{ vars.ZZCLAWTERM_GITHUB_GIST_CLIENT_ID }}
           ZZCLAWTERM_VERSION: ${{ inputs.version }}
           TARGET: ${{ matrix.target }}
         run: python scripts/release/package_native.py "${TARGET}"
