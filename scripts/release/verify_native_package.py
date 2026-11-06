@@ -300,6 +300,7 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             if str(parent) != "."
         }
         vcxsrv_prefix = f"{root}/{package_native.VCXSRV_DIRNAME}/"
+        directories.add(vcxsrv_prefix.rstrip("/"))
         for entry in archive.infolist():
             name = entry.filename.rstrip("/")
             if name.casefold() in seen:
